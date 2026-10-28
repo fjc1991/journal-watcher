@@ -1460,7 +1460,11 @@ def main():
             check("the Sign-ins menu has a row for INFORMS, AIS, your library (by its own name) and other publishers, each saying it is not signed in yet", all(x in t_ for x in ("INFORMS member account", "AIS member account", "Test University Library", "Other publisher sites")) and t_.count("Not signed in") == 4 and "Example University" not in t_, t_)
             check("no tick and no green dot before any sign-in", page.locator("#signinmenu .si-st.ok").count() == 0 and page.locator("#sidot.hide").count() == 1)
             gate = os.path.join(TMP, "signin-gate"); open(gate, "w").close()          # the fake sign-in window finishes at once …
-            page.click("#signinmenu [data-which=informs]"); page.wait_for_function("document.querySelector('#toast') && /✓ Signed in to INFORMS/.test(document.querySelector('#toast').textContent)", timeout=15000)
+            page.click("#signinmenu [data-which=informs]")
+            try:
+                page.wait_for_function("document.querySelector('#toast') && /✓ Signed in to INFORMS/.test(document.querySelector('#toast').textContent)", timeout=15000)
+            except Exception:  # noqa: BLE001
+                print("DEBUG sign-in toast:", page.inner_text("#toast"), "|", json.dumps(api("/api/signins"))[:400], "|", os.path.exists(gate)); raise
             check("when a sign-in window finishes, a message with a tick says so", "✓ Signed in" in page.inner_text("#toast"), page.inner_text("#toast"))
             page.click("#signinbtn"); page.wait_for_selector("#signinmenu:not(.hide) .si-st.ok")
             check("…and its row gets a green tick and 'Signed in · just now', and the Sign-ins button shows a green dot", "Signed in · just now" in page.inner_text("#signinmenu [data-which=informs]") and page.locator("#sidot:not(.hide)").count() == 1 and page.locator("#signinmenu [data-which=ais] .si-st.ok").count() == 0)

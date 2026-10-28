@@ -638,6 +638,26 @@ function paintSignins() {
   $("#signinbtn").classList.toggle("signed", any);
   window.dispatchEvent(new CustomEvent("jw-signins", {detail: SI}));
 }
+// One message per sign-in outcome, however it is noticed: the server's event stream (with the reason, if it failed) or, if that stream missed it (the window was asleep,
+// the connection was being re-made), a look at the status a few seconds after the window was opened.
+const ANNOUNCED = {};
+const sikey = k => { const e = (SI && SI[k]) || {}; return (e.at || "") + "|" + (e.failed_at || ""); };
+function announceSignin(site, info) {
+  const key = sikey(site); if (ANNOUNCED[site] === key) return; ANNOUNCED[site] = key;
+  const who = info.name || ({informs: "INFORMS", ais: "AIS", library: (SI && SI.library && SI.library.name) || "your library", publishers: "the publisher sites"})[site] || site;
+  toast(info.signed_in ? (site === "publishers" ? "Sign-in window closed; your sessions are saved." : `✓ Signed in to ${who}. Press “Download whole queue” to fetch the blocked papers.`)
+    : `${who} sign-in wasn’t completed.${info.error ? " " + info.error : ""}`);
+}
+function watchSignin(site) {
+  const before = sikey(site); let seen = false, n = 0;
+  const t = setInterval(async () => {
+    n++; await loadSignins();
+    if (SI && SI.pending === site) { seen = true; return; }
+    if (!seen && n < 4) return;                        // the window may not have opened yet
+    clearInterval(t);
+    if (sikey(site) !== before) announceSignin(site, {signed_in: !!(SI[site] && SI[site].signed_in)});
+  }, 1200);
+}
 function signIn(which) {
   $("#signinmenu").classList.add("hide");
   if (which === "setup") { window.Settings ? Settings.open("library") : toast("Settings are still loading."); return Promise.resolve(); }
@@ -646,7 +666,7 @@ function signIn(which) {
     informs: "An INFORMS sign-in window is opening: log in with your member account; it closes by itself.",
     ais: "An AIS eLibrary sign-in window is opening: log in with your member account; it closes by itself.",
     publishers: "A browser window is opening with one tab per publisher — sign in, then close it."}[which === "nova" ? "library" : which];
-  return api("/api/login", {which}).then(() => { toast(msg); loadSignins(); }).catch(e => { toast(e.message); if (/library first/i.test(e.message)) Settings.open("library"); });
+  return api("/api/login", {which}).then(() => { toast(msg); loadSignins(); watchSignin(which === "nova" ? "library" : which); }).catch(e => { toast(e.message); if (/library first/i.test(e.message)) Settings.open("library"); });
 }
 $("#signinbtn").onclick = e => { e.stopPropagation(); loadSignins(); $("#signinmenu").classList.toggle("hide"); };
 $("#signinmenu").onclick = e => { const b = e.target.closest("[data-which]"); if (b) signIn(b.dataset.which); };
@@ -1129,9 +1149,7 @@ function connect() {
     const d = JSON.parse(e.data), who = d.name || (d.site || "").toUpperCase();
     if (d.state === "opened") { if (SI) { SI.pending = d.site; paintSignins(); } return; }
     if (d.status) SI = {...d.status, pending: ""}; else if (SI) SI.pending = "";
-    paintSignins();
-    toast(d.signed_in ? (d.site === "publishers" ? "Sign-in window closed; your sessions are saved." : `✓ Signed in to ${who}. Press “Download whole queue” to fetch the blocked papers.`)
-      : `${who} sign-in wasn’t completed.${d.error ? " " + d.error : ""}`);
+    paintSignins(); announceSignin(d.site, d);
   });
   es.addEventListener("log", e => { const d = JSON.parse(e.data); log(d.msg, d.level); });
   es.onerror = () => { $("#statustext").textContent = "Reconnecting…"; };
