@@ -3,11 +3,13 @@ embedding search and the Ask pipeline. No network, no API key, no paid calls, an
 
     .venv/bin/python .agents/skills/ais-journal-watcher/scripts/test_reader.py
 """
+import base64
 import io
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -1433,6 +1435,11 @@ def main():
     FEEDS = {"/appcast.json": {"app": "Journal Watcher", "version": "1.1.0", "released": "2026-10-28", "notes": ["One", " Two  words ", ""], "url": "http://127.0.0.1:%d/j.zip", "sha256": hashlib.sha256(ZIPB).hexdigest(), "size": len(ZIPB),
                                "history": [{"version": "1.0.5", "released": "2026-10-20", "notes": ["Old note"]}, {"version": "0.9.0", "notes": ["Older"]}, {"nope": 1}]}}
 
+    SIGS = {}          # path -> the signature text served there (a signed feed has /appcast.json.sig)
+
+    def feed_body(path):
+        return json.dumps(FEEDS[path]).replace("%d", str(feed_srv.server_address[1])).encode()
+
     class FeedH(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -1441,7 +1448,9 @@ def main():
             if self.path == "/j.zip":
                 body = ZIPB
             elif self.path in FEEDS:
-                body = json.dumps(FEEDS[self.path]).encode() % () if False else json.dumps(FEEDS[self.path]).replace("%d", str(feed_srv.server_address[1])).encode()
+                body = feed_body(self.path)
+            elif self.path in SIGS:
+                body = SIGS[self.path].encode()
             else:
                 self.send_response(404); self.end_headers(); return
             self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -1609,6 +1618,180 @@ def main():
     check("updates: a download with the wrong checksum is refused, and something that is not an app is not installed", t_up_download)
     check("updates: the helper waits for the old app to quit, swaps the new one in, and puts the old one back if that fails", t_up_swap)
     check("updates: make_appcast.py writes a feed the app accepts, with the last release as history", t_up_appcast_script)
+    # ---- signed feeds: the app believes a feed only when the author's key signed its exact bytes (scripts/updater.py, app/sign_release.py)
+    import importlib.util
+    import stat as _stat
+    _spec = importlib.util.spec_from_file_location("sign_release", os.path.abspath(os.path.join(HERE, "..", "..", "..", "..", "app", "sign_release.py")))
+    srel = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(srel)
+
+    def _must_not_verify(data, sig, keys, why):
+        try:
+            up.verify_feed(data, sig, keys)
+        except up.FeedNotTrusted:
+            return
+        raise AssertionError("accepted: " + why)
+
+    def t_sig_rules():
+        assert up.SIG_PREFIX == srel.SIG_PREFIX                                           # the script and the app sign and check the same thing
+        sk, other = srel.nacl_signing().SigningKey.generate(), srel.nacl_signing().SigningKey.generate()
+        pub, data = srel.public_b64(sk), b'{"version": "1.2.0"}'
+        sig = srel.sign_bytes(sk, data)
+        keys = [bytes(sk.verify_key)]
+        assert up.verify_feed(data, sig, keys) is True
+        _must_not_verify(data + b" ", sig, keys, "changed bytes")
+        _must_not_verify(data, srel.sign_bytes(other, data), keys, "another key's signature")
+        _must_not_verify(data, base64.b64encode(sk.sign(data).signature).decode(), keys, "a signature made without the app's prefix")
+        _must_not_verify(data, "not base64!", keys, "garbage")
+        _must_not_verify(data, base64.b64encode(b"short").decode(), keys, "a short signature")
+        _must_not_verify(data, sig, [], "no usable key")
+        assert up.verify_feed(data, sig, [bytes(other.verify_key), bytes(sk.verify_key)]) is True      # a second key may be listed (a key change: apps that trust both)
+        env = os.environ.get("JW_UPDATE_KEYS")
+        try:
+            os.environ["JW_UPDATE_KEYS"] = ""
+            assert up.trusted_keys() is None                                              # no key: nothing is checked, as in a project run
+            os.environ["JW_UPDATE_KEYS"] = "# only a comment\n"
+            assert up.trusted_keys() is None
+            os.environ["JW_UPDATE_KEYS"] = pub + "  # the author\n" + srel.public_b64(other)
+            assert up.trusted_keys() == [bytes(sk.verify_key), bytes(other.verify_key)], up.trusted_keys()
+            os.environ["JW_UPDATE_KEYS"] = "garbage\n" + base64.b64encode(b"too short").decode()
+            assert up.trusted_keys() == []                                                # a damaged key file must not switch the check off
+        finally:
+            if env is None:
+                os.environ.pop("JW_UPDATE_KEYS", None)
+            else:
+                os.environ["JW_UPDATE_KEYS"] = env
+
+    def t_sig_check():
+        sk, other = srel.nacl_signing().SigningKey.generate(), srel.nacl_signing().SigningKey.generate()
+        os.environ["JW_UPDATE_KEYS"] = srel.public_b64(sk)
+        try:
+            FEEDS["/appcast.json"]["version"] = "1.1.0"
+            assert up.public()["available"] is False and up.public()["signed"] is True and up.public()["keys"] == 1      # what an unchecked feed said earlier is not offered once a key is set
+            up._progress.update({"phase": "idle", "pct": 0, "error": ""})
+            up._run_install()
+            assert "not checked against the signing key" in up._progress["error"], up._progress                          # …and cannot be installed either
+            up._progress.update({"phase": "idle", "pct": 0, "error": ""})
+            assert "not signed" in up.check()["error"]                                                                   # no .sig at all
+            SIGS["/appcast.json.sig"] = srel.sign_bytes(sk, feed_body("/appcast.json")) + "\n"
+            st = up.check()
+            assert st["error"] == "" and st["available"] is True and st["latest"] == "1.1.0" and st["signed"] is True, st
+            cached = up.load_state()
+            assert base64.b64decode(cached["feed_data"], validate=True) == feed_body("/appcast.json") and cached["feed_signature"] == SIGS["/appcast.json"] + "\n"
+            cached.update({"latest": "9.9.9", "url": "http://127.0.0.1:1/unsigned.zip", "sha256": "0" * 64, "size": 1})
+            up._write(up.STATE_FILE, cached)
+            st = up.public()
+            assert st["available"] is True and st["latest"] == "1.1.0", st
+            downloads = []
+            old_download = up._download
+            def record_download(*args):
+                downloads.append(args)
+                raise ValueError("stop after verifying cached metadata")
+            up._download = record_download
+            try:
+                up._progress.update({"phase": "idle", "pct": 0, "error": ""})
+                up._run_install()
+            finally:
+                up._download = old_download
+            assert len(downloads) == 1 and downloads[0][0] == FEEDS["/appcast.json"]["url"] % feed_srv.server_address[1] and downloads[0][2:] == (len(ZIPB), hashlib.sha256(ZIPB).hexdigest()), downloads
+            os.environ["JW_UPDATE_KEYS"] = srel.public_b64(other)
+            assert up.public()["available"] is False
+            downloads.clear()
+            up._progress.update({"phase": "idle", "pct": 0, "error": ""})
+            up._run_install()
+            assert not downloads and "not checked against the signing key" in up._progress["error"], up._progress
+            os.environ["JW_UPDATE_KEYS"] = srel.public_b64(sk)
+            FEEDS["/appcast.json"]["version"] = "9.9.9"                                                                  # the feed changes after it was signed
+            st = up.check()
+            assert "not signed with this app" in st["error"] and st["latest"] == "1.1.0", st                              # refused; the last checked answer is kept
+            SIGS["/appcast.json.sig"] = srel.sign_bytes(other, feed_body("/appcast.json"))
+            assert "not signed with this app" in up.check()["error"]                                                      # signed, but by someone else
+            os.environ["JW_UPDATE_KEYS"] = srel.public_b64(other) + "\n" + srel.public_b64(sk)
+            st = up.check()
+            assert st["error"] == "" and st["latest"] == "9.9.9" and st["keys"] == 2, st                                  # either of two listed keys will do
+            os.environ["JW_UPDATE_KEYS"] = ""
+            SIGS.clear()
+            FEEDS["/appcast.json"]["version"] = "1.1.0"
+            st = up.check()
+            assert st["error"] == "" and st["latest"] == "1.1.0" and st["signed"] is False, st                          # no key built in: unsigned feeds work as before
+        finally:
+            os.environ.pop("JW_UPDATE_KEYS", None)
+            SIGS.clear()
+            FEEDS["/appcast.json"]["version"] = "1.1.0"
+            up.check()
+
+    def t_sign_script():
+        import contextlib
+        d = tempfile.mkdtemp(prefix="jw-sign-")
+        try:
+            keyfile = os.path.join(d, "keys", "release-signing-key")
+            out_ = io.StringIO()
+            with contextlib.redirect_stdout(out_):
+                srel.main(["keygen", "--key", keyfile])
+            pub = re.search(r"^([A-Za-z0-9+/=]{44})$", out_.getvalue(), re.M).group(1)
+            assert stat.S_IMODE(os.stat(keyfile).st_mode) == 0o600 and "BACK IT UP" in out_.getvalue()                     # readable by you only, and it says to keep a copy
+            try:
+                srel.main(["keygen", "--key", keyfile]); raise AssertionError("a key was overwritten")
+            except SystemExit:
+                pass
+            rel_dir = os.path.join(d, "release"); os.makedirs(rel_dir)
+            zip_bytes = os.urandom(2000)
+            name = "Journal-Watcher-1.2.0.zip"
+            open(os.path.join(rel_dir, name), "wb").write(zip_bytes)
+            feed = {"app": "Journal Watcher", "version": "1.2.0", "released": "2026-10-28", "notes": ["One"], "url": "https://github.com/x/y/releases/download/v1.2.0/" + name,
+                    "sha256": hashlib.sha256(zip_bytes).hexdigest(), "size": len(zip_bytes), "history": []}
+            open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(feed, indent=1))
+            outdir = os.path.join(d, "out")
+            args = ["sign", "--dir", rel_dir, "--tag", "v1.2.0", "--repo", "x/y", "--key", keyfile, "--out", outdir, "--yes"]
+            with contextlib.redirect_stdout(io.StringIO()) as o2:
+                srel.main(args)
+            sig = open(os.path.join(outdir, "appcast.json.sig")).read()
+            assert "checksum" in o2.getvalue() and "One" in o2.getvalue()                                                  # it shows what is being signed
+            assert up.verify_feed(open(os.path.join(rel_dir, "appcast.json"), "rb").read(), sig, [base64.b64decode(pub)]) is True      # and the app accepts it
+            with contextlib.redirect_stdout(io.StringIO()):
+                srel.main(["verify", "--appcast", os.path.join(rel_dir, "appcast.json"), "--sig", os.path.join(outdir, "appcast.json.sig"), "--pub", pub])
+            os.remove(os.path.join(outdir, "appcast.json.sig"))
+            no_tag_args = ["sign", "--dir", rel_dir, "--repo", "x/y", "--key", keyfile, "--out", outdir, "--yes"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                srel.main(no_tag_args)
+            assert os.path.exists(os.path.join(outdir, "appcast.json.sig"))                                  # --dir derives v1.2.0 and validates its release URL
+            os.remove(os.path.join(outdir, "appcast.json.sig"))
+            for what, edit in (("a zip that is not the one in the feed", lambda: open(os.path.join(rel_dir, name), "wb").write(zip_bytes[::-1])),
+                               ("a feed pointing somewhere else", lambda: open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps({**feed, "url": "https://evil.example/" + name}))),
+                               ("a tag that is not the feed's version", lambda: (open(os.path.join(rel_dir, name), "wb").write(zip_bytes), open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(feed)), args.__setitem__(4, "v1.3.0")))):
+                edit()
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        srel.main(args)
+                    raise AssertionError("signed " + what)
+                except SystemExit as e:
+                    assert e.code not in (0, None), (what, e.code)
+                assert not os.path.exists(os.path.join(outdir, "appcast.json.sig")), what
+            try:
+                open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps({**feed, "url": "https://evil.example/" + name}))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    srel.main(no_tag_args)
+                raise AssertionError("signed a --dir feed pointing somewhere else")
+            except SystemExit as e:
+                assert e.code not in (0, None), e.code
+            assert not os.path.exists(os.path.join(outdir, "appcast.json.sig"))
+            cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    srel.main(["keygen", "--key", "release-signing-key"])
+                assert os.path.isfile("release-signing-key") and stat.S_IMODE(os.stat("release-signing-key").st_mode) == 0o600
+            finally:
+                os.chdir(cwd)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    check("signed feeds: only the author's key counts (changed bytes, another key, no prefix, garbage and short signatures are refused; two keys may be listed; a damaged key file does not switch the check off)", t_sig_rules)
+    check("signed feeds: with a key set, an unsigned or wrongly signed feed is ignored (and what an unchecked feed said earlier is not offered or installed), a signed one is believed; with no key nothing changes", t_sig_check)
+    def t_sig_selfcheck():
+        r = subprocess.run([sys.executable, os.path.join(HERE, "updater.py")], capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and "update signature check: ok" in r.stdout, (r.returncode, r.stdout, r.stderr[-300:])      # what build_app.sh runs on the finished app
+    check("signed feeds: the build's own self-check (python updater.py) passes", t_sig_selfcheck)
+    check("signing script: makes a private key readable only by you (and will not overwrite it), shows what it signs, refuses a zip or address that does not match the feed, and its signature is accepted by the app", t_sign_script)
     feed_srv.shutdown()
     os.environ.pop("JW_VERSION", None); os.environ.pop("JW_UPDATE_FEED", None)
 
@@ -1703,6 +1886,15 @@ def main():
         _with_support_files(body3)
 
     check("support: the author's page keeps only safe fields (https and mailto links, a photo inside static/, trimmed text); a missing or damaged file is simply empty", t_support_author)
+    def t_support_shipped():
+        raw = json.load(open(os.path.join(paths.STATIC, "author.json"), encoding="utf-8"))
+        a = sp.author()                                                                           # the real file, cleaned the way the page sees it
+        assert len(a["links"]) == len(raw.get("links") or []), (raw.get("links"), a["links"])      # a link that is not https or mailto, or has no label, would vanish without a word
+        for k in ("university_url", "photo"):
+            assert bool(raw.get(k)) == bool(a[k]), (k, raw.get(k), a[k])
+        assert bool((raw.get("support") or {}).get("url")) == bool(a["support"]["url"]), raw.get("support")      # the tip page must be https
+        assert bool(raw.get("repo")) == bool(a["repo"]) and len(a["bio"]) == len(raw.get("bio") or [])
+    check("support: nothing in the shipped dashboard/static/author.json is silently dropped when the page cleans it (https links, a photo that exists, an https tip page)", t_support_shipped)
     check("support: the reminder is due after 14 days and 5 visits, then 60 days apart, at most three times, never after 'Don't ask again' or a click on the tip link, never without a tip page", t_support_rules)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)

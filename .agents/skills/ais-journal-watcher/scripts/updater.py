@@ -10,7 +10,14 @@ The feed is the `appcast.json` that `app/release.sh` writes next to each new bui
 Where the feed is: JW_UPDATE_FEED (tests), else your choice in Settings → About & updates (<settings folder>/update.json), else the address built into the app
 (defaults/update_feed.txt). Downloads are checked against the feed's sha256, the unpacked app must be a valid signature for the same bundle id and the advertised version,
 and only https (or loopback http, for tests) is accepted. Run from the project folder (not the app) it checks and reports but never installs.
+
+Signatures: when the app has a public key built in (defaults/update_public_key.txt, one base64 Ed25519 key per line, set by app/build_app.sh from
+app/update_public_key.txt), it only believes a feed whose bytes are signed by one of those keys: <feed address>.sig holds the base64 signature of
+SIG_PREFIX + the exact bytes of appcast.json, made on the author's own computer by app/sign_release.py. Without a key built in (a project run, an old build)
+nothing is checked beyond the sha256 below, as before. A feed without a good signature is ignored, and so is anything saved from an earlier, unchecked one.
 """
+
+import base64
 import hashlib
 import json
 import os
@@ -21,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -33,6 +41,7 @@ STATE_FILE = os.path.join(paths.STATE, "update_state.json")
 SUPPORT = os.environ.get("JW_UPDATE_DIR") or os.path.expanduser("~/Library/Application Support/Journal Watcher/updates")        # downloads and the swap script (JW_UPDATE_DIR: tests)
 CHECK_EVERY = 6 * 3600
 MAX_FEED = 262144
+SIG_PREFIX = b"journal-watcher-appcast-v1\n"      # what is signed: this line, then the exact bytes of appcast.json (so a signature made for something else cannot be reused here)
 _lock = threading.RLock()
 _progress = {"phase": "idle", "pct": 0, "error": ""}      # idle | downloading | verifying | installing | restarting | revealed | error
 EXIT = None                                                  # the app sets this: a function that quits it (so the new one can take its place)
@@ -128,6 +137,59 @@ def can_install():
     return bool(t and EXIT and os.path.isdir(t) and os.access(os.path.dirname(t), os.W_OK) and os.access(t, os.W_OK))
 
 
+# ------------------------------------------------------------------------------------------------ the signing key
+
+class FeedNotTrusted(ValueError):
+    """The feed could be read, but it is not shown to come from the author's key."""
+
+
+def trusted_keys():
+    """None: this copy does not check signatures (no key built in). Otherwise the list of 32-byte public keys it accepts; a built-in file that has lines but no
+    usable key gives an empty list, so that nothing is believed (a damaged key file must not switch the check off). JW_UPDATE_KEYS replaces the file (tests)."""
+    raw = os.environ.get("JW_UPDATE_KEYS")
+    if raw is None:
+        try:
+            raw = open(os.path.join(paths.DEFAULTS, "update_public_key.txt"), encoding="utf-8").read()
+        except OSError:
+            return None
+    lines = [l for l in (x.split("#", 1)[0].strip() for x in raw.replace(",", "\n").splitlines()) if l]
+    if not lines:
+        return None
+    keys = []
+    for l in lines:
+        try:
+            k = base64.b64decode(l, validate=True)
+        except ValueError:
+            continue
+        if len(k) == 32:
+            keys.append(k)
+    return keys
+
+
+def verify_feed(data, sig_text, keys):
+    """Raises FeedNotTrusted unless sig_text (base64) is a signature of SIG_PREFIX + data by one of keys."""
+    try:
+        from nacl.exceptions import BadSignatureError
+        from nacl.signing import VerifyKey
+    except ImportError:
+        raise FeedNotTrusted("This copy cannot check update signatures (the PyNaCl package is missing), so it ignores the update feed.")
+    try:
+        sig = base64.b64decode(str(sig_text or "").strip(), validate=True)
+    except ValueError:
+        sig = b""
+    if len(sig) != 64:
+        raise FeedNotTrusted("The update feed’s signature is not readable, so it was ignored.")
+    if not keys:
+        raise FeedNotTrusted("The signing key built into this app is not usable, so it ignores the update feed.")
+    for k in keys:
+        try:
+            VerifyKey(k).verify(SIG_PREFIX + data, sig)
+            return True
+        except (BadSignatureError, ValueError):
+            continue
+    raise FeedNotTrusted("The update feed is not signed with this app’s signing key, so it was ignored.")
+
+
 # ------------------------------------------------------------------------------------------------ asking the feed
 
 def _fetch(url, limit=MAX_FEED, timeout=15):
@@ -167,6 +229,27 @@ def load_state():
     return _read(STATE_FILE, {})
 
 
+def cached_feed(st, keys):
+    encoded = st.get("feed_data")
+    if not isinstance(encoded, str):
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError):
+        return None
+    if len(raw) > MAX_FEED:
+        return None
+    if keys is not None:
+        try:
+            verify_feed(raw, st.get("feed_signature"), keys)
+        except FeedNotTrusted:
+            return None
+    try:
+        return parse_feed(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def check(quiet=False):
     """Ask the feed; remember what it said. Never raises: a failure is recorded as state['error']."""
     with _lock:
@@ -178,9 +261,24 @@ def check(quiet=False):
             _write(STATE_FILE, st)
             return public()
         try:
-            f = parse_feed(_fetch(url))
-            st.update({"latest": f["version"], "released": f["released"], "notes": f["notes"], "url": f["url"], "sha256": f["sha256"], "size": f["size"], "min_macos": f["min_macos"],
+            raw = _fetch(url)
+            keys = trusted_keys()
+            sig = ""
+            if keys is not None:
+                try:
+                    sig = _fetch(url + ".sig", limit=1024).decode("ascii", "replace")
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
+                    raise FeedNotTrusted("The update feed is not signed (yet), so it was ignored.")
+                verify_feed(raw, sig, keys)
+            f = parse_feed(raw)
+            st.update({"feed_data": base64.b64encode(raw).decode("ascii"), "feed_signature": sig,
+                       "latest": f["version"], "released": f["released"], "notes": f["notes"], "url": f["url"], "sha256": f["sha256"], "size": f["size"], "min_macos": f["min_macos"],
                        "history": [h for h in f["history"] if newer(h["version"], version())], "error": ""})
+            st.pop("verified", None)
+        except FeedNotTrusted as e:
+            st["error"] = str(e)[:160]
         except (OSError, ValueError, KeyError, TypeError) as e:
             st["error"] = ("Could not reach the update feed: %s" % str(e)[:120]) if not quiet else str(e)[:120]
         _write(STATE_FILE, st)
@@ -189,9 +287,19 @@ def check(quiet=False):
 
 def public():
     st, s, cur = load_state(), settings(), version()
-    latest = st.get("latest") or ""
-    avail = bool(latest) and newer(latest, cur)
-    notes = list(st.get("notes") or [])
+    keys = trusted_keys()
+    f = cached_feed(st, keys)
+    if f:
+        latest, notes = f["version"], list(f["notes"])
+        history = [h for h in f["history"] if newer(h["version"], cur)]
+        released, size = f["released"], f["size"]
+    elif keys is None:
+        latest, notes = st.get("latest") or "", list(st.get("notes") or [])
+        history = st.get("history") or []
+        released, size = st.get("released") or "", st.get("size") or 0
+    else:
+        latest, notes, history, released, size = "", [], [], "", 0
+    avail = bool(latest) and newer(latest, cur) and (keys is None or f is not None)
     seen = s["seen"]
     just = bool(seen) and seen != cur and not newer(seen, cur)      # first start after an update
     if not seen:
@@ -199,10 +307,10 @@ def public():
             save_settings({"seen": cur})
         except (OSError, ValueError):
             pass
-    return {"current": cur, "latest": latest, "available": avail, "skipped": avail and latest == s["skipped"], "notes": notes if avail else [], "history": st.get("history") or [] if avail else [],
-            "released": st.get("released") or "", "size": st.get("size") or 0, "checked": st.get("checked") or "", "error": "" if (st.get("error") or "") == "no feed" else (st.get("error") or ""),
+    return {"current": cur, "latest": latest, "available": avail, "skipped": avail and latest == s["skipped"], "notes": notes if avail else [], "history": history if avail else [],
+            "released": released, "size": size, "checked": st.get("checked") or "", "error": "" if (st.get("error") or "") == "no feed" else (st.get("error") or ""),
             "feed": bool(feed_url()), "feed_url": feed_url(), "auto": s["auto"], "can_install": can_install(), "app": bool(target_app()), "progress": dict(_progress), "just_updated": just,
-            "seen": seen}
+            "seen": seen, "signed": keys is not None, "keys": len(keys or [])}
 
 
 def acknowledge():
@@ -293,17 +401,25 @@ def _apply(new_app, stage_dir, target):
 def _run_install():
     try:
         st = load_state()
-        if not (st.get("latest") and newer(st["latest"], version())):
+        keys = trusted_keys()
+        f = cached_feed(st, keys)
+        if keys is not None and f is None:
+            raise ValueError("This update was not checked against the signing key. Press “Check for updates” first.")
+        latest = f["version"] if f else st.get("latest", "")
+        url = f["url"] if f else st.get("url", "")
+        sha = f["sha256"] if f else st.get("sha256", "")
+        size = f["size"] if f else st.get("size")
+        if not (latest and newer(latest, version())):
             raise ValueError("You already have the newest version.")
         os.makedirs(SUPPORT, exist_ok=True)
-        zip_path = os.path.join(SUPPORT, "Journal-Watcher-%s.zip" % st["latest"])
+        zip_path = os.path.join(SUPPORT, "Journal-Watcher-%s.zip" % latest)
         _set("downloading", 0)
-        _download(st["url"], zip_path, st.get("size"), st["sha256"])
+        _download(url, zip_path, size, sha)
         _set("verifying", 100)
         target = target_app()
         bundle_id = _plist(target, "CFBundleIdentifier") if target and os.path.isdir(target) else ""
         try:
-            stage, new_app = _stage(zip_path, st["latest"], bundle_id)
+            stage, new_app = _stage(zip_path, latest, bundle_id)
         finally:
             try:
                 os.remove(zip_path)
@@ -359,3 +475,28 @@ def start_background(first_delay=25):
                 pass
             time.sleep(CHECK_EVERY)
     threading.Thread(target=loop, daemon=True, name="update-check").start()
+
+
+# ------------------------------------------------------------------------------------------------ for the build
+
+def selfcheck():
+    """Can this build really check a signature (is libsodium inside it)? app/build_app.sh runs `Journal Watcher --jw-module updater` on the finished app and stops if not."""
+    from nacl.signing import SigningKey
+    sk = SigningKey(bytes(range(32)))
+    data, keys = b"selfcheck", [bytes(sk.verify_key)]
+    sig = base64.b64encode(sk.sign(SIG_PREFIX + data).signature).decode()
+    assert verify_feed(data, sig, keys) is True
+    try:
+        verify_feed(data + b"x", sig, keys)
+    except FeedNotTrusted:
+        return True
+    raise AssertionError("a changed feed was accepted")
+
+
+if __name__ == "__main__":
+    try:
+        selfcheck()
+        print("update signature check: ok")
+    except Exception as e:  # noqa: BLE001
+        print("update signature check FAILED: %s: %s" % (type(e).__name__, e))
+        sys.exit(1)

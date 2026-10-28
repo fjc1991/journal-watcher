@@ -14,7 +14,7 @@ DEFAULTS = os.path.join(SPECPATH, "build", "defaults")        # made by build_ap
 
 # every module of the project except the tests
 mods = sorted(os.path.splitext(f)[0] for f in os.listdir(SCRIPTS) if f.endswith(".py") and not f.startswith(("test_", "real_smoke")))
-hidden = mods + ["server", "Quartz", "AppKit"]
+hidden = mods + ["server", "Quartz", "AppKit", "nacl", "nacl.signing", "nacl.exceptions", "nacl.bindings", "nacl._sodium"]      # nacl: the update feed's signature (scripts/updater.py imports it only when it checks one)
 datas, binaries = [], []
 for pkg in ("playwright", "fastembed", "onnxruntime", "docx", "pymupdf", "certifi", "anthropic", "tokenizers", "huggingface_hub"):
     try:

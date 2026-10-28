@@ -4,9 +4,19 @@ name: release
 # Optional repository secrets for a signed, notarised app (without them the app is ad-hoc signed and macOS asks once, see README):
 #   MACOS_CERT_P12 (base64 of a "Developer ID Application" certificate .p12), MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY ("Developer ID Application: Name (TEAMID)"),
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD (an app-specific password) for notarisation.
+# A dry run (Actions → release → Run workflow) does everything except publishing: it builds the app, the zip and the disk image, writes the update feed, rehearses
+# app/sign_release.py on them with a throw-away key, and attaches the results to the run (kept for 3 days) so that you can look at them. It costs a full macOS build.
+# After a real release: sign it on your own computer (python app/sign_release.py sign --tag vX.Y.Z --upload), see that script's header. Installed copies that have a
+# public key built in (app/update_public_key.txt) only see the update once appcast.json.sig is attached to the release.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Dry run: build as this version (empty: the newest section of CHANGELOG.md). Nothing is published."
+        required: false
+        default: ""
 permissions:
   contents: write
 jobs:
@@ -26,12 +36,28 @@ jobs:
         with:
           python-version: "3.14"
       - name: Version, update feed address and release notes
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+            if [ -z "$VERSION" ]; then VERSION="$(grep -m1 -E '^## [0-9]+(\.[0-9]+)+' CHANGELOG.md | sed -E 's/^## ([0-9.]+).*/\1/')"; fi
+            TAG="v$VERSION"
+          else
+            TAG="$GITHUB_REF_NAME"; VERSION="${TAG#v}"
+          fi
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$'; then echo "::error::'$VERSION' is not a version number"; exit 1; fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"; echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "$VERSION" > app/VERSION
           echo "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.json" > app/update_feed.txt
           python3 app/changelog_notes.py "$VERSION" > notes.txt
           sed 's/^/- /' notes.txt > body.md
+          if [ -s app/update_public_key.txt ]; then
+            echo "Update signatures: REQUIRED by this build (app/update_public_key.txt). Run: python app/sign_release.py sign --tag $TAG --upload"
+            printf '\n_Installed copies see this update once the release is signed (appcast.json.sig is attached)._\n' >> body.md
+          else
+            echo "::warning::app/update_public_key.txt is missing: this build accepts an unsigned update feed (see app/sign_release.py)"
+          fi
       - name: Import the Developer ID certificate (only if the secrets exist)
         if: ${{ env.MACOS_CERT_P12 != '' }}
         run: |
@@ -55,12 +81,30 @@ jobs:
           app/build_app.sh
       - name: Update feed
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.json" -o previous.json || echo '{}' > previous.json
           python3 app/make_appcast.py --version "$VERSION" --zip "app/dist/Journal-Watcher-$VERSION.zip" \
-            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Journal-Watcher-$VERSION.zip" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Journal-Watcher-$VERSION.zip" \
             --notes-file notes.txt --previous previous.json --out app/dist/appcast.json
+      - name: "Dry run: rehearse app/sign_release.py on these files with a throw-away key"
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python3 -m pip install -q pynacl
+          python3 app/sign_release.py keygen --key "$RUNNER_TEMP/dry-run-key" > /dev/null
+          python3 app/sign_release.py sign --dir app/dist --tag "$TAG" --repo "$GITHUB_REPOSITORY" --key "$RUNNER_TEMP/dry-run-key" --out "$RUNNER_TEMP/signed" --yes
+          test -s "$RUNNER_TEMP/signed/appcast.json.sig"
+      - name: "Dry run: keep the results for a few days"
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ env.VERSION }}
+          retention-days: 3
+          path: |
+            app/dist/Journal Watcher.dmg
+            app/dist/Journal-Watcher-*.zip
+            app/dist/appcast.json
+            notes.txt
       - name: Publish the release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           body_path: body.md
