@@ -114,10 +114,13 @@ def record(site, ok):
     if site not in SITES:
         return
     d = _read(STATUS_FILE, {})
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if ok:
-        d[site] = {"ok": True, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    elif site in d:
-        d[site]["failed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        d[site] = {"ok": True, "at": now}
+    else:
+        e = d.get(site) or {}
+        e["failed_at"] = now                                   # an earlier good sign-in stays; the page learns that an attempt ended
+        d[site] = e
     _write(STATUS_FILE, d)
 
 
@@ -141,6 +144,6 @@ def status():
             except ValueError:
                 age = None
         ttl = TTL[s]
-        out[s] = {"signed_in": bool(e.get("ok") and age is not None and age < ttl), "at": at, "age_hours": None if age is None else round(age, 2), "ttl_hours": ttl, "expired": bool(e.get("ok") and age is not None and age >= ttl)}
+        out[s] = {"signed_in": bool(e.get("ok") and age is not None and age < ttl), "at": at, "failed_at": e.get("failed_at") or "", "age_hours": None if age is None else round(age, 2), "ttl_hours": ttl, "expired": bool(e.get("ok") and age is not None and age >= ttl)}
     out["library"].update({"name": p["name"], "mode": p["mode"], "configured": p["configured"], "signs_in": p["signs_in"], "ill_email": p["ill_email"], "home": p["home"]})
     return out

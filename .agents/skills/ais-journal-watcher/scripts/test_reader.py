@@ -1568,6 +1568,8 @@ def main():
         st = si.status()
         assert not st["library"]["signed_in"] and st["library"]["expired"] and st["informs"]["signed_in"], st["library"]                                  # an old one is "expired", not forgotten
         si.record("nonsense", True); assert "nonsense" not in json.load(open(si.STATUS_FILE))
+        si.record("ais", False); st = si.status()
+        assert not st["ais"]["signed_in"] and st["ais"]["failed_at"], st["ais"]                                                                            # a first attempt that fails is noticed too (the page says so)
         si.forget("informs"); assert not si.status()["informs"]["signed_in"]
     def t_si_login_pages():
         assert brw.looks_like_login("https://login.openathens.net/auth/x") and brw.looks_like_login("https://login.microsoftonline.com/common") and brw.looks_like_login("https://idp.uni.edu/idp/profile/SAML2/Redirect/SSO")
