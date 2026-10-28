@@ -750,8 +750,13 @@ def main():
             page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the script of a short spoken briefing")][-1]
             check("🎧 Listen on the Card tab writes a short script from the card (the model is told to write for the ear)", "PAPER:" in req["messages"][-1]["content"] and "for the ear" in req["messages"][0]["content"] and page.locator(".lsn-s").count() >= 6 and "two minutes" in page.inner_text("#lsn-body"))
-            page.click("#lsn-play"); page.wait_for_function("window.__spoken.length >= 6", timeout=10000)
-            check("play reads it sentence by sentence with the browser's voice", page.evaluate("window.__spoken[0]").startswith("Here is the paper") and len(page.evaluate("window.__spoken")) == page.locator(".lsn-s").count())
+            page.click("#lsn-play")
+            try:
+                page.wait_for_function("window.__spoken.length >= document.querySelectorAll('.lsn-s').length", timeout=10000)      # all of them: the fake voice speaks one sentence every few milliseconds
+            except Exception:  # noqa: BLE001
+                pass
+            check("play reads it sentence by sentence with the browser's voice", page.evaluate("window.__spoken[0]").startswith("Here is the paper") and len(page.evaluate("window.__spoken")) == page.locator(".lsn-s").count(),
+                  page.evaluate("[window.__spoken.length, document.querySelectorAll('.lsn-s').length]"))
             page.click('[data-l="close"]'); check("the player closes", page.locator(".lsn").count() == 0)
             page.locator("#reader .cd-cite").first.click(); page.wait_for_timeout(500)
             page.click('#reader .cd-t[data-path="findings.0.text"]'); page.fill("#reader .cd-ed", "Entry rises by about twelve percent."); page.keyboard.press("Enter")
