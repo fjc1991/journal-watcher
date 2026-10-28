@@ -1005,13 +1005,13 @@ def main():
             print("round 3: flashcards and the daily review")
             page.goto("about:blank"); page.goto(base + "/#/library/review"); page.wait_for_selector(".rv-head", timeout=15000)
             check("the Library has a Review tab; with no cards yet it offers to make some", page.locator('.libtabs [data-tab="review"]').count() == 1 and "No flashcards yet" in page.inner_text("#rv-body"))
-            for _ in range(4):      # the Library draws the Review tab again when it has finished loading, and that puts the view back to Study: press "Make cards" again, as a person would
-                page.click('[data-rv="view"][data-v="make"]')
+            for _ in range(4):      # the Library draws the Review tab again when it has finished loading, and that puts the view back to Study (also between two of these steps): so the whole of "Make cards", "all without cards yet" and its result is one bounded attempt, repeated as a person would
                 try:
-                    page.wait_for_selector('[data-rv="selall"]', timeout=2500); break
+                    page.click('[data-rv="view"][data-v="make"]'); page.click('[data-rv="selall"]', timeout=3000); page.wait_for_selector("[data-rvp]:checked", timeout=3000)
+                    break
                 except Exception:  # noqa: BLE001
                     pass
-            page.click('[data-rv="selall"]'); n_sel = page.locator("[data-rvp]:checked").count()
+            n_sel = page.locator("[data-rvp]:checked").count()
             check("the papers that have a card can be ticked (only those)", n_sel >= 3 and page.locator("[data-rvp]").count() == n_sel, str(n_sel))
             page.wait_for_function("document.querySelector('#rv-est') && document.querySelector('#rv-est').textContent.includes('·')", timeout=10000)
             page.click('[data-rv="go"]'); page.wait_for_selector(".rv-card", timeout=60000)
@@ -1249,12 +1249,16 @@ def main():
             check("dropping a PDF from the desktop onto a folder adds it to the library and to that folder", api("/api/folders")[0]["count"] == 2 and len(api("/api/library")) == 4)
             page.click('[data-fp="rail-ask"]'); page.wait_for_selector("#lib-ask #am-q")
             check("the quick actions on the left jump to Ask", page.locator("#lib-ask:not(.hide)").count() == 1)
-            page.click("#folditem"); page.wait_for_selector(".fp-tile"); page.click('[data-fp="rail-add"]')
-            try:
-                page.wait_for_selector("#adddlg[open]", timeout=10000)
-            except Exception:  # noqa: BLE001
+            page.click("#folditem"); page.wait_for_selector(".fp-tile")
+            for _ in range(4):      # the Folders page redraws itself when its tab is shown; a click that begins just before is lost (no dialog is ever made), so click again, as a person would
+                page.click('[data-fp="rail-add"]')
+                try:
+                    page.wait_for_selector("#adddlg[open]", timeout=2500); break
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
                 print("  DEBUG the Add paper dialog did not open:", page.evaluate("JSON.stringify({dialog: !!document.querySelector('#adddlg'), open: [...document.querySelectorAll('dialog[open]')].map(d => d.id || d.className), tiles: document.querySelectorAll('.fp-tile').length, visibleRail: [...document.querySelectorAll('[data-fp=\"rail-add\"]')].map(b => b.getBoundingClientRect().width), hash: location.hash, body: document.body.className, toast: (document.querySelector('#toast') || {}).textContent})"))
-                raise
+                raise AssertionError("the Add paper dialog did not open")
             page.click("#ad-close")
             check("…and open the Add paper dialog", True)
             page.click(".fp-tile[data-id='lab']"); page.wait_for_selector(".fvtabs"); shot(page, "21-folder-view")
