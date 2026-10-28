@@ -1,0 +1,29 @@
+{
+  "_help": "Your prompt library. 'prompts' are the one-click actions on selected text (and figures/tables: scope 'area'); placeholders {{text}} (the selection), {{context}} (the paragraph around it), {{title}}, {{authors}}, {{year}}. 'summaries' are the templates for paper summaries; placeholders {{interests}}, {{title}}, {{journal}}, {{doi}}. Edit here or in Settings → Prompts.",
+  "prompts": [
+    {"id": "plain", "name": "Explain in plain words", "scope": "selection", "pinned": true,
+     "prompt": "Explain the selected passage in plain, precise language for a researcher who is not a specialist in this sub-field. Say what it claims, what it assumes, and any term worth defining. At most 120 words.\n\nPassage:\n{{text}}"},
+    {"id": "define", "name": "Define the term", "scope": "selection", "pinned": true,
+     "prompt": "Define the key term or concept in the selected text as it is used in this paper (and, if different, in the wider literature). Give one example.\n\nSelected text:\n{{text}}"},
+    {"id": "why", "name": "Why does this matter?", "scope": "selection", "pinned": true,
+     "prompt": "Why does the selected passage matter for the paper's argument? Link it to the research question and say what would change if it were false.\n\nPassage:\n{{text}}"},
+    {"id": "assume", "name": "Hidden assumptions", "scope": "selection", "pinned": false,
+     "prompt": "List the assumptions behind the selected claim, and for each say how it could fail. Be concrete and brief.\n\nClaim:\n{{text}}"},
+    {"id": "rq", "name": "Turn into a research question", "scope": "selection", "pinned": false,
+     "prompt": "Turn the selected passage into two or three follow-up research questions an IS researcher could pursue, each with a suggested method.\n\nPassage:\n{{text}}"},
+    {"id": "pt", "name": "Translate to Portuguese", "scope": "selection", "pinned": false,
+     "prompt": "Translate the selected text into European Portuguese, keeping technical terms accurate. Output only the translation.\n\n{{text}}"},
+    {"id": "figure", "name": "Explain this figure or table", "scope": "area", "pinned": true,
+     "prompt": "Explain the attached figure or table from the paper \"{{title}}\": what it shows, how to read it (axes, columns, units), the main takeaway, and any caveat visible in it. If it is a table, list the key numbers."}
+  ],
+  "summaries": [
+    {"id": "is_brief", "name": "IS brief (default)",
+     "prompt": "Read this paper in full and write a markdown summary for an IS researcher\nwhose interests are: {{interests}}.\n\nUse exactly this structure:\n\n# {{title}}\n**Authors**: ... | **Journal**: {{journal}} | **Year**: ... | **DOI**: {{doi}}\n**Matched interests**: ...\n## TL;DR\n2-3 sentences.\n## Research question & contribution\n## Method\nData, setting, identification/design, sample size.\n## Key findings\n- one bullet per finding, with effect sizes where reported\n## Implications\nFor research and for practice.\n## Limitations & open questions\n## Relevance to your interests\n1-2 lines tying it to the matched interests.\n\nOutput only the markdown."},
+    {"id": "theory", "name": "Theory & contribution",
+     "prompt": "Read this paper in full and write a markdown note on its theory and contribution for an IS researcher with interests in: {{interests}}.\n\n# {{title}}\n## Theoretical lens\nWhich theories, and how they are used (extended, tested, challenged).\n## Constructs and propositions\nKey constructs with definitions; hypotheses or propositions and whether they were supported.\n## Contribution\nWhat is new relative to prior work, and to whom it matters.\n## Boundary conditions\nWhere the argument should and should not hold.\n## How I could use it\nThree concrete ways this could feed my own research.\n\nOutput only the markdown."},
+    {"id": "methods", "name": "Methods & data",
+     "prompt": "Read this paper in full and write a markdown replication brief.\n\n# {{title}}\n## Design\nResearch design and identification strategy.\n## Data\nSource, period, unit of analysis, sample size and filters.\n## Measures\nKey variables, how they are built, scales or models used.\n## Estimation\nModel specifications, controls, robustness checks.\n## Threats to validity\nWhat a sceptical reviewer would press on.\n## What I would need to replicate\nData access, code, tools.\n\nOutput only the markdown."},
+    {"id": "tldr", "name": "5-line TL;DR",
+     "prompt": "Read this paper and write exactly five bullet points, each one sentence: (1) the question, (2) the method and data, (3) the main finding, (4) the contribution, (5) the main limitation. Title: {{title}}. Output only the five bullets."}
+  ]
+}

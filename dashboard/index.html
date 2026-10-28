@@ -1,0 +1,1165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Journal Watcher</title>
+<script>/* the theme before the first paint: light unless you chose dark (or "match my computer") */
+(function () { try { var t = localStorage.getItem("jw-theme") || "light"; if (t === "auto") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; document.documentElement.dataset.theme = t; document.documentElement.dataset.themepref = localStorage.getItem("jw-theme") || "light"; } catch (e) { document.documentElement.dataset.theme = "light"; } })();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/appbridge.js"></script>
+<link rel="stylesheet" href="/static/reader.css">
+<link rel="stylesheet" href="/static/library.css">
+<link rel="stylesheet" href="/static/settings.css">
+<link rel="stylesheet" href="/static/ideas.css">
+<link rel="stylesheet" href="/static/folders.css">
+<style>
+:root { --serif: var(--sans); --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }   /* the colours are in static/theme.css */
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); }
+button, input, select { font: inherit; color: inherit; }
+a { color: var(--accent); }
+
+.brand small { font: 400 12px var(--sans); color: var(--ink-3); margin-left: 8px; }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px;
+  background: var(--sk-soft); color: var(--ink-2); font-size: 12px; font-weight: 500; }
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sk); }
+.pill.busy .dot { background: var(--accent); animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+.cost { font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 12px; }
+.btn { border: 1px solid var(--line); background: var(--panel); padding: 6px 12px; border-radius: 8px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.07); }
+.btn.danger { color: var(--err); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+.btn.back { border: 1.5px solid var(--accent); color: var(--accent); font-weight: 600; padding: 8px 16px; font-size: 14px; background: var(--panel); }
+.btn.back:hover { background: var(--accent-soft); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.side { display: flex; flex-direction: column; overflow: auto; align-self: start; }
+.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.tabs button { flex: 1; background: none; border: 0; padding: 11px; cursor: pointer; color: var(--ink-2);
+  border-bottom: 2px solid transparent; font-weight: 500; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+.pane { padding: 16px; display: none; }
+.pane.on { display: block; }
+.pane p { margin: 0 0 12px; color: var(--ink-2); font-size: 13px; }
+label.lbl { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3);
+  margin: 12px 0 6px; font-weight: 600; }
+label.lbl span { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.row { display: flex; gap: 8px; align-items: center; }
+select, input[type=text], input[type=search] { background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 9px; width: 100%; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--panel-2); border-radius: 99px; padding: 3px 10px;
+  font-size: 12px; cursor: pointer; user-select: none; }
+.chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.chip.off { opacity: .4; cursor: not-allowed; }
+.est { font-size: 12px; color: var(--ink-3); margin: 10px 0; }
+.full { width: 100%; margin-top: 8px; justify-content: center; }
+.list-h { padding: 12px 16px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); font-weight: 600; }
+.runs { padding: 0 8px 8px; }
+.runitem { padding: 8px 10px; border-radius: 8px; cursor: pointer; }
+.runitem:hover { background: var(--panel-2); }
+.runitem.on { background: var(--accent-soft); }
+.runitem b { display: block; font-weight: 500; font-size: 13px; }
+.runitem span { font-size: 11px; color: var(--ink-3); }
+.runitem .now { display: inline-block; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
+.runtabs button { padding: 9px; font-size: 13px; }
+.runtabs .n { font-size: 11px; color: var(--ink-3); margin-left: 4px; }
+.main { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.navbar { z-index: 15; padding: 10px 14px; display: flex; align-items: center; gap: 14px; }
+.crumbs { font-size: 13px; color: var(--ink-3); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.crumbs a { color: var(--ink-2); text-decoration: none; cursor: pointer; }
+.crumbs a:hover { color: var(--accent); text-decoration: underline; }
+.crumbs b { color: var(--ink); font-weight: 600; }
+.banner { padding: 14px 16px; border-radius: 12px; background: var(--bl-soft); color: var(--ink); border: 1px solid var(--bl);
+  display: flex; gap: 12px; align-items: flex-start; }
+.banner b { color: var(--bl); }
+.runhead { padding: 16px 18px; }
+.runhead h1 { font: 600 22px var(--serif); margin: 0 0 4px; }
+.meta { color: var(--ink-3); font-size: 12px; }
+.prog { margin-top: 12px; display: none; }
+.prog.on { display: block; }
+.bar { height: 6px; background: var(--sk-soft); border-radius: 99px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.prog .row { justify-content: space-between; font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+.stats { display: flex; gap: 18px; margin-top: 12px; flex-wrap: wrap; }
+.stat b { font: 600 20px var(--serif); display: block; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
+.toolbar { padding: 10px 14px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.toolbar select, .toolbar input { width: auto; }
+.toolbar input[type=search] { flex: 1; min-width: 160px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: var(--panel); padding: 5px 10px; cursor: pointer; font-size: 12px; color: var(--ink-2); }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+.selbar { padding: 10px 14px; display: flex; align-items: center; gap: 12px; }
+.papers { display: flex; flex-direction: column; gap: 10px; }
+.paper { display: grid; grid-template-columns: 22px 1fr auto; gap: 12px; padding: 14px 16px; }
+.paper.skip { opacity: .72; }
+.paper input[type=checkbox] { margin-top: 4px; width: 16px; height: 16px; accent-color: var(--accent); }
+.ptitle { font: 600 16px/1.3 var(--serif); margin: 0 0 4px; cursor: pointer; }
+.ptitle:hover { color: var(--accent); }
+.pauth { font-size: 13px; color: var(--ink-2); margin-bottom: 2px; }
+.pmeta { font-size: 12px; color: var(--ink-3); }
+.reason { margin-top: 6px; font-size: 13px; color: var(--ink-2); }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tag { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--sk-soft); color: var(--ink-2); }
+.tag.warn { background: var(--bl-soft); color: var(--bl); }
+.pside { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 120px; }
+.verdict { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; padding: 3px 9px; border-radius: 6px; }
+.v-download { background: var(--dl-soft); color: var(--dl); }
+.v-borderline { background: var(--bl-soft); color: var(--bl); }
+.v-skip { background: var(--sk-soft); color: var(--sk); }
+.v-error { background: var(--err-soft); color: var(--err); }
+.v-pending { background: var(--sk-soft); color: var(--ink-3); animation: pulse 1.4s infinite; }
+.rel { width: 90px; height: 4px; background: var(--sk-soft); border-radius: 99px; overflow: hidden; }
+.rel i { display: block; height: 100%; background: var(--dl); }
+.dl { font-size: 12px; color: var(--ink-2); text-align: right; }
+.dl.ok { color: var(--dl); } .dl.bad { color: var(--err); } .dl.wait { color: var(--accent); }
+.empty { padding: 50px 20px; text-align: center; color: var(--ink-3); }
+.empty h2 { font: 600 20px var(--serif); color: var(--ink); margin: 0 0 8px; }
+.log { padding: 10px 14px; max-height: 160px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--ink-2); }
+.log .warn { color: var(--bl); } .log .error { color: var(--err); } .log .ok { color: var(--dl); }
+details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; color: var(--ink-3); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+.tile { padding: 16px; cursor: pointer; border-radius: 16px; transition: transform .12s, border-color .12s;
+  display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.tile:hover { transform: translateY(-2px); border-color: var(--jc, var(--accent)); }
+.tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tile .open { font-size: 12px; color: var(--accent); font-weight: 500; }
+.trow { display: flex; gap: 12px; align-items: center; }
+.mono { flex: none; width: 52px; height: 52px; border-radius: 14px; background: var(--jc); color: #fff;
+  display: grid; place-items: center; font: 600 14px var(--serif); letter-spacing: .3px; }
+.mono.sm { width: 34px; height: 34px; border-radius: 9px; font-size: 11px; }
+.tname { font: 600 15px/1.25 var(--serif); }
+.tpub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.tstatus { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+.tstatus .failed { color: var(--err); }
+.tbar { height: 8px; }
+.tbar i.done { background: var(--dl); }
+.tbar i.idle { background: var(--ink-3); opacity: .35; }
+.tbar.indet i { width: 35% !important; animation: slide 1.1s ease-in-out infinite; }
+@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+.tcounts { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); }
+.tcounts b { font: 600 17px var(--serif); color: var(--ink); margin-right: 3px; font-variant-numeric: tabular-nums; }
+.tcounts .c-dl b { color: var(--dl); } .tcounts .c-bl b { color: var(--bl); }
+.alllink { margin-top: 12px; font-size: 13px; }
+.viewtabs { display: flex; padding: 6px; gap: 6px; flex-wrap: wrap; }
+.viewtabs button { flex: 1; min-width: 160px; border: 0; background: none; padding: 10px 14px; border-radius: 8px;
+  cursor: pointer; font-weight: 600; color: var(--ink-2); font-size: 14px; }
+.viewtabs button:hover { background: var(--panel-2); }
+.viewtabs button.on { background: var(--accent-soft); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.viewtabs .n { font-weight: 500; color: var(--ink-3); margin-left: 4px; }
+.abs { margin-top: 8px; font-size: 13px; line-height: 1.55; color: var(--ink); display: -webkit-box;
+  -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.abs.open { -webkit-line-clamp: unset; }
+.tag.you { background: var(--accent-soft); color: var(--accent); }
+.tag.fit.high { background: var(--dl-soft); color: var(--dl); } .tag.fit.medium { background: var(--bl-soft); color: var(--bl); } .tag.fit.lower { background: var(--well, #eee); color: var(--ink-3); }
+.yeargroup h3 { font: 600 18px var(--serif); margin: 18px 0 8px; display: flex; align-items: baseline; gap: 10px; }
+.yeargroup h3 span { font: 400 12px var(--sans); color: var(--ink-3); }
+.jgroup > h2 { font: 600 20px var(--serif); margin: 22px 0 4px; display: flex; gap: 10px; align-items: center; }
+.librow { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 12px 16px; align-items: center; }
+.drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 40; display: none; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 100vw); background: var(--panel);
+  z-index: 41; transform: translateX(100%); transition: transform .2s; display: flex; flex-direction: column;
+  border-left: 1px solid var(--line); }
+.drawer.on { transform: none; }
+.drawer-bg.on { display: block; }
+.dhead { padding: 16px 24px 16px; border-bottom: 1px solid var(--line); }
+.dtop { display: flex; align-items: center; gap: 10px; }
+.dtop .spacer { flex: 1; }
+.dhead h2 { font: 600 22px/1.3 var(--serif); margin: 12px 0 10px; }
+.authors { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.authors .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); font-weight: 600; margin-bottom: 3px; }
+.authors .v { font-size: 15px; color: var(--ink); }
+.dfacts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.fact { font-size: 12px; padding: 3px 9px; border-radius: 99px; background: var(--sk-soft); color: var(--ink-2); }
+.dbody { padding: 18px 24px 40px; overflow: auto; flex: 1; }
+.dbody h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); margin: 20px 0 8px; }
+.dbody h3:first-child { margin-top: 0; }
+.md h1 { display: none; }
+.md h2 { font: 600 16px var(--serif); margin: 18px 0 6px; }
+.md p, .md li { color: var(--ink); line-height: 1.6; }
+.signin { position: relative; }
+.signin .menu { position: absolute; right: 0; top: 40px; z-index: 50; width: 330px; padding: 6px; display: flex; flex-direction: column; }
+.signin .menu button { text-align: left; border: 0; background: none; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.signin .menu button:hover { background: var(--panel-2); }
+.signin .menu b { display: block; font-weight: 600; font-size: 13px; }
+.signin .menu span { font-size: 12px; color: var(--ink-3); }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+  padding: 9px 16px; border-radius: 8px; font-size: 13px; z-index: 60; display: none; max-width: 90vw; }
+.hide { display: none !important; }
+@media (max-width: 900px) {
+  .paper { grid-template-columns: 22px 1fr; }
+  .pside { grid-column: 2; align-items: flex-start; flex-direction: row; flex-wrap: wrap; }
+  .navbar { top: 0; position: static; }
+  .seg { flex-wrap: wrap; }
+  .seg button + button { border-left: 0; }
+  .toolbar select { flex: 1; }
+}
+</style>
+<link rel="stylesheet" href="/static/output.css">
+<link rel="stylesheet" href="/static/theme.css">
+</head>
+<body>
+<button class="skip" id="skipnav">Skip to the page</button>
+<div class="app" id="app">
+<aside class="sidebar" id="sidebar" aria-label="Navigation">
+  <div class="sb-head">
+    <div class="brand" id="brand" title="Home"><span class="brand-mark"><svg class="ico"><use href="/static/icons.svg#i-library"/></svg></span><span class="brand-t">Journal Watcher<small id="modelname"></small></span></div>
+    <button class="sb-x" id="sbclose" aria-label="Hide the sidebar" title="Hide the sidebar"><svg class="ico"><use href="/static/icons.svg#i-x"/></svg></button>
+  </div>
+  <button class="btn pal-btn" id="palettebtn" disabled title="Jump to a paper, folder, tool or setting (Ctrl or ⌘ K)" aria-label="Search and jump"><svg class="ico sm"><use href="/static/icons.svg#i-search"/></svg><span class="pt">Search</span><span class="pk"><kbd>⌘K</kbd></span></button>
+  <nav class="mainnav" aria-label="Main">
+    <button class="navbtn" id="watchitem" data-tool="watch" data-nav="watch" title="Check journals for new papers; your past runs"><svg class="ico"><use href="/static/icons.svg#i-watch"/></svg><span class="nt">Watch</span></button>
+    <button class="navbtn" id="libitem" data-tool="library" data-nav="library" title="Every paper you have downloaded: search, read, highlight"><svg class="ico"><use href="/static/icons.svg#i-library"/></svg><span class="nt">Library</span><span class="nn" id="libcount"></span></button>
+    <button class="navbtn" id="reviewitem" data-tool="review" data-nav="review" title="Flashcards from your papers: today's review"><svg class="ico"><use href="/static/icons.svg#i-review"/></svg><span class="nt">Review</span><span class="nn" id="reviewcount"></span></button>
+    <button class="navbtn" id="folditem" data-tool="folders" data-nav="folders" title="Your folders of papers: ask, compare and find ideas across them"><svg class="ico"><use href="/static/icons.svg#i-folders"/></svg><span class="nt">Folders</span><span class="nn" id="foldcount"></span></button>
+  </nav>
+  <div class="sb-sec"><span>Folders</span><button id="sbnewfolder" aria-label="New folder" title="New folder"><svg class="ico sm"><use href="/static/icons.svg#i-plus"/></svg></button></div>
+  <div class="sb-folders" id="sbfolders" role="list"></div>
+  <div class="sb-spacer"></div>
+  <div class="sb-foot">
+    <div class="signin">
+      <button class="navbtn" id="signinbtn" aria-haspopup="true" title="Sign in to publishers so downloads can use your access"><svg class="ico"><use href="/static/icons.svg#i-key"/></svg><span class="nt">Sign-ins</span><span class="si-dot hide" id="sidot" title="You are signed in somewhere"></span><svg class="ico sm nn2"><use href="/static/icons.svg#i-down"/></svg></button>
+      <div class="menu card hide" id="signinmenu" role="menu" aria-label="Sign-ins"></div>
+    </div>
+    <button class="navbtn" id="settingsbtn" data-tool="settings" data-nav="settings" title="Settings: AI models, privacy, usage and cost, prompts"><svg class="ico"><use href="/static/icons.svg#i-settings"/></svg><span class="nt">Settings</span></button>
+  </div>
+</aside>
+<div class="sb-scrim" id="sbscrim"></div>
+<div class="content" id="content">
+<header class="topbar">
+  <button class="btn icon sb-toggle" id="sbtoggle" aria-label="Show or hide the sidebar" title="Show or hide the sidebar"><svg class="ico"><use href="/static/icons.svg#i-menu"/></svg></button>
+  <div class="tb-title" id="tbtitle"></div>
+  <div class="spacer"></div>
+  <button class="btn upd-pill hide" id="updatepill" aria-haspopup="dialog" title="A new version is ready"><svg class="ico sm"><use href="/static/icons.svg#i-download"/></svg><span>Update</span></button>
+  <button class="btn at-btn" id="aibtn" disabled aria-haspopup="dialog" aria-expanded="false" title="AI activity: what ran, what it cost, cancel"><svg class="ico sm at-ico"><use href="/static/icons.svg#i-sparkle"/></svg><span class="at-t">AI</span></button>
+  <span class="pill" id="status"><span class="dot"></span><span id="statustext">Idle</span></span>
+  <span class="cost" id="cost"></span>
+  <button class="btn icon" id="themebtn" title="Switch between light and dark" aria-label="Switch between light and dark"><svg class="ico"><use href="/static/icons.svg#i-moon"/></svg></button>
+</header>
+
+<div class="layout" id="layout" data-view="run">
+  <aside class="side">
+    <div class="card">
+      <div class="tabs">
+        <button class="on" data-tab="weekly">This week</button>
+        <button data-tab="search">Search archive</button>
+      </div>
+      <div class="pane on" id="pane-weekly">
+        <p>Fetch the newest papers from every journal, skip anything seen before, and let Sonnet 5.5 screen them against all your interests.
+          Every check this week is added to <b id="weekname">this week</b>.</p>
+        <button class="btn primary full" id="weeklybtn">Check for new papers</button>
+      </div>
+      <div class="pane" id="pane-search">
+        <p>Every article of the chosen journals in a year range, screened for the topics and/or main method you pick.</p>
+        <label class="lbl">Years</label>
+        <div class="row"><select id="y0"></select><span>to</span><select id="y1"></select></div>
+        <label class="lbl">Topics <span>(none = all, or any topic if a method is picked)</span></label>
+        <div class="chips" id="topicchips"></div>
+        <label class="lbl">Main method <span>(optional)</span></label>
+        <div class="chips" id="methodchips"></div>
+        <label class="lbl">Specific focus <span>(optional)</span></label>
+        <input type="text" id="focus" placeholder="e.g. LLMs in software development">
+        <label class="lbl">Journals <span>(<a href="#" id="jall">all</a> · <a href="#" id="jnone">none</a>)</span></label>
+        <div class="chips" id="journalchips"></div>
+        <div class="est" id="est"></div>
+        <button class="btn primary full" id="searchbtn">Search &amp; screen</button>
+        <div class="est">Starts a new run. To narrow the list you’re viewing, use the filters above the results.</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="list-h">Past runs</div>
+      <div class="tabs runtabs" id="runtabs">
+        <button class="on" data-rt="weekly">Weekly<span class="n" id="n-weekly"></span></button>
+        <button data-rt="search">Archive searches<span class="n" id="n-search"></span></button>
+      </div>
+      <div class="runs" id="runs" style="padding-top:8px"></div>
+    </div>
+  </aside>
+
+  <main class="main" id="main-content" tabindex="-1">
+    <div class="card navbar hide" id="navbar">
+      <button class="btn back" id="backbtn">← Back</button>
+      <div class="crumbs" id="crumbs"></div>
+    </div>
+
+    <div class="banner hide" id="banner"><span>🛡️</span><div id="bannertext"></div></div>
+
+    <div class="card runhead" id="runhead" data-tool="watch">
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div><h1 id="runtitle">Welcome</h1><div class="meta" id="runmeta">Start a weekly check or an archive search from the panel on the right.</div></div>
+        <button class="btn danger hide" id="stopbtn">Stop</button>
+      </div>
+      <div class="prog" id="prog">
+        <div class="row"><span id="proglabel"></span><span id="progcount"></span></div>
+        <div class="bar"><i id="progbar"></i></div>
+      </div>
+      <div class="stats hide" id="stats"></div>
+    </div>
+
+    <div id="runview" class="hide">
+      <div class="card selbar" id="selbar">
+        <span id="selcount">0 selected</span>
+        <button class="btn small" id="selrec">Select all “download”</button>
+        <button class="btn small" id="selnone">Clear</button>
+        <div class="spacer"></div>
+        <button class="btn hide" id="qbtn">Download queue</button>
+        <button class="btn primary" id="dlbtn" disabled>Download &amp; summarize</button>
+      </div>
+      <div class="card viewtabs" id="viewtabs" style="margin-top:14px">
+        <button data-vt="">🗂 Journals</button>
+        <button data-vt="~borderline">🔍 Borderline review<span class="n" id="vt-bl"></span></button>
+        <button data-vt="~queue">⬇ Download queue<span class="n" id="vt-q"></span></button>
+      </div>
+      <div id="tilesview" style="margin-top:14px">
+        <div class="tiles" id="tiles"></div>
+        <div class="alllink"><a href="#" id="allpapers">View every paper in one list →</a></div>
+      </div>
+      <div id="listview" class="hide" style="margin-top:14px">
+        <div class="card toolbar">
+          <div class="seg" id="vfilter">
+            <button data-v="relevant" class="on">Relevant</button>
+            <button data-v="download">Download</button>
+            <button data-v="borderline">Borderline</button>
+            <button data-v="skip">Skipped</button>
+            <button data-v="all">All</button>
+          </div>
+          <select id="jsel" class="hide"><option value="">All journals</option></select>
+          <select id="yfilter"><option value="">All years</option></select>
+          <select id="tfilter"><option value="">All topics</option></select>
+          <select id="sort">
+            <option value="rel">Sort: relevance</option>
+            <option value="date">Sort: newest</option>
+            <option value="journal">Sort: journal</option>
+            <option value="fit">Sort: fits my reading</option>
+          </select>
+          <input type="search" id="q" placeholder="Filter by title or author…">
+        </div>
+        <div class="papers" id="papers" style="margin-top:14px"></div>
+      </div>
+    </div>
+
+    <div id="libview" class="hide"></div>
+
+    <details class="card logbox" id="logbox">
+      <summary>Activity log</summary>
+      <div class="log" id="log"></div>
+    </details>
+  </main>
+</div>
+
+</div>
+</div>
+<div class="drawer-bg" id="drawerbg"></div>
+<aside class="drawer" id="drawer" aria-label="Paper details">
+  <div class="dhead">
+    <div class="dtop">
+      <button class="btn back" id="dclose">← Back to list</button>
+      <div class="spacer"></div>
+      <span class="pmeta" id="dmeta"></span>
+    </div>
+    <h2 id="dtitle"></h2>
+    <div class="authors"><div class="k">Authors</div><div class="v" id="dauthors"></div></div>
+    <div class="dfacts" id="dfacts"></div>
+    <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap" id="dactions"></div>
+  </div>
+  <div class="dbody" id="dbody"></div>
+</aside>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fileUrl = p => "/files/" + p.split("/").map(encodeURIComponent).join("/");
+const JCOL = {MISQ: "#2f5d8a", ISR: "#17808f", JAIS: "#6b4f9e", JMIS: "#b0602a", ISJ: "#2e7d4f", DSS: "#b3413a",
+  MS: "#44516a", MSOM: "#0f6e6e", ORSC: "#7a4b2a", CACM: "#1f5fa8", SCI: "#a3202f", PNAS: "#2b5a8c", NBER: "#5a6b2e", HBR: "#a3192b"};
+const PUB = {aisel: "AIS eLibrary", informs: "INFORMS", wiley: "Wiley", tandfonline: "Taylor & Francis", elsevier: "Elsevier",
+  acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences", nber: "NBER", hbr: "Harvard Business Publishing"};
+const authorsText = a => Array.isArray(a) ? a.join(", ") : String(a || "").replace(/;\s*/g, ", ");
+
+let CFG = null, RUN = null, BUSY = false, JOBKIND = null;
+let SEL = new Set(), FILTER = "relevant";
+// navigation: view = "run" | "lib"; j = journal abbr, "*" (all) or null (tiles)
+const START_HASH = location.hash;      // read once, at the end of boot: a 🔗 link (#read=…) must survive the route being written into the address first
+let NAV = {view: "run", j: null};
+let JST = {}, LIB = [], RUNTAB = "weekly", RUNS = [];
+const papers = new Map();
+let order = [];
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 4000); }
+function log(msg, level = "") {
+  const d = document.createElement("div"); d.className = level;
+  d.textContent = new Date().toLocaleTimeString() + "  " + msg; $("#log").prepend(d);
+}
+const jinfo = abbr => CFG.journals.find(x => x.abbr === abbr) || {abbr, name: abbr};
+const mono = (abbr, cls = "") => `<div class="mono ${cls}" style="--jc:${JCOL[abbr] || "var(--accent)"}">${esc(abbr)}</div>`;
+
+// ---------- theme (set before the first paint by the script in <head>): light first; the button switches between light and dark
+window.setTheme = pref => {         // pref: "light" | "dark" | "auto" (follow the computer)
+  const eff = pref === "auto" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : pref;
+  document.documentElement.dataset.theme = eff; document.documentElement.dataset.themepref = pref;
+  try { localStorage.setItem("jw-theme", pref); } catch (e) {}
+};
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (document.documentElement.dataset.themepref === "auto") setTheme("auto"); });
+$("#themebtn").onclick = () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+// ---------- navigation (also works with the browser's Back button and Esc)
+function go(nav, push = true) {
+  NAV = {...NAV, ...nav};
+  if (NAV.view === "lib" && !("tab" in nav) && !NAV.tab && window.LibraryUI) NAV.tab = LibraryUI.state.tab;
+  if (push) history.pushState(NAV, "", routeOf(NAV));
+  render();
+}
+// ---------- routes: #/watch · #/library[/<tab>] · #/folders · #/folder/<id>[/<tab>]  (so reload and Back land where you were)
+const LIBTABS = ["papers", "ask", "discover", "hl", "review", "tags"];
+function routeOf(n) {
+  if (n.view !== "lib") return "#/watch";
+  if (typeof n.j === "string" && n.j[0] === "@") { const t = n.ftab || (window.LibraryUI && LibraryUI.folderTabName()); return "#/folder/" + encodeURIComponent(n.j.slice(1)) + (t && t !== "papers" ? "/" + t : ""); }
+  return n.tab === "folders" ? "#/folders" : "#/library" + (n.tab && n.tab !== "papers" ? "/" + n.tab : "");
+}
+function parseRoute(h) {
+  const m = /^#\/(watch|library|folders|folder)(?:\/([^/]+))?(?:\/([^/]+))?/.exec(h || ""); if (!m) return null;
+  if (m[1] === "watch") return {view: "run", j: null};
+  if (m[1] === "folders") return {view: "lib", j: null, tab: "folders"};
+  if (m[1] === "library") return {view: "lib", j: null, tab: LIBTABS.includes(m[2]) ? m[2] : "papers"};
+  return m[2] ? {view: "lib", j: "@" + decodeURIComponent(m[2]), tab: "folders", ftab: m[3] || "papers"} : {view: "lib", j: null, tab: "folders"};
+}
+{ const r0 = parseRoute(location.hash); if (r0) NAV = r0; }       // start where the address says
+let BOOTED = false;
+function navActive() { return NAV.view !== "lib" ? "watch" : (NAV.tab === "review" && !(typeof NAV.j === "string" && NAV.j[0] === "@")) ? "review" : (NAV.tab === "folders" || (typeof NAV.j === "string" && NAV.j[0] === "@")) ? "folders" : "library"; }
+const NAVNAME = {watch: "Watch", library: "Library", review: "Review", folders: "Folders", settings: "Settings"};
+let SBSIG = "";
+function renderSideFolders() {        // the folders as a list under the main pages (like pages in a notebook): one click opens one
+  const fs = (window.LibraryUI && LibraryUI.folders && LibraryUI.folders()) || [], cur = typeof NAV.j === "string" && NAV.j[0] === "@" ? NAV.j.slice(1) : "", sig = JSON.stringify([fs.map(f => [f.id, f.name, f.count]), cur]);
+  if (sig === SBSIG) return; SBSIG = sig;
+  $("#sbfolders").innerHTML = fs.length ? fs.map((f, i) => `<button class="sbf${f.id === cur ? " on" : ""}" role="listitem" data-fid="${esc(f.id)}" title="${esc(f.name)}"><span class="sbf-i" style="--fc:${["#5b7fa6", "#6a9a62", "#c0883a", "#a8607a", "#7f6ab0", "#3f9a96"][i % 6]}"><svg class="ico sm"><use href="/static/icons.svg#i-folders"/></svg></span><span class="sbf-n">${esc(f.name)}</span><span class="nn">${f.count}</span></button>`).join("") : `<div class="sb-none">No folders yet</div>`;
+}
+function syncNav() {                // sidebar: which page you are on, the counts, the folders; the address
+  const a = navActive(), sett = document.body.classList.contains("settings-open");
+  document.querySelectorAll(".mainnav .navbtn[data-nav], .sb-foot .navbtn[data-nav]").forEach(b => b.classList.toggle("on", sett ? b.dataset.nav === "settings" : b.dataset.nav === a));
+  $("#foldcount").textContent = window.LibraryUI && LibraryUI.folderCount() || "";
+  renderSideFolders();
+  const deep = typeof NAV.j === "string" && NAV.j[0] === "@" && window.LibraryUI ? LibraryUI.folderName(NAV.j.slice(1)) : "";
+  $("#tbtitle").innerHTML = sett ? `<b>Settings</b>` : deep ? `<a id="tbroot">Folders</a><span>›</span><b>${esc(deep)}</b>` : `<b>${NAVNAME[a]}</b>`;
+  const tr = $("#tbroot"); if (tr) tr.onclick = () => { leaveSettings(); go({view: "lib", j: null, tab: "folders"}); };
+  const r = routeOf(NAV); if (BOOTED && location.hash !== r && !/^#read=/.test(location.hash) && !document.body.classList.contains("reading")) history.replaceState(history.state, "", r);
+}
+new MutationObserver(syncNav).observe(document.body, {attributes: true, attributeFilter: ["class"]});
+window.addEventListener("popstate", e => {
+  if (e.state && e.state.view === "read") { if (window.Reader) Reader.open(e.state.meta, false); return; }   // forward into the reader
+  if (window.Reader && Reader.isOpen()) Reader.close(false);
+  NAV = e.state || parseRoute(location.hash) || {view: "run", j: null}; closeDrawer(false); render();
+});
+window.addEventListener("jw-reader-closed", () => loadLibrary());   // the Library shows highlight counts
+function openFromHash(h) {            // a link made with 🔗 in the reader: /#read=<Papers/…pdf>&p=3&y=0.31 (also what ⧉ Beside opens in its second window)
+  const hash = typeof h === "string" ? h : location.hash, m = /^#read=([^&]+)(?:&p=(\d+))?(?:&y=([\d.]+))?/.exec(hash); if (!m) return;
+  const file = decodeURIComponent(m[1]), row = LIB.find(r => r.file === file);
+  if (hash === location.hash) history.replaceState(history.state, "", location.pathname);
+  if (!row) return toast("That paper isn’t in your library.");
+  readPaper(row, m[2] ? {goto: {page: +m[2], y: m[3] ? +m[3] : 0}} : undefined);
+}
+window.addEventListener("hashchange", openFromHash);
+function readPaper(m, opts) {
+  if (!window.Reader) return toast("The reader is still loading — try again in a moment.");
+  closeDrawer(false);
+  Reader.open({file: m.file, title: m.title, authors: m.authors, abbr: m.abbr, journal: m.journal, year: m.year, doi: m.doi, summary: m.summary, card: m.card, skim: m.skim}, true, opts);
+}
+function goBack() { if (history.state && history.length > 1) history.back(); else go({j: null}); }
+$("#backbtn").onclick = goBack;
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || document.body.classList.contains("reading")) return;   // the reader handles its own Esc
+  if ($("#drawer").classList.contains("on")) closeDrawer(); else if (NAV.j !== null) goBack();
+});
+const leaveSettings = () => { if (window.Settings) Settings.close(); };
+$("#brand").onclick = $("#watchitem").onclick = () => { leaveSettings(); go({view: "run", j: null}); };
+$("#folditem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "folders"}); };
+$("#reviewitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "review"}); };
+$("#sbfolders").onclick = e => { const b = e.target.closest("[data-fid]"); if (b) { leaveSettings(); closeSidebarIfNarrow(); go({view: "lib", j: "@" + b.dataset.fid, tab: "folders", ftab: "papers"}); } };
+$("#sbnewfolder").onclick = async () => { leaveSettings(); await go({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = document.querySelector('[data-fp="new"]'); b && b.click(); }, 250); };
+// the sidebar: always there on a wide window; a drawer on a narrow one; you can fold it away
+const narrow = () => matchMedia("(max-width: 900px)").matches || document.body.classList.contains("reading");   // a drawer instead of a fixed column
+function closeSidebarIfNarrow() { if (narrow()) document.body.classList.remove("sb-open"); }
+$("#sbtoggle").onclick = () => { if (narrow()) document.body.classList.toggle("sb-open"); else { const f = document.body.classList.toggle("sb-folded"); try { localStorage.setItem("jw-sb", f ? "folded" : "open"); } catch (e) {} } };
+$("#sbclose").onclick = () => { if (narrow()) document.body.classList.remove("sb-open"); else { document.body.classList.add("sb-folded"); try { localStorage.setItem("jw-sb", "folded"); } catch (e) {} } };
+$("#sbscrim").onclick = () => document.body.classList.remove("sb-open");
+document.querySelectorAll(".mainnav .navbtn").forEach(b => b.addEventListener("click", closeSidebarIfNarrow));
+try { if (localStorage.getItem("jw-sb") === "folded") document.body.classList.add("sb-folded"); } catch (e) {}
+$("#settingsbtn").onclick = () => window.Settings ? (document.body.classList.contains("settings-open") ? Settings.close() : Settings.open()) : toast("Settings are still loading.");
+
+function render() {
+  const lib = NAV.view === "lib";
+  $("#layout").dataset.view = NAV.view;
+  if (lib && window.LibraryUI) { if (NAV.tab) LibraryUI.state.tab = NAV.tab; else NAV.tab = LibraryUI.state.tab; if (NAV.ftab) { LibraryUI.setFolderTab(NAV.ftab); delete NAV.ftab; } }
+  $("#runview").classList.toggle("hide", lib || !RUN);
+  $("#libview").classList.toggle("hide", !lib);
+  $("#runhead").classList.toggle("hide", lib);
+  document.querySelectorAll("#runs .runitem").forEach(x => x.classList.toggle("on", !lib && RUN && x.dataset.id === RUN.id));
+  $("#tilesview").classList.toggle("hide", NAV.j !== null);
+  $("#listview").classList.toggle("hide", NAV.j === null);
+  const sp = special(NAV.j);
+  document.querySelectorAll("#viewtabs button").forEach(b => b.classList.toggle("on", b.dataset.vt === (sp ? NAV.j : "")));
+  $("#vfilter").classList.toggle("hide", sp);
+  $("#jsel").classList.toggle("hide", !sp);
+  $("#qbtn").classList.toggle("hide", NAV.j !== "~queue");
+  renderNav();
+  if (lib) renderLibrary();
+  else if (RUN) { renderTiles(); if (NAV.j !== null) renderList(); renderMeta(); updateSel(); }
+  syncNav();
+  window.scrollTo({top: 0});
+}
+function renderNav() {
+  const lib = NAV.view === "lib", deep = NAV.j !== null;
+  $("#navbar").classList.toggle("hide", !deep);
+  if (!deep) return;
+  const folder = typeof NAV.j === "string" && NAV.j[0] === "@";
+  const root = folder ? "Folders" : lib ? "Library" : (RUN ? RUN.title : "Run");
+  const here = NAV.j === "*" ? (lib ? "All journals" : "All papers") : folder ? "📁 " + LibraryUI.folderName(NAV.j.slice(1))
+    : NAV.j === "~borderline" ? "Borderline review" : NAV.j === "~queue" ? "Download queue" : jinfo(NAV.j).name;
+  $("#backbtn").textContent = folder ? "← Back to folders" : lib ? "← Back to library" : "← Back to journals";
+  $("#crumbs").innerHTML = `<a id="crumbroot">${esc(root)}</a><span>›</span>${NAV.j !== "*" && !special(NAV.j) && !folder ? mono(NAV.j, "sm") : ""}<b>${esc(here)}</b>`;
+  $("#crumbroot").onclick = () => goBack();
+}
+
+// ---------- start panel
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".pane").forEach(p => p.classList.toggle("on", p.id === "pane-" + b.dataset.tab));
+});
+function chip(label, on, cb) {
+  const c = document.createElement("span"); c.className = "chip" + (on ? " on" : ""); c.textContent = label;
+  c.onclick = () => { if (c.classList.contains("off")) return; c.classList.toggle("on"); cb && cb(); }; return c;
+}
+function selectedJournals() { return [...document.querySelectorAll("#journalchips .chip.on")].map(c => c.dataset.abbr); }
+function updateEst() {
+  const y0 = +$("#y0").value, y1 = +$("#y1").value, yrs = Math.abs(y1 - y0) + 1;
+  const js = selectedJournals();
+  const n = js.reduce((a, j) => a + (jinfo(j).per_year || 80), 0) * yrs;
+  const cost = n * CFG.est_cost_per_paper;
+  const big = js.filter(j => (jinfo(j).per_year || 0) > 1000);
+  $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · est. <b>$${cost.toFixed(2)}</b>` +
+    (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
+    (CFG.openalex_key ? "" : `<br>JMIS/DSS/NBER abstracts need a free OpenAlex key; otherwise screened by title.`);
+}
+async function init() {
+  CFG = await api("/api/config");
+  $("#modelname").textContent = CFG.model;
+  $("#weekname").textContent = CFG.this_week_label;
+  for (const id of ["#y0", "#y1"]) {
+    $(id).innerHTML = CFG.years.map(y => `<option>${y}</option>`).join("");
+    $(id).onchange = updateEst;
+  }
+  $("#y0").value = $("#y1").value = String(CFG.years[0] - 1);
+  CFG.topics.forEach(t => $("#topicchips").append(chip(t, false)));
+  (CFG.methods || []).forEach(m => { const c = chip(m.label, false); c.title = m.description || ""; $("#methodchips").append(c); });
+  CFG.journals.forEach(j => {
+    const can = j.archive !== false;
+    const c = chip(j.abbr, can && (j.per_year || 0) < 1000, updateEst);
+    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)");
+    if (!can) c.classList.add("off");
+    $("#journalchips").append(c);
+  });
+  $("#jall").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip:not(.off)").forEach(c => c.classList.add("on")); updateEst(); };
+  $("#jnone").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip").forEach(c => c.classList.remove("on")); updateEst(); };
+  $("#tfilter").innerHTML += CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
+  updateEst();
+  await loadRuns(); await loadLibrary();
+  if (document.readyState !== "complete") await new Promise(r => addEventListener("load", r, {once: true}));   // every module script has run by "load" (a deep link to a folder tab needs all of them)
+  await LibraryUI.init({getLib: () => LIB, reload: reloadLib, readPaper, openLib, go, renderNav, syncNav, tabChanged: () => { NAV.tab = LibraryUI.state.tab; history.replaceState({...NAV}, "", routeOf(NAV)); syncNav(); }, openRun: run => { startedRun(run); go({view: "run", j: "~queue"}); }, rerender: () => { if (NAV.view === "lib") renderLibrary(); }});
+  window.ReviewUI && ReviewUI.refreshBadge();
+  const st = await api("/api/state");
+  setBusy(st.busy, st.kind);
+  if (st.run) setRun(st.run);
+  history.replaceState(NAV, "", routeOf(NAV));
+  render(); BOOTED = true; syncNav(); loadSignins();
+  connect();
+  openFromHash(START_HASH);
+}
+
+$("#weeklybtn").onclick = async () => {
+  try { const r = await api("/api/run/weekly", {}); startedRun(r.run); } catch (e) { toast(e.message); }
+};
+$("#searchbtn").onclick = async () => {
+  const body = {
+    year_from: +$("#y0").value, year_to: +$("#y1").value, query: $("#focus").value,
+    topics: [...document.querySelectorAll("#topicchips .chip.on")].map(c => c.textContent),
+    methods: [...document.querySelectorAll("#methodchips .chip.on")].map(c => c.textContent),
+    journals: selectedJournals(),
+  };
+  try { const r = await api("/api/run/search", body); startedRun(r.run); } catch (e) { toast(e.message); }
+};
+function startedRun(run) {
+  SEL.clear(); FILTER = "relevant"; JST = {};
+  document.querySelectorAll("#vfilter button").forEach(b => b.classList.toggle("on", b.dataset.v === FILTER));
+  setRun({...run, papers: []}); go({view: "run", j: null});
+  RUNTAB = run.kind === "weekly" ? "weekly" : "search"; loadRuns();
+  // a weekly check continues this week's run: load what it already holds
+  api("/api/runs/" + run.id).then(r => { if (RUN && RUN.id === r.id) { setRun(r); render(); } }).catch(() => {});
+}
+$("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
+// Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
+let SI = null;
+const agoText = h => h == null ? "" : h < 0.05 ? "just now" : h < 1 ? Math.round(h * 60) + " min ago" : h < 36 ? Math.round(h) + " h ago" : Math.round(h / 24) + " days ago";
+async function loadSignins() { try { SI = await api("/api/signins"); } catch (e) { return; } paintSignins(); }
+function paintSignins() {
+  if (!SI) return;
+  const menu = $("#signinmenu"), L = SI.library || {}, tick = '<svg class="ico sm"><use href="/static/icons.svg#i-check"/></svg>';
+  const row = (k, title, desc) => {
+    const e = SI[k] || {}, wait = SI.pending === k;
+    const st = wait ? `<span class="si-st wait"><i class="si-spin"></i>Waiting for you to sign in…</span>`
+      : e.signed_in && k === "publishers" ? `<span class="si-st seen">Last opened ${agoText(e.age_hours)}</span>`
+      : e.signed_in ? `<span class="si-st ok">${tick}Signed in · ${agoText(e.age_hours)}</span>`
+      : e.expired ? `<span class="si-st old">Signed in ${agoText(e.age_hours)} · sign in again</span>` : `<span class="si-st">Not signed in</span>`;
+    return `<button role="menuitem" data-which="${k}" class="${e.signed_in && k !== "publishers" ? "si-done" : ""}"${BUSY && !wait ? ' disabled title="Wait for the task that is running to finish"' : ""}><b>${esc(title)}</b><span>${esc(desc)}</span>${st}</button>`;
+  };
+  const libTitle = L.signs_in ? (L.name || "My university library") : "My university library";
+  const libDesc = L.signs_in ? "Wiley, Elsevier, Taylor & Francis and what your library holds" : L.configured ? (L.mode === "vpn" ? "You use the university VPN: nothing to sign in" : "Uses each publisher’s “sign in through your institution” page") : "Not set up yet: choose your university";
+  menu.innerHTML = row("informs", "INFORMS member account", "ISR, Management Science, MSOM, Organization Science")
+    + row("ais", "AIS member account", "MIS Quarterly, JAIS")
+    + (L.signs_in ? row("library", libTitle, libDesc) : `<button role="menuitem" data-which="setup"><b>${esc(libTitle)}</b><span>${esc(libDesc)}</span><span class="si-st">${L.configured ? "Library access settings…" : "Set up…"}</span></button>`)
+    + row("publishers", "Other publisher sites", "Opens one tab per publisher; choose your university when asked")
+    + `<button role="menuitem" data-which="setup" class="si-more"><span>Library access settings…</span></button>`;
+  const any = ["informs", "ais", "library"].some(k => SI[k] && SI[k].signed_in);
+  $("#sidot").classList.toggle("hide", !any);
+  $("#signinbtn").classList.toggle("signed", any);
+  window.dispatchEvent(new CustomEvent("jw-signins", {detail: SI}));
+}
+function signIn(which) {
+  $("#signinmenu").classList.add("hide");
+  if (which === "setup") { window.Settings ? Settings.open("library") : toast("Settings are still loading."); return Promise.resolve(); }
+  const lib = (SI && SI.library) || {}, name = lib.name || "Your library";
+  const msg = {library: `A sign-in window for ${name} is opening: type your password there; it closes by itself.`,
+    informs: "An INFORMS sign-in window is opening: log in with your member account; it closes by itself.",
+    ais: "An AIS eLibrary sign-in window is opening: log in with your member account; it closes by itself.",
+    publishers: "A browser window is opening with one tab per publisher — sign in, then close it."}[which === "nova" ? "library" : which];
+  return api("/api/login", {which}).then(() => { toast(msg); loadSignins(); }).catch(e => { toast(e.message); if (/library first/i.test(e.message)) Settings.open("library"); });
+}
+$("#signinbtn").onclick = e => { e.stopPropagation(); loadSignins(); $("#signinmenu").classList.toggle("hide"); };
+$("#signinmenu").onclick = e => { const b = e.target.closest("[data-which]"); if (b) signIn(b.dataset.which); };
+document.addEventListener("click", e => { if (!e.target.closest(".signin")) $("#signinmenu").classList.add("hide"); });
+window.signIn = signIn;
+const SIGNIN_FOR = {informs: "informs", aisel: "ais"};
+function illLink(p) {
+  const to = (SI && SI.library && SI.library.ill_email) || "";
+  if (!to) return "";
+  const cite = `${authorsText(p.authors)} (${(p.pub_date || "").slice(0, 4)}). ${p.title}. ${jinfo(p.abbr).name}.` +
+    (p.doi ? ` https://doi.org/${p.doi}` : (p.url ? ` ${p.url}` : ""));
+  const body = `Dear ${(SI.library.name || "").trim() || "Library"} team,\n\nCould you please obtain a copy of the following article for my research?\n\n${cite}\n\nThank you.`;
+  return "mailto:" + to + "?subject=" + encodeURIComponent("Document request: " + p.title.slice(0, 80)) +
+    "&body=" + encodeURIComponent(body);
+}
+
+// ---------- runs list
+document.querySelectorAll("#runtabs button").forEach(b => b.onclick = () => { RUNTAB = b.dataset.rt; drawRuns(); });
+const fmtWhen = ts => new Date(ts).toLocaleString(undefined, {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
+async function loadRuns() { RUNS = await api("/api/runs"); drawRuns(); }
+function drawRuns() {
+  const weekly = RUNS.filter(r => r.kind === "weekly"), search = RUNS.filter(r => r.kind !== "weekly");
+  $("#n-weekly").textContent = weekly.length ? `(${weekly.length})` : "";
+  $("#n-search").textContent = search.length ? `(${search.length})` : "";
+  document.querySelectorAll("#runtabs button").forEach(b => b.classList.toggle("on", b.dataset.rt === RUNTAB));
+  const list = RUNTAB === "weekly" ? weekly : search;
+  $("#runs").innerHTML = list.length ? "" : `<div class="runitem"><span>${RUNTAB === "weekly"
+    ? "No weekly checks yet — press “Check for new papers”." : "No archive searches yet."}</span></div>`;
+  list.slice(0, 60).forEach(r => {
+    const d = document.createElement("div");
+    d.className = "runitem"; d.dataset.id = r.id;
+    const got = r.kind === "weekly"
+      ? `${(r.checks || []).length} check${(r.checks || []).length === 1 ? "" : "s"} · last ${fmtWhen(r.updated || r.created)}`
+      : fmtWhen(r.created);
+    d.innerHTML = `<b>${esc(r.title)}${r.week === CFG.this_week ? `<span class="now">This week</span>` : ""}</b>
+      <span>${got} · ${r.n_papers} papers · ${r.n_download} to download · $${(r.cost || 0).toFixed(2)}</span>`;
+    d.onclick = async () => {
+      if (BUSY && RUN && RUN.id !== r.id) return toast("Wait for the current task to finish.");
+      SEL.clear(); setRun(await api("/api/runs/" + r.id)); go({view: "run", j: null}); drawRuns();
+    };
+    $("#runs").append(d);
+  });
+  document.querySelectorAll("#runs .runitem").forEach(x => x.classList.toggle("on", NAV.view === "run" && RUN && x.dataset.id === RUN.id));
+}
+
+// ---------- run data
+function setRun(run) {
+  RUN = run; JST = run.jstate || {};
+  papers.clear(); order = [];
+  (run.papers || []).forEach(p => { papers.set(p.id, p); order.push(p.id); });
+  if (!SEL.size && run.kind === "weekly") papers.forEach(p => { if (p.verdict === "download" && p.dl_status !== "ok") SEL.add(p.id); });
+  $("#runtitle").textContent = run.title;
+  setCost(run.cost);
+}
+function renderMeta() {
+  if (!RUN) return;
+  const ps = [...papers.values()];
+  const c = v => ps.filter(p => p.verdict === v).length;
+  const got = ps.filter(p => p.dl_status === "ok").length;
+  const pending = ps.filter(p => !p.verdict).length;
+  const pr = RUN.params || {};
+  const nc = (RUN.checks || []).length;
+  const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
+    : RUN.kind === "weekly"
+    ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
+      (RUN.updated ? `, last ${fmtWhen(RUN.updated)}` : "")
+    : "Archive search: " + [pr.year_from === pr.year_to ? pr.year_from : pr.year_from + "–" + pr.year_to,
+        (pr.journals || []).join(", "), (pr.topics || []).join(", "),
+        (pr.methods || []).length ? "main method: " + pr.methods.join(", ") : "",
+        pr.query ? `“${pr.query}”` : ""].filter(Boolean).join(" · ");
+  $("#runmeta").textContent = RUN.kind === "weekly" ? scope : `${scope} · started ${new Date(RUN.created).toLocaleString()}`;
+  $("#stats").classList.remove("hide");
+  $("#stats").innerHTML = [["Found", ps.length], ["Download", c("download")], ["Borderline", c("borderline")],
+    ["Skipped", c("skip")], ["Awaiting verdict", pending], ["Downloaded", got]]
+    .map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
+  $("#vt-bl").textContent = ` (${c("borderline")})`;
+  const needsWork = p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary);
+  const queued = ps.filter(needsWork).length;
+  $("#vt-q").textContent = ` (${queued} to get${got ? `, ${ps.filter(p => p.verdict === "download" && p.dl_status === "ok").length} done` : ""})`;
+  $("#qbtn").textContent = `Download whole queue (${queued})`;
+  $("#qbtn").disabled = !queued || BUSY;
+  const jcur = $("#jsel").value, inRun = [...new Set(ps.map(p => p.abbr))];
+  $("#jsel").innerHTML = `<option value="">All journals</option>` + CFG.journals.filter(j => inRun.includes(j.abbr))
+    .map(j => `<option value="${j.abbr}"${j.abbr === jcur ? " selected" : ""}>${esc(j.abbr)}</option>`).join("");
+  const js = NAV.j && NAV.j !== "*" && !special(NAV.j) ? ps.filter(p => p.abbr === NAV.j) : ps;
+  const cj = v => js.filter(p => p.verdict === v).length, pj = js.filter(p => !p.verdict).length;
+  document.querySelectorAll("#vfilter button").forEach(b => {
+    const v = b.dataset.v, n = v === "all" ? js.length : v === "relevant" ? cj("download") + cj("borderline") + pj : cj(v);
+    b.textContent = b.textContent.replace(/ \(\d+\)$/, "") + ` (${n})`;
+  });
+  const years = [...new Set(js.map(p => (p.pub_date || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  const ysel = $("#yfilter"), cur = ysel.value;
+  ysel.innerHTML = `<option value="">All years</option>` + years.map(y => `<option${y === cur ? " selected" : ""}>${y}</option>`).join("");
+}
+const special = j => j === "~borderline" || j === "~queue";
+function visible(p) {
+  const v = p.verdict;
+  if (special(NAV.j)) {
+    if (NAV.j === "~borderline" && v !== "borderline") return false;
+    if (NAV.j === "~queue" && v !== "download") return false;
+    if ($("#jsel").value && p.abbr !== $("#jsel").value) return false;
+  } else {
+    if (FILTER === "relevant" && !(v === "download" || v === "borderline" || !v || v === "error")) return false;
+    if (["download", "borderline", "skip"].includes(FILTER) && v !== FILTER) return false;
+    if (NAV.j && NAV.j !== "*" && p.abbr !== NAV.j) return false;
+  }
+  const t = $("#tfilter").value, q = $("#q").value.trim().toLowerCase(), y = $("#yfilter").value;
+  if (y && (p.pub_date || "").slice(0, 4) !== y) return false;
+  if (t && !(p.topics || []).includes(t)) return false;
+  if (q && !((p.title || "") + " " + authorsText(p.authors)).toLowerCase().includes(q)) return false;
+  return true;
+}
+// how close a paper is to what you have read, starred or marked up (local embeddings; nothing appears until you have read a few papers)
+const FITS = new Map(), FITS_TRIED = new Set();
+const fitChip = p => { const f = FITS.get(p.id); return f ? `<span class="tag fit ${f.band}" title="How close it is to the papers you read, starred or marked up (compared with the others in this list)">fit: ${f.band}</span>` : ""; };
+async function ensureFits(ps) {
+  const todo = ps.filter(p => !FITS_TRIED.has(p.id) && p.title).slice(0, 400); if (!todo.length) return; todo.forEach(p => FITS_TRIED.add(p.id));
+  try { const r = await api("/api/personal/fit", {items: todo.map(p => ({id: p.id, title: p.title, abstract: p.abstract || "", topics: p.topics || []}))}); const f = r.fits || {}; if (!Object.keys(f).length) return; Object.entries(f).forEach(([k, v]) => FITS.set(k, v)); if (NAV.view === "run" && NAV.j !== null) renderList(true); }
+  catch (e) { /* a courtesy: the list works without it */ }
+}
+function sorted() {
+  const s = $("#sort").value, rank = {download: 3, borderline: 2, error: 1.5, undefined: 1, skip: 0};
+  const ps = order.map(i => papers.get(i));
+  if (NAV.j === "~queue") return ps.sort((a, b) => (a.dl_status === "ok") - (b.dl_status === "ok") || (b.relevance ?? -1) - (a.relevance ?? -1));
+  if (s === "date") return ps.sort((a, b) => (b.pub_date || "").localeCompare(a.pub_date || ""));
+  if (s === "fit") { const fr = {high: 3, medium: 2, lower: 1}; return ps.sort((a, b) => (fr[(FITS.get(b.id) || {}).band] || 0) - (fr[(FITS.get(a.id) || {}).band] || 0) || (rank[b.verdict] ?? 1) - (rank[a.verdict] ?? 1) || (b.relevance ?? -1) - (a.relevance ?? -1)); }
+  if (s === "journal") return ps.sort((a, b) => (a.abbr || "").localeCompare(b.abbr || "") || (b.relevance || 0) - (a.relevance || 0));
+  return ps.sort((a, b) => (rank[b.verdict] ?? 1) - (rank[a.verdict] ?? 1) || (b.relevance ?? -1) - (a.relevance ?? -1));
+}
+function dlText(p) {
+  switch (p.dl_status) {
+    case "ok": return `<span class="dl ok">✓ Downloaded${p.summary ? " · summary" : ""}</span>` +
+      (/preprint|open copy/i.test(p.dl_note || "") ? `<span class="dl" title="Not the publisher’s final version">${esc((p.dl_note.match(/(preprint|open copy)[^|;]*/i) || [""])[0])}</span>` : "") +
+      (p.summary ? "" : `<span class="dl bad">No summary yet</span>`);
+    case "downloading": return `<span class="dl wait">Downloading…</span>`;
+    case "summarizing": return `<span class="dl wait">Summarizing…</span>`;
+    case "needs_login": return `<span class="dl bad">Needs publisher login</span>`;
+    case "needs_nova": case "needs_library": return `<span class="dl bad">Needs library sign-in</span>`;
+    case "not_yet": return `<span class="dl bad" title="Brand-new “articles in advance” reach the library’s EBSCO once they’re in an issue — retry in a few weeks.">Not in the library’s EBSCO yet</span>`;
+    case "unavailable": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Not in your library’s holdings</span>`;
+    case "needs_check": return `<span class="dl bad" title="The “verify you are human” box wasn’t ticked within 3 minutes. Select the paper and press Download again to retry.">Verification not completed</span>`;
+    case "failed": return `<span class="dl bad">Couldn’t download</span>`;
+    default: return "";
+  }
+}
+function shortAuthors(a) {
+  const xs = Array.isArray(a) ? a : (a ? String(a).split(/;\s*/) : []);
+  return xs.slice(0, 4).join(", ") + (xs.length > 4 ? ` +${xs.length - 4} more` : "");
+}
+function card(p) {
+  const el = document.createElement("div");
+  const v = p.verdict || "pending";
+  el.className = "card paper" + (v === "skip" ? " skip" : "");
+  el.dataset.id = p.id;
+  const tags = (p.topics || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") +
+    (p.method ? `<span class="tag" title="Main method">⚙ ${esc(p.method)}</span>` : "") +
+    (p.abstract ? "" : `<span class="tag warn">title only</span>`) + fitChip(p);
+  el.innerHTML = `
+    <input type="checkbox" ${SEL.has(p.id) ? "checked" : ""} ${p.dl_status === "ok" ? "disabled" : ""} aria-label="Select for download">
+    <div>
+      <div class="ptitle">${esc(p.title)}</div>
+      ${p.authors && p.authors.length ? `<div class="pauth">${esc(shortAuthors(p.authors))}</div>` : ""}
+      <div class="pmeta">${esc(jinfo(p.abbr).name)} · ${esc(p.pub_date || "date unknown")}</div>
+      ${p.reason ? `<div class="reason">${NAV.j === "~borderline" ? "<b>Why borderline:</b> " : ""}${esc(p.reason)}</div>` : ""}
+      ${NAV.j === "~borderline" ? `<div class="abs" title="Click to expand">${p.abstract ? esc(p.abstract) : "<i>No abstract available — open the paper for details.</i>"}</div>` : ""}
+      <div class="tags">${tags}${p.user_set ? `<span class="tag you">✋ ${p.verdict === "download" ? "moved to queue by you" : "your call"}</span>` : ""}</div>
+    </div>
+    <div class="pside">
+      <span class="verdict v-${v}">${v === "pending" ? "screening…" : esc(v)}</span>
+      ${p.relevance != null ? `<div class="rel" title="Relevance ${p.relevance}"><i style="width:${p.relevance}%"></i></div>` : ""}
+      ${dlText(p)}
+      ${p.dl_status === "needs_login" ? `<button class="btn small" data-act="login">Sign in</button>` : ""}
+      ${["needs_nova", "needs_library"].includes(p.dl_status) ? `<button class="btn primary small" data-act="nova">Sign in to my library</button>` : ""}
+      ${["unavailable", "not_yet", "failed"].includes(p.dl_status) && illLink(p) ? `<a class="btn small" href="${illLink(p)}" title="Email your library an interlibrary-loan request for this paper">Ask my library</a>` : ""}
+      ${p.dl_status === "not_yet" && SIGNIN_FOR[p.publisher] ? `<button class="btn small" data-act="login">Use my ${SIGNIN_FOR[p.publisher].toUpperCase()} membership</button>` : ""}
+      ${(p.dl_status === "failed" || p.dl_status === "needs_check") && p.manual_url ? `<a class="btn small" target="_blank" href="${esc(p.manual_url)}">Open in my browser</a>` : ""}
+      ${p.dl_status === "ok" && p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">PDF</a>` : ""}
+      ${p.summary ? `<button class="btn small" data-act="sum">Summary</button>` : ""}
+      ${p.dl_status === "ok" && !p.summary ? `<button class="btn small" data-act="resum" title="${esc(p.dl_note || "")}">Retry summary</button>` : ""}
+      ${v === "borderline" ? `<button class="btn primary small" data-act="queue">→ Move to download queue</button>` : ""}
+      ${v === "borderline" && NAV.j === "~borderline" ? `<button class="btn small" data-act="skipv">Not relevant</button>` : ""}
+      ${v === "download" && p.dl_status !== "ok" && NAV.j === "~queue" ? `<button class="btn small" data-act="unqueue">Remove from queue</button>` : ""}
+    </div>`;
+  el.querySelector("input").onchange = e => { e.target.checked ? SEL.add(p.id) : SEL.delete(p.id); updateSel(); };
+  el.querySelector(".ptitle").onclick = () => openPaper(p.id);
+  const lb = el.querySelector('[data-act="login"]'); if (lb) lb.onclick = () => signIn(SIGNIN_FOR[p.publisher] || "publishers");
+  const nb = el.querySelector('[data-act="nova"]'); if (nb) nb.onclick = () => signIn("library");
+  const sb = el.querySelector('[data-act="sum"]'); if (sb) sb.onclick = () => openPaper(p.id);
+  const rb = el.querySelector('[data-act="resum"]'); if (rb) rb.onclick = () =>
+    api("/api/download", {ids: [p.id]}).then(() => toast("Writing the summary…")).catch(e => toast(e.message));
+  const qb = el.querySelector('[data-act="queue"]'); if (qb) qb.onclick = () => setVerdict([p.id], "download");
+  const kb = el.querySelector('[data-act="skipv"]'); if (kb) kb.onclick = () => setVerdict([p.id], "skip");
+  const ub = el.querySelector('[data-act="unqueue"]'); if (ub) ub.onclick = () =>
+    setVerdict([p.id], p.ai_verdict && p.ai_verdict !== "download" ? p.ai_verdict : "borderline");
+  const ab = el.querySelector(".abs"); if (ab) ab.onclick = () => ab.classList.toggle("open");
+  if (!visible(p)) el.classList.add("hide");
+  return el;
+}
+function renderList(again) {
+  const box = $("#papers"); box.innerHTML = "";
+  const ps = sorted();
+  ps.forEach(p => box.append(card(p)));
+  if (!again) ensureFits(ps.filter(p => visible(p) && (p.verdict === "borderline" || p.verdict === "download" || !p.verdict)));
+  if (!ps.filter(visible).length) box.innerHTML = `<div class="card empty"><h2>${ps.length ? "Nothing matches these filters" : (BUSY ? "Looking for papers…" : "No papers in this run")}</h2>${ps.length ? "Try “All” to see skipped papers." : ""}</div>`;
+}
+function updateCard(id) {
+  const p = papers.get(id), old = document.querySelector(`.paper[data-id="${CSS.escape(id)}"]`);
+  if (old) old.replaceWith(card(p));
+}
+let rT = null; function scheduleList() { clearTimeout(rT); rT = setTimeout(() => { if (NAV.view === "run" && NAV.j !== null) renderList(); }, 600); }
+function updateSel() {
+  for (const id of [...SEL]) { const p = papers.get(id); if (!p || p.dl_status === "ok") SEL.delete(id); }
+  $("#selcount").textContent = `${SEL.size} selected`;
+  $("#dlbtn").disabled = !SEL.size || BUSY;
+}
+document.querySelectorAll("#vfilter button").forEach(b => b.onclick = () => {
+  FILTER = b.dataset.v; document.querySelectorAll("#vfilter button").forEach(x => x.classList.toggle("on", x === b)); renderList(); renderMeta();
+});
+["#yfilter", "#tfilter", "#sort"].forEach(s => $(s).onchange = renderList);
+$("#q").oninput = () => { clearTimeout($("#q")._t); $("#q")._t = setTimeout(renderList, 200); };
+$("#selrec").onclick = () => { papers.forEach(p => { if (p.verdict === "download" && p.dl_status !== "ok") SEL.add(p.id); }); if (NAV.j !== null) renderList(); updateSel(); };
+$("#selnone").onclick = () => { SEL.clear(); if (NAV.j !== null) renderList(); updateSel(); };
+$("#dlbtn").onclick = async () => {
+  try { await api("/api/download", {ids: [...SEL]}); toast(`Downloading ${SEL.size} papers in the background.`); }
+  catch (e) { toast(e.message); }
+};
+$("#allpapers").onclick = e => { e.preventDefault(); go({j: "*"}); };
+document.querySelectorAll("#viewtabs button").forEach(b => b.onclick = () => go({j: b.dataset.vt || null}));
+$("#jsel").onchange = renderList;
+$("#qbtn").onclick = async () => {
+  const ids = [...papers.values()].filter(p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary)).map(p => p.id);
+  try { await api("/api/download", {ids}); toast(`Downloading ${ids.length} queued papers in the background.`); }
+  catch (e) { toast(e.message); }
+};
+async function setVerdict(ids, verdict, undo = true) {
+  const before = ids.map(i => [i, papers.get(i).verdict]);
+  try { await api("/api/verdict", {run_id: RUN.id, ids, verdict}); } catch (e) { return toast(e.message); }
+  ids.forEach(i => {
+    const p = papers.get(i);
+    if (!p.ai_verdict) p.ai_verdict = p.verdict;
+    p.verdict = verdict; p.user_set = verdict !== p.ai_verdict;
+    if (verdict === "download" && p.dl_status !== "ok") SEL.add(i); else SEL.delete(i);
+  });
+  renderList(); renderMeta(); renderTilesSoon(); updateSel();
+  if (undo) {
+    const t = $("#toast");
+    t.innerHTML = `${verdict === "download" ? "Moved to the download queue" : verdict === "skip" ? "Marked not relevant" : "Moved back to borderline"}
+      · <a href="#" id="undo" style="color:inherit;font-weight:600">Undo</a>`;
+    t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 5000);
+    $("#undo").onclick = e => { e.preventDefault(); t.style.display = "none";
+      before.forEach(([i, v]) => setVerdict([i], v, false)); };
+  }
+}
+
+// ---------- journal tiles
+function runJournals() {
+  const ab = RUN && RUN.kind === "search" ? (RUN.params.journals || []) : CFG.journals.map(j => j.abbr);
+  return CFG.journals.filter(j => ab.includes(j.abbr));
+}
+function tileState(j) {
+  const ps = [...papers.values()].filter(p => p.abbr === j.abbr);
+  const st = JST[j.abbr] || {};
+  const found = ps.length, judged = ps.filter(p => p.verdict).length;
+  const busyDl = ps.filter(p => p.dl_status === "downloading" || p.dl_status === "summarizing").length;
+  let label, pct = 0, cls = "", indet = false, failed = false;
+  if (st.state === "queued") { label = "Waiting"; cls = "idle"; }
+  else if (st.state === "fetching") { label = st.label || "Fetching"; if (st.total) pct = 100 * st.done / st.total; else indet = true; }
+  else if (st.state === "enriching") { label = (st.label || "Looking up") + (st.total ? ` ${st.done}/${st.total}` : ""); if (st.total) pct = 100 * st.done / st.total; else indet = true; }
+  else if (st.state === "failed") { label = st.label || "Failed"; pct = 100; cls = "idle"; failed = true; }
+  else if (busyDl) { label = `Downloading & summarizing (${busyDl})`; indet = true; }
+  else if (!found) { label = RUN.kind === "weekly" ? "No new papers" : "No articles found"; pct = 100; cls = "idle"; }
+  else if (judged < found) { label = BUSY ? `Screening ${judged}/${found}` : `${found - judged} not screened`; pct = 100 * judged / found; }
+  else { label = "Done"; pct = 100; cls = "done"; }
+  return {ps, found, label, pct, cls, indet, failed};
+}
+function tile(j, inner, onopen) {
+  const el = document.createElement("div");
+  el.className = "card tile"; el.tabIndex = 0; el.setAttribute("role", "button");
+  el.style.setProperty("--jc", JCOL[j.abbr] || "var(--accent)");
+  el.innerHTML = `<div class="trow">${mono(j.abbr)}<div><div class="tname">${esc(j.name)}</div><div class="tpub">${esc(PUB[j.publisher] || j.publisher || "")}</div></div></div>` + inner;
+  el.onclick = onopen;
+  el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onopen(); } };
+  return el;
+}
+function renderTiles() {
+  if (!RUN || !CFG) return;
+  const box = $("#tiles"); box.innerHTML = "";
+  runJournals().forEach(j => {
+    const s = tileState(j), c = v => s.ps.filter(p => p.verdict === v).length;
+    const got = s.ps.filter(p => p.dl_status === "ok").length;
+    box.append(tile(j, `
+      <div>
+        <div class="tstatus"><span class="${s.failed ? "failed" : ""}">${esc(s.label)}</span><span>${s.indet ? "" : Math.round(s.pct) + "%"}</span></div>
+        <div class="bar tbar${s.indet ? " indet" : ""}"><i class="${s.cls}" style="width:${s.pct}%"></i></div>
+      </div>
+      <div class="tcounts">
+        <span><b>${s.found}</b>found</span>
+        <span class="c-dl"><b>${c("download")}</b>download</span>
+        <span class="c-bl"><b>${c("borderline")}</b>borderline</span>
+        ${got ? `<span><b>${got}</b>downloaded</span>` : ""}
+      </div>
+      <div class="open">Open list →</div>`, () => go({j: j.abbr})));
+  });
+}
+let tT = null; function renderTilesSoon() { clearTimeout(tT); tT = setTimeout(() => { if (NAV.view === "run") renderTiles(); }, 200); }
+
+// ---------- library (journal → year)
+async function loadLibrary() {
+  LIB = await api("/api/library");
+  $("#libcount").textContent = LIB.length;
+  if (NAV.view === "lib" && BOOTED) renderLibrary();
+}
+async function reloadLib() { LIB = await api("/api/library"); $("#libcount").textContent = LIB.length; }
+$("#skipnav").onclick = () => { const m = $("#main-content"); m.focus(); m.scrollIntoView(); };
+$("#libitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: LibraryUI.state.tab === "folders" ? "papers" : LibraryUI.state.tab}); };
+function libRow(r, i) { return window.LibraryUI ? LibraryUI.row(r, i) : ""; }
+function renderLibrary() {
+  const box = $("#libview");
+  if (!LIB.length) {
+    box.innerHTML = `<div class="card empty"><h2>Your library is empty</h2>Run a check or a search, tick papers, and press “Download & summarize”.</div>`;
+    return;
+  }
+  const byJ = {};
+  LIB.forEach((r, i) => { (byJ[r.abbr] = byJ[r.abbr] || []).push([r, i]); });
+  const groups = j => {
+    const rows = byJ[j] || [], byY = {};
+    rows.forEach(x => (byY[x[0].year || "Unknown"] = byY[x[0].year || "Unknown"] || []).push(x));
+    return Object.keys(byY).sort().reverse().map(y =>
+      `<div class="yeargroup"><h3>${esc(y)} <span>${byY[y].length} paper${byY[y].length === 1 ? "" : "s"}</span></h3>
+       <div class="papers">${byY[y].map(([r, i]) => libRow(r, i)).join("")}</div></div>`).join("");
+  };
+  if (typeof NAV.j === "string" && NAV.j[0] === "@") { LibraryUI.folderView(box, NAV.j.slice(1)); return; }
+  if (NAV.j === null) {
+    box.innerHTML = pageHead({tool: "library", icon: "library", eyebrow: "Library", title: "Library", id: "lib-head", sub: `${LIB.length} papers · search everything you’ve read and written, or browse by journal`}) + `
+      <div id="libtop" style="margin-top:14px"></div>
+      <div id="libbrowse"><div class="tiles" id="libtiles" style="margin-top:14px"></div>
+      <div class="alllink"><a href="#" id="liball">Show all journals, grouped by journal and year →</a></div></div>`;
+    if (window.LibraryUI) LibraryUI.top($("#libtop"), {browse: $("#libbrowse")});
+    const tb = $("#libtiles");
+    CFG.journals.filter(j => byJ[j.abbr]).forEach(j => {
+      const rows = byJ[j.abbr], ys = [...new Set(rows.map(x => x[0].year).filter(Boolean))].sort();
+      const sums = rows.filter(x => x[0].summary).length;
+      tb.append(tile(j, `<div class="tcounts"><span><b>${rows.length}</b>paper${rows.length === 1 ? "" : "s"}</span>
+        <span><b>${sums}</b>summar${sums === 1 ? "y" : "ies"}</span></div>
+        <div class="tpub">${ys.length ? (ys[0] === ys[ys.length - 1] ? ys[0] : ys[0] + "–" + ys[ys.length - 1]) : ""}</div>
+        <div class="open">Open →</div>`, () => go({j: j.abbr})));
+    });
+    $("#liball").onclick = e => { e.preventDefault(); go({j: "*"}); };
+  } else if (NAV.j === "*") {
+    box.innerHTML = CFG.journals.filter(j => byJ[j.abbr]).map(j =>
+      `<div class="jgroup"><h2>${mono(j.abbr, "sm")}${esc(j.name)}</h2>${groups(j.abbr)}</div>`).join("");
+  } else {
+    const j = jinfo(NAV.j);
+    box.innerHTML = `<div class="card runhead"><div class="row">${mono(j.abbr)}<div><h1 style="margin:0">${esc(j.name)}</h1>
+      <div class="meta">${(byJ[j.abbr] || []).length} downloaded papers</div></div></div></div>${groups(j.abbr)}`;
+  }
+  box.querySelectorAll("[data-i]").forEach(b => b.onclick = () => openLib(LIB[+b.dataset.i]));
+  box.querySelectorAll("[data-read]").forEach(b => b.onclick = () => readPaper(LIB[+b.dataset.read]));
+}
+
+// ---------- detail drawer
+function showDrawer() { $("#drawer").classList.add("on"); $("#drawerbg").classList.add("on"); $("#dclose").focus(); }
+function closeDrawer() { $("#drawer").classList.remove("on"); $("#drawerbg").classList.remove("on"); }
+$("#dclose").onclick = closeDrawer; $("#drawerbg").onclick = closeDrawer;
+function fillDrawer({abbr, journal, year, title, authors, facts, actions, body}) {
+  $("#dmeta").innerHTML = `<span class="row">${mono(abbr, "sm")}<span>${esc(journal)}${year ? " · " + esc(year) : ""}</span></span>`;
+  $("#dtitle").textContent = title;
+  $("#dauthors").textContent = authorsText(authors) || "Not listed";
+  $("#dfacts").innerHTML = facts.filter(Boolean).join("");
+  $("#dactions").innerHTML = actions.filter(Boolean).join("");
+  $("#dbody").innerHTML = body;
+  showDrawer();
+}
+function openPaper(id) {
+  const p = papers.get(id); if (!p) return;
+  fillDrawer({
+    abbr: p.abbr, journal: jinfo(p.abbr).name, year: p.pub_date, title: p.title, authors: p.authors,
+    facts: [p.verdict ? `<span class="fact verdict v-${esc(p.verdict)}">${esc(p.verdict)} · ${p.relevance ?? "–"}</span>` : "",
+      p.method ? `<span class="fact">⚙ ${esc(p.method)}</span>` : "",
+      ...(p.topics || []).map(t => `<span class="fact">${esc(t)}</span>`)],
+    actions: [p.file && p.dl_status === "ok" ? `<button class="btn primary small" id="dread">Read &amp; highlight</button>` : "",
+      p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">Open PDF</a>` : "",
+      p.doi ? `<a class="btn small" target="_blank" href="https://doi.org/${esc(p.doi)}">DOI ↗</a>` : (p.url ? `<a class="btn small" target="_blank" href="${esc(p.url)}">Article page ↗</a>` : ""),
+      !p.file ? `<button class="btn small" id="dsel">${SEL.has(id) ? "✓ Selected — click to deselect" : "Select for download"}</button>` : ""],
+    body: (p.reason ? `<h3>Why Sonnet flagged it</h3><p>${esc(p.reason)}</p>` : "") +
+      (p.summary ? `<h3>Summary</h3><div class="md" id="dsum">Loading…</div>` : "") +
+      `<h3>Abstract</h3><p>${p.abstract ? esc(p.abstract) : "<i>No abstract available.</i>"}</p>` +
+      (p.keywords && p.keywords.length ? `<h3>Keywords</h3><p>${esc(p.keywords.join(", "))}</p>` : "") +
+      (p.dl_note && p.dl_status !== "ok" ? `<h3>Download notes</h3><p class="pmeta">${esc(p.dl_note)}</p>` : ""),
+  });
+  const ds = $("#dsel"); if (ds) ds.onclick = () => { SEL.has(id) ? SEL.delete(id) : SEL.add(id); updateCard(id); updateSel(); openPaper(id); };
+  const dr = $("#dread"); if (dr) dr.onclick = () => readPaper({file: p.file, title: p.title, authors: p.authors, abbr: p.abbr,
+    journal: jinfo(p.abbr).name, year: (p.pub_date || "").slice(0, 4), doi: p.doi, summary: p.summary});
+  if (p.summary) loadSummary(p.summary);
+}
+function openLib(r) {
+  fillDrawer({
+    abbr: r.abbr, journal: r.journal, year: r.year, title: r.title, authors: r.authors,
+    facts: (r.matched_topics || "").split(/;\s*/).filter(Boolean).map(t => `<span class="fact">${esc(t)}</span>`),
+    actions: [`<button class="btn primary small" id="dread">Read &amp; highlight</button>`,
+      `<a class="btn small" target="_blank" href="${fileUrl(r.file)}">Open PDF</a>`,
+      r.doi ? `<a class="btn small" target="_blank" href="https://doi.org/${esc(r.doi)}">DOI ↗</a>` : ""],
+    body: r.summary ? `<h3>Summary</h3><div class="md" id="dsum">Loading…</div>` : `<p class="pmeta">No summary yet.</p>`,
+  });
+  $("#dread").onclick = () => readPaper(r);
+  if (r.summary) loadSummary(r.summary);
+}
+async function loadSummary(path) {
+  try {
+    const md = await (await fetch(fileUrl(path))).text();
+    // the summary repeats title/authors (shown above); render the rest
+    const body = md.replace(/^# .*\n/, "").replace(/^\*\*Authors\*\*.*\n/m, "").replace(/</g, "&lt;");
+    $("#dsum").innerHTML = window.marked ? marked.parse(body) : `<pre>${esc(md)}</pre>`;
+  } catch (e) { $("#dsum").textContent = "Could not load summary."; }
+}
+
+// ---------- status + live events
+function setBusy(busy, kind) {
+  BUSY = busy; JOBKIND = kind;
+  $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
+  $("#status").classList.toggle("busy", busy);
+  ["#weeklybtn", "#searchbtn"].forEach(s => $(s).disabled = busy);
+  paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
+  $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
+  if (!busy) { $("#prog").classList.remove("on"); $("#banner").classList.add("hide"); }
+  updateSel(); renderTilesSoon();
+}
+function setCost(c) { $("#cost").textContent = c ? `Sonnet cost this run: $${(+c).toFixed(2)}` : ""; }
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("activity", e => { if (window.Activity) Activity.event(JSON.parse(e.data)); });
+  es.addEventListener("hello", async () => {
+    const st = await api("/api/state"); setBusy(st.busy, st.kind);
+    if (st.run && (!RUN || st.run.id === RUN.id)) { setRun(st.run); render(); }
+  });
+  es.addEventListener("job", e => {
+    const d = JSON.parse(e.data); setBusy(d.busy, d.kind);
+    if (!d.busy) {
+      loadRuns(); loadLibrary();
+      if (d.run && RUN && d.run.id === RUN.id) api("/api/runs/" + RUN.id).then(r => { setRun(r); render(); });
+    }
+  });
+  es.addEventListener("progress", e => {
+    const d = JSON.parse(e.data);
+    $("#prog").classList.add("on");
+    $("#proglabel").textContent = d.label;
+    $("#progcount").textContent = d.total ? `${d.done} / ${d.total}` : "";
+    $("#progbar").style.width = d.total ? (100 * d.done / d.total) + "%" : "0";
+  });
+  es.addEventListener("paper", e => {
+    const p = JSON.parse(e.data); if (papers.has(p.id)) return;
+    papers.set(p.id, p); order.push(p.id);
+    if (NAV.view === "run" && NAV.j !== null && visible(p)) {
+      const box = $("#papers"); const em = box.querySelector(".empty"); if (em) em.remove();
+      box.append(card(p));
+    }
+    metaSoon(); renderTilesSoon();
+  });
+  es.addEventListener("journal", e => { const d = JSON.parse(e.data); JST[d.abbr] = d; renderTilesSoon(); });
+  es.addEventListener("verdict", e => {
+    const d = JSON.parse(e.data), p = papers.get(d.id); if (!p) return;
+    Object.assign(p, d);
+    if (d.verdict === "download" && p.dl_status !== "ok" && RUN && RUN.kind === "weekly") SEL.add(d.id);
+    updateCard(d.id); scheduleList(); metaSoon(); renderTilesSoon();
+  });
+  es.addEventListener("download", e => {
+    const d = JSON.parse(e.data), p = papers.get(d.id); if (!p) return;
+    Object.assign(p, d); updateCard(d.id); metaSoon(); renderTilesSoon(); updateSel();
+  });
+  es.addEventListener("challenge", e => {
+    const d = JSON.parse(e.data);
+    $("#bannertext").innerHTML = d.state === "waiting"
+      ? `<b>A site wants to check you’re human.</b><br>${esc(d.msg)}` : esc(d.msg);
+    $("#banner").classList.toggle("hide", d.state === "passed");
+    if (d.state === "waiting") toast("Action needed: tick “Verify you are human” in the browser window.");
+  });
+  es.addEventListener("cost", e => setCost(JSON.parse(e.data).cost));
+  es.addEventListener("signin", e => {
+    const d = JSON.parse(e.data), who = d.name || (d.site || "").toUpperCase();
+    if (d.state === "opened") { if (SI) { SI.pending = d.site; paintSignins(); } return; }
+    if (d.status) SI = {...d.status, pending: ""}; else if (SI) SI.pending = "";
+    paintSignins();
+    toast(d.signed_in ? (d.site === "publishers" ? "Sign-in window closed; your sessions are saved." : `✓ Signed in to ${who}. Press “Download whole queue” to fetch the blocked papers.`)
+      : `${who} sign-in wasn’t completed.${d.error ? " " + d.error : ""}`);
+  });
+  es.addEventListener("log", e => { const d = JSON.parse(e.data); log(d.msg, d.level); });
+  es.onerror = () => { $("#statustext").textContent = "Reconnecting…"; };
+}
+let mT = null; function metaSoon() { clearTimeout(mT); mT = setTimeout(() => { if (NAV.view === "run") renderMeta(); }, 250); }
+
+init().catch(e => { $("#runtitle").textContent = "Can’t reach the dashboard server"; $("#runmeta").textContent = e.message; });
+</script>
+<script type="module" src="/static/library.js"></script>
+<script type="module" src="/static/ideas.js"></script>
+<script type="module" src="/static/askmany.js"></script>
+<script type="module" src="/static/matrix.js"></script>
+<script type="module" src="/static/discover.js"></script>
+<script type="module" src="/static/folders.js"></script>
+<script type="module" src="/static/dropimport.js"></script>
+<script type="module" src="/static/palette.js"></script>
+<script type="module" src="/static/draft.js"></script>
+<script type="module" src="/static/claims.js"></script>
+<script type="module" src="/static/synthesis.js"></script>
+<script type="module" src="/static/review.js"></script>
+<script type="module" src="/static/workspace.js"></script>
+<script type="module" src="/static/bibdialog.js"></script>
+<script type="module" src="/static/listen.js"></script>
+<script type="module" src="/static/twin.js"></script>
+<script type="module" src="/static/update.js"></script>
+<script type="module" src="/static/welcome.js"></script>
+<script type="module" src="/static/activity.js"></script>
+<script type="module" src="/static/settings.js"></script>
+<script type="module" src="/static/reader.js"></script>
+</body>
+</html>

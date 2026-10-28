@@ -1,0 +1,53 @@
+/* Settings page: a full-screen layer under the top bar, in the dashboard's tokens. */
+body.settings-open { overflow: hidden; }
+.st { position: fixed; inset: var(--tb, 48px) 0 0 var(--sbw, 0px); z-index: 36; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
+.st.hide { display: none; }
+.st-head { display: flex; gap: 16px; align-items: center; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.st-head h1 { margin: 0; font: 600 20px var(--serif); }
+.st-tabs { display: flex; gap: 4px; margin-left: 12px; flex-wrap: wrap; }
+.st-tabs button { border: 0; background: none; padding: 7px 12px; border-radius: 8px; cursor: pointer; color: var(--ink-2); font-weight: 500; }
+.st-tabs button.on { background: var(--accent-soft); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.st-body { flex: 1; overflow: auto; padding: 18px 20px 60px; max-width: 1180px; width: 100%; margin: 0 auto; }
+.st-card { padding: 16px 18px; margin-bottom: 14px; }
+.st-card h2 { margin: 0 0 8px; font: 600 17px var(--serif); }
+.st-card h2 small, .st-table small { font: 400 12px var(--sans); color: var(--ink-3); }
+.hint { color: var(--ink-3); font-size: 12px; margin: 4px 0 10px; line-height: 1.5; }
+.st code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.st-table { width: 100%; border-collapse: collapse; }
+.st-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.st-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.st-table input[type=text], .st-table select { width: 100%; }
+.st-table tr:last-child td { border-bottom: 0; }
+.st-table.log td { font-size: 12px; }
+.st .ok { color: var(--dl); font-weight: 600; } .st .bad, .st-msg.bad, .tres.bad { color: var(--err); }
+.tres { font-size: 12px; color: var(--ink-2); margin-left: 6px; }
+.chk { display: flex; gap: 8px; align-items: center; margin: 9px 0; flex-wrap: wrap; color: var(--ink-2); }
+.st-actions { display: flex; gap: 12px; align-items: center; margin: 8px 0 20px; }
+.st-msg { font-size: 13px; color: var(--dl); }
+.st-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.st-stat { padding: 14px 16px; display: flex; flex-direction: column; gap: 3px; }
+.st-stat span { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); font-weight: 600; }
+.st-stat b { font: 600 26px var(--serif); font-variant-numeric: tabular-nums; }
+.st-stat small { color: var(--ink-3); }
+.st-bar { height: 6px; background: var(--sk-soft); border-radius: 99px; overflow: hidden; margin-top: 6px; }
+.st-bar i { display: block; height: 100%; background: var(--accent); } .st-bar i.warn { background: var(--bl); }
+.warnbox { background: var(--bl-soft); border-color: var(--bl); }
+.st-chart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 6px; }
+.st-chart div { flex: 1; min-width: 8px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; }
+.st-chart i { display: block; width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
+.st-chart small { font-size: 9px; color: var(--ink-3); }
+.st-two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; } @media (max-width: 900px) { .st-two { grid-template-columns: 1fr; } }
+.st-item { padding: 10px 12px; margin-bottom: 10px; }
+.st-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.st-row .pn { flex: 1; min-width: 160px; font-weight: 600; }
+.st-item textarea { width: 100%; font: 12.5px/1.5 ui-monospace, Menlo, monospace; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; color: var(--ink); resize: vertical; }
+.legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 16px; }
+.legend label { display: flex; gap: 8px; align-items: center; }
+.legend .sw { width: 22px; height: 22px; border-radius: 50%; flex: none; }
+.pill { font-size: 10px; background: var(--accent-soft); color: var(--accent); border-radius: 99px; padding: 0 6px; }
+.lk-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.lk-opt { flex: 1 1 220px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; cursor: pointer; background: var(--panel); }
+.lk-opt input { grid-row: span 2; } .lk-opt span { color: var(--ink-3); font-size: 12px; }
+.lk-opt.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.st-chart i { max-width: 26px; } .st-chart i.zero { background: var(--line); } .st-chart small { height: 12px; white-space: nowrap; }
+table.af td:nth-child(2), table.af td:nth-child(3) { white-space: nowrap; }

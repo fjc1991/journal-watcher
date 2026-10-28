@@ -1,0 +1,29 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  offline:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements.txt
+      - name: Offline checks (no network, no API key)
+        run: python .agents/skills/ais-journal-watcher/scripts/test_reader.py
+  ui:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m playwright install chromium
+      - name: Headless-browser end-to-end suite (a fake AI provider, a throw-away copy of the project)
+        run: python .agents/skills/ais-journal-watcher/scripts/test_ui.py

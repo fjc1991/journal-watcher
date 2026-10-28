@@ -1,0 +1,134 @@
+{
+  "_help": "Which provider/model answers each AI feature. Edit here or in the dashboard (Settings → AI). API keys are never stored here: they come from .env (the key_env names below). openai_compat covers OpenAI, OpenRouter, Gemini's OpenAI-compatible endpoint and Ollama. 'models' only fills the pickers; 'prices' (USD per million tokens) gives cost figures; 'web_body' is merged into the request when a feature searches the web (OpenAI's needs a search-capable model). privacy.local_only blocks every provider that isn't on this computer; budget.monthly_usd stops calls once the month's spend reaches it.",
+  "providers": {
+    "anthropic": {
+      "type": "anthropic",
+      "key_env": "ANTHROPIC_API_KEY",
+      "models": [
+        "claude-sonnet-5-5"
+      ],
+      "betas": [
+        "server-side-fallback-2026-07-01"
+      ],
+      "fallbacks": "default",
+      "thinking": {
+        "type": "adaptive"
+      }
+    },
+    "openai": {
+      "type": "openai_compat",
+      "base_url": "https://api.openai.com/v1",
+      "key_env": "OPENAI_API_KEY",
+      "max_tokens_param": "max_completion_tokens",
+      "models": [],
+      "web_body": {
+        "web_search_options": {}
+      }
+    },
+    "openrouter": {
+      "type": "openai_compat",
+      "base_url": "https://openrouter.ai/api/v1",
+      "key_env": "OPENROUTER_API_KEY",
+      "models": [],
+      "web_body": {
+        "plugins": [
+          {
+            "id": "web",
+            "max_results": 5
+          }
+        ]
+      }
+    },
+    "gemini": {
+      "type": "openai_compat",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "key_env": "GEMINI_API_KEY",
+      "models": []
+    },
+    "ollama": {
+      "type": "openai_compat",
+      "base_url": "http://localhost:11434/v1",
+      "key_env": "",
+      "models": [],
+      "local": true
+    }
+  },
+  "features": {
+    "ask": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "explain": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "suggest": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "summarize": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
+    },
+    "card": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
+    },
+    "events": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "ideas": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "high"
+    },
+    "critique": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
+    },
+    "folder_ask": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "matrix": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "skim": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    }
+  },
+  "embeddings": {
+    "provider": "local",
+    "model": "BAAI/bge-small-en-v1.5"
+  },
+  "prices": {
+    "claude-sonnet-5-5": {
+      "in": 2.0,
+      "out": 10.0,
+      "cache_write": 2.5,
+      "cache_read": 0.2
+    },
+    "_web_search": {
+      "per_search": 0.01
+    }
+  },
+  "privacy": {
+    "local_only": false
+  },
+  "budget": {
+    "monthly_usd": null
+  }
+}

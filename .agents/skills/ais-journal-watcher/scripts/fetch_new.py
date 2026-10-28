@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Fetch new papers from journal RSS feeds + Crossref.
+
+- Dedupes against state/seen.json
+- Writes state/new_papers.json
+- Usage:
+    python3 fetch_new.py                 # fetch all journals
+    python3 fetch_new.py --doi 10.1287/...   # fetch a specific paper's metadata
+"""
+import json
+import os
+import re
+import sys
+import time
+import hashlib
+import urllib.error
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+from html import unescape
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paths  # noqa: E402
+
+BASE, ROOT = paths.BASE, paths.ROOT       # the settings folder and the data home (paths.py)
+STATE_DIR = paths.STATE
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+# ---------- http ----------
+
+def http_get(url, timeout=40, headers=None):
+    h = {"User-Agent": UA, "Accept": "*/*"}
+    if headers:
+        h.update(headers)
+    for attempt in range(4):
+        req = urllib.request.Request(url, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read(), r.geturl(), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            # Crossref/OpenAlex throttle bursts with 429: wait and retry
+            if e.code != 429 or attempt == 3:
+                raise
+            wait = e.headers.get("Retry-After") if e.headers else None
+            time.sleep(min(int(wait), 30) if wait and wait.isdigit() else 3 * (attempt + 1))
+
+
+# ---------- text helpers ----------
+
+def strip_html(text):
+    if not text:
+        return ""
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def norm_title(t):
+    return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+
+
+def doi_from_text(text):
+    if not text:
+        return None
+    m = re.search(r"(?:^|[/=\s?])(10\.[0-9]{4,9}/[^\s\"'<>&?]+)", text)
+    if m:
+        return m.group(1).rstrip(".,;:")
+    m2 = re.search(r"doi:((?:10\.[0-9]{4,9}/\S+))", text, re.IGNORECASE)
+    if m2:
+        return m2.group(1).rstrip(".,;:")
+    return None
+
+
+def key_for(doi, journal, title):
+    if doi:
+        return "doi:" + doi.lower()
+    return "t:" + hashlib.sha1((journal + "|" + norm_title(title)).encode()).hexdigest()[:20]
+
+
+# ---------- feed parsing ----------
+
+def localname(tag):
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def parse_feed(xml_text):
+    root = ET.fromstring(xml_text)
+    items = []
+    for el in root.iter():
+        if localname(el.tag) not in ("item", "entry"):
+            continue
+        d = {}
+        for child in el:
+            ln = localname(child.tag)
+            if ln == "link":
+                href = child.get("href") or (child.text or "").strip()
+                if href and not d.get("link"):
+                    d["link"] = href
+            elif ln in ("author", "creator"):
+                # Atom <author><name>…</name></author>, RSS <dc:creator>
+                name = child.findtext("{*}name") or "".join(child.itertext())
+                if name.strip():
+                    d.setdefault("authors", []).append(name.strip())
+            elif ln in ("title", "description", "summary", "content",
+                        "pubDate", "published", "updated", "identifier",
+                        "dc:identifier", "dc:date", "category", "keywords"):
+                if ln not in d:
+                    d[ln] = (child.text or "").strip()
+        if d.get("title"):
+            items.append(d)
+    return items
+
+
+def item_to_paper(d, j):
+    title = strip_html(d.get("title", ""))
+    link = (d.get("link") or "").strip()
+    if link and not link.startswith("http"):  # HBR's Atom feed uses site-relative links
+        link = urllib.parse.urljoin(j.get("base_url") or j.get("feed") or "", link)
+    desc = strip_html(d.get("description") or d.get("summary") or d.get("content") or "")
+    date = d.get("published") or d.get("pubDate") or d.get("updated") or d.get("dc:date") or ""
+    date_m = re.search(r"(\d{4})-(\d{2})(-(\d{2}))?", date)
+    pub = ""
+    if date_m:
+        pub = "-".join(x for x in (date_m.group(1), date_m.group(2), date_m.group(4)) if x)
+    doi = doi_from_text(link) or doi_from_text(d.get("identifier", "")) or doi_from_text(d.get("dc:identifier", "")) or doi_from_text(desc[:500])
+    # abstract: strip common feed prefixes
+    abstract = desc
+    for prefix in ("Abstract:", "Abstract:"):
+        abstract = re.sub(r"^" + re.escape(prefix) + r"\s*", "", abstract)
+    if len(abstract) > 4500:
+        abstract = abstract[:4500].rsplit(" ", 1)[0]
+    authors = d.get("authors") or None
+    if j.get("publisher") == "nber":
+        # "Title -- by A, B, C"; DOI follows from the working-paper number
+        if " -- by " in title:
+            title, by = title.rsplit(" -- by ", 1)
+            authors = [a.strip() for a in re.split(r",\s*|\s+and\s+", by) if a.strip()]
+        m = re.search(r"/papers/(w\d+)", link)
+        if m:
+            doi = "10.3386/" + m.group(1)
+            link = "https://www.nber.org/papers/" + m.group(1)
+        pub = pub or datetime.now(timezone.utc).strftime("%Y-%m")
+    return {
+        "journal": j["name"], "abbr": j["abbr"], "publisher": j["publisher"],
+        "title": title, "url": link, "doi": doi, "abstract": abstract or None,
+        "keywords": None, "pub_date": pub, "source": "rss", "authors": authors,
+    }
+
+
+# ---------- crossref ----------
+
+def cr_strip_jats(x):
+    return strip_html(x) if x else None
+
+
+def fmt_date_parts(dp):
+    try:
+        d = (dp or [[None]])[0]
+        if d and d[0] and len(d) > 1 and d[1]:
+            return "%04d-%02d" % (d[0], d[1])
+        if d and d[0]:
+            return "%04d" % d[0]
+    except Exception:
+        pass
+    return ""
+
+
+def crossref_journal(issn, rows=25):
+    url = ("https://api.crossref.org/journals/%s/works?order=desc&sort=published"
+           "&rows=%d&select=DOI,title,author,abstract,published,subject,container-title"
+           % (issn, rows))
+    raw, _, _ = http_get(url, headers={"Accept": "application/json"})
+    data = json.loads(raw.decode("utf-8", "replace"))
+    out = []
+    for it in data.get("message", {}).get("items", []):
+        title = (it.get("title") or [""])[0]
+        authors = []
+        for a in it.get("author", []):
+            nm = " ".join(x for x in [a.get("given"), a.get("family")] if x)
+            if nm:
+                authors.append(nm)
+        pub = fmt_date_parts((it.get("published") or {}).get("date-parts"))
+        out.append({
+            "doi": it.get("DOI"), "title": title,
+            "url": "https://doi.org/" + it.get("DOI", ""),
+            "abstract": cr_strip_jats(it.get("abstract")),
+            "authors": authors,
+            "keywords": it.get("subject") or None,
+            "pub_date": pub,
+        })
+    return out
+
+
+def crossref_doi(doi):
+    # NOTE: no 'select' param here — it makes /works/{doi} fail validation.
+    url = "https://api.crossref.org/works/%s" % urllib.parse.quote(doi, safe="/")
+    try:
+        raw, _, _ = http_get(url, timeout=30, headers={"Accept": "application/json"})
+        msg = json.loads(raw.decode("utf-8", "replace")).get("message")
+        if not isinstance(msg, dict):
+            return None
+        it = msg
+    except Exception:
+        return None
+    authors = []
+    for a in it.get("author", []):
+        nm = " ".join(x for x in [a.get("given"), a.get("family")] if x)
+        if nm:
+            authors.append(nm)
+    return {
+        "abstract": cr_strip_jats(it.get("abstract")),
+        "authors": authors,
+        "keywords": it.get("subject") or None,
+        "pub_date": fmt_date_parts((it.get("published") or {}).get("date-parts")),
+    }
+
+
+def crossref_title_search(title, issn=None, doi_prefix=None):
+    """Best Crossref match for a title. With `issn` / `doi_prefix`, only that
+    journal / publisher is searched (ISSN first; very fresh records sometimes
+    lack it) — without them, preprints (SSRN etc.) with the same title can win."""
+    if issn or doi_prefix:
+        for flt in (["issn:" + issn] if issn else []) + (["prefix:" + doi_prefix] if doi_prefix else []):
+            r = _crossref_title_query(title, flt)
+            if r:
+                return r
+        return None
+    return _crossref_title_query(title, None)
+
+
+def _crossref_title_query(title, flt):
+    import difflib
+    q = urllib.parse.quote(title[:200])
+    url = ("https://api.crossref.org/works?query.bibliographic=%s&rows=2"
+           "&select=DOI,title,abstract,subject,published" % q)
+    if flt:
+        url += "&filter=" + flt
+    raw = None
+    for attempt in range(3):  # Crossref throttles bursts; retry before giving up
+        try:
+            raw, _, _ = http_get(url, timeout=30, headers={"Accept": "application/json"})
+            break
+        except Exception:
+            time.sleep(2 * (attempt + 1))
+    if raw is None:
+        return None
+    data = json.loads(raw.decode("utf-8", "replace"))
+    target = norm_title(title)
+    for it in data.get("message", {}).get("items", []):
+        t = (it.get("title") or [""])[0]
+        nt = norm_title(t)
+        if not (target and (nt == target or
+                            difflib.SequenceMatcher(None, target, nt).ratio() >= 0.9)):
+            continue
+        return {
+                "doi": it.get("DOI"), "abstract": cr_strip_jats(it.get("abstract")),
+                "keywords": it.get("subject") or None,
+                "pub_date": fmt_date_parts((it.get("published") or {}).get("date-parts")),
+            }
+    return None
+
+
+def openalex_key():
+    key = os.environ.get("OPENALEX_API_KEY")
+    if key:
+        return key
+    p = os.path.join(ROOT, ".env")
+    if os.path.exists(p):
+        for line in open(p):
+            if line.startswith("OPENALEX_API_KEY="):
+                return line.split("=", 1)[1].strip() or None
+    return None
+
+
+def _openalex(path):
+    """GET an OpenAlex path; keyless calls are heavily rate-limited, so use
+    OPENALEX_API_KEY (free) from .env when present."""
+    key = openalex_key()
+    url = (os.environ.get("JW_OPENALEX_URL") or "https://api.openalex.org/") + path     # (the override is for tests and mirrors)
+    if key:
+        url += ("&" if "?" in url else "?") + "api_key=" + urllib.parse.quote(key)
+    try:
+        raw, _, _ = http_get(url, timeout=30, headers={"Accept": "application/json"})
+        return json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def _inverted_to_text(inv):
+    if not inv:
+        return None
+    pos = {}
+    for word, idxs in inv.items():
+        for i in idxs:
+            pos[i] = word
+    return " ".join(pos[i] for i in sorted(pos))
+
+
+def openalex_abstract(title):
+    data = _openalex("works?search=%s&per-page=1" % urllib.parse.quote(title[:200]))
+    w = ((data or {}).get("results") or [None])[0]
+    return _inverted_to_text(w.get("abstract_inverted_index")) if w else None
+
+
+def openalex_abstract_doi(doi):
+    w = _openalex("works/doi:%s" % urllib.parse.quote(doi, safe="/"))
+    return _inverted_to_text((w or {}).get("abstract_inverted_index"))
+
+
+def crossref_journal_range(issn, year_from, year_to, progress=None, doi_prefix=None,
+                           work_type="journal-article"):
+    """All articles of one journal published in [year_from, year_to]. Series
+    without an ISSN (NBER working papers) are selected by DOI prefix."""
+    out, cursor = [], "*"
+    dates = "from-pub-date:%d-01-01,until-pub-date:%d-12-31,type:%s" % (year_from, year_to, work_type)
+    while cursor:
+        if issn:
+            base = "https://api.crossref.org/journals/%s/works?filter=%s" % (issn, dates)
+        else:
+            base = "https://api.crossref.org/works?filter=prefix:%s,%s" % (doi_prefix, dates)
+        url = ("%s&rows=500&cursor=%s&select=DOI,title,author,abstract,published,subject"
+               % (base, urllib.parse.quote(cursor)))
+        raw, _, _ = http_get(url, timeout=60, headers={"Accept": "application/json"})
+        msg = json.loads(raw.decode("utf-8", "replace")).get("message", {})
+        items = msg.get("items", [])
+        for it in items:
+            title = strip_html((it.get("title") or [""])[0])
+            if not title:
+                continue
+            out.append({
+                "doi": it.get("DOI"), "title": title,
+                "url": "https://doi.org/" + it.get("DOI", ""),
+                "abstract": cr_strip_jats(it.get("abstract")),
+                "authors": [" ".join(x for x in [a.get("given"), a.get("family")] if x)
+                            for a in it.get("author", [])],
+                "keywords": it.get("subject") or None,
+                "pub_date": fmt_date_parts((it.get("published") or {}).get("date-parts")),
+            })
+        if progress:
+            progress(len(out), msg.get("total-results", len(out)))
+        cursor = msg.get("next-cursor") if items else None
+    return out
+
+
+# ---------- main ----------
+
+def load_json(path, default):
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return default
+
+
+def fetch_journal(j):
+    """Latest items for one journals.json entry (RSS or Crossref)."""
+    out = []
+    if j["source"] == "rss":
+        raw, final_url, _ = http_get(j["feed"])
+        for d in parse_feed(raw.decode("utf-8", "replace")):
+            p = item_to_paper(d, j)
+            p["url"] = p["url"] or final_url
+            out.append(p)
+    else:
+        for it in crossref_journal(j["issn"]):
+            it.update({"journal": j["name"], "abbr": j["abbr"],
+                       "publisher": j["publisher"], "source": "crossref"})
+            out.append(it)
+    for p in out:
+        p["issn"], p["doi_prefix"] = j.get("issn"), j.get("doi_prefix")
+        if j.get("lookup") is False:
+            p["no_lookup"] = True
+        p["id"] = key_for(p.get("doi"), p["journal"], p.get("title", ""))
+    return out
+
+
+def enrich(p):
+    """Resolve a missing DOI / abstract in place (Crossref, then OpenAlex)."""
+    if p.get("no_lookup"):  # e.g. HBR: not in Crossref, feed summary is all there is
+        p["id"] = key_for(p.get("doi"), p["journal"], p.get("title", ""))
+        return p
+    ab_short = not p.get("abstract") or len(p.get("abstract")) < 200
+    if not p.get("doi") and p.get("title"):
+        time.sleep(0.4)
+        # DOI and date only from the paper's own journal; elsewhere (e.g. the SSRN
+        # preprint) at most the abstract is borrowed, below
+        r = crossref_title_search(p["title"], p.get("issn"), p.get("doi_prefix"))
+        if r:
+            p["doi"] = r.get("doi")
+            p["pub_date"] = p.get("pub_date") or r.get("pub_date", "")
+            if ab_short:
+                p["abstract"] = r.get("abstract")
+            if not p.get("keywords"):
+                p["keywords"] = r.get("keywords")
+    elif p.get("doi") and (ab_short or not p.get("pub_date") or not p.get("authors")):
+        # DOI in hand but no real abstract (e.g. INFORMS 'Ahead of Print' feeds)
+        time.sleep(0.3)
+        r = crossref_doi(p["doi"])
+        if r:
+            if r.get("abstract") and len(r["abstract"]) > 200:
+                p["abstract"] = r["abstract"]
+            if not p.get("authors"):
+                p["authors"] = r.get("authors")
+            if not p.get("keywords"):
+                p["keywords"] = r.get("keywords")
+            if not p.get("pub_date"):
+                p["pub_date"] = r.get("pub_date") or ""
+        if ab_short and (not p.get("abstract") or len(p.get("abstract") or "") < 200):
+            # publisher DOI lacks an abstract -> try the title (finds SSRN etc.)
+            time.sleep(0.4)
+            r2 = crossref_title_search(p.get("title", ""))
+            if r2 and r2.get("abstract") and len(r2["abstract"]) > 200:
+                p["abstract"] = r2["abstract"]
+                if not p.get("keywords"):
+                    p["keywords"] = r2.get("keywords")
+    if not p.get("abstract") and p.get("title"):
+        time.sleep(0.3)
+        p["abstract"] = (openalex_abstract_doi(p["doi"]) if p.get("doi") else None) \
+            or openalex_abstract(p["title"])
+    p["id"] = key_for(p.get("doi"), p["journal"], p.get("title", ""))
+    return p
+
+
+def dedupe(papers, seen):
+    """Papers not in `seen`; marks them seen (caller saves seen.json)."""
+    fresh = []
+    for p in papers:
+        k = key_for(p.get("doi"), p["journal"], p.get("title", ""))
+        p["id"] = k
+        if k in seen:
+            continue
+        seen[k] = {"journal": p["journal"], "title": p.get("title", "")[:120],
+                   "added": datetime.now(timezone.utc).strftime("%Y-%m-%d")}
+        fresh.append(p)
+    return fresh
+
+
+def main():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    journals = load_json(os.path.join(BASE, "journals.json"), {"journals": []})["journals"]
+    seen_path = os.path.join(STATE_DIR, "seen.json")
+    seen = load_json(seen_path, {})
+
+    # --doi mode: fetch one paper's metadata
+    if "--doi" in sys.argv:
+        doi = sys.argv[sys.argv.index("--doi") + 1]
+        # no `select` here: /works/{doi} rejects it
+        url = "https://api.crossref.org/works/%s" % urllib.parse.quote(doi, safe="/")
+        raw, _, _ = http_get(url)
+        it = json.loads(raw.decode("utf-8", "replace"))["message"]
+        paper = {
+            "journal": it.get("container-title", ["?"])[0] if it.get("container-title") else "?",
+            "abbr": "?", "publisher": "unknown",
+            "title": (it.get("title") or [""])[0], "url": "https://doi.org/" + doi,
+            "doi": doi, "abstract": cr_strip_jats(it.get("abstract")),
+            "keywords": it.get("subject") or None,
+            "authors": [" ".join(x for x in [a.get("given"), a.get("family")] if x)
+                        for a in it.get("author", [])],
+            "pub_date": "", "source": "crossref-doi",
+        }
+        paper["pub_date"] = fmt_date_parts((it.get("published") or {}).get("date-parts"))
+        out = os.path.join(STATE_DIR, "new_papers.json")
+        with open(out, "w") as f:
+            json.dump([paper], f, indent=1)
+        print("Fetched %s -> %s" % (paper["title"], out))
+        return
+
+    new_papers = []
+    for j in journals:
+        try:
+            items = fetch_journal(j)
+            new_papers.extend(items)
+            print("  [%s] %d items from %s" % (j["abbr"], len(items), j["source"]))
+        except Exception as e:
+            print("  [%s] FAILED: %s" % (j["abbr"], e))
+            time.sleep(1)
+
+    for p in new_papers:
+        enrich(p)
+
+    fresh = dedupe(new_papers, seen)
+
+    with open(seen_path, "w") as f:
+        json.dump(seen, f, indent=1)
+    with open(os.path.join(STATE_DIR, "new_papers.json"), "w") as f:
+        json.dump(fresh, f, indent=1)
+    with open(os.path.join(STATE_DIR, "last_run.txt"), "w") as f:
+        f.write(datetime.now(timezone.utc).isoformat())
+
+    print("\nNEW: %d papers (of %d seen this run)" % (len(fresh), len(new_papers)))
+    for p in sorted(fresh, key=lambda x: x.get("pub_date", ""), reverse=True):
+        ab = "Y" if p.get("abstract") else "-"
+        print("  %s | %s | abs:%s | %s" % (
+            p.get("pub_date", "?")[:7], p["abbr"], ab,
+            (p.get("title") or "")[:70]))
+
+
+if __name__ == "__main__":
+    main()

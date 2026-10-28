@@ -1,0 +1,70 @@
+name: release
+# Push a tag such as v1.2.0 (after adding a "## 1.2.0" section to CHANGELOG.md) to build the Mac app and publish it:
+#   git tag v1.2.0 && git push origin v1.2.0
+# Optional repository secrets for a signed, notarised app (without them the app is ad-hoc signed and macOS asks once, see README):
+#   MACOS_CERT_P12 (base64 of a "Developer ID Application" certificate .p12), MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY ("Developer ID Application: Name (TEAMID)"),
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD (an app-specific password) for notarisation.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  mac:
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Version, update feed address and release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "$VERSION" > app/VERSION
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.json" > app/update_feed.txt
+          python3 app/changelog_notes.py "$VERSION" > notes.txt
+          sed 's/^/- /' notes.txt > body.md
+      - name: Import the Developer ID certificate (only if the secrets exist)
+        if: ${{ env.MACOS_CERT_P12 != '' }}
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          rm cert.p12
+      - name: Notarisation credentials (only if the secrets exist)
+        if: ${{ env.APPLE_ID != '' }}
+        run: xcrun notarytool store-credentials jw-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+      - name: Build the app, the update zip and the disk image
+        env:
+          JW_RELEASE: "1"
+          JW_SKIP_SELFTEST: "1"
+          JW_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          if [ -n "$APPLE_ID" ]; then export JW_NOTARY_PROFILE=jw-notary; fi
+          app/build_app.sh
+      - name: Update feed
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.json" -o previous.json || echo '{}' > previous.json
+          python3 app/make_appcast.py --version "$VERSION" --zip "app/dist/Journal-Watcher-$VERSION.zip" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Journal-Watcher-$VERSION.zip" \
+            --notes-file notes.txt --previous previous.json --out app/dist/appcast.json
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: body.md
+          files: |
+            app/dist/Journal Watcher.dmg
+            app/dist/Journal-Watcher-*.zip
+            app/dist/appcast.json
