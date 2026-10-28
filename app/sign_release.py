@@ -61,7 +61,7 @@ def sign_bytes(sk, data):
 def keygen(path):
     if os.path.exists(path):
         sys.exit("There is already a key at %s: not overwriting it. (Delete it yourself if you really want a new one.)" % path)
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), mode=0o700, exist_ok=True)
     sk = nacl_signing().SigningKey.generate()
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -97,10 +97,10 @@ def check_release(appcast_bytes, zip_path, tag=None, repo=REPO):
         sys.exit("appcast.json names no valid version.")
     if tag and tag.lstrip("v") != version:
         sys.exit("The tag %s and the feed's version %s do not match." % (tag, version))
-    if tag:
-        want = "https://github.com/%s/releases/download/%s/Journal-Watcher-%s.zip" % (repo, tag, version)
-        if d.get("url") != want:
-            sys.exit("The feed points at %s, not at the release's own zip (%s). Not signing." % (d.get("url"), want))
+    tag = tag or "v" + version
+    want = "https://github.com/%s/releases/download/%s/Journal-Watcher-%s.zip" % (repo, tag, version)
+    if d.get("url") != want:
+        sys.exit("The feed points at %s, not at the release's own zip (%s). Not signing." % (d.get("url"), want))
     if os.path.getsize(zip_path) != int(d.get("size") or -1):
         sys.exit("The zip is %d bytes, the feed says %s. Not signing." % (os.path.getsize(zip_path), d.get("size")))
     if sha256_of(zip_path) != str(d.get("sha256") or "").lower():

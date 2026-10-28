@@ -1675,6 +1675,31 @@ def main():
             SIGS["/appcast.json.sig"] = srel.sign_bytes(sk, feed_body("/appcast.json")) + "\n"
             st = up.check()
             assert st["error"] == "" and st["available"] is True and st["latest"] == "1.1.0" and st["signed"] is True, st
+            cached = up.load_state()
+            assert base64.b64decode(cached["feed_data"], validate=True) == feed_body("/appcast.json") and cached["feed_signature"] == SIGS["/appcast.json"] + "\n"
+            cached.update({"latest": "9.9.9", "url": "http://127.0.0.1:1/unsigned.zip", "sha256": "0" * 64, "size": 1})
+            up._write(up.STATE_FILE, cached)
+            st = up.public()
+            assert st["available"] is True and st["latest"] == "1.1.0", st
+            downloads = []
+            old_download = up._download
+            def record_download(*args):
+                downloads.append(args)
+                raise ValueError("stop after verifying cached metadata")
+            up._download = record_download
+            try:
+                up._progress.update({"phase": "idle", "pct": 0, "error": ""})
+                up._run_install()
+            finally:
+                up._download = old_download
+            assert len(downloads) == 1 and downloads[0][0] == FEEDS["/appcast.json"]["url"] % feed_srv.server_address[1] and downloads[0][2:] == (len(ZIPB), hashlib.sha256(ZIPB).hexdigest()), downloads
+            os.environ["JW_UPDATE_KEYS"] = srel.public_b64(other)
+            assert up.public()["available"] is False
+            downloads.clear()
+            up._progress.update({"phase": "idle", "pct": 0, "error": ""})
+            up._run_install()
+            assert not downloads and "not checked against the signing key" in up._progress["error"], up._progress
+            os.environ["JW_UPDATE_KEYS"] = srel.public_b64(sk)
             FEEDS["/appcast.json"]["version"] = "9.9.9"                                                                  # the feed changes after it was signed
             st = up.check()
             assert "not signed with this app" in st["error"] and st["latest"] == "1.1.0", st                              # refused; the last checked answer is kept
@@ -1725,9 +1750,14 @@ def main():
             with contextlib.redirect_stdout(io.StringIO()):
                 srel.main(["verify", "--appcast", os.path.join(rel_dir, "appcast.json"), "--sig", os.path.join(outdir, "appcast.json.sig"), "--pub", pub])
             os.remove(os.path.join(outdir, "appcast.json.sig"))
+            no_tag_args = ["sign", "--dir", rel_dir, "--repo", "x/y", "--key", keyfile, "--out", outdir, "--yes"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                srel.main(no_tag_args)
+            assert os.path.exists(os.path.join(outdir, "appcast.json.sig"))                                  # --dir derives v1.2.0 and validates its release URL
+            os.remove(os.path.join(outdir, "appcast.json.sig"))
             for what, edit in (("a zip that is not the one in the feed", lambda: open(os.path.join(rel_dir, name), "wb").write(zip_bytes[::-1])),
                                ("a feed pointing somewhere else", lambda: open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps({**feed, "url": "https://evil.example/" + name}))),
-                               ("a tag that is not the feed's version", lambda: (open(os.path.join(rel_dir, name), "wb").write(zip_bytes), open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(feed)), args.__setitem__(3, "v1.3.0")))):
+                               ("a tag that is not the feed's version", lambda: (open(os.path.join(rel_dir, name), "wb").write(zip_bytes), open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(feed)), args.__setitem__(4, "v1.3.0")))):
                 edit()
                 try:
                     with contextlib.redirect_stdout(io.StringIO()):
@@ -1736,6 +1766,22 @@ def main():
                 except SystemExit as e:
                     assert e.code not in (0, None), (what, e.code)
                 assert not os.path.exists(os.path.join(outdir, "appcast.json.sig")), what
+            try:
+                open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps({**feed, "url": "https://evil.example/" + name}))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    srel.main(no_tag_args)
+                raise AssertionError("signed a --dir feed pointing somewhere else")
+            except SystemExit as e:
+                assert e.code not in (0, None), e.code
+            assert not os.path.exists(os.path.join(outdir, "appcast.json.sig"))
+            cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    srel.main(["keygen", "--key", "release-signing-key"])
+                assert os.path.isfile("release-signing-key") and stat.S_IMODE(os.stat("release-signing-key").st_mode) == 0o600
+            finally:
+                os.chdir(cwd)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
