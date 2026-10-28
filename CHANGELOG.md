@@ -7,6 +7,7 @@ Release notes: `.github/workflows/release.yml` reads the bullets under the headi
 - An About page (sidebar → About): who makes Journal Watcher, with the author's university and links, what the app is and how it is licensed, and a way to chip in for a coffee.
 - A small reminder card that Journal Watcher is free and takes tips, after 14 days and 5 visits, at most three times and weeks apart. It never appears while you read, while the AI works or over Settings; "Don't ask again" and a switch under About end it. The app only counts, on your own computer, how often you open it: nothing is sent anywhere.
 - Update notices can be verified against the author's digital signature (Settings → About & updates says whether this copy does): a feed without a good signature is ignored, and nothing is installed from it.
+- Fixed: in the reader, the page number showed the page above after you jumped to a page, and zooming (or Fit, or going back after following a link) moved the text you were reading by about a hundred pixels each time. The text now stays where it was.
 - Fixed: a cell you had started editing in the comparison matrix was lost when a fill finished. Cells now wait until the fill is done.
 
 ## 1.1.0
