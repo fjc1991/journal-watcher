@@ -1676,7 +1676,7 @@ def main():
             st = up.check()
             assert st["error"] == "" and st["available"] is True and st["latest"] == "1.1.0" and st["signed"] is True, st
             cached = up.load_state()
-            assert base64.b64decode(cached["feed_data"], validate=True) == feed_body("/appcast.json") and cached["feed_signature"] == SIGS["/appcast.json"] + "\n"
+            assert base64.b64decode(cached["feed_data"], validate=True) == feed_body("/appcast.json") and cached["feed_signature"].strip() == SIGS["/appcast.json.sig"].strip()
             cached.update({"latest": "9.9.9", "url": "http://127.0.0.1:1/unsigned.zip", "sha256": "0" * 64, "size": 1})
             up._write(up.STATE_FILE, cached)
             st = up.public()
@@ -1693,6 +1693,10 @@ def main():
             finally:
                 up._download = old_download
             assert len(downloads) == 1 and downloads[0][0] == FEEDS["/appcast.json"]["url"] % feed_srv.server_address[1] and downloads[0][2:] == (len(ZIPB), hashlib.sha256(ZIPB).hexdigest()), downloads
+            up._write(up.STATE_FILE, dict(cached, feed_data=base64.b64encode(feed_body("/appcast.json").replace(b"1.1.0", b"9.9.9")).decode("ascii")))
+            assert up.public()["available"] is False and up.public()["latest"] == ""                                       # saved bytes that no longer match their signature are not believed
+            up._write(up.STATE_FILE, cached)
+            assert up.public()["available"] is True
             os.environ["JW_UPDATE_KEYS"] = srel.public_b64(other)
             assert up.public()["available"] is False
             downloads.clear()
@@ -1722,6 +1726,7 @@ def main():
     def t_sign_script():
         import contextlib
         d = tempfile.mkdtemp(prefix="jw-sign-")
+        cwd0 = os.getcwd()
         try:
             keyfile = os.path.join(d, "keys", "release-signing-key")
             out_ = io.StringIO()
@@ -1733,56 +1738,57 @@ def main():
                 srel.main(["keygen", "--key", keyfile]); raise AssertionError("a key was overwritten")
             except SystemExit:
                 pass
+            os.chdir(d)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    srel.main(["keygen", "--key", "bare-key"])                                                            # a bare file name (the current folder) works too
+            finally:
+                os.chdir(cwd0)
+            assert stat.S_IMODE(os.stat(os.path.join(d, "bare-key")).st_mode) == 0o600
             rel_dir = os.path.join(d, "release"); os.makedirs(rel_dir)
             zip_bytes = os.urandom(2000)
             name = "Journal-Watcher-1.2.0.zip"
-            open(os.path.join(rel_dir, name), "wb").write(zip_bytes)
             feed = {"app": "Journal Watcher", "version": "1.2.0", "released": "2026-10-28", "notes": ["One"], "url": "https://github.com/x/y/releases/download/v1.2.0/" + name,
                     "sha256": hashlib.sha256(zip_bytes).hexdigest(), "size": len(zip_bytes), "history": []}
-            open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(feed, indent=1))
-            outdir = os.path.join(d, "out")
-            args = ["sign", "--dir", rel_dir, "--tag", "v1.2.0", "--repo", "x/y", "--key", keyfile, "--out", outdir, "--yes"]
-            with contextlib.redirect_stdout(io.StringIO()) as o2:
-                srel.main(args)
-            sig = open(os.path.join(outdir, "appcast.json.sig")).read()
-            assert "checksum" in o2.getvalue() and "One" in o2.getvalue()                                                  # it shows what is being signed
+            outdir = os.path.join(d, "out"); sig_path = os.path.join(outdir, "appcast.json.sig")
+
+            def put(zb=zip_bytes, fd=feed):
+                open(os.path.join(rel_dir, name), "wb").write(zb)
+                open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(fd, indent=1))
+
+            def run(tag="v1.2.0", repo="x/y"):
+                a = ["sign", "--dir", rel_dir, "--repo", repo, "--key", keyfile, "--out", outdir, "--yes"] + (["--tag", tag] if tag else [])
+                with contextlib.redirect_stdout(io.StringIO()) as o:
+                    srel.main(a)
+                return o.getvalue()
+
+            def refused(why, phrase, **kw):
+                put(*kw.pop("files", ()))
+                try:
+                    run(**kw)
+                    raise AssertionError("signed " + why)
+                except SystemExit as e:
+                    assert isinstance(e.code, str) and phrase in e.code, (why, e.code)          # our own refusal and its reason, not argparse's exit status
+                assert not os.path.exists(sig_path), why
+            put()
+            shown = run()
+            sig = open(sig_path).read()
+            assert "checksum" in shown and "One" in shown and feed["url"] in shown                                         # it shows what is being signed, and where the feed sends people
             assert up.verify_feed(open(os.path.join(rel_dir, "appcast.json"), "rb").read(), sig, [base64.b64decode(pub)]) is True      # and the app accepts it
             with contextlib.redirect_stdout(io.StringIO()):
-                srel.main(["verify", "--appcast", os.path.join(rel_dir, "appcast.json"), "--sig", os.path.join(outdir, "appcast.json.sig"), "--pub", pub])
-            os.remove(os.path.join(outdir, "appcast.json.sig"))
-            no_tag_args = ["sign", "--dir", rel_dir, "--repo", "x/y", "--key", keyfile, "--out", outdir, "--yes"]
-            with contextlib.redirect_stdout(io.StringIO()):
-                srel.main(no_tag_args)
-            assert os.path.exists(os.path.join(outdir, "appcast.json.sig"))                                  # --dir derives v1.2.0 and validates its release URL
-            os.remove(os.path.join(outdir, "appcast.json.sig"))
-            for what, edit in (("a zip that is not the one in the feed", lambda: open(os.path.join(rel_dir, name), "wb").write(zip_bytes[::-1])),
-                               ("a feed pointing somewhere else", lambda: open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps({**feed, "url": "https://evil.example/" + name}))),
-                               ("a tag that is not the feed's version", lambda: (open(os.path.join(rel_dir, name), "wb").write(zip_bytes), open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps(feed)), args.__setitem__(4, "v1.3.0")))):
-                edit()
-                try:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        srel.main(args)
-                    raise AssertionError("signed " + what)
-                except SystemExit as e:
-                    assert e.code not in (0, None), (what, e.code)
-                assert not os.path.exists(os.path.join(outdir, "appcast.json.sig")), what
-            try:
-                open(os.path.join(rel_dir, "appcast.json"), "w").write(json.dumps({**feed, "url": "https://evil.example/" + name}))
-                with contextlib.redirect_stdout(io.StringIO()):
-                    srel.main(no_tag_args)
-                raise AssertionError("signed a --dir feed pointing somewhere else")
-            except SystemExit as e:
-                assert e.code not in (0, None), e.code
-            assert not os.path.exists(os.path.join(outdir, "appcast.json.sig"))
-            cwd = os.getcwd()
-            try:
-                os.chdir(d)
-                with contextlib.redirect_stdout(io.StringIO()):
-                    srel.main(["keygen", "--key", "release-signing-key"])
-                assert os.path.isfile("release-signing-key") and stat.S_IMODE(os.stat("release-signing-key").st_mode) == 0o600
-            finally:
-                os.chdir(cwd)
+                srel.main(["verify", "--appcast", os.path.join(rel_dir, "appcast.json"), "--sig", sig_path, "--pub", pub])
+            os.remove(sig_path)
+            run(tag=None)                                                                                                  # no --tag: it is the feed's version, and the address is still checked
+            assert os.path.exists(sig_path); os.remove(sig_path)
+            refused("a zip that is not the one in the feed", "checksum", files=(zip_bytes[::-1],))
+            refused("a feed whose zip size is not the zip's size", "bytes", files=(zip_bytes, {**feed, "size": 5}))
+            evil = {**feed, "url": "https://evil.example/" + name}
+            refused("a feed pointing somewhere else", "release's own zip", files=(zip_bytes, evil))
+            refused("a feed pointing somewhere else, with no --tag either", "release's own zip", files=(zip_bytes, evil), tag=None)
+            refused("a feed that belongs to another repository", "release's own zip", repo="someone/else")
+            refused("a tag that is not the feed's version", "do not match", tag="v1.3.0")
         finally:
+            os.chdir(cwd0)
             shutil.rmtree(d, ignore_errors=True)
 
     check("signed feeds: only the author's key counts (changed bytes, another key, no prefix, garbage and short signatures are refused; two keys may be listed; a damaged key file does not switch the check off)", t_sig_rules)
@@ -1791,7 +1797,7 @@ def main():
         r = subprocess.run([sys.executable, os.path.join(HERE, "updater.py")], capture_output=True, text=True, timeout=60)
         assert r.returncode == 0 and "update signature check: ok" in r.stdout, (r.returncode, r.stdout, r.stderr[-300:])      # what build_app.sh runs on the finished app
     check("signed feeds: the build's own self-check (python updater.py) passes", t_sig_selfcheck)
-    check("signing script: makes a private key readable only by you (and will not overwrite it), shows what it signs, refuses a zip or address that does not match the feed, and its signature is accepted by the app", t_sign_script)
+    check("signing script: makes a private key readable only by you (and will not overwrite it), shows what it signs, refuses a zip, size, address, tag or repository that does not match the feed, and its signature is accepted by the app", t_sign_script)
     feed_srv.shutdown()
     os.environ.pop("JW_VERSION", None); os.environ.pop("JW_UPDATE_FEED", None)
 
