@@ -27,6 +27,7 @@ fi
 PY="$APP/.buildenv/bin/python"
 "$PY" -m pip install -q --upgrade pip
 "$PY" -m pip install -q -r "$ROOT/requirements.txt" pywebview pyinstaller dmgbuild
+"$PY" -m playwright install chromium >/dev/null     # the icon and the disk-image picture are drawn in a headless browser (nothing to download when it is already there)
 
 say "2/7 icon, disk-image picture and the files a new data folder starts from"
 rm -rf "$BUILD"; mkdir -p "$BUILD/defaults"
