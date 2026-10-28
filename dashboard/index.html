@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="/static/reader.css">
 <link rel="stylesheet" href="/static/library.css">
 <link rel="stylesheet" href="/static/settings.css">
+<link rel="stylesheet" href="/static/about.css">
 <link rel="stylesheet" href="/static/ideas.css">
 <link rel="stylesheet" href="/static/folders.css">
 <style>
@@ -232,6 +233,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
       <div class="menu card hide" id="signinmenu" role="menu" aria-label="Sign-ins"></div>
     </div>
     <button class="navbtn" id="settingsbtn" data-tool="settings" data-nav="settings" title="Settings: AI models, privacy, usage and cost, prompts"><svg class="ico"><use href="/static/icons.svg#i-settings"/></svg><span class="nt">Settings</span></button>
+    <button class="navbtn" id="aboutbtn" data-tool="about" data-nav="about" title="About Journal Watcher and its author, and how to support it"><svg class="ico"><use href="/static/icons.svg#i-heart"/></svg><span class="nt">About</span></button>
   </div>
 </aside>
 <div class="sb-scrim" id="sbscrim"></div>
@@ -442,7 +444,7 @@ function parseRoute(h) {
 { const r0 = parseRoute(location.hash); if (r0) NAV = r0; }       // start where the address says
 let BOOTED = false;
 function navActive() { return NAV.view !== "lib" ? "watch" : (NAV.tab === "review" && !(typeof NAV.j === "string" && NAV.j[0] === "@")) ? "review" : (NAV.tab === "folders" || (typeof NAV.j === "string" && NAV.j[0] === "@")) ? "folders" : "library"; }
-const NAVNAME = {watch: "Watch", library: "Library", review: "Review", folders: "Folders", settings: "Settings"};
+const NAVNAME = {watch: "Watch", library: "Library", review: "Review", folders: "Folders", settings: "Settings", about: "About"};
 let SBSIG = "";
 function renderSideFolders() {        // the folders as a list under the main pages (like pages in a notebook): one click opens one
   const fs = (window.LibraryUI && LibraryUI.folders && LibraryUI.folders()) || [], cur = typeof NAV.j === "string" && NAV.j[0] === "@" ? NAV.j.slice(1) : "", sig = JSON.stringify([fs.map(f => [f.id, f.name, f.count]), cur]);
@@ -450,12 +452,12 @@ function renderSideFolders() {        // the folders as a list under the main pa
   $("#sbfolders").innerHTML = fs.length ? fs.map((f, i) => `<button class="sbf${f.id === cur ? " on" : ""}" role="listitem" data-fid="${esc(f.id)}" title="${esc(f.name)}"><span class="sbf-i" style="--fc:${["#5b7fa6", "#6a9a62", "#c0883a", "#a8607a", "#7f6ab0", "#3f9a96"][i % 6]}"><svg class="ico sm"><use href="/static/icons.svg#i-folders"/></svg></span><span class="sbf-n">${esc(f.name)}</span><span class="nn">${f.count}</span></button>`).join("") : `<div class="sb-none">No folders yet</div>`;
 }
 function syncNav() {                // sidebar: which page you are on, the counts, the folders; the address
-  const a = navActive(), sett = document.body.classList.contains("settings-open");
-  document.querySelectorAll(".mainnav .navbtn[data-nav], .sb-foot .navbtn[data-nav]").forEach(b => b.classList.toggle("on", sett ? b.dataset.nav === "settings" : b.dataset.nav === a));
+  const a = navActive(), sett = document.body.classList.contains("settings-open"), abt = document.body.classList.contains("about-open"), layer = sett ? "settings" : abt ? "about" : "";
+  document.querySelectorAll(".mainnav .navbtn[data-nav], .sb-foot .navbtn[data-nav]").forEach(b => b.classList.toggle("on", b.dataset.nav === (layer || a)));
   $("#foldcount").textContent = window.LibraryUI && LibraryUI.folderCount() || "";
   renderSideFolders();
   const deep = typeof NAV.j === "string" && NAV.j[0] === "@" && window.LibraryUI ? LibraryUI.folderName(NAV.j.slice(1)) : "";
-  $("#tbtitle").innerHTML = sett ? `<b>Settings</b>` : deep ? `<a id="tbroot">Folders</a><span>›</span><b>${esc(deep)}</b>` : `<b>${NAVNAME[a]}</b>`;
+  $("#tbtitle").innerHTML = layer ? `<b>${NAVNAME[layer]}</b>` : deep ? `<a id="tbroot">Folders</a><span>›</span><b>${esc(deep)}</b>` : `<b>${NAVNAME[a]}</b>`;
   const tr = $("#tbroot"); if (tr) tr.onclick = () => { leaveSettings(); go({view: "lib", j: null, tab: "folders"}); };
   const r = routeOf(NAV); if (BOOTED && location.hash !== r && !/^#read=/.test(location.hash) && !document.body.classList.contains("reading")) history.replaceState(history.state, "", r);
 }
@@ -485,7 +487,7 @@ document.addEventListener("keydown", e => {
   if (e.key !== "Escape" || document.body.classList.contains("reading")) return;   // the reader handles its own Esc
   if ($("#drawer").classList.contains("on")) closeDrawer(); else if (NAV.j !== null) goBack();
 });
-const leaveSettings = () => { if (window.Settings) Settings.close(); };
+const leaveSettings = () => { if (window.Settings) Settings.close(); if (window.About) About.close(); };      // Settings and About are layers over the page; going anywhere else closes them
 $("#brand").onclick = $("#watchitem").onclick = () => { leaveSettings(); go({view: "run", j: null}); };
 $("#folditem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "folders"}); };
 $("#reviewitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "review"}); };
@@ -500,6 +502,7 @@ $("#sbscrim").onclick = () => document.body.classList.remove("sb-open");
 document.querySelectorAll(".mainnav .navbtn").forEach(b => b.addEventListener("click", closeSidebarIfNarrow));
 try { if (localStorage.getItem("jw-sb") === "folded") document.body.classList.add("sb-folded"); } catch (e) {}
 $("#settingsbtn").onclick = () => window.Settings ? (document.body.classList.contains("settings-open") ? Settings.close() : Settings.open()) : toast("Settings are still loading.");
+$("#aboutbtn").onclick = () => window.About ? (document.body.classList.contains("about-open") ? About.close() : About.open()) : toast("The About page is still loading.");
 
 function render() {
   const lib = NAV.view === "lib";
@@ -1178,6 +1181,8 @@ init().catch(e => { $("#runtitle").textContent = "Can’t reach the dashboard se
 <script type="module" src="/static/welcome.js"></script>
 <script type="module" src="/static/activity.js"></script>
 <script type="module" src="/static/settings.js"></script>
+<script type="module" src="/static/about.js"></script>
+<script type="module" src="/static/support.js"></script>
 <script type="module" src="/static/reader.js"></script>
 </body>
 </html>
