@@ -476,6 +476,27 @@ def main():
             check("Page fits the whole page on screen", pb["height"] <= pp["height"] and "on" in (page.get_attribute("#rd-fitpage", "class") or ""), "%.0f in %.0f" % (pb["height"], pp["height"]))
             page.click('#reader [data-a="side"]'); page.wait_for_timeout(800); page.click('#reader [data-a="fit"]'); page.wait_for_timeout(400)
             check("the reader keeps working after all that (still 3 pages)", page.locator(".rd-band").count() == 3 and abs(bw() - w0) < 12, "%.0f vs %.0f" % (bw(), w0))   # (the divider drag back is only accurate to a few pixels)
+            print("reader: a jump shows the right page number, and zooming does not move the text")
+            scroll_y = lambda: page.evaluate("document.querySelector('#rd-pdf').scrollTop")
+            page.fill("#rd-num", "3"); page.press("#rd-num", "Enter"); seen_ = []
+            for _ in range(8):
+                page.wait_for_timeout(120); seen_.append(page.input_value("#rd-num"))
+            check("typing a page number leaves the box on that page (it used to fall back to the page above a moment later) and the page is at the top", set(seen_) == {"3"} and page.evaluate(JS_PAGE_AT_TOP, 3), str(seen_))
+            page.evaluate("document.querySelector('#rd-pdf').scrollTop = 700"); page.wait_for_timeout(500)
+            y0, n0 = scroll_y(), page.input_value("#rd-num")
+            for _ in range(3):
+                page.click('#reader [data-a="zin"]'); page.wait_for_timeout(500); page.click('#reader [data-a="zout"]'); page.wait_for_timeout(500)
+            check("zooming in and out again brings the text back to the same place (it used to creep up by about a hundred pixels each time)", abs(scroll_y() - y0) <= 3 and page.input_value("#rd-num") == n0, "%.0f -> %.0f, page %s -> %s" % (y0, scroll_y(), n0, page.input_value("#rd-num")))
+            def box_is(n):
+                try:
+                    page.wait_for_function("(n) => document.querySelector('#rd-num').value === n", arg=n, timeout=4000)
+                except Exception:  # noqa: BLE001
+                    pass
+                return page.input_value("#rd-num")
+            page.fill("#rd-num", "2"); page.press("#rd-num", "Enter"); got_ = [box_is("2")]
+            page.wait_for_timeout(500); page.click('#reader [data-a="next"]'); got_.append(box_is("3"))
+            page.wait_for_timeout(500); page.click('#reader [data-a="prev"]'); got_.append(box_is("2"))
+            check("after typing a page, Next goes to the following page and Previous back again (it used to stay on the same page once, because the box was a page behind)", got_ == ["2", "3", "2"], str(got_))
             page.evaluate(JS_SELECT, [1, "Transparent governance"]); page.wait_for_selector("#rd-sel:not(.hide)"); page.click('#rd-sel [data-c="green"]')
             for _ in range(50):
                 if os.path.exists(sidecar(0, ".notes.json")):
@@ -842,8 +863,15 @@ def main():
             page.select_option("#dr-cs", "numbered"); page.wait_for_function("document.querySelectorAll('.dr-refs li[value]').length === 3")
             check("numbered citations: [1], [2] in order of first citation, with a numbered reference list", page.locator(".dr-refs li[value]").count() == 3 and "[" in page.inner_text(".of[data-tool=draft] .of-sec >> nth=0"))
             page.select_option("#dr-cs", "author-year")
+            want_ = re.search(r"\(p\. (\d+)\)", page.locator(".dr-c").first.get_attribute("title") or "")      # the chip says which page its note comes from
             page.locator(".dr-c").first.click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
-            check("a citation opens the paper in the reader at the page its note came from", page.input_value("#rd-num") == "1")
+            if want_:
+                try:
+                    page.wait_for_function("(n) => document.querySelector('#rd-num').value === n", arg=want_.group(1), timeout=5000)
+                except Exception:  # noqa: BLE001
+                    pass
+            check("a citation opens the paper in the reader at the page its note names (the old reader showed the page above)", bool(want_) and page.input_value("#rd-num") == want_.group(1),
+                  [want_.group(1) if want_ else None, page.input_value("#rd-num"), page.evaluate("[...document.querySelectorAll('.rd-band')].map(b => Math.round(b.getBoundingClientRect().top - document.querySelector('#rd-pdf').getBoundingClientRect().top))")])
             page.click('#reader [data-a="back"]'); page.wait_for_selector('[data-dr="edit"]')
             page.click('[data-dr="edit"]'); page.fill("#dr-raw", page.input_value("#dr-raw") + "\n\nOne more claim that is backed by a note [P1-3].\n"); page.click('[data-dr="saveedit"]'); page.wait_for_selector(".of-m.edited")
             check("you can edit the text; the citations are checked again and the draft says it is yours", "edited by you" in page.inner_text(".of-meta") and json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.draft.json")))["edited"] is True)

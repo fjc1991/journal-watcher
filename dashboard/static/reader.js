@@ -267,8 +267,9 @@ function flashRects(n, rects) {
 }
 
 // ---------------------------------------------------------------- position, jump, zoom
+const READ_LINE = 70;      // px below the top of the pane: where jump() puts the place you go to, and where currentPos() reads the place you are at. They must be the same line: with two (8 and 70), the page number fell back to the page above after a jump, and every zoom, Fit, "back" or reopened reading place moved the text by the difference
 function currentPos() {
-  const top = pane.getBoundingClientRect().top + 8;
+  const top = pane.getBoundingClientRect().top + READ_LINE;
   for (const b of S.bands) {
     const r = b.el.getBoundingClientRect();
     if (r.bottom > top) return {n: b.p.n, y: b.y0 + clamp((top - r.top) / r.height, 0, 1) * (b.y1 - b.y0)};
@@ -282,7 +283,7 @@ export function jump(n, y = 0, {flash = null, instant = true} = {}) {
   if (!b) b = S.bands.find(b => b.p.n === n);
   if (!b) return;
   const r = b.el.getBoundingClientRect(), fr = (y - b.y0) / Math.max(1e-6, b.y1 - b.y0);
-  pane.scrollTo({top: Math.max(0, r.top - pane.getBoundingClientRect().top + pane.scrollTop + fr * r.height - 70), behavior: instant ? "auto" : "smooth"});
+  pane.scrollTo({top: Math.max(0, r.top - pane.getBoundingClientRect().top + pane.scrollTop + fr * r.height - READ_LINE), behavior: instant ? "auto" : "smooth"});
   if (flash) setTimeout(() => flashRects(n, flash), 30);
   else $("#rd-num", root).value = n;
 }
