@@ -375,6 +375,8 @@ def main():
             ctx = br.new_context(viewport={"width": 1400, "height": 950}, permissions=["clipboard-read", "clipboard-write"])
             ctx.add_init_script("try { if (!sessionStorage.getItem('jw-wl-test')) localStorage.setItem('jw-welcome', 'done'); } catch (e) {}")      # the welcome guide has its own test below
             page = ctx.new_page()
+            if os.environ.get("JW_TEST_THROTTLE"):          # JW_TEST_THROTTLE=4 runs the page four times slower: how a busy CI machine behaves
+                ctx.new_cdp_session(page).send("Emulation.setCPUThrottlingRate", {"rate": float(os.environ["JW_TEST_THROTTLE"])})
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e) + " @ " + str(getattr(e, "stack", ""))[:300]))
             page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
@@ -1412,7 +1414,12 @@ def main():
 
             print("the welcome guide: API keys, publisher sign-ins, a map of the app")
             api("/api/library/access", {"name": "Test University Library", "mode": "openathens", "openathens": "testuni.ac.uk", "ill_email": "ill@testuni.ac.uk"})
-            page.evaluate("sessionStorage.setItem('jw-wl-test', '1'); localStorage.removeItem('jw-welcome')"); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("dialog.wl[open]", timeout=15000)
+            page.wait_for_function("!document.querySelector('dialog[open]')"); page.wait_for_timeout(300)           # the close handler (it marks the guide as seen) runs a moment after Escape
+            page.evaluate("sessionStorage.setItem('jw-wl-test', '1'); localStorage.removeItem('jw-welcome')"); page.goto("about:blank"); page.goto(base + "/#/watch")
+            try:
+                page.wait_for_selector("dialog.wl[open]", timeout=15000)
+            except Exception:  # noqa: BLE001
+                print("DEBUG welcome:", page.evaluate("JSON.stringify({seen: localStorage.getItem('jw-welcome'), wl: sessionStorage.getItem('jw-wl-test'), ready: document.readyState, open: [...document.querySelectorAll('dialog[open]')].map(d => d.className), welcome: typeof window.Welcome})"), "|", errors[:3]); raise
             check("on a first start the guide opens by itself at Welcome, and says where your data lives and that nothing goes to a server of ours", "Welcome to Journal Watcher" in page.inner_text("dialog.wl h2") and TMP in page.inner_text("dialog.wl") and "no server" not in page.inner_text("dialog.wl").lower() and "there is none" in page.inner_text("dialog.wl"))
             check("it shows five steps", page.locator("dialog.wl .wl-dots li").count() == 5)
             page.click('dialog.wl [data-wl="next"]')
