@@ -48,6 +48,8 @@ Papers/_index.csv                 the library index
 .venv/bin/python .agents/skills/ais-journal-watcher/scripts/test_ui.py       # headless-browser end-to-end suite against a throw-away copy and a fake AI provider (~7 min)
 ```
 
+On Linux the two updater checks in `test_reader.py` that call macOS's `ditto` fail, and the Mac app cannot be built; CI on a macOS runner is the judge for those. (A sandbox whose preinstalled Chromium is older than the newest Playwright needs the matching `playwright` version, e.g. `pip install playwright==1.63.0` for Chromium 1243.)
+
 `docs/HISTORY.md` is the long development log (design, decisions, gotchas); `docs/roadmap.md` what is done and what is not.
 
 ### Build the Mac app, and release it
@@ -62,6 +64,7 @@ Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`: it builds on a macO
 ## Privacy and safety
 
 - No analytics, no accounts, no server of ours. Network calls: journal feeds, Crossref, OpenAlex, Unpaywall, the publishers you sign in to, the AI provider you configured, and (if you keep it on) the update feed.
+- A friendly reminder that the app is free and takes tips (the author's tip page is set in `dashboard/static/author.json`) appears at most three times, weeks apart, and can be switched off under **About**. To decide when, the app counts on your computer how often you open it (`support.json` in your data folder); the count is never sent anywhere.
 - Passwords are typed into the publisher's or your library's own page in a browser window; the app never sees them. It keeps the browser's signed-in session on your computer.
 - API keys are stored in your data folder's `.env`, never in the repository. **Do not commit your data folder.**
 

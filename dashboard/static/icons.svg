@@ -46,5 +46,6 @@
 <symbol id="i-read" viewBox="0 0 24 24"><path d="M12 6c-2-1.5-5-2-8-2v14c3 0 6 .5 8 2 2-1.5 5-2 8-2V4c-3 0-6 .5-8 2zM12 6v14"/></symbol>
 <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6z"/></symbol>
 <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4l9.5 16h-19zM12 10v4.5M12 17.5v.1"/></symbol>
+<symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.2S4.5 15.6 4.5 9.9a4.2 4.2 0 0 1 7.5-2.6 4.2 4.2 0 0 1 7.5 2.6c0 5.7-7.5 10.3-7.5 10.3z"/></symbol>
 <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.1"/></symbol>
 </svg>

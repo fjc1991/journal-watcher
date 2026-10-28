@@ -10,6 +10,7 @@ Papers/
 .agents/skills/ais-journal-watcher/library.json
 .agents/skills/ais-journal-watcher/prompts.json
 .agents/skills/ais-journal-watcher/update.json
+.agents/skills/ais-journal-watcher/support.json
 
 # python
 __pycache__/
