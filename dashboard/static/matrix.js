@@ -116,6 +116,7 @@ async function newColumn() {
   catch (e) { notifyError(e); await load(); }
 }
 function editCell(td) {
+  if (M.busy) return toast("The fill is still running: edit a cell when it has finished.");      // the table is redrawn when it ends, which would throw away what you had typed
   const [key, col] = td.dataset.cell.split("|"), row = M.t.rows.find(r => r.key === key), cell = row.cells[col], ta = document.createElement("textarea");
   ta.className = "cd-ed"; ta.value = cell ? cell.text : ""; ta.rows = 3; td.replaceWith(ta); ta.focus();
   let done = false;
