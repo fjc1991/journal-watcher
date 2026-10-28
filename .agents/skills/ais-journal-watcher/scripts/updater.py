@@ -229,6 +229,27 @@ def load_state():
     return _read(STATE_FILE, {})
 
 
+def cached_feed(st, keys):
+    encoded = st.get("feed_data")
+    if not isinstance(encoded, str):
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError):
+        return None
+    if len(raw) > MAX_FEED:
+        return None
+    if keys is not None:
+        try:
+            verify_feed(raw, st.get("feed_signature"), keys)
+        except FeedNotTrusted:
+            return None
+    try:
+        return parse_feed(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def check(quiet=False):
     """Ask the feed; remember what it said. Never raises: a failure is recorded as state['error']."""
     with _lock:
@@ -242,6 +263,7 @@ def check(quiet=False):
         try:
             raw = _fetch(url)
             keys = trusted_keys()
+            sig = ""
             if keys is not None:
                 try:
                     sig = _fetch(url + ".sig", limit=1024).decode("ascii", "replace")
@@ -251,8 +273,10 @@ def check(quiet=False):
                     raise FeedNotTrusted("The update feed is not signed (yet), so it was ignored.")
                 verify_feed(raw, sig, keys)
             f = parse_feed(raw)
-            st.update({"latest": f["version"], "released": f["released"], "notes": f["notes"], "url": f["url"], "sha256": f["sha256"], "size": f["size"], "min_macos": f["min_macos"],
-                       "history": [h for h in f["history"] if newer(h["version"], version())], "verified": keys is not None, "error": ""})
+            st.update({"feed_data": base64.b64encode(raw).decode("ascii"), "feed_signature": sig,
+                       "latest": f["version"], "released": f["released"], "notes": f["notes"], "url": f["url"], "sha256": f["sha256"], "size": f["size"], "min_macos": f["min_macos"],
+                       "history": [h for h in f["history"] if newer(h["version"], version())], "error": ""})
+            st.pop("verified", None)
         except FeedNotTrusted as e:
             st["error"] = str(e)[:160]
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -263,10 +287,19 @@ def check(quiet=False):
 
 def public():
     st, s, cur = load_state(), settings(), version()
-    latest = st.get("latest") or ""
     keys = trusted_keys()
-    avail = bool(latest) and newer(latest, cur) and (keys is None or bool(st.get("verified")))      # what an older, unchecked answer said is not offered once a key is built in
-    notes = list(st.get("notes") or [])
+    f = cached_feed(st, keys)
+    if f:
+        latest, notes = f["version"], list(f["notes"])
+        history = [h for h in f["history"] if newer(h["version"], cur)]
+        released, size = f["released"], f["size"]
+    elif keys is None:
+        latest, notes = st.get("latest") or "", list(st.get("notes") or [])
+        history = st.get("history") or []
+        released, size = st.get("released") or "", st.get("size") or 0
+    else:
+        latest, notes, history, released, size = "", [], [], "", 0
+    avail = bool(latest) and newer(latest, cur) and (keys is None or f is not None)
     seen = s["seen"]
     just = bool(seen) and seen != cur and not newer(seen, cur)      # first start after an update
     if not seen:
@@ -274,8 +307,8 @@ def public():
             save_settings({"seen": cur})
         except (OSError, ValueError):
             pass
-    return {"current": cur, "latest": latest, "available": avail, "skipped": avail and latest == s["skipped"], "notes": notes if avail else [], "history": st.get("history") or [] if avail else [],
-            "released": st.get("released") or "", "size": st.get("size") or 0, "checked": st.get("checked") or "", "error": "" if (st.get("error") or "") == "no feed" else (st.get("error") or ""),
+    return {"current": cur, "latest": latest, "available": avail, "skipped": avail and latest == s["skipped"], "notes": notes if avail else [], "history": history if avail else [],
+            "released": released, "size": size, "checked": st.get("checked") or "", "error": "" if (st.get("error") or "") == "no feed" else (st.get("error") or ""),
             "feed": bool(feed_url()), "feed_url": feed_url(), "auto": s["auto"], "can_install": can_install(), "app": bool(target_app()), "progress": dict(_progress), "just_updated": just,
             "seen": seen, "signed": keys is not None, "keys": len(keys or [])}
 
@@ -368,19 +401,25 @@ def _apply(new_app, stage_dir, target):
 def _run_install():
     try:
         st = load_state()
-        if not (st.get("latest") and newer(st["latest"], version())):
-            raise ValueError("You already have the newest version.")
-        if trusted_keys() is not None and not st.get("verified"):
+        keys = trusted_keys()
+        f = cached_feed(st, keys)
+        if keys is not None and f is None:
             raise ValueError("This update was not checked against the signing key. Press “Check for updates” first.")
+        latest = f["version"] if f else st.get("latest", "")
+        url = f["url"] if f else st.get("url", "")
+        sha = f["sha256"] if f else st.get("sha256", "")
+        size = f["size"] if f else st.get("size")
+        if not (latest and newer(latest, version())):
+            raise ValueError("You already have the newest version.")
         os.makedirs(SUPPORT, exist_ok=True)
-        zip_path = os.path.join(SUPPORT, "Journal-Watcher-%s.zip" % st["latest"])
+        zip_path = os.path.join(SUPPORT, "Journal-Watcher-%s.zip" % latest)
         _set("downloading", 0)
-        _download(st["url"], zip_path, st.get("size"), st["sha256"])
+        _download(url, zip_path, size, sha)
         _set("verifying", 100)
         target = target_app()
         bundle_id = _plist(target, "CFBundleIdentifier") if target and os.path.isdir(target) else ""
         try:
-            stage, new_app = _stage(zip_path, st["latest"], bundle_id)
+            stage, new_app = _stage(zip_path, latest, bundle_id)
         finally:
             try:
                 os.remove(zip_path)
