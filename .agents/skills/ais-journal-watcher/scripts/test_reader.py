@@ -1840,6 +1840,15 @@ def main():
         _with_support_files(body3)
 
     check("support: the author's page keeps only safe fields (https and mailto links, a photo inside static/, trimmed text); a missing or damaged file is simply empty", t_support_author)
+    def t_support_shipped():
+        raw = json.load(open(os.path.join(paths.STATIC, "author.json"), encoding="utf-8"))
+        a = sp.author()                                                                           # the real file, cleaned the way the page sees it
+        assert len(a["links"]) == len(raw.get("links") or []), (raw.get("links"), a["links"])      # a link that is not https or mailto, or has no label, would vanish without a word
+        for k in ("university_url", "photo"):
+            assert bool(raw.get(k)) == bool(a[k]), (k, raw.get(k), a[k])
+        assert bool((raw.get("support") or {}).get("url")) == bool(a["support"]["url"]), raw.get("support")      # the tip page must be https
+        assert bool(raw.get("repo")) == bool(a["repo"]) and len(a["bio"]) == len(raw.get("bio") or [])
+    check("support: nothing in the shipped dashboard/static/author.json is silently dropped when the page cleans it (https links, a photo that exists, an https tip page)", t_support_shipped)
     check("support: the reminder is due after 14 days and 5 visits, then 60 days apart, at most three times, never after 'Don't ask again' or a click on the tip link, never without a tip page", t_support_rules)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)

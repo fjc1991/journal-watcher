@@ -1606,6 +1606,7 @@ def main():
             print("about the author and the support reminder")
             static_ = os.path.join(TMP, "dashboard", "static"); skd = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher")
             author_file = os.path.join(static_, "author.json"); author_orig = open(author_file, encoding="utf-8").read()
+            json.dump({"name": "", "role": "", "university": "", "university_url": "", "photo": "", "bio": [], "links": [], "support": {"service": "Ko-fi", "url": ""}, "repo": ""}, open(author_file, "w"))      # an empty page, whatever the repository ships
             page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_function("window.Settings && window.About && document.querySelector('#aboutbtn')")
             page.click("#aboutbtn"); page.wait_for_selector("#about:not(.hide) #au-body .st-card")
             check("About opens from the sidebar, lights its button and names itself in the top bar", page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "about" and "About" in page.inner_text("#tbtitle") and page.locator("#settings:not(.hide)").count() == 0)
