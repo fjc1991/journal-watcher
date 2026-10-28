@@ -24,13 +24,14 @@ function build() {
 export function close() { root?.classList.add("hide"); document.body.classList.remove("settings-open"); }
 export async function open(t) {
   build(); if (t) tab = t;
+  if (window.About) About.close();
   root.classList.remove("hide"); document.body.classList.add("settings-open");
   try { D = await api("/api/settings"); } catch (e) { toast(e.message); return; }
   render();
 }
 function render() {
-  $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
+  $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   const body = $("#st-body", root);
   ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, look: renderLook, about: renderAbout})[tab](body);
 }
@@ -196,7 +197,8 @@ async function renderAbout(body) {
   const when = U.checked ? new Date(U.checked).toLocaleString() : "not yet";
   body.innerHTML = `<div class="card st-card"><h2>Journal Watcher <small>version ${esc(U.current)}</small></h2>
       <p class="hint">${C && C.home ? `Your data lives in <code>${esc(C.home)}</code> (papers, notes, folders, settings and your API keys). ` : ""}${U.app ? "This is the Mac app." : "This copy runs from the project folder."}</p>
-      <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-welcome">Show the welcome guide</button><span class="hint" style="margin:0">What API keys are, how to get one, and how the publisher sign-ins work.</span></div></div>
+      <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-welcome">Show the welcome guide</button><span class="hint" style="margin:0">What API keys are, how to get one, and how the publisher sign-ins work.</span></div>
+      <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-author">About the author and support</button><span class="hint" style="margin:0">Who makes Journal Watcher, and how to chip in.</span></div></div>
     <div class="card st-card"><h2>Updates</h2>
       <p id="ab-status" style="margin:0 0 8px">${U.available ? `<b>Version ${esc(U.latest)} is ready</b> (you have ${esc(U.current)}).` : U.feed ? `You have the newest version.` : `No update address is set up, so this copy doesn’t look for updates.`} <span class="hint">Last checked: ${esc(when)}.</span></p>
       ${U.error ? `<p class="hint bad">${esc(U.error)}</p>` : ""}
@@ -207,6 +209,7 @@ async function renderAbout(body) {
       <p class="hint">Where the app asks for news of new versions: a small <code>appcast.json</code> that <code>app/release.sh</code> writes. Leave it as it is unless you moved it.</p></details>
       <div class="st-msg" id="ab-msg"></div></div>`;
   $("#ab-welcome", body).onclick = () => { close(); window.Welcome && window.Welcome.open(0); };
+  $("#ab-author", body).onclick = () => { close(); window.About && window.About.open(); };
   $("#ab-go", body).onclick = () => window.JWUpdate ? JWUpdate.show(!U.available) : toast("Updates are still loading.");
   $("#ab-auto", body).onchange = async e => { try { await api("/api/update/settings", {auto: e.target.checked}); note($("#ab-msg", body), "Saved."); } catch (er) { note($("#ab-msg", body), er.message, true); } };
   $("#ab-feedsave", body).onclick = async () => { try { await api("/api/update/settings", {feed: $("#ab-feed", body).value.trim()}); note($("#ab-msg", body), "Saved."); renderAbout(body); } catch (er) { note($("#ab-msg", body), er.message, true); } };

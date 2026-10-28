@@ -29,6 +29,7 @@ function build() {
   add("go", "Folders", "folders", "folders", () => nav({view: "lib", j: null, tab: "folders"}), {hint: "page", quick: true, hay: "folder tiles projects", sub: "your folders of papers"});
   [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"], ["reader", "Reader & summaries"], ["look", "Appearance"]].forEach(([t, name]) =>
     add("go", "Settings › " + name, "settings", "settings", async () => { await closeReader(); window.Settings && window.Settings.open(t); }, {hint: "settings", quick: t === "ai", hay: "settings preferences models keys budget cost " + t}));
+  add("go", "About Journal Watcher", "heart", "about", async () => { await closeReader(); window.About && window.About.open(); }, {hint: "page", hay: "about author made by support coffee tip donate ko-fi licence version", sub: "who makes it, and how to support it"});
   F.forEach(f => {
     add("folder", f.name, "folders", "folders", () => nav({view: "lib", j: "@" + f.id, tab: "folders"}), {hint: "folder", sub: (f.count || 0) + " paper" + (f.count === 1 ? "" : "s"), boost: 2});
     Object.entries(TABS).forEach(([t, name]) => t !== "papers" && add("folder", f.name + " › " + name, TICON[t], t === "lab" ? "ideas" : t, () => nav({view: "lib", j: "@" + f.id, tab: "folders", ftab: t}), {hint: "folder tool", hay: f.name + " " + name}));

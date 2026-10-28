@@ -17,7 +17,7 @@
   --serif: var(--sans);      /* titles use the UI sans now; the name is kept so every style sheet follows */
   --sbw: 0px; --tb: 48px; --sbwide: 256px;
   /* one colour per tool */
-  --t-watch: #3b6a94; --t-library: #2f5d8a; --t-folders: #476682; --t-settings: #6b7686;
+  --t-watch: #3b6a94; --t-library: #2f5d8a; --t-folders: #476682; --t-settings: #6b7686; --t-about: #a8466a;
   --t-read: #2f6db5; --t-notes: #7a6a2a; --t-card: #0b8580; --t-skim: #ad6800; --t-ask: #6c44c0; --t-matrix: #cb4f27;
   --t-discover: #2a8a4c; --t-ideas: #c0365f; --t-evidence: #4a6fa5; --t-sum: #5a6a85; --t-related: #1f7fa6; --t-toc: #6b7686; --t-hl: #b8890a; --t-tags: #8a5a9c; --t-explain: #a8409a; --t-draft: #8c5a2b; --t-claims: #6c7a1c; --t-synthesis: #4d4bb8; --t-review: #1c8c5e; --t-workspace: #8a6d2f;
   /* folder colours (pastel): back, front, number */
@@ -32,7 +32,7 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, .25);
   --shadow-raised: 0 1px 0 rgba(255, 255, 255, .05) inset, 0 14px 36px -8px rgba(0, 0, 0, .55);
   --scrim: rgba(8, 8, 10, .55); --pdf-bg: #1b1c1f; --page-shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 8px 24px -10px rgba(0, 0, 0, .6);
-  --t-watch: #8fb3d6; --t-library: #7fb0e0; --t-folders: #94b3d1; --t-settings: #9aa4b2;
+  --t-watch: #8fb3d6; --t-library: #7fb0e0; --t-folders: #94b3d1; --t-settings: #9aa4b2; --t-about: #ee93b0;
   --t-read: #7db3f0; --t-notes: #d6c06a; --t-card: #4fd0c8; --t-skim: #f0b04a; --t-ask: #b9a0f7; --t-matrix: #ff8d6a;
   --t-discover: #66d38c; --t-ideas: #f48fb3; --t-evidence: #8fb0e0; --t-sum: #a9b6cf; --t-related: #5ec3ea; --t-toc: #9aa4b2; --t-hl: #f0c445; --t-tags: #cf9be0; --t-explain: #e08ad0; --t-draft: #e0a66b; --t-claims: #bccb5a; --t-synthesis: #a3a6f2; --t-review: #62d3a0; --t-workspace: #d9bc6c;
   --fo-1: #3d5675 #4c6b92 #bcd3f0; --fo-2: #3f5c3c #507650 #c4e2bf; --fo-3: #66522b #82693a #f2dcae; --fo-4: #62404d #7f5262 #f2cad8; --fo-5: #52476f #685b8b #dcd2f4; --fo-6: #2f5f5c #3f7a76 #c3eae6;
@@ -40,7 +40,7 @@
 
 /* a tool's colour, available to everything inside [data-tool] */
 [data-tool] { --t: var(--accent); --t-soft: color-mix(in srgb, var(--t) 11%, var(--panel)); --t-line: color-mix(in srgb, var(--t) 38%, var(--line)); --t-ink: color-mix(in srgb, var(--t) 78%, var(--ink)); }
-[data-tool="watch"] { --t: var(--t-watch); } [data-tool="library"] { --t: var(--t-library); } [data-tool="folders"] { --t: var(--t-folders); } [data-tool="settings"] { --t: var(--t-settings); }
+[data-tool="watch"] { --t: var(--t-watch); } [data-tool="library"] { --t: var(--t-library); } [data-tool="folders"] { --t: var(--t-folders); } [data-tool="settings"] { --t: var(--t-settings); } [data-tool="about"] { --t: var(--t-about); }
 [data-tool="read"] { --t: var(--t-read); } [data-tool="notes"] { --t: var(--t-notes); } [data-tool="card"] { --t: var(--t-card); } [data-tool="skim"] { --t: var(--t-skim); }
 [data-tool="ask"] { --t: var(--t-ask); } [data-tool="matrix"] { --t: var(--t-matrix); } [data-tool="discover"] { --t: var(--t-discover); } [data-tool="ideas"] { --t: var(--t-ideas); }
 [data-tool="evidence"] { --t: var(--t-evidence); } [data-tool="sum"] { --t: var(--t-sum); } [data-tool="related"] { --t: var(--t-related); } [data-tool="toc"] { --t: var(--t-toc); }

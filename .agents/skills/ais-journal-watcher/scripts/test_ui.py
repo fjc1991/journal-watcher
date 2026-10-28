@@ -7,6 +7,7 @@ Library: search, filters, status, folders, highlights hub, exports, "reading alo
 Reader: highlights, kinds (underline, strike, sticky note), undo/redo, links and citation cards, back button, area box -> picture card,
 explain with your prompts (cached), Ask with history / regenerate / compare / follow-ups, summary templates, settings page and legend.
 """
+import base64
 import csv
 import hashlib
 import json
@@ -350,7 +351,7 @@ def main():
     srv_up = ThreadingHTTPServer(("127.0.0.1", 0), FakeFeed)
     threading.Thread(target=srv_up.serve_forever, daemon=True).start()
     feed["url"] = "http://127.0.0.1:%d/j.zip" % srv_up.server_address[1]
-    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d/appcast.json" % srv_up.server_address[1], "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
+    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d/appcast.json" % srv_up.server_address[1], "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
     marker = os.path.join(TMP, "download-called.txt")
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
@@ -875,8 +876,8 @@ def main():
             check("filling answers every paper with a page link", page.locator("table.mx td:has-text('Tenure moderates the effect.')").count() == 3, [json.dumps(json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))["cells"])[:500], page.evaluate("[...document.querySelectorAll('.toast, #toast, [class*=toast]')].map(e => e.innerText).join('|')")])
             mx = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))
             check("the matrix is saved beside the folder", len(mx["custom"]) == 1 and sum(len(v) for v in mx["cells"].values()) == 3 and all(c["cites"] for v in mx["cells"].values() for c in v.values()))
-            page.locator('table.mx td .mx-edit >> nth=0').click(); page.fill("td textarea.cd-ed, textarea.cd-ed", "Tenure, from my own reading"); page.keyboard.press("Control+Enter"); page.wait_for_selector('td:has-text("from my own reading")')
             page.wait_for_selector('[data-k="fill"]', state="detached")      # the fill ends with one more redraw; a cell opened for editing before it would be thrown away
+            page.locator('table.mx td .mx-edit >> nth=0').click(); page.fill("td textarea.cd-ed, textarea.cd-ed", "Tenure, from my own reading"); page.keyboard.press("Control+Enter"); page.wait_for_selector('td:has-text("from my own reading")')
             check("writing in a cell keeps your words and marks them", any(c.get("edited") for v in json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))["cells"].values() for c in v.values()))
             page.click('[data-k="cols"]'); page.locator('#mx-colmenu label:has-text("Research question") input').uncheck(); page.wait_for_function("document.querySelectorAll('table.mx thead th[data-col]').length === 5")
             check("columns can be switched off from the Columns menu", "Research question" not in page.inner_text("table.mx thead"))
@@ -948,11 +949,11 @@ def main():
             check("the review exports as Markdown", "# Reviewer 2 — Lab" in urllib.request.urlopen(base + "/api/export/review?folder=lab").read().decode() and os.path.exists(os.path.join(TMP, "Papers", "_folders", "lab.review.json")))
             page.reload(); page.wait_for_selector("#libitem"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs")
             page.click('.fvtabs [data-ft="claims"]'); page.wait_for_selector(".cl-row")
-            check("after a reload the review is still there", page.locator("#cl-rev .rv2-i").count() >= 3)
             try:
                 page.wait_for_function("document.querySelectorAll('.cl-s input').length === 5", timeout=10000)      # the sentence list comes from a second request (the estimate)
             except Exception:  # noqa: BLE001
                 pass
+            check("after a reload the review is still there", page.locator("#cl-rev .rv2-i").count() >= 3)
             check("after a reload the result and your text are as you left them", page.locator(".cl-row").count() == 5 and "SUPPORTME" in page.input_value("#cl-text") and page.locator(".cl-row.done").count() == 1 and page.locator(".cl-s input:checked").count() == 5,
                   page.evaluate("[document.querySelectorAll('.cl-row').length, document.querySelectorAll('.cl-row.done').length, document.querySelectorAll('.cl-s input:checked').length, document.querySelector('#cl-text').value.slice(0, 40)]"))
             check("it ran as a job in the activity list", any(j["kind"] == "claims" and j["status"] == "done" for j in api("/api/activity")["jobs"]))
@@ -1312,8 +1313,8 @@ def main():
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")
-            page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)")
             page.wait_for_selector("#sbfolders .sbf")      # the palette lists the folders the page has loaded by then
+            page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)")
             check("Ctrl+K opens the palette; with nothing typed it offers pages, folders and actions", page.locator("#pal .pal-it").count() >= 8 and all(x in page.inner_text("#pal-list") for x in ("Library", "Folders", "Lab", "Settings")) and page.evaluate("document.activeElement.id") == "pal-q", page.evaluate("[document.querySelectorAll('#pal .pal-it').length, document.activeElement.id, document.querySelector('#pal-list').innerText.slice(0, 160)]"))
             page.keyboard.type("complement")
             check("typing finds a paper by words in its title, with the match marked", "Open Platforms and Complementors" in page.inner_text("#pal-list") and page.locator("#pal mark").count() >= 1)
@@ -1585,6 +1586,104 @@ def main():
             n_trash = len(api("/api/aifiles")["trash"]); page.click('[data-clear="cache"]'); page.wait_for_function("document.querySelector('table.af tr[data-k=cache] td:nth-child(2)').textContent.trim() === '0'")
             check("saved answers are cleared without a zip (they come back by themselves)", len(api("/api/aifiles")["trash"]) == n_trash and api("/api/aifiles")["kinds"][5]["count"] == 0)
             page.click("#st-back")
+
+            print("about the author and the support reminder")
+            static_ = os.path.join(TMP, "dashboard", "static"); skd = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher")
+            author_file = os.path.join(static_, "author.json"); author_orig = open(author_file, encoding="utf-8").read()
+            page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_function("window.Settings && window.About && document.querySelector('#aboutbtn')")
+            page.click("#aboutbtn"); page.wait_for_selector("#about:not(.hide) #au-body .st-card")
+            check("About opens from the sidebar, lights its button and names itself in the top bar", page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "about" and "About" in page.inner_text("#tbtitle") and page.locator("#settings:not(.hide)").count() == 0)
+            check("with the author's page left empty it shows only the app: no 'Made by', no support card, no reminder switch, and no reminder is due",
+                  "Made by" not in page.inner_text("#au-body") and page.locator("#au-remind").count() == 0 and "GNU Affero" in page.inner_text("#au-body") and api("/api/support")["due"] is False)
+            open(os.path.join(static_, "me.png"), "wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+            json.dump({"name": "Ada Lovelace", "role": "Researcher in Information Systems", "university": "Test University", "university_url": "https://example.edu", "photo": "me.png",
+                       "bio": ["First paragraph about the author.", "Second paragraph."], "links": [{"label": "Website", "url": "https://example.org/ada"}, {"label": "Email", "url": "mailto:ada@example.org"}, {"label": "Unsafe", "url": "javascript:alert(1)"}],
+                       "support": {"service": "Ko-fi", "url": "https://ko-fi.com/adatest"}, "repo": "https://github.com/example/repo"}, open(author_file, "w"))
+            page.click("#au-back"); page.click("#aboutbtn"); page.wait_for_selector(".au-who")
+            t_ = page.inner_text("#au-body")
+            check("a filled-in page shows name, role, university (as a link), the text and the links; an unsafe link is left out",
+                  all(x in t_ for x in ("Ada Lovelace", "Researcher in Information Systems", "Test University", "First paragraph", "Second paragraph", "Website", "Email")) and "Unsafe" not in t_ and page.get_attribute(".au-role a", "href") == "https://example.edu", t_[:300])
+            page.wait_for_function("(() => { const i = document.querySelector('.au-photo'); return !!i && i.complete; })()", timeout=15000)
+            check("outside links open in another window without handing it this page, and the photo loads",
+                  all(page.get_attribute(sel, "rel") == "noopener noreferrer" and page.get_attribute(sel, "target") == "_blank" for sel in (".au-pill >> nth=0", ".au-tipbtn", ".au-role a")) and page.evaluate("document.querySelector('.au-photo').naturalWidth") == 1,
+                  page.evaluate("[...document.querySelectorAll('.au-pill, .au-tipbtn, .au-role a')].map(a => [a.textContent.trim(), a.target, a.rel]).concat([[document.querySelector('.au-photo').src, document.querySelector('.au-photo').naturalWidth]])"))
+            check("the support card names the service, links to the tip page, says what is counted and that it stays here, and has the reminder switch on",
+                  "Ko-fi" in page.inner_text(".au-tip") and page.get_attribute(".au-tipbtn", "href") == "https://ko-fi.com/adatest" and "never sent anywhere" in page.inner_text(".au-tip") and page.is_checked("#au-remind"))
+            page.uncheck("#au-remind"); page.wait_for_function("document.querySelector('#au-msg').textContent.includes('No more')")
+            check("switching the reminders off is saved", api("/api/support")["optout"] is True)
+            page.check("#au-remind"); page.wait_for_function("document.querySelector('#au-msg').textContent.includes('remind you')")
+            check("…and on again", api("/api/support")["optout"] is False)
+            ctx.route("https://ko-fi.com/**", lambda r: r.fulfill(status=200, content_type="text/html", body="<title>tip</title>"))
+            with ctx.expect_page() as np_:
+                page.click(".au-tipbtn")
+            np_.value.close()
+            for _ in range(20):
+                if api("/api/support")["supported"]:
+                    break
+                time.sleep(0.25)
+            check("pressing the tip link opens it in another window and remembers that you did", api("/api/support")["supported"] is True)
+            api("/api/support/action", {"action": "reminders", "value": True})
+            page.keyboard.press("Escape"); page.wait_for_selector("#about.hide", state="attached")
+            check("Escape closes About", page.locator("body.about-open").count() == 0)
+            page.click("#aboutbtn"); page.wait_for_selector("#about:not(.hide)"); page.click("#settingsbtn"); page.wait_for_selector("#settings:not(.hide)")
+            check("opening Settings closes About", page.locator("#about.hide").count() == 1 and page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "settings")
+            page.click("#aboutbtn"); page.wait_for_selector("#about:not(.hide)")
+            check("opening About closes Settings", page.locator("#settings.hide").count() == 1 and page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "about")
+            page.click("#libitem"); page.wait_for_selector("#about.hide", state="attached")
+            check("going to another page closes About and lights that page", page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "library")
+            page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)"); page.keyboard.type("coffee"); page.wait_for_selector("#pal .pal-it"); page.keyboard.press("Enter"); page.wait_for_selector("#about:not(.hide)")
+            check("the palette finds About by 'coffee' and opens it", "Ada Lovelace" in page.inner_text("#au-body"))
+            page.click("#au-back")
+
+            now_ = int(time.time())
+            def set_support(**kw):
+                json.dump({"first": now_ - 30 * 86400, "last": now_ - 3600, "visits": 6, "shown": 0, "last_shown": 0, "optout": False, "supported": False, **kw}, open(os.path.join(skd, "support.json"), "w"))
+            def open_watch():
+                page.goto("about:blank"); page.goto(base + "/#/watch")
+            set_support(); open_watch(); page.wait_for_selector(".sup", timeout=30000)
+            check("after 14 days and 5 visits the reminder appears in the corner, says who made the app, and offers the tip link, 'Maybe later' and 'Don't ask again'",
+                  "saving you time" in page.inner_text(".sup") and "made by Ada Lovelace at Test University" in page.inner_text(".sup") and page.get_attribute("#sup-go", "href") == "https://ko-fi.com/adatest" and page.locator("#sup-later").count() == 1 and page.locator("#sup-never").count() == 1)
+            check("it is a dialog with a name that does not take the focus away from what you are doing",
+                  page.get_attribute(".sup", "role") == "dialog" and page.get_attribute(".sup", "aria-modal") == "false" and "saving you time" in page.inner_text("#" + page.get_attribute(".sup", "aria-labelledby")) and page.evaluate("document.activeElement.closest('.sup') === null"))
+            for _ in range(40):
+                if api("/api/support")["shown"] == 1:
+                    break
+                time.sleep(0.25)
+            check("it counts as shown the moment it appears", api("/api/support")["shown"] == 1 and api("/api/support")["due"] is False)
+            bad_ = []
+            for scheme in ("light", "dark"):
+                page.evaluate("window.setTheme(%r)" % scheme)
+                r_ = page.evaluate(JS_A11Y); bad_ += [("name", x) for x in r_["noname"]] + [("id", x) for x in r_["dupid"]] + [(scheme, x) for x in page.evaluate(JS_CONTRAST, scheme)]
+            page.evaluate("window.setTheme('light')")
+            check("every control of the reminder has a name, and its text is readable (WCAG AA) in the light and the dark theme", not bad_, str(bad_[:4]))
+            page.set_viewport_size({"width": 520, "height": 800}); page.wait_for_timeout(200)
+            check("on a narrow window it still fits the screen and the page does not scroll sideways",
+                  page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") and page.evaluate("(() => { const r = document.querySelector('.sup').getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; })()"))
+            page.set_viewport_size({"width": 1400, "height": 950})
+            page.focus("#sup-later"); page.keyboard.press("Escape"); page.wait_for_selector(".sup", state="detached")
+            check("Escape closes it", page.locator(".sup").count() == 0)
+            open_watch(); page.wait_for_function("document.querySelector('#aboutbtn')"); page.wait_for_timeout(4500)
+            check("having been shown, it does not come back on the next visit", page.locator(".sup").count() == 0)
+
+            set_support(); open_watch(); page.wait_for_selector(".sup", timeout=30000); page.click("#sup-later"); page.wait_for_selector(".sup", state="detached")
+            check("'Maybe later' just closes it (it is not asked again for 60 days)", api("/api/support")["optout"] is False and api("/api/support")["due"] is False and api("/api/support")["shown"] == 1)
+            set_support(); open_watch(); page.wait_for_selector(".sup", timeout=30000); page.click("#sup-never"); page.wait_for_selector(".sup", state="detached"); page.wait_for_function("document.querySelector('#toast').textContent.includes('ask again')")
+            check("'Don't ask again' ends the reminders and says where the link is", api("/api/support")["optout"] is True and "won’t ask again" in page.inner_text("#toast"))
+            set_support(); open_watch(); page.wait_for_selector(".sup", timeout=30000)
+            with ctx.expect_page() as np_:
+                page.click("#sup-go")
+            np_.value.close(); page.wait_for_selector(".sup", state="detached")
+            check("pressing the tip link opens it, closes the card and ends the reminders", api("/api/support")["supported"] is True and api("/api/support")["due"] is False)
+
+            set_support(); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_function("window.Settings && document.querySelector('#settingsbtn')"); page.click("#settingsbtn"); page.wait_for_selector("#settings:not(.hide)")
+            page.wait_for_timeout(4500)
+            check("it does not appear over Settings", page.locator(".sup").count() == 0 and api("/api/support")["shown"] == 0)
+            page.click("#st-back"); page.wait_for_selector(".sup", timeout=30000)
+            check("…but follows once Settings is closed", api("/api/support")["shown"] == 1)
+            set_support(first=now_ - 5 * 86400); open_watch(); page.wait_for_timeout(4500)
+            check("before 14 days it never appears", page.locator(".sup").count() == 0)
+            os.remove(os.path.join(skd, "support.json")); open(author_file, "w", encoding="utf-8").write(author_orig); os.remove(os.path.join(static_, "me.png"))
+            page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#libitem")
 
             print("accessibility: every control has a name, no repeated ids, readable text in both themes, a visible focus, a skip link, calm motion on request")
             bad_names, bad_ids, bad_con = [], [], []
