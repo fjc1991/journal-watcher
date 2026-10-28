@@ -136,6 +136,7 @@ def sign(args):
         data = open(appcast, "rb").read()
         d = check_release(data, zip_path, tag, args.repo)
         print("\nRelease %s (%s)  %.0f MB" % (d["version"], d.get("released", "?"), os.path.getsize(zip_path) / 1048576))
+        print("  the feed sends installed copies to (equal to this repository's release): %s" % d["url"])
         print("  zip checksum (computed here, equal to the feed's): %s" % d["sha256"])
         print("  what is new:")
         for n in d.get("notes") or []:
