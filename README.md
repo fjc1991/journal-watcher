@@ -59,6 +59,8 @@ app/build_app.sh            # PyInstaller + pywebview → app/dist/Journal Watch
 app/test_update.sh          # end-to-end proof of "Update now" with the real app (~5 min)
 ```
 
+**Before the first release, once:** `python app/sign_release.py keygen` makes your signing key (kept in `~/.journal-watcher/`, back it up) and prints the public half; put that line in `app/update_public_key.txt` and commit it. Builds that contain it only believe an update feed signed with your key. **After each release:** the workflow publishes the build, then you sign it on your own computer: `python app/sign_release.py sign --tag vX.Y.Z --upload` (it shows what it signs, recomputes the zip's checksum, and attaches `appcast.json.sig`; `--dir` works on files you downloaded, e.g. while the repository is private). Installed copies see the update once it is signed. **To rehearse a release without publishing anything:** Actions → release → Run workflow (a dry run: it builds, rehearses the signing with a throw-away key and keeps the files for three days; a full macOS build).
+
 Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`: it builds on a macOS runner, writes the update feed `appcast.json` (the notes come from `CHANGELOG.md`), and attaches the `.dmg`, the `.zip` and the feed to the GitHub release. The app's built-in feed address is `https://github.com/<owner>/<repo>/releases/latest/download/appcast.json`. Signing with an Apple Developer ID and notarising are supported through repository secrets (see the workflow); without them the app is ad-hoc signed.
 
 ## Privacy and safety
