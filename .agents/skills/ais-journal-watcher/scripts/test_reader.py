@@ -45,6 +45,7 @@ import skim as sk  # noqa: E402
 import smart as sm  # noqa: E402
 import synthesis as sy  # noqa: E402
 import signins as si  # noqa: E402
+import support as sp  # noqa: E402
 import updater as up  # noqa: E402
 import browser as brw  # noqa: E402
 import workspace as wk  # noqa: E402
@@ -1610,6 +1611,99 @@ def main():
     check("updates: make_appcast.py writes a feed the app accepts, with the last release as history", t_up_appcast_script)
     feed_srv.shutdown()
     os.environ.pop("JW_VERSION", None); os.environ.pop("JW_UPDATE_FEED", None)
+
+
+    # ---- the author's page and the support reminder (support.py)
+    def _with_support_files(fn):
+        d = tempfile.mkdtemp(prefix="jw-support-")
+        old = (sp.AUTHOR, sp.FILE, paths.STATIC)
+        try:
+            os.makedirs(os.path.join(d, "static"))
+            open(os.path.join(d, "static", "me.jpg"), "wb").write(b"x")
+            sp.AUTHOR, sp.FILE, paths.STATIC = os.path.join(d, "author.json"), os.path.join(d, "support.json"), os.path.join(d, "static")
+            fn(d)
+        finally:
+            sp.AUTHOR, sp.FILE, paths.STATIC = old
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _author(**kw):
+        base = {"name": "Ada Lovelace", "support": {"service": "Ko-fi", "url": "https://ko-fi.com/ada"}}
+        base.update(kw)
+        json.dump(base, open(sp.AUTHOR, "w"))
+
+    def t_support_author():
+        def body(d):
+            a = sp.author()          # no file yet: everything empty, no tip page, the service name defaults
+            assert a["name"] == "" and a["bio"] == [] and a["links"] == [] and a["photo"] == "" and a["support"] == {"service": "Ko-fi", "url": ""}, a
+            open(sp.AUTHOR, "w").write("{not json")
+            assert sp.author()["name"] == "" and sp.public()["due"] is False          # damaged: treated like empty
+            _author(name="  Ada   Lovelace ", role="R" * 500, university="U", university_url="http://insecure.example", photo="../../etc/passwd", bio=["one", "", "two"],
+                    links=[{"label": "Site", "url": "https://example.org"}, {"label": "Bad", "url": "javascript:alert(1)"}, {"label": "Mail", "url": "mailto:a@b.org"}, {"label": "", "url": "https://x.org"}, "nope"],
+                    support={"service": "Ko-fi", "url": "http://tips.example"})
+            a = sp.author()
+            assert a["name"] == "Ada Lovelace" and len(a["role"]) == 120 and a["university_url"] == "" and a["photo"] == "" and a["bio"] == ["one", "two"], a
+            assert [x["label"] for x in a["links"]] == ["Site", "Mail"], a["links"]          # only https and mailto links, each with a label
+            assert a["support"]["url"] == "", a["support"]                                    # a tip page must be https
+            _author(photo="sub/me.jpg", support={"service": "Buy Me a Coffee", "url": "https://buymeacoffee.com/ada"})
+            a = sp.author()
+            assert a["photo"] == "me.jpg" and a["support"] == {"service": "Buy Me a Coffee", "url": "https://buymeacoffee.com/ada"}, a      # only a file name inside static/ is used
+        _with_support_files(body)
+
+    def t_support_rules():
+        DAY, t0 = 86400, 1_800_000_000
+
+        def body(d):
+            _author()
+            sp.visit(t0)
+            s = sp._state()
+            assert s["first"] == t0 and s["visits"] == 1, s
+            sp.visit(t0 + 60)                                  # still the same visit
+            assert sp._state()["visits"] == 1
+            sp.visit(t0 + 60 + 31 * 60)                        # 31 minutes after the last look: a new visit
+            assert sp._state()["visits"] == 2
+            for k in range(1, 5):
+                sp.visit(t0 + k * DAY)
+            assert sp._state()["visits"] == 6
+            assert sp.public(t0 + 14 * DAY - 1)["due"] is False and sp.public(t0 + 14 * DAY)["due"] is True      # 14 days since the first start, with 5 visits or more
+            sp.act("shown", now=t0 + 14 * DAY)
+            assert sp.public(t0 + 14 * DAY + 1)["due"] is False and sp.public(t0 + 74 * DAY - 1)["due"] is False and sp.public(t0 + 74 * DAY)["due"] is True      # then 60 days of quiet
+            sp.act("shown", now=t0 + 74 * DAY)
+            sp.act("shown", now=t0 + 134 * DAY)
+            assert sp._state()["shown"] == 3 and sp.public(t0 + 1000 * DAY)["due"] is False          # never more than three times
+        _with_support_files(body)
+
+        def body2(d):
+            _author()
+            for k in range(4):
+                sp.visit(t0 + k * DAY)
+            assert sp.public(t0 + 30 * DAY)["due"] is False                                          # four visits are too few, however long ago the first was
+            sp.visit(t0 + 20 * DAY)
+            assert sp.public(t0 + 30 * DAY)["due"] is True
+            sp.act("never", now=t0 + 31 * DAY)
+            assert sp.public(t0 + 400 * DAY)["due"] is False and sp.public()["optout"] is True       # "Don't ask again"
+            assert sp.act("reminders", True, now=t0 + 32 * DAY)["due"] is True and sp.act("reminders", False)["optout"] is True      # the switch in About
+            sp.act("reminders", True)
+            sp.act("supported", now=t0 + 33 * DAY)
+            assert sp.public(t0 + 400 * DAY)["due"] is False and sp.public()["supported"] is True    # a click on the tip link ends it
+            assert sp.act("reminders", True, now=t0 + 400 * DAY)["due"] is True                      # switching reminders on again lifts that too
+            try:
+                sp.act("bogus")
+                raise AssertionError("an unknown action was accepted")
+            except ValueError:
+                pass
+            open(sp.FILE, "w").write("[1, 2")                                                        # a damaged count file starts again instead of failing
+            assert sp.public()["visits"] == 0 and sp.public()["due"] is False
+        _with_support_files(body2)
+
+        def body3(d):
+            json.dump({"name": "Ada"}, open(sp.AUTHOR, "w"))                                         # no tip page: never due
+            for k in range(8):
+                sp.visit(t0 + k * DAY)
+            assert sp.public(t0 + 60 * DAY)["due"] is False
+        _with_support_files(body3)
+
+    check("support: the author's page keeps only safe fields (https and mailto links, a photo inside static/, trimmed text); a missing or damaged file is simply empty", t_support_author)
+    check("support: the reminder is due after 14 days and 5 visits, then 60 days apart, at most three times, never after 'Don't ask again' or a click on the tip link, never without a tip page", t_support_rules)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")

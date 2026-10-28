@@ -45,6 +45,7 @@ import notes_store as ns  # noqa: E402
 import pipeline as pl  # noqa: E402
 import prefs  # noqa: E402
 import signins  # noqa: E402
+import support  # noqa: E402
 import updater  # noqa: E402
 import smart  # noqa: E402
 import readstate as rs  # noqa: E402
@@ -579,6 +580,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(signins.profile())
         if path == "/api/update":       # the version, whether a newer one is announced, its notes, the progress of an update that is running
             return self.send_json(updater.public())
+        if path == "/api/support":      # the author's page, and whether the reminder about supporting the app is due (nothing leaves this computer)
+            return self.send_json(support.public())
         if path == "/api/state":
             run = JOBS.run
             return self.send_json({"busy": JOBS.busy(), "kind": JOBS.kind,
@@ -1406,6 +1409,14 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.send_json(updater.public())
+        if path == "/api/support/visit":        # the page was opened or came back after a while: counts one visit
+            support.visit()
+            return self.send_json(support.public())
+        if path == "/api/support/action":       # {action: shown | never | supported | reminders, value}
+            try:
+                return self.send_json(support.act(str(b.get("action") or ""), b.get("value")))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         self.send_json({"error": "not found"}, 404)
 
     def started(self, ok, run):

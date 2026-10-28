@@ -1,0 +1,27 @@
+/* The About page (a layer like Settings, see settings.css) and the small "support the app" reminder. */
+body.about-open { overflow: hidden; }
+.au .st-body { max-width: 760px; }
+.au-who { display: flex; gap: 22px; align-items: flex-start; }
+.au-photo { width: 128px; height: 128px; border-radius: 50%; object-fit: cover; flex: none; border: 1px solid var(--line); background: var(--panel-2); }
+.au-text { min-width: 0; }
+.au-text h2 { font-size: 24px; margin: 2px 0 4px; }
+.au-text p { margin: 8px 0; line-height: 1.55; }
+.au-role { color: var(--ink-2); }
+.au-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px !important; }
+.au-pill { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); text-decoration: none; font-weight: 500; }
+.au-pill:hover { border-color: color-mix(in srgb, var(--ink) 30%, var(--line)); background: var(--hover); }
+.au .st-card p { line-height: 1.55; }
+.au-tip h2 .ico { color: var(--t-about); vertical-align: -3px; margin-right: 4px; }
+.au-tipbtn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
+.au-tipbtn .ico { color: inherit; }
+@media (max-width: 640px) { .au-who { flex-direction: column; } .au-photo { width: 96px; height: 96px; } }
+
+/* the reminder: a card in the corner, never over a dialog, the reader or Settings */
+.sup { position: fixed; right: 16px; bottom: 16px; z-index: 2000; width: min(380px, calc(100vw - 32px)); padding: 16px 18px 14px; box-shadow: var(--shadow-pop, 0 8px 30px rgba(0, 0, 0, .18)); }
+.sup h2 { margin: 0 0 6px; font: 600 16px var(--serif); display: flex; align-items: center; gap: 8px; }
+.sup h2 .ico { color: var(--t-about); }
+.sup p { margin: 0 0 12px; line-height: 1.5; color: var(--ink-2); }
+.sup-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sup-btns a.btn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
+.sup-btns .ico { color: inherit; }
+.sup .meta { margin: 10px 0 0; }
