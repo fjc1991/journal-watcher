@@ -202,6 +202,7 @@ async function renderAbout(body) {
     <div class="card st-card"><h2>Updates</h2>
       <p id="ab-status" style="margin:0 0 8px">${U.available ? `<b>Version ${esc(U.latest)} is ready</b> (you have ${esc(U.current)}).` : U.feed ? `You have the newest version.` : `No update address is set up, so this copy doesn’t look for updates.`} <span class="hint">Last checked: ${esc(when)}.</span></p>
       ${U.error ? `<p class="hint bad">${esc(U.error)}</p>` : ""}
+      <p class="hint" id="ab-sig">${U.signed ? `Updates are checked against the author’s digital signature before anything is installed (${U.keys} signing key${U.keys === 1 ? "" : "s"} built into this app): a feed without a good signature is ignored.` : `This copy does not check an update’s digital signature (no signing key is built into it); it checks the download against the feed’s checksum only.`}</p>
       ${U.available && U.notes.length ? `<ul class="ab-notes">${U.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       <div class="st-actions" style="margin:8px 0"><button class="btn${U.available ? " primary" : ""}" id="ab-go">${U.available ? "Update now…" : "Check for updates"}</button></div>
       <label class="chk"><input type="checkbox" id="ab-auto"${U.auto ? " checked" : ""}> Look for updates by itself (a little after start-up and every six hours); a button appears in the top bar when one is ready</label>
