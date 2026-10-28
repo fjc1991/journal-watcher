@@ -1581,7 +1581,13 @@ def main():
     def t_celebrate():
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
-            b = pw.chromium.launch()
+            try:
+                b = pw.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                if "Executable doesn't exist" in str(e):
+                    print("  (skipped: Chromium is not installed here: python -m playwright install chromium)")
+                    return
+                raise
             pg = b.new_page()
             pg.set_content("<html><body><h1>Publisher page</h1></body></html>")
             brw.celebrate(pg, "Signed in to INFORMS")                 # waits a few seconds so the person can read it: the page is still there afterwards
