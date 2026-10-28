@@ -16,6 +16,7 @@ Journal Watcher is licensed under the GNU AGPL v3 or later (`LICENSE`). It uses,
 | [pypdf](https://pypdf.readthedocs.io) | PDF helpers | BSD-3-Clause |
 | [pywebview](https://pywebview.flowrl.com) | The Mac app's window | BSD-3-Clause |
 | [PyInstaller](https://pyinstaller.org) | Packaging (the bootloader is GPL with an exception that allows any licence for the packaged app) | GPL-2.0 with exception |
+| [PyNaCl](https://pynacl.readthedocs.io) (libsodium inside) | Checking the signature of the update feed | Apache-2.0 (libsodium: ISC) |
 | [dmgbuild](https://github.com/dmgbuild/dmgbuild) | The disk image | MIT |
 
 Journal metadata comes from the publishers' feeds, Crossref, OpenAlex and Unpaywall; use of those services is subject to their terms. The PDFs you download are covered by the publishers' licences and your institution's agreements: they are never part of this repository.

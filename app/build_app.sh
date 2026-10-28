@@ -38,6 +38,8 @@ for f in ai.json journals.json interests.json library.json prompts.json; do cp "
 SUGGEST="${JW_SUGGEST_HOME:-}"; [ -z "$SUGGEST" ] && [ -s "$APP/suggested_home.txt" ] && SUGGEST="$(head -1 "$APP/suggested_home.txt")"
 if [ -n "$SUGGEST" ] && [ -z "${JW_RELEASE:-}" ]; then printf '%s\n' "$SUGGEST" > "$BUILD/defaults/suggested_home.txt"; echo "first start will offer: $SUGGEST"; fi
 printf '{"version": "%s"}\n' "$VERSION" > "$BUILD/defaults/version.json"
+# the author's public signing key(s): with one built in, the app only believes an update feed signed by it (see scripts/updater.py and app/sign_release.py)
+if [ -s "$APP/update_public_key.txt" ]; then cp "$APP/update_public_key.txt" "$BUILD/defaults/update_public_key.txt"; echo "update signatures: required (keys in app/update_public_key.txt)"; else echo "no app/update_public_key.txt: this build accepts an unsigned update feed (run app/sign_release.py keygen, see its header)"; fi
 if [ -s "$APP/update_feed.txt" ]; then tr -d '[:space:]' < "$APP/update_feed.txt" > "$BUILD/defaults/update_feed.txt"; echo "update feed: $(cat "$BUILD/defaults/update_feed.txt")"; else echo "no app/update_feed.txt: this build will not look for updates until you set an address in Settings"; fi
 
 say "3/7 PyInstaller"
@@ -56,6 +58,8 @@ else
   echo "signed ad hoc (no Developer ID): opens on this Mac without a prompt; see HANDOFF §2l for other Macs"
 fi
 codesign --verify --deep --strict "$DIST/$NAME.app" && echo "signature ok"
+# the finished app must be able to check an update signature (libsodium is inside the bundle): a headless run of scripts/updater.py's self-check
+"$DIST/$NAME.app/Contents/MacOS/$NAME" --jw-module updater || { echo "The built app cannot check update signatures: is PyNaCl in the bundle? (see app/JournalWatcher.spec)"; exit 1; }
 if [ -n "${JW_NOTARY_PROFILE:-}" ] && [ -n "${JW_SIGN_IDENTITY:-}" ]; then
   say "notarising (Apple checks the app; a few minutes)"
   ditto -c -k --keepParent "$DIST/$NAME.app" "$BUILD/notarize.zip"

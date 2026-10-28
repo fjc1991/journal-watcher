@@ -5,3 +5,4 @@ pymupdf>=1.26,<2   # reader: paragraph blocks for AI (AGPL; fine for a local too
 fastembed         # reader: local embeddings for semantic search (ONNX, no torch)
 numpy
 python-docx        # reader: Word export of notes
+pynacl             # updater: checks the signature of the update feed (Ed25519; libsodium is inside the wheel)
