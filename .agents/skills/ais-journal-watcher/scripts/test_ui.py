@@ -275,6 +275,9 @@ JS_DROP = """([sel, files, pre]) => { const dt = new DataTransfer();      // dra
 JS_SPAN_CENTER ="""([n, sub]) => { const q = [...document.querySelectorAll(`.rd-band[data-n="${n}"] .textLayer span`)].find(s => s.textContent.includes(sub)); if (!q) return null;
   const i = q.textContent.indexOf(sub), t = q.firstChild, r = document.createRange(); r.setStart(t, i); r.setEnd(t, i + sub.length); const b = r.getBoundingClientRect();
   return [b.left + b.width / 2, b.top + b.height / 2]; }"""
+# did the reader turn to page n? A jump puts the page's top about 70 px below the top of the pane. (The page-number box is no judge of that: it shows n for a few milliseconds
+# and then the page whose foot is still in view above, see docs/HISTORY.md §2n.)
+JS_PAGE_AT_TOP = r"""(n) => { const b = document.querySelectorAll('.rd-band')[n - 1], p = document.querySelector('#rd-pdf'); if (!b || !p) return false; const d = b.getBoundingClientRect().top - p.getBoundingClientRect().top; return d >= 0 && d < 150; }"""
 JS_A11Y = r"""() => {
   const out = {noname: [], dupid: [], tiny: [], smalltext: []};
   const vis = e => { const r = e.getBoundingClientRect(), cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
@@ -579,8 +582,11 @@ def main():
             page.check("#rf-refs") if page.locator("#rf-refs").count() else None
             check("references can be shown when you want them", page.locator("#rf-refs").count() == 0 or page.locator(".rf-p.ref").count() >= 1)
             page.locator('.rf-p[data-page="2"] .rf-n').first.click(); page.wait_for_function("document.querySelector('#rd-pdf') && !document.querySelector('#rd-pdf').classList.contains('hide')")
-            page.wait_for_function("document.querySelector('#rd-num').value === '2'", timeout=8000)
-            check("clicking a page number leaves the text view and opens that page of the PDF", page.input_value("#rd-num") == "2" and page.locator("#rd-pdf").is_visible() and not page.locator(".rd-reflow:not(.hide)").count())
+            try:
+                page.wait_for_function(JS_PAGE_AT_TOP, arg=2, timeout=8000)
+            except Exception:  # noqa: BLE001
+                pass
+            check("clicking a page number leaves the text view and opens that page of the PDF", page.evaluate(JS_PAGE_AT_TOP, 2) and page.locator("#rd-pdf").is_visible() and not page.locator(".rd-reflow:not(.hide)").count())
 
             print("reader: the notes canvas: Markdown notes, zoom, arrows, frames, outline")
             page.click('.rd-tabs button[data-tab="notes"]'); page.wait_for_selector(".nc-card")
@@ -609,8 +615,12 @@ def main():
             check("Enter puts a Markdown link in the note", re.search(r"\[[^\]]*Big idea[^\]]*\]\(jw:card/\w+\)", ta2.input_value()) is not None, ta2.input_value())
             ta2.type("and //2"); page.wait_for_selector(".nc-ref button"); page.keyboard.press("Enter"); page.click("#nc-pn"); page.wait_for_selector('.nc-card.note >> nth=1 >> .nc-md a[href^="jw:page/2"]')
             check("//2 links to page 2", "jw:page/2" in ta2.input_value() or page.locator('.nc-card.note >> nth=1 >> .nc-md a[href="jw:page/2"]').count() == 1)
-            page.click('.nc-card.note >> nth=1 >> .nc-md a[href="jw:page/2"]'); page.wait_for_function("document.querySelector('#rd-num').value === '2'", timeout=8000)
-            check("clicking a page link turns to that page", page.input_value("#rd-num") == "2")
+            page.click('.nc-card.note >> nth=1 >> .nc-md a[href="jw:page/2"]')
+            try:
+                page.wait_for_function(JS_PAGE_AT_TOP, arg=2, timeout=8000)
+            except Exception:  # noqa: BLE001
+                pass
+            check("clicking a page link turns to that page", page.evaluate(JS_PAGE_AT_TOP, 2))
             page.click('.nc-card.note >> nth=1 >> .nc-md a[href^="jw:card/"]'); page.wait_for_selector(".nc-card.new")
             check("clicking a card link brings that card into view and lights it", page.locator(".nc-card.new").count() >= 1)
             page.click(".nc-card.note >> nth=0 >> [data-c=conn]"); page.wait_for_selector(".nc-connhint:not(.hide)")
