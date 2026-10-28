@@ -640,22 +640,21 @@ function paintSignins() {
 }
 // One message per sign-in outcome, however it is noticed: the server's event stream (with the reason, if it failed) or, if that stream missed it (the window was asleep,
 // the connection was being re-made), a look at the status a few seconds after the window was opened.
-const ANNOUNCED = {};
+const ANNOUNCED = {}, DONE_AT = {};
 const sikey = k => { const e = (SI && SI[k]) || {}; return (e.at || "") + "|" + (e.failed_at || ""); };
 function announceSignin(site, info) {
-  const key = sikey(site); if (ANNOUNCED[site] === key) return; ANNOUNCED[site] = key;
+  const key = sikey(site); if (ANNOUNCED[site] === key) return; ANNOUNCED[site] = key; DONE_AT[site] = Date.now();
   const who = info.name || ({informs: "INFORMS", ais: "AIS", library: (SI && SI.library && SI.library.name) || "your library", publishers: "the publisher sites"})[site] || site;
   toast(info.signed_in ? (site === "publishers" ? "Sign-in window closed; your sessions are saved." : `✓ Signed in to ${who}. Press “Download whole queue” to fetch the blocked papers.`)
     : `${who} sign-in wasn’t completed.${info.error ? " " + info.error : ""}`);
 }
-function watchSignin(site) {
-  const before = sikey(site); let seen = false, n = 0;
+function watchSignin(site, before) {
+  let seen = false, n = 0;
   const t = setInterval(async () => {
     n++; await loadSignins();
-    if (SI && SI.pending === site) { seen = true; return; }
-    if (!seen && n < 4) return;                        // the window may not have opened yet
-    clearInterval(t);
-    if (sikey(site) !== before) announceSignin(site, {signed_in: !!(SI[site] && SI[site].signed_in)});
+    const running = SI && SI.pending === site; if (running) seen = true;
+    if (!running && sikey(site) !== before) { clearInterval(t); announceSignin(site, {signed_in: !!(SI[site] && SI[site].signed_in)}); return; }
+    if (!running && (seen || n >= 4)) clearInterval(t);          // it ended without a new result, or never started
   }, 1200);
 }
 function signIn(which) {
@@ -666,7 +665,8 @@ function signIn(which) {
     informs: "An INFORMS sign-in window is opening: log in with your member account; it closes by itself.",
     ais: "An AIS eLibrary sign-in window is opening: log in with your member account; it closes by itself.",
     publishers: "A browser window is opening with one tab per publisher — sign in, then close it."}[which === "nova" ? "library" : which];
-  return api("/api/login", {which}).then(() => { toast(msg); loadSignins(); watchSignin(which === "nova" ? "library" : which); }).catch(e => { toast(e.message); if (/library first/i.test(e.message)) Settings.open("library"); });
+  const site = which === "nova" ? "library" : which, before = sikey(site), t0 = Date.now();
+  return api("/api/login", {which}).then(() => { if (!(DONE_AT[site] > t0)) toast(msg); loadSignins(); watchSignin(site, before); }).catch(e => { toast(e.message); if (/library first/i.test(e.message)) Settings.open("library"); });
 }
 $("#signinbtn").onclick = e => { e.stopPropagation(); loadSignins(); $("#signinmenu").classList.toggle("hide"); };
 $("#signinmenu").onclick = e => { const b = e.target.closest("[data-which]"); if (b) signIn(b.dataset.which); };
