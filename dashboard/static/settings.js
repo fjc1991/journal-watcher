@@ -30,6 +30,7 @@ export async function open(t) {
 }
 function render() {
   $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+  if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
   const body = $("#st-body", root);
   ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, look: renderLook, about: renderAbout})[tab](body);
 }

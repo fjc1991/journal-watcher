@@ -402,7 +402,8 @@ def main():
                 page.wait_for_function("document.querySelectorAll('.ft-s mark').length >= 2", timeout=10000)      # the words are marked as the results settle
             except Exception:  # noqa: BLE001
                 pass
-            check("In the PDFs finds the words inside the papers (the passage, its paper and page, the words marked)", page.locator(".ft-i").count() >= 1 and "p. 1" in page.inner_text(".ft-h") and page.locator(".ft-s mark").count() >= 2 and "Transparent governance rules attract" in page.inner_text(".ft-s"), page.inner_text("#lib-results")[:300])
+            check("In the PDFs finds the words inside the papers (the passage, its paper and page, the words marked)", page.locator(".ft-i").count() >= 1 and "p. 1" in page.inner_text(".ft-h") and page.locator(".ft-s mark").count() >= 2 and "Transparent governance rules attract" in page.inner_text(".ft-s"),
+                  page.evaluate("[document.querySelectorAll('.ft-i').length, (document.querySelector('.ft-h') || {}).innerText, document.querySelectorAll('.ft-s mark').length, ((document.querySelector('.ft-s') || {}).innerText || '').slice(0, 60)]"))
             page.fill("#lf-q", '"no such phrase anywhere"'); page.click("#lf-ft"); page.wait_for_selector("text=Not found in the PDFs")
             page.fill("#lf-q", "transparent governance"); page.click("#lf-ft"); page.wait_for_selector(".ft-i")
             page.click(".ft-i >> nth=0"); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
@@ -875,6 +876,7 @@ def main():
             mx = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))
             check("the matrix is saved beside the folder", len(mx["custom"]) == 1 and sum(len(v) for v in mx["cells"].values()) == 3 and all(c["cites"] for v in mx["cells"].values() for c in v.values()))
             page.locator('table.mx td .mx-edit >> nth=0').click(); page.fill("td textarea.cd-ed, textarea.cd-ed", "Tenure, from my own reading"); page.keyboard.press("Control+Enter"); page.wait_for_selector('td:has-text("from my own reading")')
+            page.wait_for_selector('[data-k="fill"]', state="detached")      # the fill ends with one more redraw; a cell opened for editing before it would be thrown away
             check("writing in a cell keeps your words and marks them", any(c.get("edited") for v in json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))["cells"].values() for c in v.values()))
             page.click('[data-k="cols"]'); page.locator('#mx-colmenu label:has-text("Research question") input').uncheck(); page.wait_for_function("document.querySelectorAll('table.mx thead th[data-col]').length === 5")
             check("columns can be switched off from the Columns menu", "Research question" not in page.inner_text("table.mx thead"))
@@ -947,7 +949,12 @@ def main():
             page.reload(); page.wait_for_selector("#libitem"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs")
             page.click('.fvtabs [data-ft="claims"]'); page.wait_for_selector(".cl-row")
             check("after a reload the review is still there", page.locator("#cl-rev .rv2-i").count() >= 3)
-            check("after a reload the result and your text are as you left them", page.locator(".cl-row").count() == 5 and "SUPPORTME" in page.input_value("#cl-text") and page.locator(".cl-row.done").count() == 1 and page.locator(".cl-s input:checked").count() == 5)
+            try:
+                page.wait_for_function("document.querySelectorAll('.cl-s input').length === 5", timeout=10000)      # the sentence list comes from a second request (the estimate)
+            except Exception:  # noqa: BLE001
+                pass
+            check("after a reload the result and your text are as you left them", page.locator(".cl-row").count() == 5 and "SUPPORTME" in page.input_value("#cl-text") and page.locator(".cl-row.done").count() == 1 and page.locator(".cl-s input:checked").count() == 5,
+                  page.evaluate("[document.querySelectorAll('.cl-row').length, document.querySelectorAll('.cl-row.done').length, document.querySelectorAll('.cl-s input:checked').length, document.querySelector('#cl-text').value.slice(0, 40)]"))
             check("it ran as a job in the activity list", any(j["kind"] == "claims" and j["status"] == "done" for j in api("/api/activity")["jobs"]))
 
             print("round 3: synthesis")
@@ -1306,7 +1313,8 @@ def main():
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")
             page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)")
-            check("Ctrl+K opens the palette; with nothing typed it offers pages, folders and actions", page.locator("#pal .pal-it").count() >= 8 and all(x in page.inner_text("#pal-list") for x in ("Library", "Folders", "Lab", "Settings")) and page.evaluate("document.activeElement.id") == "pal-q")
+            page.wait_for_selector("#sbfolders .sbf")      # the palette lists the folders the page has loaded by then
+            check("Ctrl+K opens the palette; with nothing typed it offers pages, folders and actions", page.locator("#pal .pal-it").count() >= 8 and all(x in page.inner_text("#pal-list") for x in ("Library", "Folders", "Lab", "Settings")) and page.evaluate("document.activeElement.id") == "pal-q", page.evaluate("[document.querySelectorAll('#pal .pal-it').length, document.activeElement.id, document.querySelector('#pal-list').innerText.slice(0, 160)]"))
             page.keyboard.type("complement")
             check("typing finds a paper by words in its title, with the match marked", "Open Platforms and Complementors" in page.inner_text("#pal-list") and page.locator("#pal mark").count() >= 1)
             page.keyboard.press("Enter"); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
