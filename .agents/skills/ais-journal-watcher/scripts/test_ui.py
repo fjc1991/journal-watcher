@@ -402,8 +402,8 @@ def main():
             page.fill("#lf-q", "complementors"); page.wait_for_selector("#lib-results .librow")
             check("search finds a paper by its text", "Open Platforms" in page.inner_text("#lib-results"))
             page.fill("#lf-q", "transparent governance rules"); page.click("#lf-ft"); page.wait_for_selector(".ft-i", timeout=30000)
-            try:
-                page.wait_for_function("document.querySelectorAll('.ft-s mark').length >= 2", timeout=10000)      # the words are marked as the results settle
+            try:      # the results can be drawn again a moment after they first appear (the list refreshes), so wait for all that the check below needs, at once
+                page.wait_for_function("document.querySelectorAll('.ft-i').length >= 1 && /p\\. 1/.test((document.querySelector('.ft-h') || {}).innerText || '') && document.querySelectorAll('.ft-s mark').length >= 2 && ((document.querySelector('.ft-s') || {}).innerText || '').includes('Transparent governance rules attract')", timeout=10000)
             except Exception:  # noqa: BLE001
                 pass
             check("In the PDFs finds the words inside the papers (the passage, its paper and page, the words marked)", page.locator(".ft-i").count() >= 1 and "p. 1" in page.inner_text(".ft-h") and page.locator(".ft-s mark").count() >= 2 and "Transparent governance rules attract" in page.inner_text(".ft-s"),
@@ -1430,6 +1430,7 @@ def main():
             api("/api/update/settings", {"skipped": ""})
             page.click("#settingsbtn"); page.wait_for_selector("#st-body"); page.click('.st-tabs button[data-t="about"]'); page.wait_for_selector("#ab-go")
             check("Settings → About & updates shows the version, where your data lives and what the update status is", "1.0.0" in page.inner_text("#st-body") and TMP in page.inner_text("#st-body") and "9.9.9" in page.inner_text("#st-body"), page.inner_text("#st-body")[:300])
+            check("…and says whether the update's digital signature is checked (this test copy has no signing key built in, so it says it only checks the checksum)", "does not check" in page.inner_text("#ab-sig") and api("/api/update")["signed"] is False, page.inner_text("#ab-sig"))
             page.uncheck("#ab-auto"); page.wait_for_timeout(300)
             check("the automatic check can be switched off, and stays off", api("/api/update")["auto"] is False); page.check("#ab-auto"); page.wait_for_timeout(300)
             page.click("#ab-welcome"); page.wait_for_selector("dialog.wl[open]")
