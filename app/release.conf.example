@@ -1,0 +1,15 @@
+# Releasing through GitHub needs none of this: push a tag (see README → "Build the Mac app, and release it").
+# This file is for publishing by hand from your own Mac to any folder that is synced or served (Dropbox, a website …) with app/release.sh.
+# Copy to app/release.conf and edit. Sourced by app/release.sh (plain bash).
+#
+# Where release.sh puts the files so that people can reach them. A folder that is synced or served:
+PUBLISH_DIR="$HOME/Dropbox/Journal Watcher Releases"
+# The web address of the update zip. A fixed name that is overwritten each time (simple with Dropbox: one shared link that never changes)…
+ZIP_NAME_TEMPLATE="Journal-Watcher-latest.zip"
+ZIP_URL_TEMPLATE="https://www.dropbox.com/scl/fi/XXXX/Journal-Watcher-latest.zip?rlkey=YYYY&dl=1"
+# …or one file per version, with {version} in both (a website, GitHub releases):
+#   ZIP_NAME_TEMPLATE="Journal-Watcher-{version}.zip"
+#   ZIP_URL_TEMPLATE="https://example.com/jw/Journal-Watcher-{version}.zip"
+#
+# The address of appcast.json goes in app/update_feed.txt (one line), and is built into every app, e.g.
+#   https://www.dropbox.com/scl/fi/ZZZZ/appcast.json?rlkey=WWWW&dl=1

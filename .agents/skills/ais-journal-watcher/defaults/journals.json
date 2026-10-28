@@ -1,0 +1,150 @@
+{
+  "_comment": "Journals monitored. source: rss (use 'feed') or crossref (use 'issn'). publisher drives the PDF route: aisel | informs | wiley | tandfonline | elsevier | acm | aaas | pnas | nber | hbr. per_year = approx. articles/year (archive-search cost estimate). archive:false = not searchable by year. Journals without an ISSN are searched by doi_prefix.",
+  "journals": [
+    {
+      "name": "MIS Quarterly",
+      "abbr": "MISQ",
+      "publisher": "aisel",
+      "source": "rss",
+      "feed": "http://aisel.aisnet.org/misq/recent.rss",
+      "issn": "0276-7783",
+      "doi_prefix": "10.25300",
+      "per_year": 65
+    },
+    {
+      "name": "Information Systems Research",
+      "abbr": "ISR",
+      "publisher": "informs",
+      "source": "rss",
+      "feed": "https://pubsonline.informs.org/action/showFeed?type=etoc&feed=rss&jc=isre",
+      "issn": "1047-7047",
+      "doi_prefix": "10.1287",
+      "per_year": 105
+    },
+    {
+      "name": "Journal of the AIS",
+      "abbr": "JAIS",
+      "publisher": "aisel",
+      "source": "rss",
+      "feed": "http://aisel.aisnet.org/jais/recent.rss",
+      "issn": "1536-9323",
+      "doi_prefix": "10.17705",
+      "per_year": 60
+    },
+    {
+      "name": "Journal of Management Information Systems",
+      "abbr": "JMIS",
+      "publisher": "tandfonline",
+      "source": "rss",
+      "feed": "https://jmis-web.org/jmis.xml",
+      "issn": "0742-1222",
+      "doi_prefix": "10.1080",
+      "per_year": 50
+    },
+    {
+      "name": "Information Systems Journal",
+      "abbr": "ISJ",
+      "publisher": "wiley",
+      "source": "rss",
+      "feed": "https://onlinelibrary.wiley.com/feed/13652575/most-recent",
+      "issn": "1350-1917",
+      "doi_prefix": "10.1111",
+      "per_year": 70
+    },
+    {
+      "name": "Decision Support Systems",
+      "abbr": "DSS",
+      "publisher": "elsevier",
+      "source": "rss",
+      "feed": "https://rss.sciencedirect.com/publication/science/01679236",
+      "issn": "0167-9236",
+      "doi_prefix": "10.1016",
+      "per_year": 105
+    },
+    {
+      "name": "Management Science",
+      "abbr": "MS",
+      "publisher": "informs",
+      "source": "crossref",
+      "feed": null,
+      "issn": "0025-1909",
+      "doi_prefix": "10.1287",
+      "per_year": 440
+    },
+    {
+      "name": "Manufacturing & Service Operations Management",
+      "abbr": "MSOM",
+      "publisher": "informs",
+      "source": "rss",
+      "feed": "https://pubsonline.informs.org/action/showFeed?type=etoc&feed=rss&jc=msom",
+      "issn": "1523-4614",
+      "doi_prefix": "10.1287",
+      "per_year": 140
+    },
+    {
+      "name": "Organization Science",
+      "abbr": "ORSC",
+      "publisher": "informs",
+      "source": "rss",
+      "feed": "https://pubsonline.informs.org/action/showFeed?type=etoc&feed=rss&jc=orsc",
+      "issn": "1047-7039",
+      "doi_prefix": "10.1287",
+      "per_year": 110
+    },
+    {
+      "name": "Communications of the ACM",
+      "abbr": "CACM",
+      "publisher": "acm",
+      "source": "crossref",
+      "feed": null,
+      "issn": "0001-0782",
+      "doi_prefix": "10.1145",
+      "per_year": 275
+    },
+    {
+      "name": "Science",
+      "abbr": "SCI",
+      "publisher": "aaas",
+      "source": "rss",
+      "feed": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science",
+      "issn": "0036-8075",
+      "doi_prefix": "10.1126",
+      "per_year": 2040
+    },
+    {
+      "name": "PNAS",
+      "abbr": "PNAS",
+      "publisher": "pnas",
+      "source": "rss",
+      "feed": "https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas",
+      "issn": "0027-8424",
+      "doi_prefix": "10.1073",
+      "per_year": 3950
+    },
+    {
+      "name": "NBER Working Papers",
+      "abbr": "NBER",
+      "publisher": "nber",
+      "source": "rss",
+      "feed": "https://www.nber.org/rss/new.xml",
+      "issn": null,
+      "doi_prefix": "10.3386",
+      "crossref_type": "report",
+      "per_year": 1300
+    },
+    {
+      "name": "Harvard Business Review",
+      "abbr": "HBR",
+      "publisher": "hbr",
+      "source": "rss",
+      "feed": "http://feeds.hbr.org/harvardbusiness",
+      "issn": null,
+      "doi_prefix": null,
+      "lookup": false,
+      "archive": false,
+      "base_url": "https://hbr.org",
+      "per_year": null,
+      "_note": "Digital articles feed (no DOIs, not in Crossref): weekly checks only; saved as PDF from the article page."
+    }
+  ]
+}

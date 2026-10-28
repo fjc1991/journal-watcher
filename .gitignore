@@ -1,0 +1,35 @@
+# Your data and keys never go in the repository
+.env
+**/.env
+Papers/
+.agents/skills/ais-journal-watcher/state/
+# your own settings (the generic starting versions are in defaults/)
+.agents/skills/ais-journal-watcher/ai.json
+.agents/skills/ais-journal-watcher/interests.json
+.agents/skills/ais-journal-watcher/journals.json
+.agents/skills/ais-journal-watcher/library.json
+.agents/skills/ais-journal-watcher/prompts.json
+.agents/skills/ais-journal-watcher/update.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# macOS and editors
+.DS_Store
+.vscode/
+.claude/
+
+# the Mac app: build environment, outputs, personal release settings
+app/.buildenv/
+app/build/
+app/dist/
+app/release/
+app/release.conf
+app/update_feed.txt
+app/suggested_home.txt
+
+# test scratch
+jw-*/

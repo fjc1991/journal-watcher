@@ -1,0 +1,1511 @@
+#!/usr/bin/env python3
+"""Journal Watcher dashboard server (stdlib only, plus the pipeline's deps).
+
+    python dashboard/server.py [--port 8765] [--no-open]
+
+Serves dashboard/index.html, dashboard/static/ (the PDF reader) and a small
+JSON API; live progress is pushed to the page with Server-Sent Events
+(/api/events). One job runs at a time because downloads share one browser
+profile. Reader requests (notes, AI) run in their own request threads, outside
+that lock, so reading never waits for a download.
+"""
+import json
+import mimetypes
+import os
+import queue
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import traceback
+import urllib.parse
+import urllib.request
+import webbrowser
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_DEV_SCRIPTS = os.path.join(os.path.dirname(_HERE), ".agents", "skills", "ais-journal-watcher", "scripts")
+if os.path.isdir(_DEV_SCRIPTS):          # run from the project folder; as the Mac app the modules are in the bundle
+    sys.path.insert(0, _DEV_SCRIPTS)
+import paths  # noqa: E402     where the code (HERE: the dashboard, SCRIPTS) and your data (ROOT) are: see paths.py
+HERE, ROOT, SCRIPTS = paths.DASHBOARD, paths.ROOT, paths.SCRIPTS
+sys.path.insert(0, SCRIPTS)
+import activity  # noqa: E402
+import aifiles  # noqa: E402
+import authorcache as ac  # noqa: E402
+import bibimport  # noqa: E402
+import exports  # noqa: E402
+import folders as fo  # noqa: E402
+import importer  # noqa: E402
+import library_search as ls  # noqa: E402
+import notes_store as ns  # noqa: E402
+import pipeline as pl  # noqa: E402
+import prefs  # noqa: E402
+import signins  # noqa: E402
+import updater  # noqa: E402
+import smart  # noqa: E402
+import readstate as rs  # noqa: E402
+import refs as rf  # noqa: E402
+try:   # the reader's AI features; the dashboard still runs without them
+    import ai  # noqa: E402
+    import ask  # noqa: E402
+    import audio  # noqa: E402
+    import citeuse  # noqa: E402
+    import claims  # noqa: E402
+    import explain  # noqa: E402
+    import evidence  # noqa: E402
+    import flashcards  # noqa: E402
+    import fulltext  # noqa: E402
+    import ideas  # noqa: E402
+    import indexer  # noqa: E402
+    import matrix  # noqa: E402
+    import multiask  # noqa: E402
+    import papercard  # noqa: E402
+    import personal  # noqa: E402
+    import related  # noqa: E402
+    import relatedwork  # noqa: E402
+    import reviewer  # noqa: E402
+    import skim  # noqa: E402
+    import synthesis  # noqa: E402
+    import workspace  # noqa: E402
+except ImportError as _e:
+    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = synthesis = workspace = personal = None
+    print("AI features unavailable (%s) — run: pip install -r requirements.txt" % _e)
+
+STATIC = os.path.join(HERE, "static")
+mimetypes.add_type("text/javascript", ".mjs")
+
+
+# ---------------------------------------------------------------- live events
+
+class Hub:
+    def __init__(self):
+        self.clients = set()
+        self.lock = threading.Lock()
+
+    def subscribe(self):
+        q = queue.Queue(maxsize=5000)
+        with self.lock:
+            self.clients.add(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self.lock:
+            self.clients.discard(q)
+
+    def emit(self, event, data):
+        msg = "event: %s\ndata: %s\n\n" % (event, json.dumps(data, ensure_ascii=False))
+        with self.lock:
+            for q in list(self.clients):
+                try:
+                    q.put_nowait(msg)
+                except queue.Full:
+                    pass
+
+
+HUB = Hub()
+activity.set_emitter(HUB.emit)        # the activity tray follows AI jobs through the same event stream as everything else
+
+
+# ---------------------------------------------------------------- jobs
+
+class Jobs:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.thread = None
+        self.stop = threading.Event()
+        self.run = None        # the run currently shown / being worked on
+        self.kind = None       # what the job is doing: fetch | download | login
+
+    def busy(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self, kind, fn, run=None):
+        with self.lock:
+            if self.busy():
+                return False
+            self.stop = threading.Event()
+            self.kind = kind
+            if run is not None:
+                self.run = run
+            self.thread = threading.Thread(target=self._wrap, args=(fn,), daemon=True)
+            self.thread.start()
+            return True
+
+    def _wrap(self, fn):
+        run = self.run
+        try:
+            if run is not None:
+                run.status = "running"
+                HUB.emit("job", {"busy": True, "kind": self.kind, "run": run.to_dict(full=False)})
+            fn()
+            if run is not None:
+                run.status = "stopped" if self.stop.is_set() else "done"
+        except Exception as e:
+            traceback.print_exc()
+            if run is not None:
+                run.status = "error"
+                run.errors.append(str(e)[:300])
+            HUB.emit("log", {"msg": "Error: %s" % str(e)[:300], "level": "error"})
+        finally:
+            if run is not None:
+                run.stage = "ready"
+                pl.mark_downloaded(run)
+                run.save(force=True)
+            HUB.emit("job", {"busy": False, "kind": self.kind,
+                             "run": run.to_dict(full=False) if run else None})
+            if self.kind == "download" and indexer:
+                indexer.kick(3)                  # new papers: read them into the index for Ask (the local model only; see indexer.py)
+            self.kind = None
+
+
+JOBS = Jobs()
+
+
+def emit_for(run):
+    def emit(event, data):
+        if event == "progress":
+            run.stage = data.get("stage", run.stage)
+        HUB.emit(event, data)
+    return emit
+
+
+def start_fetch(run):
+    def job():
+        emit = emit_for(run)
+        if run.kind == "weekly":
+            run.checks.append(datetime.now(timezone.utc).isoformat())
+            emit("log", {"msg": "Check %d for %s (new papers are added to this week)"
+                         % (len(run.checks), run.title())})
+        else:
+            emit("log", {"msg": "Started: %s" % run.title()})
+        if run.kind == "weekly":
+            pl.fetch_weekly(run, emit, JOBS.stop)
+        else:
+            pl.fetch_search(run, emit, JOBS.stop)
+        pl.mark_downloaded(run)
+        if not JOBS.stop.is_set() and run.order:
+            pl.screen(run, emit, JOBS.stop)
+        n_dl = sum(1 for p in run.papers.values() if p.get("verdict") == "download")
+        n_bl = sum(1 for p in run.papers.values() if p.get("verdict") == "borderline")
+        emit("log", {"msg": "Finished: %d papers, %d to download, %d borderline · $%.2f"
+                     % (len(run.order), n_dl, n_bl, run.usage.cost()), "level": "ok"})
+    return JOBS.start("fetch", job, run)
+
+
+def start_download(ids):
+    run = JOBS.run
+
+    def job():
+        pl.download_and_summarize(run, ids, emit_for(run), JOBS.stop)
+        ok = sum(1 for i in ids if run.papers.get(i, {}).get("dl_status") == "ok")
+        HUB.emit("log", {"msg": "Downloads finished: %d of %d" % (ok, len(ids)), "level": "ok"})
+    return JOBS.start("download", job)
+
+
+def _why(r):
+    """The reason a helper process gave for failing: the last line of what it printed to stderr (a Python traceback ends with it)."""
+    lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip() and not l.strip().startswith(("║", "╔", "╚", "File ", "^", "~"))]
+    return lines[-1][:200] if r.returncode != 0 and lines else ""
+
+
+LOGIN_PENDING = {"site": ""}        # which sign-in window is open right now ("" = none)
+
+
+def start_login(which="publishers"):
+    """Open a browser window for one kind of sign-in (informs | ais | library | publishers) and remember whether it worked: signins.record, and a "signin" event
+    ({site, state: opened|done, signed_in, error, status}) so the page can tick the right row."""
+    which = "library" if which == "nova" else which
+    if which not in signins.SITES:
+        which = "publishers"
+
+    def job():
+        LOGIN_PENDING["site"] = which
+        lib = signins.profile()
+        label = {"informs": "INFORMS", "ais": "AIS", "library": lib["name"] or "Your library", "publishers": "The publisher sign-in pages"}[which]
+        HUB.emit("signin", {"site": which, "state": "opened", "name": label})
+        try:
+            HUB.emit("log", {"msg": ("%s sign-in opened: enter your password; the window closes by itself." % label) if which != "publishers" else "Login window opened — sign in on each tab you have access to, then close the browser window."})
+            cmd = {"informs": ("member-login", "informs"), "ais": ("member-login", "ais"), "library": ("library-login",), "publishers": ("login",)}[which]
+            r = subprocess.run(paths.cmd("browser.py", *cmd), cwd=ROOT, capture_output=True, text=True)
+            ok = "Signed in to" in r.stdout if which != "publishers" else r.returncode == 0
+            why = "" if ok else _why(r)
+            signins.record(which, ok)
+            msg = {"informs": "Signed in to INFORMS.", "ais": "Signed in to AIS.", "library": "Signed in to %s." % label, "publishers": "Sign-in window closed; the sessions are saved."}[which]
+            HUB.emit("log", {"msg": msg if ok else "%s sign-in not completed.%s" % (label, " " + why if why else ""), "level": "ok" if ok else "warn"})
+            HUB.emit("signin", {"site": which, "state": "done", "signed_in": ok, "error": why, "name": label, "status": signins.status()})
+        finally:
+            LOGIN_PENDING["site"] = ""
+    return JOBS.start("login", job)
+
+
+# ---------------------------------------------------------------- http
+
+def config():
+    import datetime
+    y = datetime.date.today().year
+    return {
+        "journals": [{"abbr": j["abbr"], "name": j["name"], "publisher": j["publisher"],
+                      "per_year": j.get("per_year"), "archive": j.get("archive", True)}
+                     for j in pl.journals()],
+        "topics": pl.topic_labels(),
+        "methods": [{"label": m.get("label", m["name"]), "description": m.get("description", "")}
+                    for m in pl.methods()],
+        "years": list(range(y, 1999, -1)),
+        "openalex_key": bool(pl.fx.openalex_key()),
+        "est_cost_per_paper": pl.EST_SCREEN_COST_PER_PAPER,
+        "model": pl.MODEL,
+        "this_week": pl.week_of(),
+        "this_week_label": pl.week_label(pl.week_of()),
+        "home": ROOT,                                            # where your data lives (the welcome guide and Settings say so)
+        "app": {"frozen": paths.FROZEN, "version": updater.version()},
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        if "/api/events" not in str(args[0] if args else ""):
+            sys.stderr.write("  %s\n" % (fmt % args))
+
+    def send_json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_file(self, path, ctype=None, cache="no-store"):
+        """Whole file or a byte range (PDF.js reads PDFs in ranges). cache="no-cache" adds an ETag so the
+        browser revalidates instead of re-downloading a 20 MB PDF every time."""
+        if not os.path.isfile(path):
+            return self.send_json({"error": "not found"}, 404)
+        st = os.stat(path)
+        size = st.st_size
+        etag = '"%x-%x"' % (st.st_mtime_ns, size)
+        if cache == "no-cache" and self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        start, end, code = 0, size - 1, 200
+        m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range") or "")
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start, end = int(m.group(1)), min(int(m.group(2) or end), size - 1)
+            else:  # "-N": the last N bytes
+                start = max(0, size - int(m.group(2)))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", "bytes */%d" % size)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            code = 206
+        self.send_response(code)
+        self.send_header("Content-Type", ctype or mimetypes.guess_type(path)[0] or "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        if code == 206:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Cache-Control", cache)
+        if cache == "no-cache":
+            self.send_header("ETag", etag)
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the viewer cancelled a range it no longer needs
+
+    def body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+
+    def local_only(self):
+        """Host/Origin guard for POSTs: they spend API money and write notes, and the server has no login, so refuse
+        anything that isn't the dashboard page itself (cross-site forms, DNS rebinding)."""
+        local = ("localhost", "127.0.0.1", "::1")
+        if (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower() not in local:
+            return False
+        origin = self.headers.get("Origin")
+        return not origin or (urllib.parse.urlsplit(origin).hostname or "") in local
+
+    def send_bytes(self, data, ctype, filename=None):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(filename))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_temp_file(self, path, ctype, filename):
+        """Stream a temporary file as a download, then delete it."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(os.path.getsize(path)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(filename))
+            self.end_headers()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def rows_for(self, q):
+        """Library rows picked by ?folder=<id> or one-or-more ?file=<Papers/…pdf>; no selector = the whole library."""
+        rows = pl.library()
+        if q.get("folder"):
+            f = fo.get(q["folder"][0])
+            if not f:
+                return None
+            keys = set(f["papers"])
+            return [r for r in rows if r["key"] in keys]
+        if q.get("file"):
+            want = set(q["file"])
+            return [r for r in rows if r["file"] in want]
+        return rows
+
+    def folder_rows(self, fid):
+        f = fo.get(fid)
+        if not f:
+            return None, None
+        keys = set(f["papers"])
+        return f, [r for r in pl.library() if r["key"] in keys]
+
+    def scope_rows(self, s):
+        """Library rows picked by a scope: {folder?, journal?, year?, tag?, status?, star?} (all optional; none = the whole library)."""
+        rows = pl.library()
+        if s.get("folder"):
+            f = fo.get(str(s["folder"]))
+            if not f:
+                return None
+            keys = set(f["papers"])
+            rows = [r for r in rows if r["key"] in keys]
+        if any(s.get(k) for k in ("journal", "year", "tag", "status", "star")):
+            keep = {h["file"] for h in ls.search(rows, "", str(s.get("status") or ""), bool(s.get("star")), "", str(s.get("journal") or ""), str(s.get("year") or ""), str(s.get("tag") or ""))}
+            rows = [r for r in rows if r["file"] in keep]
+        return rows
+
+    def export(self, what, q):
+        if what == "matrix":
+            f, rows = self.folder_rows((q.get("folder") or [""])[0]) if matrix else (None, None)
+            if not f:
+                return self.send_json({"error": "open a folder first"}, 404)
+            fmt = (q.get("fmt") or ["csv"])[0]
+            makers = {"csv": (lambda: matrix.csv_bytes(f["id"], rows), "text/csv; charset=utf-8"), "md": (lambda: matrix.markdown(f["id"], rows).encode(), "text/markdown; charset=utf-8"),
+                      "tex": (lambda: matrix.latex(f["id"], rows).encode(), "application/x-tex; charset=utf-8"),
+                      "docx": (lambda: matrix.docx_bytes(f["id"], rows), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
+            if fmt not in makers:
+                return self.send_json({"error": "unknown format"}, 400)
+            return self.send_bytes(makers[fmt][0](), makers[fmt][1], "%s-comparison.%s" % (f["name"], fmt))
+        if what == "draft":
+            f = fo.get((q.get("folder") or [""])[0]) if relatedwork else None
+            doc = relatedwork.load(f["id"]) if f else None
+            if not doc:
+                return self.send_json({"error": "write the related-work draft first"}, 404)
+            if (q.get("fmt") or ["md"])[0] == "docx":
+                return self.send_bytes(relatedwork.docx(doc, f["name"]), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f["name"] + "-related-work.docx")
+            if (q.get("fmt") or ["md"])[0] == "tex":
+                return self.send_bytes(relatedwork.latex(doc, f["name"]).encode(), "application/x-tex; charset=utf-8", f["name"] + "-related-work.tex")
+            if (q.get("fmt") or ["md"])[0] == "bib":      # the references of the papers the text cites, with the keys \\citep uses
+                cited = [r for r in self.folder_rows(f["id"])[1] if r["file"] in {p["file"] for pid, p in doc["papers"].items() if pid in relatedwork.render(doc)["cited"]}]
+                return self.send_bytes(exports.bibtex(cited).encode(), "application/x-bibtex; charset=utf-8", f["name"] + "-related-work.bib")
+            return self.send_bytes(relatedwork.markdown(doc, f["name"]).encode(), "text/markdown; charset=utf-8", f["name"] + "-related-work.md")
+        if what == "workspace":
+            f, rows = self.folder_rows((q.get("folder") or [""])[0]) if workspace else (None, None)
+            doc = workspace.load(f["id"]) if f else None
+            if not doc or not (doc["cards"] or doc["frames"]):
+                return self.send_json({"error": "the workspace is empty"}, 404)
+            if (q.get("fmt") or ["md"])[0] == "docx":
+                return self.send_bytes(workspace.docx(doc, f["name"], rows), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f["name"] + "-workspace.docx")
+            return self.send_bytes(workspace.markdown(doc, f["name"], rows).encode(), "text/markdown; charset=utf-8", f["name"] + "-workspace.md")
+        if what == "review":
+            f = fo.get((q.get("folder") or [""])[0]) if reviewer else None
+            doc = reviewer.load(f["id"]) if f else None
+            if not doc:
+                return self.send_json({"error": "ask Reviewer 2 first"}, 404)
+            return self.send_bytes(reviewer.markdown(doc, f["name"]).encode(), "text/markdown; charset=utf-8", f["name"] + "-reviewer2.md")
+        if what == "synthesis":
+            f = fo.get((q.get("folder") or [""])[0]) if synthesis else None
+            doc = synthesis.load(f["id"]) if f else None
+            if not doc:
+                return self.send_json({"error": "make the synthesis first"}, 404)
+            if (q.get("fmt") or ["md"])[0] == "docx":
+                return self.send_bytes(synthesis.docx(doc, f["name"]), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f["name"] + "-synthesis.docx")
+            return self.send_bytes(synthesis.markdown(doc, f["name"]).encode(), "text/markdown; charset=utf-8", f["name"] + "-synthesis.md")
+        if what == "claims":
+            f = fo.get((q.get("folder") or [""])[0]) if claims else None
+            doc = claims.load(f["id"]) if f else None
+            if not doc:
+                return self.send_json({"error": "check some claims first"}, 404)
+            if (q.get("fmt") or ["md"])[0] == "docx":
+                return self.send_bytes(claims.docx(doc, f["name"]), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f["name"] + "-claim-check.docx")
+            return self.send_bytes(claims.markdown(doc, f["name"]).encode(), "text/markdown; charset=utf-8", f["name"] + "-claim-check.md")
+        if what == "ideas":
+            f = fo.get((q.get("folder") or [""])[0]) if ideas else None
+            if not f:
+                return self.send_json({"error": "open a folder first"}, 404)
+            if (q.get("fmt") or ["md"])[0] == "docx":
+                return self.send_bytes(ideas.docx(f["id"]), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f["name"] + "-ideas.docx")
+            return self.send_bytes(ideas.markdown(f["id"]).encode(), "text/markdown; charset=utf-8", f["name"] + "-ideas.md")
+        if what == "cards":
+            rows = self.rows_for(q) or []
+            parts = []
+            for r in rows:
+                pdf = ns.pdf_path(r["file"]); card = papercard.load(pdf) if pdf and papercard else None
+                if card:
+                    parts.append(papercard.markdown(card, r.get("title", "")))
+            if not parts:
+                return self.send_json({"error": "none of these papers has a card yet"}, 404)
+            return self.send_bytes("\n\n---\n\n".join(parts).encode(), "text/markdown; charset=utf-8", ((fo.get(q["folder"][0]) or {}).get("name") if q.get("folder") else "paper") + "-cards.md")
+        rows = self.rows_for(q)
+        if rows is None or not rows:
+            return self.send_json({"error": "nothing to export"}, 404)
+        name = "library"
+        if q.get("folder"):
+            name = fo.get(q["folder"][0])["name"]
+        elif len(rows) == 1:
+            name = os.path.basename(rows[0]["file"])[:-4]
+        if what == "bib":
+            return self.send_bytes(exports.bibtex(rows).encode(), "application/x-bibtex; charset=utf-8", name + ".bib")
+        if what == "ris":
+            return self.send_bytes(exports.ris(rows).encode(), "application/x-research-info-systems; charset=utf-8", name + ".ris")
+        if what == "cites":     # the keys of the .bib file as one LaTeX command: \citep{rai2026fair,lee2020…}
+            keys = [e["key"] for e in exports.entries(rows)]
+            return self.send_bytes(("\\citep{%s}\n" % ",".join(keys)).encode(), "text/plain; charset=utf-8", name + "-cites.tex")
+        if what == "notes":
+            if (q.get("fmt") or ["md"])[0] == "docx":
+                return self.send_bytes(exports.notes_docx(rows, name if len(rows) > 1 else None),
+                                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document", name + "-notes.docx")
+            return self.send_bytes(exports.notes_markdown(rows, name if len(rows) > 1 else None).encode(), "text/markdown; charset=utf-8", name + "-notes.md")
+        if what == "pdf" and len(rows) == 1:
+            pdf = ns.pdf_path(rows[0]["file"])
+            return self.send_bytes(exports.annotated_pdf(pdf, ns.load(pdf), ns.load_tags()["tags"]), "application/pdf", name + "-annotated.pdf")
+        self.send_json({"error": "unknown export"}, 400)
+
+    def stream_ndjson(self, messages, job=None):
+        """Send dicts from a generator as they are produced, one JSON object per line (the reader reads them live).
+        job = (kind, label, scope): shown in the activity tray with its progress and cost, and cancellable there."""
+        jb = activity.start(job[0], job[1], scope=job[2]) if job else None
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for m in messages:
+                if jb:
+                    jb.observe(m)
+                self.wfile.write((json.dumps(m, ensure_ascii=False) + "\n").encode())
+                self.wfile.flush()
+                if jb and jb.cancelled and not jb.completed:     # Cancel in the tray: stop paying for the answer, tell the page
+                    messages.close()
+                    self.wfile.write((json.dumps({"type": "error", "error": "Cancelled."}) + "\n").encode())
+                    self.wfile.flush()
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            messages.close()          # the reader navigated away: stop paying for the answer
+            if jb:
+                jb.cancel_ev.set()
+        finally:
+            if jb:
+                jb.finish()
+        self.close_connection = True
+
+    def job_of(self, kind, label, **scope):
+        return (kind, label, scope)
+
+    def title_of(self, rel):
+        return str(self.doc_info(rel)[0].get("title") or "this paper")[:64]
+
+    def finish_import(self, res, summarize):
+        """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does."""
+        row = next((r for r in pl.library() if r["file"] == res["file"]), {})
+        if indexer and not res["existing"]:
+            indexer.kick(2)
+        if summarize and not res["existing"] and not row.get("summary"):
+            def job():
+                try:
+                    pl.summarize({"title": row.get("title"), "journal": row.get("journal"), "doi": row.get("doi")},
+                                 os.path.join(ROOT, res["file"]), pl.Usage())
+                    HUB.emit("log", {"msg": "Summary written for “%s”." % res["title"][:60], "level": "ok"})
+                except Exception as e:  # noqa: BLE001
+                    HUB.emit("log", {"msg": "Couldn’t summarize “%s”: %s" % (res["title"][:50], str(e)[:100]), "level": "warn"})
+            threading.Thread(target=job, daemon=True).start()
+        return self.send_json({"ok": True, **res, "row": row})
+
+    def doc_info(self, rel):
+        """Library row of a paper (by its Papers/… path) and the small identity record stored in its notes."""
+        row = next((r for r in pl.library() if r["file"] == rel), None) or {}
+        key = (row.get("doi") or row.get("title") or "").lower()
+        return row, {"id": key, "title": row.get("title", ""), "doi": row.get("doi", "")}
+
+    # -- GET
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        path = u.path
+        if path in ("/", "/index.html"):
+            return self.send_file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
+        if path == "/api/events":
+            return self.events()
+        if path == "/api/config":
+            return self.send_json(config())
+        if path == "/api/signins":      # who is signed in (informs, ais, library, publishers), and which sign-in window is open now
+            return self.send_json({**signins.status(), "pending": LOGIN_PENDING["site"]})
+        if path == "/api/library/access":   # which university library you use and how it lets you in
+            return self.send_json(signins.profile())
+        if path == "/api/update":       # the version, whether a newer one is announced, its notes, the progress of an update that is running
+            return self.send_json(updater.public())
+        if path == "/api/state":
+            run = JOBS.run
+            return self.send_json({"busy": JOBS.busy(), "kind": JOBS.kind,
+                                   "run": run.to_dict() if run else None})
+        if path == "/api/runs":
+            return self.send_json(pl.list_runs())
+        if path.startswith("/api/runs/"):
+            rid = path.rsplit("/", 1)[-1]
+            if JOBS.run and JOBS.run.id == rid:
+                return self.send_json(JOBS.run.to_dict())
+            run = pl.Run.load(rid)
+            if not run:
+                return self.send_json({"error": "no such run"}, 404)
+            if not JOBS.busy():
+                pl.mark_downloaded(run)
+                JOBS.run = run
+            return self.send_json(run.to_dict())
+        if path == "/api/library":
+            return self.send_json(pl.library())
+        if path.startswith("/files/"):
+            full = ns.safe_papers_path(urllib.parse.unquote(path[len("/files/"):]))
+            if not full:
+                return self.send_json({"error": "forbidden"}, 403)
+            ctype = "text/markdown; charset=utf-8" if full.endswith(".md") else None
+            return self.send_file(full, ctype, "no-cache")
+        if path.startswith("/static/"):  # the reader's own JS/CSS and the vendored PDF.js
+            try:
+                full = os.path.realpath(os.path.join(STATIC, urllib.parse.unquote(path[len("/static/"):])))
+            except ValueError:
+                full = ""
+            if not full.startswith(os.path.realpath(STATIC) + os.sep):
+                return self.send_json({"error": "forbidden"}, 403)
+            return self.send_file(full, cache="no-cache")
+        if path == "/api/doc":  # one paper's notes + the shared tags, for the reader
+            rel = (urllib.parse.parse_qs(u.query).get("file") or [""])[0]
+            pdf = ns.pdf_path(rel)
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            row, doc = self.doc_info(rel)
+            return self.send_json({"file": rel, "meta": row, "notes": ns.load(pdf, doc), "tags": ns.load_tags()})
+        if path == "/api/tags":
+            return self.send_json(ns.load_tags())
+        q = urllib.parse.parse_qs(u.query)
+        one = lambda k, d="": (q.get(k) or [d])[0]  # noqa: E731
+        if path == "/api/doc/chat":     # the Ask tab's saved conversation
+            pdf = ns.pdf_path(one("file"))
+            return self.send_json(ns.load_chat(pdf) if pdf else {"error": "no such paper"}, 200 if pdf else 404)
+        if path == "/api/doc/blocks":    # the paper as paragraphs in reading order, for the text view
+            pdf = ns.pdf_path(one("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                import blocks as _bl
+                return self.send_json({"blocks": [{"page": b["page"], "text": b["text"], "kind": b.get("kind", "body"), "y": round(b["bbox"][1] / (b.get("page_h") or 1), 4)} for b in _bl.extract(pdf)]})
+            except ImportError as e:
+                return self.send_json({"error": "missing package: %s" % e.name}, 501)
+        if path == "/api/doc/refs":     # the paper's own reference list, for citation cards
+            pdf = ns.pdf_path(one("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                return self.send_json({"refs": rf.match_library(rf.parse(pdf), pl.library())})
+            except ImportError as e:
+                return self.send_json({"error": "missing package: %s" % e.name}, 501)
+        if path == "/api/cite/info":    # Semantic Scholar's TL;DR and citation count for a DOI (cached)
+            doi = importer.clean_doi(one("doi"))
+            return self.send_json(rf.cite_info(doi) if doi else {})
+        if path == "/api/folders":
+            return self.send_json(fo.list_all())
+        if path == "/api/related/paper":    # similar papers you have + related / cited papers you don't (OpenAlex)
+            if not related:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            lib = pl.library()
+            row = next((r for r in lib if r["file"] == one("file")), None)
+            if not row:
+                return self.send_json({"error": "no such paper"}, 404)
+            return self.send_json(related.paper(row, lib))
+        if path == "/api/related/ignored":
+            return self.send_json({"ignored": related.ignored() if related else {}})
+        if path == "/api/ask/scope":    # how many papers a question over this scope reads, and what it costs
+            if not multiask:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            rows = self.scope_rows({k: one(k) for k in ("folder", "journal", "year", "tag", "status")} | {"star": one("star") == "1"})
+            if rows is None:
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.send_json({**multiask.scope_info(rows), "estimate": {"passages": multiask.estimate(rows), "cards": multiask.estimate(rows, "cards")}})
+        if path == "/api/ask/chat":     # the saved conversation of a folder (or of the whole library when no folder is given)
+            if not multiask:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if one("folder") and not fo.get(one("folder")):
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.send_json(multiask.load_chat(one("folder") or None))
+        if path == "/api/folder/matrix":
+            if not matrix:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            f, rows = self.folder_rows(one("id"))
+            if not f:
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.send_json({**matrix.table(f["id"], rows), "fill": matrix.estimate_fill(f["id"], rows), "folder": {"id": f["id"], "name": f["name"]}})
+        if path == "/api/doc/skim":     # the paper's skim layer (or what making one would cost)
+            pdf = ns.pdf_path(one("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            if not skim:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            d = skim.load(pdf)
+            return self.send_json({"skim": d, "lenses": skim.LENSES, **({} if d else {"estimate": skim.estimate(pdf)})})
+        if path == "/api/doc/card":     # the paper's card (or what making one would cost)
+            pdf = ns.pdf_path(one("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            if not papercard:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            card = papercard.load(pdf)
+            return self.send_json({"card": card} if card else {"card": None, "estimate": papercard.estimate(pdf)})
+        if path in ("/api/folder/evidence", "/api/folder/ideas"):
+            if not ideas:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            f, rows = self.folder_rows(one("id"))
+            if not f:
+                return self.send_json({"error": "no such folder"}, 404)
+            have = [r for r in rows if r.get("card")]
+            cards = {"have": len(have), "missing": len(rows) - len(have), "total": len(rows)}
+            if path == "/api/folder/ideas":
+                return self.send_json({"doc": ideas.load(f["id"]), "cards": cards, "folder": {"id": f["id"], "name": f["name"]}})
+            miss = [r for r in rows if not r.get("card")]
+            cost = 0.0
+            for r in miss[:60]:
+                pdf = ns.pdf_path(r["file"]); e = papercard.estimate(pdf, quick=True) if pdf else None
+                cost = None if cost is None or not e or e["cost"] is None else cost + e["cost"]
+            return self.send_json({"evidence": evidence.build(rows), "cards": cards, "estimate": {"cards": cost}})
+        if path == "/api/library/search":
+            return self.send_json(ls.search(pl.library(), one("q"), one("status"), one("star") == "1", one("folder"), one("journal"),
+                                            one("year"), one("tag"), one("notes") == "1", one("sort")))
+        if path == "/api/library/highlights":
+            return self.send_json(ls.highlights(pl.library(), one("q"), one("tag") or None, one("color") or None, one("folder") or None, one("journal") or None))
+        if path == "/api/tags/usage":
+            return self.send_json(ls.tag_usage(pl.library()))
+        if path.startswith("/api/export/"):
+            try:
+                return self.export(path.rsplit("/", 1)[-1], q)
+            except ImportError as e:
+                return self.send_json({"error": "missing package: %s — run pip install -r requirements.txt" % e.name}, 501)
+        if path == "/api/settings":     # everything the Settings page shows
+            return self.send_json({"prefs": prefs.get_settings(), **prefs.get_prompts(), "ai": ai.config() if ai else None,
+                                   "usage": ai.usage_summary() if ai else None, "cache": ai.cache_stats() if ai else None})
+        if path == "/api/folder/draft":  # ?id=: the saved related-work draft (rendered), the folder's papers (with or without a card) and an estimate for writing one
+            f, rows = self.folder_rows(one("id"))
+            if not f or not relatedwork:
+                return self.send_json({"error": "no such folder"}, 404)
+            doc = relatedwork.load(f["id"])
+            if doc:
+                doc["render"] = relatedwork.render(doc)
+            ps = [{"file": r["file"], "title": r.get("title", ""), "cite": relatedwork.evd.short_cite(r), "card": bool(papercard.exists(ns.pdf_path(r["file"]))) if ns.pdf_path(r["file"]) else False} for r in rows]
+            st = (doc or {}).get("settings") or {}
+            return self.send_json({"doc": doc, "papers": ps, "estimate": relatedwork.estimate(rows, {"files": st.get("files") or [p["file"] for p in ps if p["card"]], "words": st.get("words", 600)})})
+        if path == "/api/folder/workspace" and workspace:       # ?id=: the folder's board
+            f, rows = self.folder_rows(one("id"))
+            if not f:
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.send_json({"doc": workspace.load(f["id"])})
+        if path == "/api/folder/workspace/sources" and workspace:   # ?id=: what can be pulled onto the board: highlights, card lines, takeaways, per paper
+            f, rows = self.folder_rows(one("id"))
+            if not f:
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.send_json({"papers": workspace.sources(rows)})
+        if path == "/api/queue" and personal:     # ?n=: what to read next (your "to read" list first), each with why, how close it is to what you read, and the folder it belongs in
+            return self.send_json(personal.queue(pl.library(), max(1, min(30, int(one("n", "8") or 8)))))
+        if path == "/api/smart":        # your saved searches
+            return self.send_json({"searches": smart.load()})
+        if path == "/api/flashcards" and flashcards:   # ?folder=&all=1: today's queue (with what each answer would mean), the counts, and with all=1 every card
+            files = None
+            if one("folder"):
+                f = fo.get(one("folder"))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                keys = set(f["papers"])
+                files = {r["file"] for r in pl.library() if r["key"] in keys}
+            doc = flashcards.load()
+            qu = [{**c, "preview": flashcards.preview(c)} for c in flashcards.queue(doc, files)]
+            return self.send_json({"counts": flashcards.counts(doc, files), "queue": qu, "cards": [c for c in doc["cards"] if not files or c["file"] in files] if one("all") == "1" else [], "settings": doc["settings"], "all_counts": flashcards.counts(doc)})
+        if path == "/api/folder/synthesis":  # ?id=: the saved synthesis, the folder's papers (with or without a card) and an estimate
+            f, rows = self.folder_rows(one("id"))
+            if not f or not synthesis:
+                return self.send_json({"error": "no such folder"}, 404)
+            doc = synthesis.load(f["id"])
+            ps = [{"file": r["file"], "title": r.get("title", ""), "cite": relatedwork.evd.short_cite(r), "card": bool(papercard.exists(ns.pdf_path(r["file"]))) if ns.pdf_path(r["file"]) else False} for r in rows]
+            st = (doc or {}).get("settings") or {}
+            return self.send_json({"doc": doc, "papers": ps, "estimate": synthesis.estimate(rows, {"files": st.get("files") or [p["file"] for p in ps if p["card"]]})})
+        if path == "/api/folder/claims":  # ?id=: the saved claim check, and what you could check (the related-work draft's text if there is one)
+            f, rows = self.folder_rows(one("id"))
+            if not f or not claims:
+                return self.send_json({"error": "no such folder"}, 404)
+            dr = relatedwork.load(f["id"]) if relatedwork else None
+            return self.send_json({"doc": claims.load(f["id"]), "papers": len(rows), "library": len(pl.library()), "draft": relatedwork.render(dr)["text"] if dr else "", "review": reviewer.load(f["id"]) if reviewer else None})
+        if path == "/api/aifiles":      # Settings → AI files: what the AI wrote or cached, how big it is, what was cleared lately, how big a backup is
+            return self.send_json({"kinds": aifiles.scan(), "trash": aifiles.trash_list(), "backup": aifiles.backup_size(), "export_dir": prefs.get_settings().get("export_dir") or "",
+                                   "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
+        if path == "/api/backup":       # ?pdfs=1: a zip of your own data (notes, cards, folders, tags, settings…), optionally with the PDFs
+            name = "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M")
+            return self.send_temp_file(aifiles.backup(one("pdfs", "") == "1"), "application/zip", name)
+        if path == "/api/activity":     # what the AI is doing now and just did, plus the background indexer's state; ?pending=1 also counts unindexed papers
+            out = {"jobs": activity.snapshot(), "indexing": indexer.status() if indexer else {"enabled": False, "local": False, "running": False}}
+            if one("pending", "") and indexer:
+                out["indexing"]["pending"] = len(indexer.pending())
+            return self.send_json(out)
+        if path in ("/api/ai/config", "/api/ai/usage", "/api/ai/log"):
+            if not ai:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            return self.send_json({"/api/ai/config": ai.config, "/api/ai/usage": ai.usage_summary,
+                                   "/api/ai/log": lambda: ai.usage_log(int(one("limit", "40")))}[path]())
+        self.send_json({"error": "not found"}, 404)
+
+    def events(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        q = HUB.subscribe()
+        try:
+            self.wfile.write(b"event: hello\ndata: {}\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    msg = q.get(timeout=15)
+                except queue.Empty:
+                    msg = ": ping\n\n"
+                self.wfile.write(msg.encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            HUB.unsubscribe(q)
+
+    # -- POST
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if not self.local_only():
+            return self.send_json({"error": "forbidden"}, 403)
+        if path == "/api/import/pdf":   # the raw PDF is the request body (not JSON); the name travels in a header
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= 150 * 1024 * 1024:
+                return self.send_json({"error": "the file is empty or larger than 150 MB"}, 400)
+            data = self.rfile.read(n)
+            try:
+                res = importer.add_pdf(data, urllib.parse.unquote(self.headers.get("X-Filename") or "paper.pdf"), self.headers.get("X-Doi") or "")
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.finish_import(res, self.headers.get("X-Summarize") == "1")
+        try:
+            b = self.body()
+        except ValueError:
+            return self.send_json({"error": "bad json"}, 400)
+        if path == "/api/import/doi":
+            try:
+                res = importer.add_doi(b.get("doi"))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.finish_import(res, bool(b.get("summarize")))
+        if path == "/api/settings":     # {prefs?: {legend, summary_template, export_dir, wpm}, prompts?: [...], summaries?: [...]}
+            try:
+                if "prefs" in b:
+                    prefs.save_settings(b["prefs"])
+                if "prompts" in b or "summaries" in b:
+                    prefs.save_prompts({k: b[k] for k in ("prompts", "summaries") if k in b})
+            except (ValueError, TypeError, KeyError) as e:
+                return self.send_json({"error": str(e)[:160]}, 400)
+            return self.send_json({"ok": True, "prefs": prefs.get_settings(), **prefs.get_prompts()})
+        if path == "/api/tags/retag":   # {from, into?}: merge a tag into another (or delete it) across every paper
+            if not b.get("from"):
+                return self.send_json({"error": "which tag?"}, 400)
+            return self.send_json({"ok": True, "changed": ns.retag(b["from"], b.get("into") or None)})
+        if path == "/api/folders":      # {action: create|rename|delete|add|remove, id, name, files:[Papers/…pdf]}
+            act, fid = b.get("action"), b.get("id")
+            keys = [r["key"] for r in pl.library() if r["file"] in set(b.get("files") or [])]
+            try:
+                if act == "create":
+                    f = fo.create(b.get("name"))
+                    if keys:
+                        fo.add(f["id"], keys)
+                elif act == "rename":
+                    fo.rename(fid, b.get("name"))
+                elif act == "delete":
+                    fo.delete(fid)
+                elif act in ("add", "remove"):
+                    (fo.add if act == "add" else fo.remove)(fid, keys)
+                else:
+                    return self.send_json({"error": "unknown action"}, 400)
+            except (ValueError, KeyError) as e:
+                return self.send_json({"error": str(e.args[0] if e.args else e)}, 400)
+            return self.send_json({"ok": True, "folders": fo.list_all()})
+        if path == "/api/paper/state":  # {file, status?, star?, takeaway?, page?, total?, opened?}
+            row = next((r for r in pl.library() if r["file"] == b.get("file")), None)
+            if not row:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                if b.get("opened"):
+                    st = rs.touch_open(row["key"], b.get("page"), b.get("total"))
+                else:
+                    patch = {k: b[k] for k in ("status", "star", "skip", "takeaway", "page", "progress") if k in b}
+                    if b.get("page") and b.get("total"):
+                        patch["progress"] = b["page"] / b["total"]
+                    st = rs.update(row["key"], patch)
+            except (ValueError, TypeError) as e:
+                return self.send_json({"error": str(e)[:100]}, 400)
+            return self.send_json({"ok": True, "state": st})
+        if path == "/api/doc/skim":   # {file, dismissed: [ids]}: the proposals you said no to
+            pdf = ns.pdf_path(b.get("file"))
+            if not pdf or not skim:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                return self.send_json({"ok": True, "dismissed": skim.save_dismissed(pdf, [str(i) for i in (b.get("dismissed") or [])][:500])})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/doc/card":   # {file, card, rev}: your edits to a paper card
+            pdf = ns.pdf_path(b.get("file"))
+            if not pdf or not papercard:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                return self.send_json({"ok": True, "card": papercard.save_edit(pdf, b.get("card"), int(b.get("rev") or 0))})
+            except ns.Conflict as c:
+                return self.send_json({"error": "This card changed in another window.", "current": c.current}, 409)
+            except (ValueError, TypeError) as e:
+                return self.send_json({"error": str(e)[:120]}, 400)
+        if path == "/api/folder/ideas":   # {id, doc, rev}: the board's own changes (brief, events ticked, stars, status, notes, deletes)
+            try:
+                return self.send_json({"ok": True, "doc": ideas.save(str(b.get("id") or ""), b.get("doc"), int(b.get("rev") or 0))})
+            except ns.Conflict as c:
+                return self.send_json({"error": "The board changed in another window.", "current": c.current}, 409)
+            except KeyError:
+                return self.send_json({"error": "no such folder"}, 404)
+            except (ValueError, TypeError, AttributeError) as e:
+                return self.send_json({"error": str(e)[:120] or "bad board"}, 400)
+        if path == "/api/related/ignore":   # {items: [{id, title}]} hides them; {undo: [ids]} brings them back
+            if not related:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if b.get("undo"):
+                related.unignore([str(i) for i in b["undo"]])
+            if b.get("items"):
+                related.ignore([x for x in b["items"] if isinstance(x, dict)])
+            return self.send_json({"ok": True, "ignored": related.ignored()})
+        if path == "/api/related/scope":    # {folder?, journal?, year?, tag?, status?, min}: papers cited by several of these papers, not in your library
+            if not related:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            lib = pl.library()
+            rows = self.scope_rows(b.get("scope") if isinstance(b.get("scope"), dict) else {})
+            if rows is None:
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.stream_ndjson(related.scope_stream(rows, lib, max(1, min(10, int(b.get("min") or 2)))))
+        if path == "/api/related/download":   # {items: [{id, doi, title, authors, year, venue, date, reason}], label}: straight into the download pipeline
+            if not related:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if JOBS.busy():
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            items = [x for x in (b.get("items") or []) if isinstance(x, dict)][:40]
+            papers, have = related.run_papers(items)
+            if not papers:
+                return self.send_json({"error": "Nothing to download: %s" % ("they are all in your library already." if have else "no usable papers were chosen."), "have": have}, 400)
+            run = pl.Run("picks", {"label": re.sub(r"\s+", " ", str(b.get("label") or "related papers")).strip()[:60]})
+            for p in papers:
+                run.add_paper(p)
+            run.stage, run.status = "ready", "stopped"
+            run.save(force=True)
+            JOBS.run = run
+            if not start_download([p["id"] for p in papers]):
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            return self.send_json({"ok": True, "run": run.to_dict(full=False), "have": have, "n": len(papers)})
+        if path == "/api/ask/chat":      # {folder?, turns}: replaces the saved conversation (an empty list deletes it)
+            try:
+                return self.send_json(multiask.save_chat(str(b.get("folder") or "") or None, b.get("turns")))
+            except KeyError:
+                return self.send_json({"error": "no such folder"}, 404)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/folder/matrix":   # {id, rev, action?: "add" (name, prompt) | default save {columns?, custom?, edits?}}
+            fid = str(b.get("id") or "")
+            try:
+                if b.get("action") == "add":
+                    doc = matrix.add_custom(fid, b.get("name"), b.get("prompt"), int(b.get("rev") or 0))
+                else:
+                    doc = matrix.save(fid, b.get("doc"), int(b.get("rev") or 0))
+                return self.send_json({"ok": True, "doc": doc})
+            except ns.Conflict as c:
+                return self.send_json({"error": "The matrix changed in another window.", "current": c.current}, 409)
+            except KeyError:
+                return self.send_json({"error": "no such folder"}, 404)
+            except (ValueError, TypeError, AttributeError) as e:
+                return self.send_json({"error": str(e)[:120] or "bad matrix"}, 400)
+        if path == "/api/personal/fit" and personal:     # {items: [{id, title, abstract?, topics?}]}: how close candidates are to what you read, starred or marked up ({} until you have enough to learn from)
+            items = [x for x in (b.get("items") or []) if isinstance(x, dict)][:400]
+            return self.send_json({"fits": personal.fits(items, pl.library()), "profile": personal.profile_info(pl.library())})
+        if path == "/api/library/fulltext" and fulltext:     # {q, scope?: {folder, journal, year, tag, status}}: the words inside the PDFs themselves (stream: status | results | error)
+            rows = self.scope_rows(b.get("scope") if isinstance(b.get("scope"), dict) else {})
+            if rows is None:
+                return self.send_json({"error": "no such folder"}, 404)
+            return self.stream_ndjson(fulltext.stream(rows, str(b.get("q") or "")[:300]))
+        if path == "/api/smart":         # {action: add (name, filters) | rename (id, name) | delete (id)}
+            try:
+                a = b.get("action")
+                items = smart.add(b.get("name"), b.get("filters")) if a == "add" else smart.rename(str(b.get("id") or ""), b.get("name")) if a == "rename" else smart.delete(str(b.get("id") or "")) if a == "delete" else None
+                if items is None:
+                    return self.send_json({"error": "unknown action"}, 400)
+                return self.send_json({"ok": True, "searches": items})
+            except KeyError as e:
+                return self.send_json({"error": str(e.args[0])}, 404)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/bib/parse":     # {text, name}: the entries of a .ris / .bib file, each marked with the paper in your library if you have it
+            entries = bibimport.parse(str(b.get("text") or "")[:8_000_000], str(b.get("name") or ""))
+            if not entries:
+                return self.send_json({"error": "No references were found. This reads RIS (EndNote, Mendeley, Zotero) and BibTeX (.bib) files."}, 400)
+            ents = bibimport.match(entries, pl.library())
+            return self.send_json({"entries": ents, "have": sum(1 for e in ents if e["file"]), "no_doi": sum(1 for e in ents if not e["file"] and not e["has_doi"])})
+        if path == "/api/export/folderdir":   # {folder}: the folder as a real directory in your export folder: the PDFs, a .bib and your notes as Markdown
+            d = prefs.get_settings()["export_dir"]
+            f, rows = self.folder_rows(str(b.get("folder") or ""))
+            if not d or not f:
+                return self.send_json({"error": "Choose an export folder in Settings → Reader first." if not d else "no such folder"}, 400)
+            safe = re.sub(r"[\\/:*?\"<>|]+", "-", f["name"]).strip(" .") or "folder"
+            dest = os.path.join(d, safe)
+            os.makedirs(dest, exist_ok=True)
+            n = skipped = 0
+            for r in rows:
+                pdf = ns.pdf_path(r["file"])
+                if not pdf:
+                    continue
+                target = os.path.join(dest, os.path.basename(pdf))
+                if os.path.exists(target) and os.path.getsize(target) == os.path.getsize(pdf):
+                    skipped += 1
+                    continue
+                shutil.copy2(pdf, target)
+                n += 1
+            if rows:
+                with open(os.path.join(dest, "references.bib"), "w", encoding="utf-8") as fh:
+                    fh.write(exports.bibtex(rows))
+                with open(os.path.join(dest, "notes.md"), "w", encoding="utf-8") as fh:
+                    fh.write(exports.notes_markdown(rows, f["name"]))
+            return self.send_json({"ok": True, "path": dest, "pdfs": n, "unchanged": skipped, "papers": len(rows)})
+        if path == "/api/export/save":   # {what: ideas|cards, folder, fmt}: write the file into your export folder (Settings -> Reader)
+            d = prefs.get_settings()["export_dir"]
+            f = fo.get(str(b.get("folder") or ""))
+            if not d or not f:
+                return self.send_json({"error": "Choose an export folder in Settings → Reader first." if not d else "no such folder"}, 400)
+            what, fmt = b.get("what"), b.get("fmt") or "md"
+            try:
+                if what == "workspace":
+                    wd, wrows = workspace.load(f["id"]), self.folder_rows(f["id"])[1]
+                    if not (wd["cards"] or wd["frames"]):
+                        return self.send_json({"error": "the workspace is empty"}, 400)
+                    data, name = (workspace.docx(wd, f["name"], wrows), f["name"] + "-workspace.docx") if fmt == "docx" else (workspace.markdown(wd, f["name"], wrows).encode(), f["name"] + "-workspace.md")
+                elif what == "synthesis":
+                    sd = synthesis.load(f["id"])
+                    if not sd:
+                        return self.send_json({"error": "make the synthesis first"}, 400)
+                    data, name = (synthesis.docx(sd, f["name"]), f["name"] + "-synthesis.docx") if fmt == "docx" else (synthesis.markdown(sd, f["name"]).encode(), f["name"] + "-synthesis.md")
+                elif what == "claims":
+                    cd = claims.load(f["id"])
+                    if not cd:
+                        return self.send_json({"error": "check some claims first"}, 400)
+                    data, name = (claims.docx(cd, f["name"]), f["name"] + "-claim-check.docx") if fmt == "docx" else (claims.markdown(cd, f["name"]).encode(), f["name"] + "-claim-check.md")
+                elif what == "draft":
+                    dr = relatedwork.load(f["id"])
+                    if not dr:
+                        return self.send_json({"error": "write the related-work draft first"}, 400)
+                    data, name = (relatedwork.docx(dr, f["name"]), f["name"] + "-related-work.docx") if fmt == "docx" else (relatedwork.markdown(dr, f["name"]).encode(), f["name"] + "-related-work.md")
+                elif what == "ideas":
+                    data, name = (ideas.docx(f["id"]), f["name"] + "-ideas.docx") if fmt == "docx" else (ideas.markdown(f["id"]).encode(), f["name"] + "-ideas.md")
+                elif what == "matrix" and fmt in ("csv", "md", "tex", "docx"):
+                    rows = self.folder_rows(f["id"])[1]
+                    data = {"csv": lambda: matrix.csv_bytes(f["id"], rows), "md": lambda: matrix.markdown(f["id"], rows).encode(), "tex": lambda: matrix.latex(f["id"], rows).encode(),
+                            "docx": lambda: matrix.docx_bytes(f["id"], rows)}[fmt]()
+                    name = "%s-comparison.%s" % (f["name"], fmt)
+                else:
+                    return self.send_json({"error": "unknown export"}, 400)
+                os.makedirs(os.path.expanduser(d), exist_ok=True)
+                out = os.path.join(os.path.expanduser(d), re.sub(r"[^\w .()-]+", "_", name))
+                with open(out, "wb") as fh:
+                    fh.write(data)
+            except OSError as e:
+                return self.send_json({"error": "Couldn’t write there: %s" % e.strerror}, 400)
+            return self.send_json({"ok": True, "path": out})
+        if path == "/api/doc/chat":   # {file, turns:[...]}: replaces the saved conversation (empty list deletes it)
+            pdf = ns.pdf_path(b.get("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                return self.send_json(ns.save_chat(pdf, b.get("turns")))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/doc/summary":   # {file, text}: replace the paper's saved summary (the old one is kept in state/summary_backups/)
+            pdf = ns.pdf_path(b.get("file"))
+            text = str(b.get("text") or "").strip()
+            if not pdf or len(text) < 20:
+                return self.send_json({"error": "nothing to save"}, 400)
+            md = pdf[:-4] + ".md"
+            if os.path.exists(md):
+                bk = os.path.join(pl.STATE, "summary_backups")
+                os.makedirs(bk, exist_ok=True)
+                shutil.copy(md, os.path.join(bk, "%s-%s.md" % (ns.sha1_of(pdf)[:12], datetime.now().strftime("%Y%m%d-%H%M%S"))))
+            with open(md, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            return self.send_json({"ok": True, "path": os.path.relpath(md, ROOT)})
+        if path == "/api/doc/notes":  # autosave from the reader; rev guards against a stale tab
+            pdf = ns.pdf_path(b.get("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            try:
+                out = ns.save(pdf, b.get("notes"), int(b.get("rev") or 0), self.doc_info(b["file"])[1])
+            except ns.Conflict as c:
+                return self.send_json({"error": "These notes changed in another window.", "current": c.current}, 409)
+            except (ValueError, TypeError) as e:
+                return self.send_json({"error": str(e)[:120]}, 400)
+            return self.send_json({"ok": True, "rev": out["rev"]})
+        if path == "/api/folder/draft" and relatedwork:     # {id, raw?, style?, pages?, rev?}: your edits, or only how the citations are written; no model call
+            try:
+                return self.send_json({"ok": True, "doc": relatedwork.update(str(b.get("id") or ""), b.get("raw"), b.get("style"), b.get("pages"), b.get("rev"))})
+            except KeyError as e:
+                return self.send_json({"error": str(e.args[0])}, 404)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 409)
+        if path == "/api/folder/workspace" and workspace:        # {id, doc, rev}: save the board (409 with the newer copy when another window saved first)
+            try:
+                return self.send_json({"ok": True, "doc": workspace.save(str(b.get("id") or ""), b.get("doc"), b.get("rev"))})
+            except workspace.Conflict as c:
+                return self.send_json({"error": "This workspace changed in another window.", "current": c.current}, 409)
+            except KeyError as e:
+                return self.send_json({"error": str(e.args[0])}, 404)
+            except (ValueError, TypeError) as e:
+                return self.send_json({"error": str(e)[:120]}, 400)
+        if path.startswith("/api/flashcards/") and flashcards:     # rate {id, rating} · add {q, a, file?, page?, quote?} · update {id, q?, a?, suspended?} · delete {ids} · settings {new_per_day}
+            act_ = path.rsplit("/", 1)[-1]
+            try:
+                if act_ == "rate":
+                    c, cn = flashcards.rate(str(b.get("id") or ""), int(b.get("rating") or 0))
+                    return self.send_json({"ok": True, "card": c, "counts": cn})
+                if act_ == "add":
+                    return self.send_json({"ok": True, "card": flashcards.add(b.get("q"), b.get("a"), b.get("file") or "", b.get("page"), b.get("quote") or "")})
+                if act_ == "update":
+                    return self.send_json({"ok": True, "card": flashcards.update(str(b.get("id") or ""), b.get("q"), b.get("a"), b.get("suspended"))})
+                if act_ == "delete":
+                    return self.send_json({"ok": True, "removed": flashcards.delete([str(i) for i in b.get("ids") or []])})
+                if act_ == "settings":
+                    return self.send_json({"ok": True, "settings": flashcards.set_new_per_day(b.get("new_per_day"))})
+            except KeyError as e:
+                return self.send_json({"error": str(e.args[0])}, 404)
+            except (ValueError, TypeError) as e:
+                return self.send_json({"error": str(e)[:160]}, 400)
+        if path == "/api/folder/claims" and claims:       # {id, n, handled, rev?}: tick a claim off; no model call
+            try:
+                return self.send_json({"ok": True, "doc": claims.mark(str(b.get("id") or ""), int(b.get("n") or 0), bool(b.get("handled")), b.get("rev"))})
+            except KeyError as e:
+                return self.send_json({"error": str(e.args[0])}, 404)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 409)
+        if path == "/api/aifiles/clear":         # {kind}: delete one kind of AI file (a zip of it goes to state/trash first unless it is freely regenerable)
+            try:
+                r = aifiles.clear(str(b.get("kind") or ""))
+            except KeyError as e:
+                return self.send_json({"error": str(e.args[0] if e.args else e)}, 400)
+            return self.send_json({"ok": True, **r, "kinds": aifiles.scan(), "trash": aifiles.trash_list()})
+        if path == "/api/aifiles/restore":       # {name}: put a cleared kind back (never over a file that exists again)
+            try:
+                r = aifiles.restore(str(b.get("name") or ""))
+            except (KeyError, OSError) as e:
+                return self.send_json({"error": str(e.args[0] if e.args else e)[:120]}, 400)
+            return self.send_json({"ok": True, **r, "kinds": aifiles.scan(), "trash": aifiles.trash_list()})
+        if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
+            d = prefs.get_settings().get("export_dir") or ""
+            if not d or not os.path.isdir(os.path.expanduser(d)):
+                return self.send_json({"error": "Choose an export folder first (Settings → Reader & summaries)."}, 400)
+            tmp = aifiles.backup(bool(b.get("pdfs")))
+            dest = os.path.join(os.path.expanduser(d), "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M"))
+            shutil.move(tmp, dest)
+            return self.send_json({"ok": True, "path": dest, "bytes": os.path.getsize(dest)})
+        if path == "/api/activity/cancel":       # {id}
+            return self.send_json({"ok": activity.cancel(str(b.get("id") or ""))})
+        if path == "/api/activity/indexing":     # {enabled?: bool, now?: true}: the background indexing switch / "Index now"
+            if not indexer:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if "enabled" in b:
+                prefs.save_settings({"background_index": bool(b["enabled"])})
+            started = indexer.kick(0, manual=True) if b.get("now") else (indexer.kick(0) if b.get("enabled") else False)
+            return self.send_json({"ok": True, "started": started, "indexing": indexer.status()})
+        if path.startswith("/api/ai/"):
+            if not ai:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if path == "/api/ai/config":
+                try:
+                    return self.send_json(ai.save_config(b))
+                except (ValueError, KeyError, TypeError, AttributeError) as e:
+                    return self.send_json({"error": str(e)[:120] or "bad settings"}, 400)
+            if path == "/api/ai/key":       # {provider, key}: saved in the data home's .env (mode 600), never echoed back
+                try:
+                    return self.send_json(ai.set_key(str(b.get("provider") or ""), b.get("key")))
+                except ValueError as e:
+                    return self.send_json({"error": str(e)[:160]}, 400)
+            if path == "/api/ai/test":      # one tiny real call: does this provider + key + model work?
+                return self.send_json(ai.test(str(b.get("provider") or ""), str(b.get("model") or "")))
+            if path == "/api/ai/cache/clear":
+                return self.send_json({"ok": True, "removed": ai.cache_clear()})
+            if path == "/api/ai/explain":   # {file, text?, page, prompt_id | custom, image? (base64 PNG), fresh?}
+                pdf = ns.pdf_path(b.get("file"))
+                if not pdf or not (b.get("text") or b.get("image")):
+                    return self.send_json({"error": "select some text or box a figure first"}, 400)
+                return self.stream_ndjson(explain.stream(pdf, self.doc_info(b["file"])[0], str(b.get("text") or "")[:6000], int(b.get("page") or 1), b.get("prompt_id"),
+                                                         str(b.get("custom") or "")[:2000] or None, b.get("image"), bool(b.get("fresh"))),
+                                       job=self.job_of("explain", "Explain · " + self.title_of(b["file"]), file=b["file"]))
+            if path == "/api/ai/ask":   # runs in this request's thread, outside JOBS: reading never waits for a download
+                pdf, q = ns.pdf_path(b.get("file")), str(b.get("question") or "").strip()
+                if not pdf or not q:
+                    return self.send_json({"error": "a paper and a question are required"}, 400)
+                ov = b.get("override") if isinstance(b.get("override"), dict) else None
+                hist = [{"q": str(h.get("q", ""))[:3000], "a": str(h.get("a", ""))[:6000]} for h in (b.get("history") or [])[-4:] if isinstance(h, dict)]
+                return self.stream_ndjson(ask.stream(pdf, q[:6000], "full" if b.get("mode") == "full" else "rag", hist, ov, bool(b.get("fresh"))),
+                                       job=self.job_of("ask", "Ask · " + q[:60], file=b["file"], tab="ask"))
+            if path == "/api/ai/card":      # {file, fresh?}: write (or return) the paper's card; streams status / progress / card / done
+                pdf = ns.pdf_path(b.get("file"))
+                if not pdf:
+                    return self.send_json({"error": "no such paper"}, 404)
+                return self.stream_ndjson(papercard.stream(pdf, self.doc_info(b["file"])[0], bool(b.get("fresh"))), job=self.job_of("card", "Card · " + self.title_of(b["file"]), file=b["file"], tab="card"))
+            if path == "/api/ai/skim":      # {file, fresh?}: find (or return) the paper's key sentences by lens; streams status / progress / skim / done
+                pdf = ns.pdf_path(b.get("file"))
+                if not pdf:
+                    return self.send_json({"error": "no such paper"}, 404)
+                return self.stream_ndjson(skim.stream(pdf, self.doc_info(b["file"])[0], bool(b.get("fresh"))), job=self.job_of("skim", "Skim · " + self.title_of(b["file"]), file=b["file"], tab="skim"))
+            if path == "/api/ai/cards":     # {folder | files, fresh?}: cards for many papers, three at a time
+                if b.get("folder"):
+                    f, rows = self.folder_rows(b["folder"])
+                    if not f:
+                        return self.send_json({"error": "no such folder"}, 404)
+                else:
+                    want = set(b.get("files") or [])
+                    rows = [r for r in pl.library() if r["file"] in want]
+                return self.stream_ndjson(papercard.batch(rows, bool(b.get("fresh"))), job=self.job_of("cards", "Cards for %d paper%s" % (len(rows), "" if len(rows) == 1 else "s"), folder=b.get("folder") or "", ftab="evidence"))
+            if path == "/api/ai/askmany":   # {scope:{folder?,journal?,year?,tag?,status?,star?}, question, mode: passages|cards, history, override, fresh}
+                sc = b.get("scope") if isinstance(b.get("scope"), dict) else {}
+                rows, q = self.scope_rows(sc), str(b.get("question") or "").strip()
+                if rows is None or not q:
+                    return self.send_json({"error": "a scope and a question are required"}, 400)
+                ov = b.get("override") if isinstance(b.get("override"), dict) else None
+                hist = [{"q": str(h.get("q", ""))[:3000], "a": str(h.get("a", ""))[:6000]} for h in (b.get("history") or [])[-4:] if isinstance(h, dict)]
+                return self.stream_ndjson(multiask.stream(rows, q[:6000], "cards" if b.get("mode") == "cards" else "passages", hist, ov, bool(b.get("fresh"))),
+                                       job=self.job_of("askmany", "Ask %s · %s" % ("a folder" if sc.get("folder") else "the library", q[:50]), folder=sc.get("folder") or "", ftab="ask", library=not sc.get("folder")))
+            if path in ("/api/ai/matrix/fill", "/api/ai/matrix/estimate"):   # {id, columns?: [custom column ids], fresh?}
+                f, rows = self.folder_rows(str(b.get("id") or ""))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                cols = [c for c in (b.get("columns") or []) if isinstance(c, str)] or None
+                if path.endswith("/estimate"):
+                    return self.send_json(matrix.estimate_fill(f["id"], rows, cols, bool(b.get("fresh"))))
+                return self.stream_ndjson(matrix.fill(f["id"], rows, cols, bool(b.get("fresh"))), job=self.job_of("matrix", "Matrix · " + f["name"][:50], folder=f["id"], ftab="matrix"))
+            if path in ("/api/ai/ideas/events", "/api/ai/ideas/generate", "/api/ai/ideas/develop", "/api/ai/ideas/estimate"):
+                f, rows = self.folder_rows(str(b.get("id") or ""))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                if path.endswith("/estimate"):
+                    ev = evidence.build(rows)
+                    board = ideas.load(f["id"])
+                    return self.send_json({"events": ideas.estimate_events(), "generate": ideas.estimate_generate(ev, [e for e in board["events"]["items"] if e.get("keep", True)], ideas._brief(b.get("brief"))), "papers": len(ev["papers"])})
+                if path.endswith("/events"):
+                    return self.stream_ndjson(ideas.refresh_events(f["id"], rows, str(b.get("focus") or "")[:400]), job=self.job_of("ideas", "Ideas · current events", folder=f["id"], ftab="lab"))
+                if path.endswith("/develop"):
+                    return self.stream_ndjson(ideas.develop(f["id"], str(b.get("idea") or "")), job=self.job_of("ideas", "Ideas · developing an outline", folder=f["id"], ftab="lab"))
+                return self.stream_ndjson(ideas.generate(f["id"], rows, b.get("brief"), "replace" if b.get("mode") == "replace" else "add"), job=self.job_of("ideas", "Ideas · generating for " + f["name"][:40], folder=f["id"], ftab="lab"))
+            if path in ("/api/ai/draft", "/api/ai/draft/estimate"):    # {id, settings:{topic, themes, words, style, pages, files}, fresh?}
+                f, rows = self.folder_rows(str(b.get("id") or ""))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                if path.endswith("/estimate"):
+                    return self.send_json(relatedwork.estimate(rows, b.get("settings")))
+                return self.stream_ndjson(relatedwork.stream(f["id"], rows, b.get("settings"), bool(b.get("fresh"))), job=self.job_of("draft", "Related work · " + f["name"][:50], folder=f["id"], ftab="draft"))
+            if path in ("/api/ai/flashcards", "/api/ai/flashcards/estimate"):    # {files: [paper files with a card], per: 4|8|12, fresh?}
+                want = {str(x) for x in (b.get("files") or [])}
+                rows = [r for r in pl.library() if r["file"] in want]
+                per = int(b.get("per") or 8)
+                if path.endswith("/estimate"):
+                    return self.send_json(flashcards.estimate(rows, want, per))
+                return self.stream_ndjson(flashcards.stream(rows, want, per, bool(b.get("fresh"))), job=self.job_of("flashcards", "Flashcards for %d paper%s" % (len(rows), "" if len(rows) == 1 else "s"), library=True, ltab="review"))
+            if path in ("/api/ai/synthesis", "/api/ai/synthesis/estimate"):    # {id, settings:{files, focus}, fresh?}
+                f, rows = self.folder_rows(str(b.get("id") or ""))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                if path.endswith("/estimate"):
+                    return self.send_json(synthesis.estimate(rows, b.get("settings")))
+                return self.stream_ndjson(synthesis.stream(f["id"], rows, b.get("settings"), bool(b.get("fresh"))), job=self.job_of("synthesis", "Synthesis · " + f["name"][:50], folder=f["id"], ftab="synthesis"))
+            if path in ("/api/ai/review", "/api/ai/review/estimate"):    # {id, text, fresh?}: Reviewer 2 reads your text with the folder's papers in mind
+                f, rows = self.folder_rows(str(b.get("id") or ""))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                if path.endswith("/estimate"):
+                    return self.send_json(reviewer.estimate(rows, str(b.get("text") or "")))
+                return self.stream_ndjson(reviewer.stream(f["id"], rows, str(b.get("text") or ""), bool(b.get("fresh"))), job=self.job_of("review", "Reviewer 2 · " + f["name"][:50], folder=f["id"], ftab="claims"))
+            if path in ("/api/ai/claims", "/api/ai/claims/estimate"):    # {id, scope: folder|library, text, texts?: [sentences to check], fresh?}
+                f, frows = self.folder_rows(str(b.get("id") or ""))
+                if not f:
+                    return self.send_json({"error": "no such folder"}, 404)
+                lib_scope = b.get("scope") == "library"
+                rows = self.scope_rows({}) if lib_scope else frows
+                if path.endswith("/estimate"):
+                    sp = claims.split(str(b.get("text") or "")[:60000])
+                    texts = b.get("texts") if isinstance(b.get("texts"), list) else [c["text"] for c in sp if not c["own"]]
+                    return self.send_json({"claims": [{**c, "cited": [relatedwork.evd.short_cite(r) for r in rows if r["file"] in claims.cited_papers(c["text"], rows)]} for c in sp], **claims.estimate(rows, texts)})
+                texts = [str(t) for t in (b.get("texts") or [])][:claims.MAX_CLAIMS]
+                return self.stream_ndjson(claims.stream(f["id"], rows, texts, "library" if lib_scope else "folder", bool(b.get("fresh")), str(b.get("text") or "")),
+                                          job=self.job_of("claims", "Claim check · " + f["name"][:50], folder=f["id"], ftab="claims"))
+            if path == "/api/ai/citeuse":    # {ref, contexts: [sentences that cite it], fresh?} -> {text, cost, cached}: how the paper uses that reference
+                try:
+                    return self.send_json(citeuse.answer(str(b.get("ref") or ""), [str(c) for c in (b.get("contexts") or [])][:6], bool(b.get("fresh"))))
+                except ai.AIError as e:
+                    return self.send_json({"error": str(e)}, 400)
+            if path == "/api/ai/audio":      # {file | folder, fresh?}: the script of a short spoken briefing (the browser reads it aloud)
+                if b.get("folder"):
+                    f, frows = self.folder_rows(str(b["folder"]))
+                    if not f:
+                        return self.send_json({"error": "no such folder"}, 404)
+                    return self.stream_ndjson(audio.stream_folder(f, frows, bool(b.get("fresh"))), job=self.job_of("audio", "Briefing · " + f["name"][:50], folder=f["id"], ftab="synthesis"))
+                pdf = ns.pdf_path(b.get("file"))
+                if not pdf:
+                    return self.send_json({"error": "no such paper"}, 404)
+                return self.stream_ndjson(audio.stream_paper(pdf, self.doc_info(b["file"])[0], bool(b.get("fresh"))), job=self.job_of("audio", "Briefing · " + self.title_of(b["file"]), file=b["file"], tab="card"))
+            if path == "/api/ai/summary":   # {file, template?, fresh?}: stream a summary with one of your templates (not saved)
+                pdf = ns.pdf_path(b.get("file"))
+                if not pdf:
+                    return self.send_json({"error": "no such paper"}, 404)
+                return self.stream_ndjson(ask.summary_stream(pdf, self.doc_info(b["file"])[0], b.get("template"), bool(b.get("fresh"))), job=self.job_of("summary", "Summary · " + self.title_of(b["file"]), file=b["file"], tab="sum"))
+            if path == "/api/ai/suggest":   # {file, q?, a?} -> {questions: [...]}
+                pdf = ns.pdf_path(b.get("file"))
+                if not pdf:
+                    return self.send_json({"error": "no such paper"}, 404)
+                try:
+                    return self.send_json({"questions": ask.suggest(pdf, str(b.get("q") or "")[:2000] or None, str(b.get("a") or "")[:4000] or None)})
+                except ai.AIError as e:
+                    return self.send_json({"error": str(e)}, 400)
+        if path == "/api/tags":
+            try:
+                out = ns.save_tags(b.get("tags"), int(b.get("rev") or 0))
+            except ns.Conflict as c:
+                return self.send_json({"error": "Tags changed in another window.", "current": c.current}, 409)
+            except (ValueError, TypeError) as e:
+                return self.send_json({"error": str(e)[:120]}, 400)
+            return self.send_json({"ok": True, "rev": out["rev"]})
+        if path == "/api/run/weekly":
+            if JOBS.busy():
+                return self.started(False, None)
+            run = pl.weekly_run(JOBS.run)  # one run per week: reuse this week's
+            return self.started(start_fetch(run), run)
+        if path == "/api/run/search":
+            try:
+                y0, y1 = sorted([int(b["year_from"]), int(b["year_to"])])
+            except (KeyError, ValueError):
+                return self.send_json({"error": "year_from and year_to required"}, 400)
+            js = [j for j in b.get("journals") or []
+                  if j in {x["abbr"] for x in pl.journals() if x.get("archive", True)}]
+            if not js:
+                return self.send_json({"error": "pick at least one journal"}, 400)
+            meths = [m for m in b.get("methods") or [] if m in pl.method_labels()]
+            topics = [t for t in b.get("topics") or [] if t in pl.topic_labels()]
+            if not topics and not meths:
+                topics = pl.topic_labels()  # nothing picked = all interests
+            run = pl.Run("search", {"year_from": y0, "year_to": y1, "journals": js, "topics": topics,
+                                    "methods": meths, "query": (b.get("query") or "").strip()[:200]})
+            return self.started(start_fetch(run), run)
+        if path == "/api/download":
+            ids = [i for i in b.get("ids") or [] if JOBS.run and i in JOBS.run.papers]
+            if not ids:
+                return self.send_json({"error": "nothing selected"}, 400)
+            return self.started(start_download(ids), JOBS.run)
+        if path == "/api/verdict":
+            # the user's own call on a paper (e.g. borderline -> download queue)
+            v = b.get("verdict")
+            if v not in ("download", "borderline", "skip"):
+                return self.send_json({"error": "bad verdict"}, 400)
+            rid = b.get("run_id") or (JOBS.run.id if JOBS.run else None)
+            run = JOBS.run if JOBS.run and JOBS.run.id == rid else pl.Run.load(rid or "")
+            if not run:
+                return self.send_json({"error": "no such run"}, 404)
+            changed = []
+            for i in b.get("ids") or []:
+                p = run.papers.get(i)
+                if not p:
+                    continue
+                p.setdefault("ai_verdict", p.get("verdict"))
+                p["verdict"] = v
+                p["user_set"] = v != p.get("ai_verdict")
+                changed.append(i)
+                HUB.emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method",
+                                                           "reason", "ai_verdict", "user_set")})
+            run.save(force=True)
+            return self.send_json({"ok": True, "changed": changed})
+        if path == "/api/rescreen":
+            run = JOBS.run
+            if not run:
+                return self.send_json({"error": "no run"}, 400)
+            for p in run.papers.values():
+                if p.get("verdict") == "error":
+                    p.pop("verdict")
+            ok = JOBS.start("fetch", lambda: pl.screen(run, emit_for(run), JOBS.stop), run)
+            return self.started(ok, run)
+        if path == "/api/stop":
+            JOBS.stop.set()
+            return self.send_json({"ok": True})
+        if path == "/api/login":
+            which = b.get("which") or "publishers"
+            if which in ("library", "nova") and not signins.profile()["signs_in"]:
+                return self.send_json({"error": "Set up your library first (Settings → Library access): it has no sign-in of its own yet.", "setup": True}, 400)
+            return self.started(start_login(which), None)
+        if path == "/api/library/access":
+            try:
+                return self.send_json(signins.save_profile(b))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/update/check":
+            return self.send_json(updater.check())
+        if path == "/api/update/install":
+            st = updater.public()
+            if not st["available"]:
+                return self.send_json({"error": "You already have the newest version."}, 409)
+            return self.send_json({"ok": updater.install(), **updater.public()})
+        if path == "/api/update/settings":      # {auto, feed, skipped, ack}
+            try:
+                if b.get("ack"):
+                    updater.acknowledge()
+                updater.save_settings({k: b[k] for k in ("auto", "feed", "skipped") if k in b})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json(updater.public())
+        self.send_json({"error": "not found"}, 404)
+
+    def started(self, ok, run):
+        if not ok:
+            return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+        self.send_json({"ok": True, "run": run.to_dict(full=False) if run else None})
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # the browser closing an idle/keep-alive connection is normal: don't print a traceback
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def free_port(start):
+    for port in range(start, start + 50):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise SystemExit("no free port")
+
+
+_LOCK = None     # the open lock file lives as long as the process (the lock goes with it, even after a crash)
+
+
+def take_lock(port):
+    """One dashboard per project: two of them write the same files (notes, folders, indexes) and would overwrite each other.
+    Returns None when this process now holds the lock, or the details ({pid, port, url}) of the dashboard that already runs."""
+    global _LOCK
+    path = os.path.join(pl.dl.STATE, "server.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    f = open(path, "a+")
+    try:
+        import fcntl
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:          # no fcntl (Windows): trust the file if the dashboard named in it still answers
+        f.seek(0)
+        try:
+            old = json.load(f)
+            urllib.request.urlopen(old["url"] + "/api/config", timeout=1)
+            f.close()
+            return old
+        except Exception:  # noqa: BLE001
+            pass
+    except OSError:
+        f.seek(0)
+        try:
+            old = json.load(f)
+        except ValueError:
+            old = {}
+        f.close()
+        return old or {"pid": None, "port": None, "url": None}
+    f.seek(0); f.truncate()
+    json.dump({"pid": os.getpid(), "port": port, "url": "http://localhost:%d" % port, "started": datetime.now(timezone.utc).isoformat(timespec="seconds")}, f)
+    f.flush()
+    _LOCK = f
+    return None
+
+
+def start(port=8765, quiet=False):
+    """Everything main() does except waiting for requests. The Mac app runs the server in a thread of its own process with this.
+    Returns (server, url), or (None, url) when a dashboard for this folder already runs (url is where)."""
+    paths.seed_home()            # a new data folder (or a fresh checkout): the folders and the settings files it starts from
+    port = free_port(port)
+    other = take_lock(port)
+    if other is not None:
+        return None, other.get("url")
+    if not os.environ.get("ANTHROPIC_API_KEY") and not quiet:
+        print("WARNING: ANTHROPIC_API_KEY missing from .env — screening and summaries will fail.")
+    for canon, olds in pl.migrate_weekly():
+        print("Merged %d weekly runs into %s" % (len(olds), canon))
+    srv = Server(("127.0.0.1", port), Handler)
+    updater.start_background()
+    threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)
+    if indexer:
+        indexer.kick(25)       # read papers into the index for Ask a little after start-up (local model only, switchable in the activity tray)
+    return srv, "http://localhost:%d" % port
+
+
+def main():
+    a = sys.argv[1:]
+    srv, url = start(int(a[a.index("--port") + 1]) if "--port" in a else 8765)
+    if srv is None:
+        print("Journal Watcher is already running%s." % (" at " + url if url else ""))
+        print("Use that window: two copies would overwrite each other's notes and folders. Close it first if you want to start again.")
+        if url and "--no-open" not in a:
+            webbrowser.open(url)
+        raise SystemExit(0)
+    print("Journal Watcher dashboard running at %s  (close this window to stop)" % url)
+    if "--no-open" not in a:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
