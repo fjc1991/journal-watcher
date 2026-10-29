@@ -1822,11 +1822,12 @@ pl._screen_batch = fake_screen
             screened = os.path.join(TMP, "screened.log")
             def batches():
                 return open(screened).read().split() if os.path.exists(screened) else []
-            def wait_idle(n_papers, timeout=60):
+            def wait_idle(n_papers, min_checks=1, timeout=60):          # the search run itself (not the run that was open before it started), idle, with this many papers and times started
                 for _ in range(timeout * 4):
                     s_ = api("/api/state")
-                    if not s_["busy"] and s_["run"] and s_["run"]["n_papers"] >= n_papers and s_["run"]["stage"] == "ready":
-                        return s_["run"]
+                    r_ = s_["run"]
+                    if not s_["busy"] and r_ and r_["kind"] == "search" and r_["n_papers"] >= n_papers and len(r_.get("checks") or []) >= min_checks and r_["stage"] == "ready":
+                        return r_
                     time.sleep(0.25)
                 raise AssertionError("the search did not finish: %s" % json.dumps(api("/api/state"))[:300])
             page.set_viewport_size({"width": 1400, "height": 950}); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#searchbtn", state="attached"); page.wait_for_timeout(600)
@@ -1838,16 +1839,20 @@ pl._screen_batch = fake_screen
             n0 = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
             page.click("#searchbtn"); run_a = wait_idle(3)
             check("the search finds 3 papers and screens them once (one question to the model)", run_a["n_papers"] == 3 and run_a["n_download"] == 2 and len(batches()) == 1 and batches() == ["3"], str((run_a["n_papers"], batches())))
-            page.click('#runtabs button[data-rt="search"]'); page.wait_for_function("document.querySelector('#n-search').textContent.trim() !== ''")
+            page.click('#runtabs button[data-rt="search"]'); page.wait_for_function("document.querySelector('#n-search').textContent.trim() !== '' && /You already ran this search/.test(document.querySelector('#est').innerText)", timeout=15000)
             check("it is in the history under 'Archive searches', and the form now says you already ran this search", run_a["title"] in page.inner_text("#runs") and "You already ran this search" in page.inner_text("#est"), page.inner_text("#est"))
-            page.click("#searchbtn"); page.wait_for_timeout(300); run_a2 = wait_idle(3)
+            page.click("#searchbtn"); run_a2 = wait_idle(3, min_checks=2)
             runs_ = [r_ for r_ in api("/api/runs") if r_["kind"] == "search"]
+            try:
+                page.wait_for_function("/updated/.test(document.querySelector('#runs').innerText)", timeout=15000)
+            except Exception:  # noqa: BLE001  (the check below says what is wrong)
+                pass
             check("pressing Search again for the same search continues the saved one: no second copy, nothing screened again, and it says when it was updated",
-                  len(runs_) == n0 + 1 and run_a2["id"] == run_a["id"] and batches() == ["3"] and len(api("/api/runs/" + run_a["id"])["checks"]) == 2 and "updated" in page.inner_text("#runs"), str((len(runs_), n0, batches())))
+                  len(runs_) == n0 + 1 and run_a2["id"] == run_a["id"] and batches() == ["3"] and len(api("/api/runs/" + run_a["id"])["checks"]) == 2 and "updated" in page.inner_text("#runs"), str((len(runs_), n0, batches(), run_a2["id"] == run_a["id"], len(api("/api/runs/" + run_a["id"])["checks"]), page.inner_text("#runs")[:200])))
             page.click('#journalchips .chip[data-abbr="%s"]' % first_two[1])
             page.click("#searchbtn"); run_b = wait_idle(6)
             check("a wider search (one more journal) keeps what it can: the first journal's three papers reuse their verdicts and only the new journal's are screened (and the page says so)",
-                  run_b["id"] != run_a["id"] and run_b["reused"] == 3 and batches() == ["3", "3"], str((run_b["reused"], batches())))
+                  run_b["id"] != run_a["id"] and run_b["reused"] == 3 and batches() == ["3", "3"], str((run_b["id"], run_a["id"], run_b["reused"], run_b["n_papers"], batches(), run_b["params"], run_a["params"])))
             page.wait_for_function("/reused a verdict/.test(document.querySelector('#runmeta').textContent)", timeout=8000)
             check("…the run's description says how many papers reused a verdict", "3 papers reused a verdict from an earlier screening" in page.inner_text("#runmeta"), page.inner_text("#runmeta"))
             page.click('#runs .runitem[data-id="%s"]' % run_a["id"]); page.wait_for_selector("#againbtn:not(.hide)")
@@ -1861,6 +1866,60 @@ pl._screen_batch = fake_screen
             check("with nothing open, the Watch page offers the last runs to pick up ('Pick up where you left off')", page.locator("#resumelist .runitem").count() >= 2 and "Archive search" in page.inner_text("#resumelist"), page.inner_text("#resume"))
             page.click('#resumelist .runitem >> nth=0'); page.wait_for_function("document.querySelector('#resume').classList.contains('hide')")
             check("…a click opens it (the page now shows that run, with its papers)", page.evaluate("RUN && RUN.id") == run_b["id"] and page.evaluate("papers.size") == 6, str(page.evaluate("RUN && RUN.id")))
+
+            print("Check my PDFs: a PDF that is not the paper it is filed under can be found, kept or taken out")
+            import pymupdf as _pmu
+            idxp, folderp = os.path.join(TMP, "Papers", "_index.csv"), os.path.join(TMP, "Papers", "2025-03", "CheckTest")
+            saved_idx = open(idxp, newline="").read(); os.makedirs(folderp, exist_ok=True)
+            def mkpdf_(name, headline):
+                d_ = _pmu.open(); pg_ = d_.new_page(); pg_.insert_textbox(_pmu.Rect(60, 60, 540, 130), headline, fontsize=18); pg_.insert_textbox(_pmu.Rect(60, 150, 540, 790), "Jane Doe and Richard Roe. " + "We study how platforms govern their complementors. " * 40, fontsize=9)
+                d_.save(os.path.join(folderp, name)); d_.close()
+            mkpdf_("right.pdf", "Governing Open Platforms Through Transparent Rules"); mkpdf_("wrong1.pdf", "Two-stage differences in differences"); mkpdf_("wrong2.pdf", "A Completely Different Paper About Hotel Reviews")
+            for nm in ("wrong1", "wrong2"):
+                open(os.path.join(folderp, nm + ".md"), "w").write("summary of " + nm)
+            with open(idxp, "a", newline="") as f_:
+                w_ = csv.writer(f_)
+                for nm, ttl, doi in (("right", "Governing Open Platforms Through Transparent Rules", "10.9999/pc.right"), ("wrong1", "The Pitfalls of Review Solicitation on TripAdvisor", "10.9999/pc.wrong1"), ("wrong2", "Platform Pricing and Seller Entry Decisions", "10.9999/pc.wrong2")):
+                    w_.writerow(["2026-10-29", "Test Journal", "TJ", ttl, "Jane Doe; Richard Roe", doi, "", "", "", "Papers/2025-03/CheckTest/%s.pdf" % nm, "ok", "browser"])
+            page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#lf-q"); page.wait_for_timeout(500)
+            page.evaluate("window.Settings.open('files')"); page.wait_for_selector("#pc-go")
+            check("Settings → AI files & backup has 'Check my PDFs', and it has not looked yet (it says nothing about your files before you press it)", "PDFs checked" not in page.inner_text("#pc-card") and page.locator("#pc-go:not([disabled])").count() == 1)
+            page.click("#pc-go"); page.wait_for_function("document.querySelector('#pc-res') && /PDFs? checked/.test(document.querySelector('#pc-res').innerText)", timeout=30000)
+            res_t = page.inner_text("#pc-res")
+            check("it reads every PDF and lists the two that are another paper (and not the right one), each with what the PDF is titled",
+                  page.locator('.pc-row[data-f$="wrong1.pdf"]').count() == 1 and page.locator('.pc-row[data-f$="wrong2.pdf"]').count() == 1 and page.locator('.pc-row[data-f$="/right.pdf"]').count() == 0
+                  and "Two-stage differences in differences" in page.inner_text('.pc-row[data-f$="wrong1.pdf"]'), res_t[:600])
+            check("…each row can show the PDF, keep it ('it is the right paper') or remove it and download again", page.locator('.pc-row[data-f$="wrong1.pdf"] a[href*="CheckTest/wrong1.pdf"]').count() == 1 and page.locator('.pc-row[data-f$="wrong1.pdf"] [data-pc-keep]').count() == 1 and page.locator('.pc-row[data-f$="wrong1.pdf"] [data-pc-rm]').count() == 1)
+            try:
+                api("/api/library/check/remove", {"file": "Papers/2025-03/CheckTest/right.pdf"}); refused_ = False
+            except urllib.error.HTTPError as e_:
+                refused_ = e_.code == 404
+            check("only a PDF that the check listed can be removed: the right one is refused and stays where it is", refused_ and os.path.exists(os.path.join(folderp, "right.pdf")))
+            page.click('[data-pc-keep$="wrong2.pdf"]'); page.wait_for_function("!document.querySelector('.pc-row[data-f$=\"wrong2.pdf\"]')", timeout=5000)
+            page.evaluate("document.querySelector('#pc-go').dataset.old = '1'"); page.click("#pc-go")           # (the button is drawn again with the new answer: wait for that one, not for the old one still on the page)
+            page.wait_for_function("(() => { const b = document.querySelector('#pc-go'); return b && !b.dataset.old && !b.disabled && /PDFs? checked/.test(document.querySelector('#pc-res').innerText); })()", timeout=30000)
+            check("'It is the right paper' hides it, and it stays hidden when you check again (counted as 'you marked as right')", page.locator('.pc-row[data-f$="wrong2.pdf"]').count() == 0 and page.locator('.pc-row[data-f$="wrong1.pdf"]').count() == 1 and "you marked as right" in page.inner_text("#pc-res"), page.inner_text("#pc-res")[:400])
+            if os.path.exists(marker): os.remove(marker)
+            page.once("dialog", lambda d_: d_.accept())
+            page.click('[data-pc-rm$="wrong1.pdf"]'); page.wait_for_function("!document.querySelector('.pc-row[data-f$=\"wrong1.pdf\"]')", timeout=15000)
+            for _ in range(40):
+                if os.path.exists(marker): break
+                page.wait_for_timeout(250)
+            rows_after = list(csv.DictReader(open(idxp, newline=""))); r1 = [r_ for r_ in rows_after if r_["doi"] == "10.9999/pc.wrong1"][0]
+            removed_dirs = os.listdir(os.path.join(TMP, "Papers", "_removed")) if os.path.isdir(os.path.join(TMP, "Papers", "_removed")) else []
+            check("'Remove and download again' moves that PDF and its summary aside (Papers/_removed, nothing deleted), the library forgets it, and the paper is queued for download again",
+                  not os.path.exists(os.path.join(folderp, "wrong1.pdf")) and not os.path.exists(os.path.join(folderp, "wrong1.md")) and len(removed_dirs) == 1
+                  and os.path.exists(os.path.join(TMP, "Papers", "_removed", removed_dirs[0], "2025-03", "CheckTest", "wrong1.pdf")) and os.path.exists(os.path.join(TMP, "Papers", "_removed", removed_dirs[0], "2025-03", "CheckTest", "wrong1.md"))
+                  and r1["status"] == "removed" and os.path.exists(os.path.join(folderp, "wrong2.pdf")) and os.path.exists(marker) and open(marker).read() == "doi:10.9999/pc.wrong1", str((removed_dirs, r1["status"], open(marker).read() if os.path.exists(marker) else None)))
+            page.keyboard.press("Escape")
+            lib_titles = [x["title"] for x in api("/api/library")]
+            check("the Library no longer lists the removed paper, and still lists the others", "The Pitfalls of Review Solicitation on TripAdvisor" not in lib_titles and "Governing Open Platforms Through Transparent Rules" in lib_titles and "Platform Pricing and Seller Entry Decisions" in lib_titles)
+            for _ in range(60):                                     # let the (pretend) download finish before the test files are taken away
+                if not api("/api/state")["busy"]: break
+                time.sleep(0.25)
+            open(idxp, "w", newline="").write(saved_idx); shutil.rmtree(folderp, ignore_errors=True); shutil.rmtree(os.path.join(TMP, "Papers", "_removed"), ignore_errors=True)
+            try: os.remove(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "identity_ok.json"))
+            except OSError: pass
 
             print("one dashboard per project")
             second = subprocess.run([sys.executable, os.path.join(TMP, "dashboard", "server.py"), "--port", str(port + 1), "--no-open"], cwd=TMP, env=env, capture_output=True, text=True, timeout=60)

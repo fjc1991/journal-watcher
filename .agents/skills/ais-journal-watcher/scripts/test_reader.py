@@ -2349,7 +2349,59 @@ def main():
         finally:
             paths.ROOT, paths.PAPERS = saved
             shutil.rmtree(root, ignore_errors=True)
+    def t_identity_remove():
+        """Check my PDFs: a PDF you said is right is not read again (until it changes); a wrong one is moved aside with what belongs to it, never deleted, and the library forgets it."""
+        import csv
+        real = os.path.join(TMP, "remove_home_real"); root = os.path.join(TMP, "remove_home"); folder = os.path.join(real, "Papers", "2025-03", "Management Science"); os.makedirs(folder)
+        os.symlink(real, root)                                    # the library is reached through a link, as /var is /private/var on a Mac (this made the first version move files to ../../private/…)
+        saved = (paths.ROOT, paths.PAPERS, idt.KEPT)
+        paths.ROOT, paths.PAPERS, idt.KEPT = root, os.path.join(root, "Papers"), os.path.join(root, "state", "identity_ok.json")
+        try:
+            rel = lambda n: "Papers/2025-03/Management Science/" + n
+            open(os.path.join(root, rel("right.pdf")), "wb").write(RIGHT); open(os.path.join(root, rel("wrong.pdf")), "wb").write(WRONG)
+            for ext in (".md", ".notes.json", ".card.json"):
+                open(os.path.join(root, rel("wrong") + ext), "w").write("sidecar")
+            hdr = "date_checked journal abbr title authors doi url matched_topics score file status note".split()
+            with open(os.path.join(root, "Papers", "_index.csv"), "w", newline="") as f:
+                w = csv.writer(f); w.writerow(hdr)
+                w.writerow(["2026-10-29", "Management Science", "MS", ID_T, "Jane Doe; Richard Roe", ID_D, "", "", "", rel("right.pdf"), "ok", "browser"])
+                w.writerow(["2026-10-29", "Management Science", "MS", "A Study of Hotel Reviews and Their Effects on Demand", "Ann Lee; Bob Ray", "10.1287/mnsc.2024.0002", "", "", "", rel("wrong.pdf"), "ok", "browser"])
+            res = idt.audit(use_kept=True); assert [(r["file"].split("/")[-1], r["verdict"]) for r in res] == [("wrong.pdf", "mismatch"), ("right.pdf", "match")], res
+            idt.keep(rel("wrong.pdf"))                                                                   # "it is the right paper": not read again while the file is the same
+            res = idt.audit(use_kept=True); assert {r["file"].split("/")[-1]: r["verdict"] for r in res} == {"wrong.pdf": "kept", "right.pdf": "match"}, res
+            assert {r["verdict"] for r in idt.audit()} == {"mismatch", "match"}                         # (the plain audit ignores that list)
+            open(os.path.join(root, rel("wrong.pdf")), "ab").write(b"\n% changed")                      # a changed file is looked at again
+            assert {r["file"].split("/")[-1]: r["verdict"] for r in idt.audit(use_kept=True)}["wrong.pdf"] == "mismatch"
+            for bad in ("../x.pdf", "Papers/2025-03/Management Science/missing.pdf", "Papers/_index.csv", "Papers/2025-03/Management Science/wrong.md", "/etc/passwd"):
+                try:
+                    idt.remove(bad); raise AssertionError("removed " + bad)
+                except ValueError:
+                    pass
+            assert os.path.exists(os.path.join(root, rel("wrong.pdf")))
+            open(os.path.join(root, "outside.pdf"), "wb").write(RIGHT)                                      # an index row that points outside Papers/ (a damaged or edited index) is not followed
+            with open(os.path.join(root, "Papers", "_index.csv"), "a", newline="") as f:
+                csv.writer(f).writerow(["2026-10-29", "J", "J", "Outside", "", "10.1/out", "", "", "", "outside.pdf", "ok", ""])
+            for bad in ("outside.pdf", "Papers/../outside.pdf"):
+                try:
+                    idt.remove(bad); raise AssertionError("removed " + bad)
+                except ValueError:
+                    pass
+            assert os.path.exists(os.path.join(root, "outside.pdf"))
+            gone = idt.remove(rel("wrong.pdf"))
+            assert gone["title"].startswith("A Study of Hotel") and gone["doi"] == "10.1287/mnsc.2024.0002" and gone["authors"] == ["Ann Lee", "Bob Ray"] and gone["date"] == "2025-03", gone
+            assert not os.path.exists(os.path.join(root, rel("wrong.pdf"))) and not any(os.path.exists(os.path.join(root, rel("wrong") + e)) for e in (".md", ".notes.json", ".card.json"))
+            moved = [os.path.join(root, m) for m in gone["files"]]
+            assert len(moved) == 4 and all(os.path.exists(m) and "/Papers/_removed/" in m for m in moved) and any(m.endswith("wrong.pdf") for m in moved), gone     # the PDF and its three sidecars, kept
+            rows = list(csv.DictReader(open(os.path.join(root, "Papers", "_index.csv"))))
+            r = [x for x in rows if x["doi"] == "10.1287/mnsc.2024.0002"][0]
+            assert r["status"] == "removed" and r["file"] == "" and "kept in Papers/_removed/" in r["note"] and [x for x in rows if x["doi"] == ID_D][0]["status"] == "ok", rows
+            assert sorted(x["file"].split("/")[-1] for x in idt.audit()) == ["outside.pdf", "right.pdf"]        # the library has forgotten it (the planted row is still there, untouched)
+        finally:
+            paths.ROOT, paths.PAPERS, idt.KEPT = saved
+            os.unlink(root); shutil.rmtree(real, ignore_errors=True)
+
     check("identity audit: lists the PDFs in a library that are not the paper they are filed under (worst first), changes nothing", t_identity_audit)
+    check("check my PDFs: a PDF you marked as right is not read again until it changes; a wrong one is moved aside with its notes, summary and card (never deleted) and the library forgets it; anything outside the library is refused", t_identity_remove)
 
     def t_link_follow():
         from playwright.sync_api import sync_playwright
@@ -2568,6 +2620,7 @@ def main():
             a = {"year_from": 2024, "year_to": 2024, "journals": ["B", "A"], "topics": ["t2", "t1"], "methods": [], "query": "  LLMs "}
             b = {"year_from": 2024, "year_to": 2024, "journals": ["A", "B"], "topics": ["t1", "t2"], "methods": [], "query": "llms"}
             assert pl_.search_key(a) == pl_.search_key(b) and pl_.search_key(a) != pl_.search_key(dict(b, year_to=2025)) and pl_.search_key(a) != pl_.search_key(dict(b, journals=["A"]))
+            assert pl_.Run("search", a).id.split("_")[-1] != pl_.Run("search", dict(a, journals=["A"])).id.split("_")[-1] and pl_.Run("search", a).id.split("_")[-1] == pl_.Run("search", b).id.split("_")[-1]     # two searches started in the same second do not share a file
             rs_ = pl_.Run("search", a); rs_.add_paper(dict(papers()[0])); rs_.save(force=True)
             assert pl_.find_search(b)["id"] == rs_.id and pl_.find_search(dict(b, query="other")) is None and pl_.find_search(a)["search_key"] == pl_.search_key(a)
             # a journal's year range is kept for a few days (a day when it reaches the current year), asked for again after that
