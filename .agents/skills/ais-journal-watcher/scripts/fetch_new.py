@@ -346,6 +346,35 @@ def crossref_journal_range(issn, year_from, year_to, progress=None, doi_prefix=N
     return out
 
 
+SSRN_PREFIX = "10.2139"
+SSRN_LIMIT = 200
+
+
+def crossref_ssrn(query, year_from, year_to, limit=SSRN_LIMIT, progress=None):
+    """The papers on SSRN (DOI prefix 10.2139, registered with Crossref as posted content) that best match `query`, posted in [year_from, year_to], in Crossref's order of
+    relevance, at most `limit`. SSRN holds hundreds of thousands of papers a year in every field, so it can only be searched by words, and only the best matches are taken."""
+    url = ("https://api.crossref.org/works?query.bibliographic=%s&filter=prefix:%s,type:posted-content,from-pub-date:%d-01-01,until-pub-date:%d-12-31"
+           "&rows=%d&select=DOI,title,author,abstract,published,posted,issued,subject"
+           % (urllib.parse.quote(str(query)[:200]), SSRN_PREFIX, year_from, year_to, max(1, min(int(limit), 1000))))
+    raw, _, _ = http_get(url, timeout=60, headers={"Accept": "application/json"})
+    msg = json.loads(raw.decode("utf-8", "replace")).get("message", {})
+    out = []
+    for it in msg.get("items", []):
+        title = strip_html((it.get("title") or [""])[0])
+        if not title or not (it.get("DOI") or "").lower().startswith(SSRN_PREFIX + "/"):
+            continue
+        dp = next((it[k]["date-parts"] for k in ("published", "posted", "issued") if (it.get(k) or {}).get("date-parts")), None)
+        date = fmt_date_parts(dp)
+        out.append({
+            "doi": it["DOI"], "title": title, "url": "https://doi.org/" + it["DOI"], "abstract": cr_strip_jats(it.get("abstract")),
+            "authors": [" ".join(x for x in [a.get("given"), a.get("family")] if x) for a in it.get("author", [])],
+            "keywords": it.get("subject") or None, "pub_date": date + "-01" if re.fullmatch(r"\d{4}", date or "") else date,
+        })
+    if progress:
+        progress(len(out), len(out))
+    return out
+
+
 # ---------- main ----------
 
 def load_json(path, default):
