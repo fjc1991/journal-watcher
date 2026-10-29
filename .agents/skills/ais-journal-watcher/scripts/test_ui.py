@@ -424,7 +424,7 @@ def main():
             page.on("dialog", lambda dd: None) if False else None
             page.click('[data-smartdel]'); page.wait_for_function("document.querySelectorAll('[data-smart]').length === 0")
             check("…and it can be forgotten (the papers are untouched)", api("/api/smart")["searches"] == [] and not os.path.exists(os.path.join(TMP, "Papers", "_smart.json")))
-            page.fill("#lf-q", "")
+            page.fill("#lf-q", ""); page.wait_for_timeout(450)       # the box's own refresh fires 220 ms after the last keystroke and draws the rows again; if it comes after the ⋯ menu is opened it closes the menu (measured: the menu is gone 100-250 ms after opening), so let it come first
             page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
             row0 = page.locator("#lib-results .librow").first
             check("a paper row shows only ☆, Read and ⋯; the rest is in the menu", [b.get_attribute("data-star") is not None or b.get_attribute("data-read") is not None or b.get_attribute("data-more") is not None for b in row0.locator(".actions > .btn, .actions > .menuwrap > .btn").all()] == [True, True, True] and row0.locator(".rowmenu").is_hidden())
