@@ -63,6 +63,7 @@ DEFAULT = {
     "prices": {},
     "privacy": {"local_only": False},
     "budget": {"monthly_usd": None},
+    "screening": {"reuse_days": 90},      # an earlier screening verdict is believed for this many days (0 = always ask again): pipeline.reuse_days
 }
 
 
@@ -70,6 +71,7 @@ def config_data():
     c = dl.load_json(CONFIG, None) or json.loads(json.dumps(DEFAULT))
     c.setdefault("privacy", {"local_only": False})
     c.setdefault("budget", {"monthly_usd": None})
+    c.setdefault("screening", {"reuse_days": 90})
     return c
 
 
@@ -133,7 +135,7 @@ def config():
                  "configured": not p.get("key_env") or bool(_key(p["key_env"])), "local": is_local(p),
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
     return {"providers": provs, "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
-            "privacy": c["privacy"], "budget": c["budget"]}
+            "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
 
 
 def save_config(patch):
@@ -159,6 +161,14 @@ def save_config(patch):
     if "budget" in patch:
         v = (patch["budget"] or {}).get("monthly_usd")
         c["budget"] = {"monthly_usd": None if v in (None, "") else max(0.0, float(v))}
+    if "screening" in patch:
+        try:
+            days = int((patch["screening"] or {}).get("reuse_days", 90))
+        except (TypeError, ValueError):
+            raise ValueError("The number of days must be a whole number (0 = always ask again).")
+        if not 0 <= days <= 3650:
+            raise ValueError("The number of days must be between 0 and 3650.")
+        c["screening"] = {"reuse_days": days}
     for pname, models in (patch.get("provider_models") or {}).items():
         if pname not in c["providers"] or not isinstance(models, list):
             raise ValueError("unknown provider %s" % pname)

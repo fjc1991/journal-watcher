@@ -182,7 +182,12 @@ def start_fetch(run):
             emit("log", {"msg": "Check %d for %s (new papers are added to this week)"
                          % (len(run.checks), run.title())})
         else:
-            emit("log", {"msg": "Started: %s" % run.title()})
+            if not run.checks:
+                run.checks.append(run.created)
+            if run.order:                                                      # it holds papers already: this is a search run again (it keeps its papers and verdicts; "updated" shows when)
+                run.checks.append(datetime.now(timezone.utc).isoformat())
+            emit("log", {"msg": ("Started: %s" % run.title()) if len(run.checks) < 2 else
+                         "Continuing your saved search: %s (%d papers are already in it; only papers without a verdict are screened)" % (run.title(), len(run.order))})
         if run.kind == "weekly":
             pl.fetch_weekly(run, emit, JOBS.stop)
         else:
@@ -1343,8 +1348,9 @@ class Handler(BaseHTTPRequestHandler):
             topics = [t for t in b.get("topics") or [] if t in pl.topic_labels()]
             if not topics and not meths:
                 topics = pl.topic_labels()  # nothing picked = all interests
-            run = pl.Run("search", {"year_from": y0, "year_to": y1, "journals": js, "topics": topics,
-                                    "methods": meths, "query": (b.get("query") or "").strip()[:200]})
+            params = {"year_from": y0, "year_to": y1, "journals": js, "topics": topics, "methods": meths, "query": (b.get("query") or "").strip()[:200]}
+            old = pl.find_search(params)           # the same search as one you already ran: continue that one (its papers, verdicts and downloads are kept)
+            run = (JOBS.run if JOBS.run and old and JOBS.run.id == old["id"] else pl.Run.load(old["id"]) if old else None) or pl.Run("search", params)
             return self.started(start_fetch(run), run)
         if path == "/api/download":
             ids = [i for i in b.get("ids") or [] if JOBS.run and i in JOBS.run.papers]
