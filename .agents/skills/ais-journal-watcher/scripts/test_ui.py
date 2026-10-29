@@ -277,6 +277,7 @@ JS_SPAN_CENTER ="""([n, sub]) => { const q = [...document.querySelectorAll(`.rd-
   return [b.left + b.width / 2, b.top + b.height / 2]; }"""
 # did the reader turn to page n? A jump puts the page's top about 70 px below the top of the pane. (The page-number box is no judge of that: it shows n for a few milliseconds
 # and then the page whose foot is still in view above, see docs/HISTORY.md §2n.)
+JS_RANGE = """([sel, v]) => { const r = document.querySelector(sel); r.value = v; r.dispatchEvent(new Event('input', {bubbles: true})); }"""
 JS_PAGE_AT_TOP = r"""(n) => { const b = document.querySelectorAll('.rd-band')[n - 1], p = document.querySelector('#rd-pdf'); if (!b || !p) return false; const d = b.getBoundingClientRect().top - p.getBoundingClientRect().top; return d >= 0 && d < 150; }"""
 JS_A11Y = r"""() => {
   const out = {noname: [], dupid: [], tiny: [], smalltext: []};
@@ -526,6 +527,43 @@ def main():
                 page.keyboard.press("Control+Shift+z"); page.wait_for_timeout(300)
             check("redo brings it back", page.locator(".rd-ov .hl").count() == n_before)
             page.click("#rd-undo"); page.wait_for_timeout(200); page.click("#rd-redo"); page.wait_for_timeout(200)
+
+            print("reader: a collapsed view keeps your place when the reading line is in a 'lines hidden' bar or below every strip")
+            JS_PANE_H = "document.querySelector('#rd-pdf').getBoundingClientRect().height"
+            JS_FLOW = """() => { const p = document.querySelector('#rd-pdf'); return {h: p.getBoundingClientRect().height, all: p.scrollHeight}; }"""
+            JS_GAP_TO_LINE = """() => { const p = document.querySelector('#rd-pdf'), pr = p.getBoundingClientRect();       // the middle of the first "lines hidden" bar that has a strip after it goes on the reading line (70 px under the top of the pane)
+              const g = [...document.querySelectorAll('#rd-flow .rd-gap')].find(g => g.nextElementSibling && g.nextElementSibling.classList.contains('rd-band')); if (!g) return false;
+              const r = g.getBoundingClientRect(); p.scrollTop += r.top + r.height / 2 - (pr.top + 70); return true; }"""
+            JS_STRIP_AFTER_LINE = """() => { const p = document.querySelector('#rd-pdf'), line = p.getBoundingClientRect().top + 70;
+              const b = [...document.querySelectorAll('#rd-flow .rd-band')].find(b => b.getBoundingClientRect().top > line - 1); return b ? {k: b.dataset.n + '@' + (+b.dataset.y0).toFixed(3), off: Math.round(b.getBoundingClientRect().top - line)} : null; }"""
+            JS_LAST_STRIP = """() => { const p = document.querySelector('#rd-pdf'), pr = p.getBoundingClientRect(), bs = [...document.querySelectorAll('#rd-flow .rd-band')], b = bs[bs.length - 1];
+              const r = b.getBoundingClientRect(); return {n: b.dataset.n, endsAboveLine: r.bottom <= pr.top + 70, shown: r.bottom > pr.top && r.top < pr.bottom}; }"""
+            JS_PAGE_SHOWN = """(n) => { const p = document.querySelector('#rd-pdf').getBoundingClientRect(), r = document.querySelector(`.rd-band[data-n="${n}"]`).getBoundingClientRect(); return r.bottom > p.top && r.top < p.bottom; }"""
+            page.fill("#rd-num", "2"); page.press("#rd-num", "Enter"); page.wait_for_timeout(400)
+            page.evaluate(JS_RANGE, ["#rd-ctx", 0]); page.wait_for_timeout(500)         # (the slider re-collapses after a pause: let that pass before collapsing)
+            page.click('#reader [data-a="collapse"]'); page.wait_for_selector("#rd-collapse.on"); page.wait_for_timeout(900)
+            strips_, bars_ = page.locator("#rd-flow .rd-band").count(), page.locator("#rd-flow .rd-gap").count()
+            check("collapsed to the highlights with no context, the paper is a few short strips with 'lines hidden' bars between them", strips_ >= 3 and bars_ >= 2, "%d strips, %d bars" % (strips_, bars_))
+            vh_ = 950 - (page.evaluate(JS_PANE_H) - 200); page.set_viewport_size({"width": 1400, "height": int(vh_)}); page.wait_for_timeout(600)      # a short window, so that the strips need scrolling
+            for k_ in range(6):
+                g_ = page.evaluate(JS_FLOW)
+                if k_ >= 3 and g_["all"] >= g_["h"] + 150:
+                    break
+                page.click('#reader [data-a="zin"]'); page.wait_for_timeout(450)
+            page.evaluate(JS_GAP_TO_LINE); page.wait_for_timeout(400)
+            b0_ = page.evaluate(JS_STRIP_AFTER_LINE)
+            page.click('#reader [data-a="zout"]'); page.wait_for_timeout(600); b1_ = page.evaluate(JS_STRIP_AFTER_LINE)
+            page.click('#reader [data-a="zin"]'); page.wait_for_timeout(600); b2_ = page.evaluate(JS_STRIP_AFTER_LINE)
+            check("zooming a collapsed view with the reading line in a 'lines hidden' bar leaves the strip below it where it was (it used to slide that strip up to the line)",
+                  bool(b0_ and b1_ and b2_) and 5 < b0_["off"] < 80 and b0_["k"] == b1_["k"] == b2_["k"] and abs(b1_["off"] - b0_["off"]) <= 3 and abs(b2_["off"] - b0_["off"]) <= 3, str([b0_, b1_, b2_]))
+            page.set_viewport_size({"width": 1400, "height": int(vh_ - (page.evaluate(JS_PANE_H) - 130))}); page.wait_for_timeout(600)
+            page.evaluate("document.querySelector('#rd-pdf').scrollTop = 99999"); page.wait_for_timeout(500)
+            last_ = page.evaluate(JS_LAST_STRIP)
+            check("with the reading line below every strip (a very short window), the page number is the last strip's page, not page 1", last_["endsAboveLine"] and last_["shown"] and page.input_value("#rd-num") == last_["n"], "%s, box %s" % (last_, page.input_value("#rd-num")))
+            page.click('#reader [data-a="collapse"]'); page.wait_for_selector("#rd-collapse:not(.on)"); page.wait_for_timeout(700)
+            check("expanding from there stays at that passage (it used to jump to page 1)", page.input_value("#rd-num") == last_["n"] and page.evaluate(JS_PAGE_SHOWN, last_["n"]), "box %s, wanted %s" % (page.input_value("#rd-num"), last_["n"]))
+            page.set_viewport_size({"width": 1400, "height": 950}); page.wait_for_timeout(500)
+            page.evaluate(JS_RANGE, ["#rd-ctx", 2]); page.click('#reader [data-a="fit"]'); page.wait_for_timeout(600)
 
             print("reader: links, citations, area, explain")
             page.click(".rd-bar [data-a='back']"); page.wait_for_selector("#lf-q")
