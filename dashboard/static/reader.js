@@ -267,22 +267,28 @@ function flashRects(n, rects) {
 }
 
 // ---------------------------------------------------------------- position, jump, zoom
+const READ_LINE = 70;      // px below the top of the pane: where jump() puts the place you go to, and where currentPos() reads the place you are at. They must be the same line: with two (8 and 70), the page number fell back to the page above after a jump, and every zoom, Fit, "back" or reopened reading place moved the text by the difference
+// Where you are: the point of the paper on the reading line. dy is how far that point lies below the line, in px, for the two times the line is not on a strip of the paper:
+// in the gap before a strip (collapsed view's "lines hidden" bar, or the space between pages) the point is that strip's start, below the line (dy > 0);
+// past the end of the last strip (a flow shorter than the line) it is that strip's end, above the line (dy < 0). Give dy back to jump() as {off} and the text stays exactly where it was.
 function currentPos() {
-  const top = pane.getBoundingClientRect().top + 8;
+  const line = pane.getBoundingClientRect().top + READ_LINE;
+  let r = null;
   for (const b of S.bands) {
-    const r = b.el.getBoundingClientRect();
-    if (r.bottom > top) return {n: b.p.n, y: b.y0 + clamp((top - r.top) / r.height, 0, 1) * (b.y1 - b.y0)};
+    r = b.el.getBoundingClientRect();
+    if (r.bottom > line) return {n: b.p.n, y: b.y0 + clamp((line - r.top) / r.height, 0, 1) * (b.y1 - b.y0), dy: Math.max(0, r.top - line)};
   }
-  return {n: 1, y: 0};
+  const last = S.bands[S.bands.length - 1];
+  return last ? {n: last.p.n, y: last.y1, dy: r.bottom - line} : {n: 1, y: 0, dy: 0};
 }
-export function jump(n, y = 0, {flash = null, instant = true} = {}) {
+export function jump(n, y = 0, {flash = null, instant = true, off = 0} = {}) {
   n = clamp(Math.round(n), 1, S.pages.length || 1);
   let b = S.bands.find(b => b.p.n === n && y >= b.y0 - 1e-4 && y <= b.y1 + 1e-4);
   if (!b && S.view.keep) { reveal(n, y); b = S.bands.find(b => b.p.n === n && y >= b.y0 - 1e-4 && y <= b.y1 + 1e-4); }
   if (!b) b = S.bands.find(b => b.p.n === n);
   if (!b) return;
   const r = b.el.getBoundingClientRect(), fr = (y - b.y0) / Math.max(1e-6, b.y1 - b.y0);
-  pane.scrollTo({top: Math.max(0, r.top - pane.getBoundingClientRect().top + pane.scrollTop + fr * r.height - 70), behavior: instant ? "auto" : "smooth"});
+  pane.scrollTo({top: Math.max(0, r.top - pane.getBoundingClientRect().top + pane.scrollTop + fr * r.height - READ_LINE - off), behavior: instant ? "auto" : "smooth"});
   if (flash) setTimeout(() => flashRects(n, flash), 30);
   else $("#rd-num", root).value = n;
 }
@@ -292,7 +298,7 @@ const goPage = n => jump(n, 0);
 function setScale(s, fit = false) {
   const a = currentPos(); S.fit = fit; S.scale = clamp(s, 0.4, 4);
   S.pages.forEach(p => { release(p); p.bands = []; });
-  layout(); jump(a.n, a.y); savePos();
+  layout(); jump(a.n, a.y, {off: a.dy}); savePos();
 }
 const zoomBy = f => setScale(S.scale * f);
 function postState(patch) {   // reading status / progress for the Library; failures never matter to reading
@@ -340,7 +346,7 @@ function makeGap(g) {
   d.textContent = `⋯ ${g.lines} line${g.lines === 1 ? "" : "s"} hidden · ${g.p0 === g.p1 ? "p. " + g.p0 : "pp. " + g.p0 + "–" + g.p1} — click to show more`;
   d.onclick = () => { const a = currentPos(), k = 8;
     for (let i = 0; i < k; i++) { if (g.g0 + i <= g.g1) S.view.extra.add(g.g0 + i); if (g.g1 - i >= g.g0) S.view.extra.add(g.g1 - i); }
-    layout(); jump(a.n, a.y); };
+    layout(); jump(a.n, a.y, {off: a.dy}); };
   return d;
 }
 function reveal(n, y) {   // make sure the line at (page, y) is shown, with its context
@@ -350,11 +356,11 @@ function reveal(n, y) {   // make sure the line at (page, y) is shown, with its 
   layout();
 }
 async function setCollapse(on, source) {
-  if (!on) { const a = currentPos(); S.view.keep = null; layout(); jump(a.n, a.y); refreshFind(); return; }
+  if (!on) { const a = currentPos(); S.view.keep = null; layout(); jump(a.n, a.y, {off: a.dy}); refreshFind(); return; }
   if (source) S.view.source = source;
   const a = currentPos();
   S.view.keep = await keepLines(); S.view.extra = new Set();
-  layout(); jump(a.n, a.y); refreshFind();
+  layout(); jump(a.n, a.y, {off: a.dy}); refreshFind();
   if (!S.view.keep.size) toast("Nothing to collapse to yet — search for something or highlight some text first.");
 }
 
