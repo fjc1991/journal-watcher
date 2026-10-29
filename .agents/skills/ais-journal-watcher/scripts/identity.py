@@ -309,8 +309,9 @@ def remove(file):
     ({title, doi, authors, journal, date}) and where the files went."""
     import download as dl                                  # (INDEX_COLS; imported here: download imports this module)
     import notes_store as ns                               # (the files that belong to a PDF)
+    base, root = os.path.realpath(paths.PAPERS), os.path.realpath(paths.ROOT)       # (real paths all through: /var is /private/var on a Mac, and a Papers folder may be a link)
     pdf = os.path.realpath(os.path.join(paths.ROOT, file)) if isinstance(file, str) and "\0" not in file else ""
-    if not pdf.startswith(os.path.realpath(paths.PAPERS) + os.sep) or not pdf.lower().endswith(".pdf") or not os.path.isfile(pdf) or os.sep + "_removed" + os.sep in pdf:
+    if not pdf.startswith(base + os.sep) or not pdf.lower().endswith(".pdf") or not os.path.isfile(pdf) or os.sep + "_removed" + os.sep in pdf:
         raise ValueError("That file is not in your library.")
     idx = os.path.join(paths.PAPERS, "_index.csv")
     with open(idx, newline="", encoding="utf-8") as f:
@@ -320,16 +321,20 @@ def remove(file):
         raise ValueError("That file is not in your library index.")
     row = mine[0]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest_root = os.path.join(paths.PAPERS, "_removed", stamp)
-    moved = []
+    dest_root = os.path.join(base, "_removed", stamp)
+    moves = []
     for src in [pdf] + ns.sidecars(pdf):
-        rel = os.path.relpath(src, paths.PAPERS)
-        dst = os.path.join(dest_root, rel)
+        rel = os.path.relpath(src, base)
+        if rel.startswith(".."):                                  # never move a file to anywhere but under Papers/_removed
+            raise ValueError("That file is not in your library.")
+        moves.append((src, os.path.join(dest_root, rel)))
+    moved = []
+    for src, dst in moves:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.move(src, dst)
-        moved.append(os.path.relpath(dst, paths.ROOT))
+        moved.append(os.path.relpath(dst, root))
     row["file"], row["status"] = "", "removed"
-    row["note"] = ("removed by Check my PDFs: it did not look like this paper (kept in %s)" % os.path.relpath(dest_root, paths.ROOT))[:300]
+    row["note"] = ("removed by Check my PDFs: it did not look like this paper (kept in %s)" % os.path.relpath(dest_root, root))[:300]
     tmp = idx + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, dl.INDEX_COLS)
@@ -338,7 +343,7 @@ def remove(file):
     os.replace(tmp, idx)
     m = re.match(r"Papers/(\d{4}-\d{2})/", file)
     return {"title": row.get("title", ""), "doi": row.get("doi", ""), "authors": [a for a in (row.get("authors") or "").split("; ") if a], "journal": row.get("journal", ""),
-            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, paths.ROOT), "files": moved}
+            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, root), "files": moved}
 
 
 def main(argv=None):

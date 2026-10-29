@@ -2352,7 +2352,8 @@ def main():
     def t_identity_remove():
         """Check my PDFs: a PDF you said is right is not read again (until it changes); a wrong one is moved aside with what belongs to it, never deleted, and the library forgets it."""
         import csv
-        root = os.path.join(TMP, "remove_home"); folder = os.path.join(root, "Papers", "2025-03", "Management Science"); os.makedirs(folder)
+        real = os.path.join(TMP, "remove_home_real"); root = os.path.join(TMP, "remove_home"); folder = os.path.join(real, "Papers", "2025-03", "Management Science"); os.makedirs(folder)
+        os.symlink(real, root)                                    # the library is reached through a link, as /var is /private/var on a Mac (this made the first version move files to ../../private/…)
         saved = (paths.ROOT, paths.PAPERS, idt.KEPT)
         paths.ROOT, paths.PAPERS, idt.KEPT = root, os.path.join(root, "Papers"), os.path.join(root, "state", "identity_ok.json")
         try:
@@ -2397,7 +2398,7 @@ def main():
             assert sorted(x["file"].split("/")[-1] for x in idt.audit()) == ["outside.pdf", "right.pdf"]        # the library has forgotten it (the planted row is still there, untouched)
         finally:
             paths.ROOT, paths.PAPERS, idt.KEPT = saved
-            shutil.rmtree(root, ignore_errors=True)
+            os.unlink(root); shutil.rmtree(real, ignore_errors=True)
 
     check("identity audit: lists the PDFs in a library that are not the paper they are filed under (worst first), changes nothing", t_identity_audit)
     check("check my PDFs: a PDF you marked as right is not read again until it changes; a wrong one is moved aside with its notes, summary and card (never deleted) and the library forgets it; anything outside the library is refused", t_identity_remove)
