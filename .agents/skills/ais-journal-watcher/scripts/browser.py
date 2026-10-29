@@ -56,6 +56,8 @@ PUBLISHER_LOGINS = [
      "https://www.pnas.org/action/ssostart"),
     ("Harvard Business Review — sign in (if you subscribe)",
      "https://hbr.org/sign-in"),
+    ("SSRN — sign in (if you have an account: it can make downloads easier)",
+     "https://papers.ssrn.com/"),
 ]
 
 
@@ -296,9 +298,12 @@ class Browser:
         for u, l in links:
             if names(u) and not l["ref"]:
                 return u
+        ssrn = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "")
         for u, l in links:
             if l["other"] or site_of(u) != site_of(base):
                 continue
+            if ssrn and re.search(r"Delivery\.cfm", u, re.I) and re.search(r"(?<!\d)%s(?!\d)" % ssrn.group(1), u):      # SSRN's own download link carries the paper's number (and no DOI)
+                return u
             if doi and ("/doi/" in u or not re.search(r"viewcontent\.cgi|pdfft", u)):
                 continue
             return u

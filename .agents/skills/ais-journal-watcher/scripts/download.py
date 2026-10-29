@@ -126,6 +126,9 @@ READER_HOSTS = {"pnas": "www.pnas.org", "aaas": "www.science.org", "informs": "p
 def browser_pdf_url(p):
     """PDF URL for the real-browser route (browser.py)."""
     pub, doi = p.get("publisher"), p.get("doi")
+    m = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "", re.I)
+    if m:                                       # an SSRN paper: its page there (the PDF link on it is followed: browser._pdf_link)
+        return "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=%s" % m.group(1)
     if pub == "informs" and doi:
         return "https://pubsonline.informs.org/doi/pdf/%s" % doi
     if pub == "wiley" and doi:
