@@ -1451,6 +1451,14 @@ def main():
                 body = feed_body(self.path)
             elif self.path in SIGS:
                 body = SIGS[self.path].encode()
+            elif self.path.startswith("/status/"):                       # the feed address answers with this HTTP status
+                self.send_response(int(self.path.split("/")[2])); self.end_headers(); return
+            elif self.path == "/html":                                    # a Wi-Fi sign-in page where the feed should be
+                body = b"<html><body>Sign in to the Wi-Fi</body></html>"
+            elif self.path == "/empty":
+                body = b""
+            elif self.path == "/shape":                                   # JSON, but not a feed
+                body = b"[1, 2]"
             else:
                 self.send_response(404); self.end_headers(); return
             self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -1496,6 +1504,105 @@ def main():
         finally:
             os.environ["JW_UPDATE_FEED"] = FURL
         assert up.check()["error"] == ""
+    def t_up_problems():
+        import http.client as _hc, socket as _sk, ssl as _ssl, urllib.error as _ue
+        base = "http://127.0.0.1:%d" % feed_srv.server_address[1]
+        saved = (up.load_state(), os.environ["JW_UPDATE_FEED"])
+        try:
+            def look(url):
+                os.environ["JW_UPDATE_FEED"] = url
+                return up.check()
+            # what went wrong is told by the kind of failure, with the HTTP status; the words are the same whoever asked
+            for path, kind, code in [("/nothing", "not_found", 404), ("/status/410", "not_found", 410), ("/status/403", "denied", 403), ("/status/401", "denied", 401), ("/status/429", "busy", 429),
+                                     ("/status/503", "busy", 503), ("/status/418", "http", 418), ("/html", "garbled", 0), ("/empty", "garbled", 0), ("/shape", "garbled", 0)]:
+                st = look(base + path)
+                assert st["problem"] and st["problem"]["kind"] == kind and st["problem"]["code"] == code, (path, st["problem"])
+                assert st["checked_ok"] is False and st["error"], (path, st)
+                assert st["error"].startswith("Could not reach the update feed") == (kind != "garbled"), (path, st["error"])          # a page that was reached is not 'unreachable'
+            assert look(base + "/nothing")["problem"]["url"] == base + "/nothing"                                                  # the address that answered is kept for the Details
+            st = look("http://127.0.0.1:1/appcast.json")                                                                          # nobody listens
+            assert st["problem"]["kind"] == "offline" and st["error"].startswith("Could not reach"), st
+            # a server that does not speak HTTP at all must not break the check (it once raised out of check())
+            srv = _sk.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(2)
+            def junk():
+                for _ in range(2):
+                    try:
+                        c, _a = srv.accept(); c.recv(2048); c.sendall(b"garbage line\r\n\r\n"); c.close()
+                    except OSError:
+                        return
+            threading.Thread(target=junk, daemon=True).start()
+            st = look("http://127.0.0.1:%d/appcast.json" % srv.getsockname()[1])
+            assert st["problem"]["kind"] == "garbled", st["problem"]
+            srv.close()
+            # by the type of the exception: a certificate, a timeout, a reset, a surprise
+            for exc, kind in [(_ue.URLError(_ssl.SSLCertVerificationError("certificate verify failed")), "tls"), (_ue.URLError(_sk.timeout("timed out")), "timeout"), (TimeoutError("timed out"), "timeout"),
+                              (ConnectionResetError(54, "Connection reset by peer"), "offline"), (_hc.RemoteDisconnected("closed"), "offline"), (_hc.IncompleteRead(b"x"), "garbled"),
+                              (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), "garbled"), (up.BadAddress("must start with https://"), "address"), (RuntimeError("boom"), "other")]:
+                assert up.classify(exc)[0] == kind, (exc, up.classify(exc))
+            real = up.urllib.request.urlopen
+            up.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("something nobody planned for"))
+            try:
+                st = look(base + "/appcast.json")
+            finally:
+                up.urllib.request.urlopen = real
+            assert st["problem"]["kind"] == "other" and st["error"], st                                                           # check() never raises, whatever happens
+            # nothing to ask is not a check: no 'last checked' stamp, no problem, the page says there is no address
+            before = up.load_state().get("checked")
+            os.environ["JW_UPDATE_FEED"] = ""
+            real_bi = up.built_in_feed; up.built_in_feed = lambda: ""
+            try:
+                st = up.check()
+            finally:
+                up.built_in_feed = real_bi
+            assert st["feed"] is False and st["problem"] is None and st["error"] == "" and up.load_state().get("checked") == before, st
+            # a state file written before 1.2 has an error and no kind: it is shown as an unexpected problem, not dropped
+            os.environ["JW_UPDATE_FEED"] = base + "/appcast.json"
+            up._write(up.STATE_FILE, {"checked": "2026-10-01T00:00:00+00:00", "error": "old message"})
+            st = up.public()
+            assert st["problem"] == {"kind": "other", "code": 0, "url": ""} and st["checked_ok"] is False and st["error"] == "old message", st
+            # a feed that names your version is no problem and is 'checked_ok'; a failure after a success keeps the last answer and says there is a problem
+            up._write(up.STATE_FILE, {})
+            FEEDS["/appcast.json"]["version"] = "1.0.0"
+            st = look(base + "/appcast.json")
+            assert st["problem"] is None and st["checked_ok"] is True and st["available"] is False and st["ok_at"] and st["error"] == "", st
+            FEEDS["/appcast.json"]["version"] = "1.1.0"
+            assert look(base + "/appcast.json")["available"] is True
+            st = look(base + "/status/503")
+            assert st["available"] is True and st["latest"] == "1.1.0" and st["problem"]["kind"] == "busy" and st["checked_ok"] is False, st
+            assert look(base + "/appcast.json")["problem"] is None
+        finally:
+            FEEDS["/appcast.json"]["version"] = "1.1.0"
+            os.environ["JW_UPDATE_FEED"] = saved[1]
+            up._write(up.STATE_FILE, saved[0])
+
+    def t_up_no_release():
+        """A 404 from the address built into the app, before it has ever answered, is 'nothing published yet'; every other 404 is a problem."""
+        base = "http://127.0.0.1:%d" % feed_srv.server_address[1]
+        saved = (up.load_state(), os.environ["JW_UPDATE_FEED"], up.settings())
+        rel = base + "/o/r/releases/latest/download/appcast.json"                  # shaped like the built-in address; the server has nothing there
+        try:
+            up.save_settings({"feed": ""})
+            up._write(up.STATE_FILE, {})
+            os.environ["JW_UPDATE_FEED"] = rel
+            st = up.check()
+            assert st["no_release"] is True and st["problem"]["kind"] == "not_found" and st["source"] == "test", st
+            os.environ["JW_UPDATE_FEED"] = base + "/o/r/elsewhere/appcast.json"      # another kind of address
+            assert up.check()["no_release"] is False
+            os.environ["JW_UPDATE_FEED"] = rel
+            up._write(up.STATE_FILE, {"ok_at": "2026-10-01T00:00:00+00:00"})        # it answered once: now a 404 is something that went wrong
+            st = up.check()
+            assert st["no_release"] is False and st["problem"]["kind"] == "not_found", st
+            up._write(up.STATE_FILE, {})
+            os.environ.pop("JW_UPDATE_FEED"); up.save_settings({"feed": rel})        # an address you typed yourself is never 'nothing published yet'
+            st = up.check()
+            assert st["no_release"] is False and st["source"] == "yours" and st["problem"]["kind"] == "not_found", st
+            up.save_settings({"feed": ""})
+            os.environ["JW_UPDATE_FEED"] = base + "/status/403"                      # only a 404 is read as 'nothing yet'
+            assert up.check()["no_release"] is False
+        finally:
+            os.environ["JW_UPDATE_FEED"] = saved[1]
+            up.save_settings({"feed": saved[2]["feed"]})
+            up._write(up.STATE_FILE, saved[0])
     def t_up_settings():
         try:
             up.save_settings({"feed": "http://example.com/appcast.json"}); raise AssertionError("an insecure address was accepted")
@@ -1614,6 +1721,8 @@ def main():
     check("updates: the feed is read strictly (version, checksum, https or loopback only, no file:// or http:// elsewhere)", t_up_feed)
     check("updates: a newer version is announced with notes and the history since yours (older releases are left out), a skipped one is hidden until a newer one comes, an equal one is no news", t_up_check)
     check("updates: when the feed cannot be reached the last answer is kept and the problem is said", t_up_failure)
+    check("updates: a failed look says what kind of problem it was (not found, refused, busy, offline, not a feed, TLS, timeout), by the failure and not its wording; the same words whoever asked; a server that does not speak HTTP does not break it; no address is not a check", t_up_problems)
+    check("updates: a 404 from the built-in release address that never answered is 'nothing published yet'; a typed address, a feed that worked before, another path or another status is a problem", t_up_no_release)
     check("updates: choices are saved (automatic checks, the address must be https) and a test feed overrides them", t_up_settings)
     check("updates: a download with the wrong checksum is refused, and something that is not an app is not installed", t_up_download)
     check("updates: the helper waits for the old app to quit, swaps the new one in, and puts the old one back if that fails", t_up_swap)
@@ -1671,7 +1780,7 @@ def main():
             up._run_install()
             assert "not checked against the signing key" in up._progress["error"], up._progress                          # …and cannot be installed either
             up._progress.update({"phase": "idle", "pct": 0, "error": ""})
-            assert "not signed" in up.check()["error"]                                                                   # no .sig at all
+            assert "not signed" in up.check()["error"] and up.public()["problem"]["kind"] == "unsigned"                  # no .sig at all
             SIGS["/appcast.json.sig"] = srel.sign_bytes(sk, feed_body("/appcast.json")) + "\n"
             st = up.check()
             assert st["error"] == "" and st["available"] is True and st["latest"] == "1.1.0" and st["signed"] is True, st
@@ -1706,17 +1815,19 @@ def main():
             os.environ["JW_UPDATE_KEYS"] = srel.public_b64(sk)
             FEEDS["/appcast.json"]["version"] = "9.9.9"                                                                  # the feed changes after it was signed
             st = up.check()
-            assert "not signed with this app" in st["error"] and st["latest"] == "1.1.0", st                              # refused; the last checked answer is kept
+            assert "not signed with this app" in st["error"] and st["latest"] == "1.1.0" and st["problem"]["kind"] == "bad_signature", st      # refused; the last checked answer is kept
             SIGS["/appcast.json.sig"] = srel.sign_bytes(other, feed_body("/appcast.json"))
             assert "not signed with this app" in up.check()["error"]                                                      # signed, but by someone else
             os.environ["JW_UPDATE_KEYS"] = srel.public_b64(other) + "\n" + srel.public_b64(sk)
             st = up.check()
             assert st["error"] == "" and st["latest"] == "9.9.9" and st["keys"] == 2, st                                  # either of two listed keys will do
+            os.environ["JW_UPDATE_KEYS"] = "not a key\n"                                                                  # a key file that has lines but no usable key: nothing is believed
+            assert up.check()["problem"]["kind"] == "no_verifier"
             os.environ["JW_UPDATE_KEYS"] = ""
             SIGS.clear()
             FEEDS["/appcast.json"]["version"] = "1.1.0"
             st = up.check()
-            assert st["error"] == "" and st["latest"] == "1.1.0" and st["signed"] is False, st                          # no key built in: unsigned feeds work as before
+            assert st["error"] == "" and st["latest"] == "1.1.0" and st["signed"] is False and st["problem"] is None, st   # no key built in: unsigned feeds work as before
         finally:
             os.environ.pop("JW_UPDATE_KEYS", None)
             SIGS.clear()
