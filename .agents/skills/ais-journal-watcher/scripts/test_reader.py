@@ -2507,6 +2507,102 @@ def main():
             brw.library, brw.via_library = saved
             srv3.shutdown()
 
+    def t_search_memory():
+        """A search is not paid for twice: verdicts are reused for the same question and the same text (and expire), a journal's year range is kept for a while, and the same search is the same saved run."""
+        import contextlib, pipeline as pl_
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
+        asked, fetched, events = [], [], []
+        def fake_batch(system, batch, usage):
+            asked.extend(p["title"] for p in batch)
+            return {n: {"n": n, "verdict": "download" if "Platform" in p["title"] else "skip", "relevance": 80, "topics": [topic], "reason": "because", "method": None} for n, p in enumerate(batch, 1)}
+        real = (pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts)
+        pl_._screen_batch = fake_batch
+        emit = lambda ev, d=None: events.append((ev, d))
+        stop = threading.Event()
+        def papers(abs_="About platforms."):
+            return [{"id": "p%d" % k, "title": ttl, "abbr": abbr, "pub_date": "2024-03-01", "abstract": abs_, "keywords": ["x"]} for k, ttl in enumerate(["Platform A", "Platform B", "Other C"])]
+        def run_with(query="", ps=None):
+            r = pl_.Run("search", {"year_from": 2024, "year_to": 2024, "journals": [abbr], "topics": [topic], "methods": [], "query": query})
+            for q in (ps or papers()):
+                r.add_paper(dict(q))
+            return r
+        saved_state = ai.config_data()
+        try:
+            for f in (pl_.VERDICTS,):
+                if os.path.exists(f): os.remove(f)
+            ai.save_config({"screening": {"reuse_days": 90}})
+            r1 = run_with(); pl_.screen(r1, emit, stop)
+            assert asked == ["Platform A", "Platform B", "Other C"] and [r1.papers[i]["verdict"] for i in ("p0", "p1", "p2")] == ["download", "download", "skip"] and r1.reused == 0
+            asked.clear(); events.clear()
+            r2 = run_with(); pl_.screen(r2, emit, stop)                                        # the same question, the same text: nothing is asked
+            assert not asked and r2.reused == 3 and [r2.papers[i]["verdict"] for i in ("p0", "p1", "p2")] == ["download", "download", "skip"], (asked, r2.reused)
+            assert r2.papers["p0"]["reason"] == "because" and r2.papers["p0"]["topics"] == [topic] and any(e == "log" and "already had a verdict" in d["msg"] for e, d in events), events[-3:]
+            r2.save(force=True); assert pl_.Run.load(r2.id).reused == 3 and [d for d in pl_.list_runs() if d["id"] == r2.id][0]["reused"] == 3
+            asked.clear(); r3 = run_with(query="a different focus"); pl_.screen(r3, emit, stop)    # another question has its own verdicts
+            assert len(asked) == 3 and r3.reused == 0
+            asked.clear(); ps = papers(); ps[0]["abstract"] = "An abstract that arrived later."; r4 = run_with(ps=ps); pl_.screen(r4, emit, stop)      # another text: that one paper is asked again
+            assert asked == ["Platform A"] and r4.reused == 2, (asked, r4.reused)
+            asked.clear(); ai.save_config({"screening": {"reuse_days": 0}}); r5 = run_with(); pl_.screen(r5, emit, stop)                        # 0 days: always ask
+            assert len(asked) == 3 and r5.reused == 0
+            ai.save_config({"screening": {"reuse_days": 30}})
+            d = json.load(open(pl_.VERDICTS)); old = (_dt.now(_tz.utc) - _td(days=31)).isoformat(timespec="seconds")
+            for fp in d:
+                for e in d[fp].values(): e["at"] = old
+            json.dump(d, open(pl_.VERDICTS, "w"))
+            asked.clear(); r6 = run_with(); pl_.screen(r6, emit, stop)                           # older than the number of days: asked again, and remembered afresh
+            assert len(asked) == 3 and r6.reused == 0
+            asked.clear(); r7 = run_with(); pl_.screen(r7, emit, stop); assert not asked and r7.reused == 3
+            pl_._screen_batch = lambda system, batch, usage: {}                                  # a failure is an error verdict and is never remembered
+            asked.clear(); r8 = run_with(query="fails"); pl_.screen(r8, emit, stop)
+            assert {r8.papers[i]["verdict"] for i in r8.papers} == {"error"}
+            pl_._screen_batch = fake_batch
+            asked.clear(); r9 = run_with(query="fails"); pl_.screen(r9, emit, stop); assert len(asked) == 3 and r9.reused == 0
+            for bad in ({"reuse_days": -1}, {"reuse_days": "x"}, {"reuse_days": 99999}):
+                try:
+                    ai.save_config({"screening": bad}); raise AssertionError("accepted %r" % bad)
+                except ValueError:
+                    pass
+            assert ai.config()["screening"] == {"reuse_days": 30}
+            # the same search is the same saved run: the order of the choices and the case of the focus phrase do not matter
+            a = {"year_from": 2024, "year_to": 2024, "journals": ["B", "A"], "topics": ["t2", "t1"], "methods": [], "query": "  LLMs "}
+            b = {"year_from": 2024, "year_to": 2024, "journals": ["A", "B"], "topics": ["t1", "t2"], "methods": [], "query": "llms"}
+            assert pl_.search_key(a) == pl_.search_key(b) and pl_.search_key(a) != pl_.search_key(dict(b, year_to=2025)) and pl_.search_key(a) != pl_.search_key(dict(b, journals=["A"]))
+            rs_ = pl_.Run("search", a); rs_.add_paper(dict(papers()[0])); rs_.save(force=True)
+            assert pl_.find_search(b)["id"] == rs_.id and pl_.find_search(dict(b, query="other")) is None and pl_.find_search(a)["search_key"] == pl_.search_key(a)
+            # a journal's year range is kept for a few days (a day when it reaches the current year), asked for again after that
+            calls = []
+            def fake_cr(issn, y0, y1, progress=None, doi_prefix=None, work_type=None):
+                calls.append((y0, y1))
+                return [{"title": "Platform %d" % k, "doi": "10.9999/t.%d.%d" % (y0, k), "pub_date": "%d-02-01" % y0, "abstract": "Abstract %d" % k, "keywords": ["k"]} for k in range(3)]
+            pl_.fx.crossref_journal_range = fake_cr; pl_.fill_abstracts = lambda *a, **k: None
+            def search(y0, y1):
+                r = pl_.Run("search", {"year_from": y0, "year_to": y1, "journals": [abbr], "topics": [topic], "methods": [], "query": ""}); events.clear()
+                pl_.fetch_search(r, emit, stop); return r
+            shutil.rmtree(pl_.FETCHED, ignore_errors=True)
+            r = search(2023, 2023); assert calls == [(2023, 2023)] and len(r.order) == 3
+            r = search(2023, 2023); assert calls == [(2023, 2023)] and len(r.order) == 3 and any(e == "log" and "saved copy" in d["msg"] for e, d in events) and r.jstate[abbr]["label"] == "Saved copy"
+            path = pl_._fetched_path(abbr, 2023, 2023); dd = json.load(open(path)); dd["at"] = (_dt.now(_tz.utc) - _td(days=8)).isoformat(timespec="seconds"); json.dump(dd, open(path, "w"))
+            r = search(2023, 2023); assert calls == [(2023, 2023), (2023, 2023)]                   # older than a week: asked again
+            this_year = _dt.now(_tz.utc).year
+            search(this_year - 1, this_year); n = len(calls)
+            path = pl_._fetched_path(abbr, this_year - 1, this_year); dd = json.load(open(path)); dd["at"] = (_dt.now(_tz.utc) - _td(days=2)).isoformat(timespec="seconds"); json.dump(dd, open(path, "w"))
+            search(this_year - 1, this_year); assert len(calls) == n + 1                              # a range up to this year is kept for a day only (new articles appear)
+            pl_.fx.crossref_journal_range = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+            r = search(2022, 2022); assert not r.order and not os.path.exists(pl_._fetched_path(abbr, 2022, 2022))          # a failure is not saved
+            stop2 = threading.Event()
+            def cr_stopped(*a, **k):                                                                                        # Stop pressed while the journal was being asked: what came is not complete
+                stop2.set(); return fake_cr(None, 2021, 2021)
+            pl_.fx.crossref_journal_range = cr_stopped
+            r = pl_.Run("search", {"year_from": 2021, "year_to": 2021, "journals": [abbr], "topics": [topic], "methods": [], "query": ""}); pl_.fetch_search(r, emit, stop2)
+            assert not os.path.exists(pl_._fetched_path(abbr, 2021, 2021)), "a stopped fetch was saved"
+            # an error verdict is never remembered (screen filters them out, and this is the second guard)
+            pl_.remember_verdicts("fpx", [{"id": "e1", "verdict": "error", "title": "T"}, {"id": "e2", "verdict": "skip", "title": "T2", "reason": "r"}])
+            kept = json.load(open(pl_.VERDICTS))["fpx"]; assert "e1" not in kept and kept["e2"]["v"] == "skip", kept
+        finally:
+            pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts = real
+            ai.save_config({"screening": saved_state["screening"]})
+
     def t_library_test_record():
         """What the test finds changes the tick only when it is clear: a library with a sign-in of its own is ticked when the test got through and un-ticked when it was asked for a password."""
         sg = brw.si
@@ -2525,6 +2621,7 @@ def main():
         sg.save_profile({"mode": "institutional"})
 
     check("browser: on a paywalled landing page only THIS article's PDF link is followed (its own link wherever the page puts it: aside, tab strip, 'footer'-named wrapper, other host, citation_pdf_url; not another site, a reference list, the footer, a banner PDF, another article or one whose DOI merely starts with ours)", t_link_follow)
+    check("search memory: a verdict is reused for the same question and the same paper text (never another question, another text, an error, or one older than the number of days you set), a journal's year range is kept for a while, and the same search is the same saved run", t_search_memory)
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
 
