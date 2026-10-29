@@ -196,7 +196,7 @@ class Run:
         bits = ["%s-%s" % (p.get("year_from"), p.get("year_to"))]
         bits += [re.sub(r"[^a-z0-9]+", "", t.lower())[:12]
                  for t in (p.get("topics") or [])[:2] + (p.get("methods") or [])[:1]]
-        return "search_" + "_".join(bits)
+        return "search_" + "_".join(bits) + "_" + hashlib.sha1(search_key(p).encode("utf-8")).hexdigest()[:6]     # (the journals and the focus phrase too: two searches started in the same second must not share a file)
 
     def title(self):
         if self.kind == "weekly":

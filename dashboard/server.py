@@ -45,6 +45,7 @@ import notes_store as ns  # noqa: E402
 import pipeline as pl  # noqa: E402
 import prefs  # noqa: E402
 import signins  # noqa: E402
+import identity  # noqa: E402
 import support  # noqa: E402
 import updater  # noqa: E402
 import smart  # noqa: E402
@@ -216,6 +217,35 @@ def _why(r):
     """The reason a helper process gave for failing: the last line of what it printed to stderr (a Python traceback ends with it)."""
     lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip() and not l.strip().startswith(("║", "╔", "╚", "File ", "^", "~"))]
     return lines[-1][:200] if r.returncode != 0 and lines else ""
+
+
+# "Check my PDFs": is every PDF the paper it is filed under (identity.py)? It reads the first pages of each PDF in the background and keeps its answers here until the app closes.
+PDFCHECK = {"state": "idle", "done": 0, "total": 0, "results": [], "counts": {}, "at": "", "error": ""}
+PDFCHECK_LOCK = threading.Lock()
+
+
+def start_pdfcheck():
+    with PDFCHECK_LOCK:
+        if PDFCHECK["state"] == "running":
+            return False
+        PDFCHECK.update(state="running", done=0, total=0, results=[], counts={}, error="")
+
+    def progress(n, total):
+        PDFCHECK.update(done=n, total=total)
+
+    def job():
+        try:
+            res = identity.audit(progress, use_kept=True)
+            counts = {}
+            for r in res:
+                counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+            PDFCHECK.update(results=[r for r in res if r["verdict"] in ("mismatch", "unverified", "missing")], counts=counts, state="done",
+                            at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            PDFCHECK.update(state="error", error="The check stopped: %s" % str(e)[:200])
+    threading.Thread(target=job, daemon=True).start()
+    return True
 
 
 LOGIN_PENDING = {"site": ""}        # which sign-in window is open right now ("" = none)
@@ -607,6 +637,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(run.to_dict())
         if path == "/api/library":
             return self.send_json(pl.library())
+        if path == "/api/library/check":
+            return self.send_json(PDFCHECK)
         if path.startswith("/files/"):
             full = ns.safe_papers_path(urllib.parse.unquote(path[len("/files/"):]))
             if not full:
@@ -1396,6 +1428,41 @@ class Handler(BaseHTTPRequestHandler):
             if which in ("library", "nova") and not signins.profile()["signs_in"]:
                 return self.send_json({"error": "Set up your library first (Settings → Library access): it has no sign-in of its own yet.", "setup": True}, 400)
             return self.started(start_login(which), None)
+        if path == "/api/library/check":         # start "Check my PDFs"
+            return self.send_json({"ok": True, "started": start_pdfcheck(), **PDFCHECK})
+        if path in ("/api/library/check/keep", "/api/library/check/remove"):
+            f = str(b.get("file") or "")
+            hit = next((r for r in PDFCHECK["results"] if r["file"] == f and r["verdict"] in ("mismatch", "unverified")), None)
+            if not hit:
+                return self.send_json({"error": "That PDF is not in the list of the last check. Check again."}, 404)
+            if path.endswith("/keep"):
+                identity.keep(f)
+                PDFCHECK["results"] = [r for r in PDFCHECK["results"] if r["file"] != f]
+                PDFCHECK["counts"]["kept"] = PDFCHECK["counts"].get("kept", 0) + 1
+                PDFCHECK["counts"][hit["verdict"]] = max(0, PDFCHECK["counts"].get(hit["verdict"], 1) - 1)
+                return self.send_json({"ok": True, **PDFCHECK})
+            again = bool(b.get("download", True)) and related is not None
+            if again and JOBS.busy():                      # the download is started by this very request: do not take the PDF away if it cannot start
+                return self.send_json({"error": "Another task is running — wait or press Stop, then try again."}, 409)
+            try:
+                gone = identity.remove(f)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            PDFCHECK["results"] = [r for r in PDFCHECK["results"] if r["file"] != f]
+            PDFCHECK["counts"][hit["verdict"]] = max(0, PDFCHECK["counts"].get(hit["verdict"], 1) - 1)
+            out = {"ok": True, "moved_to": gone["moved_to"], "title": gone["title"], "download": False}
+            if again:
+                papers, have = related.run_papers([{"doi": gone["doi"], "title": gone["title"], "authors": gone["authors"], "venue": gone["journal"], "date": gone["date"], "reason": "re-download: the PDF was another paper"}])
+                if papers:
+                    run = pl.Run("picks", {"label": "Download again: " + re.sub(r"\s+", " ", gone["title"])[:40]})
+                    for p in papers:
+                        run.add_paper(p)
+                    run.stage, run.status = "ready", "stopped"
+                    run.save(force=True)
+                    JOBS.run = run
+                    out["download"] = start_download([p["id"] for p in papers])
+                    out["run"] = run.to_dict(full=False)
+            return self.send_json({**out, **{k: PDFCHECK[k] for k in ("state", "counts", "results", "at")}})
         if path == "/api/library/test":          # is the library access working now? (a few seconds to half a minute: it opens the library page in the background)
             if JOBS.busy():
                 return self.send_json({"error": "Wait for the task that is running to finish, then test again."}, 409)
