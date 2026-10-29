@@ -277,6 +277,7 @@ JS_SPAN_CENTER ="""([n, sub]) => { const q = [...document.querySelectorAll(`.rd-
   return [b.left + b.width / 2, b.top + b.height / 2]; }"""
 # did the reader turn to page n? A jump puts the page's top about 70 px below the top of the pane. (The page-number box is no judge of that: it shows n for a few milliseconds
 # and then the page whose foot is still in view above, see docs/HISTORY.md §2n.)
+JS_RANGE = """([sel, v]) => { const r = document.querySelector(sel); r.value = v; r.dispatchEvent(new Event('input', {bubbles: true})); }"""
 JS_PAGE_AT_TOP = r"""(n) => { const b = document.querySelectorAll('.rd-band')[n - 1], p = document.querySelector('#rd-pdf'); if (!b || !p) return false; const d = b.getBoundingClientRect().top - p.getBoundingClientRect().top; return d >= 0 && d < 150; }"""
 JS_A11Y = r"""() => {
   const out = {noname: [], dupid: [], tiny: [], smalltext: []};
@@ -476,6 +477,27 @@ def main():
             check("Page fits the whole page on screen", pb["height"] <= pp["height"] and "on" in (page.get_attribute("#rd-fitpage", "class") or ""), "%.0f in %.0f" % (pb["height"], pp["height"]))
             page.click('#reader [data-a="side"]'); page.wait_for_timeout(800); page.click('#reader [data-a="fit"]'); page.wait_for_timeout(400)
             check("the reader keeps working after all that (still 3 pages)", page.locator(".rd-band").count() == 3 and abs(bw() - w0) < 12, "%.0f vs %.0f" % (bw(), w0))   # (the divider drag back is only accurate to a few pixels)
+            print("reader: a jump shows the right page number, and zooming does not move the text")
+            scroll_y = lambda: page.evaluate("document.querySelector('#rd-pdf').scrollTop")
+            page.fill("#rd-num", "3"); page.press("#rd-num", "Enter"); seen_ = []
+            for _ in range(8):
+                page.wait_for_timeout(120); seen_.append(page.input_value("#rd-num"))
+            check("typing a page number leaves the box on that page (it used to fall back to the page above a moment later) and the page is at the top", set(seen_) == {"3"} and page.evaluate(JS_PAGE_AT_TOP, 3), str(seen_))
+            page.evaluate("document.querySelector('#rd-pdf').scrollTop = 700"); page.wait_for_timeout(500)
+            y0, n0 = scroll_y(), page.input_value("#rd-num")
+            for _ in range(3):
+                page.click('#reader [data-a="zin"]'); page.wait_for_timeout(500); page.click('#reader [data-a="zout"]'); page.wait_for_timeout(500)
+            check("zooming in and out again brings the text back to the same place (it used to creep up by about a hundred pixels each time)", abs(scroll_y() - y0) <= 3 and page.input_value("#rd-num") == n0, "%.0f -> %.0f, page %s -> %s" % (y0, scroll_y(), n0, page.input_value("#rd-num")))
+            def box_is(n):
+                try:
+                    page.wait_for_function("(n) => document.querySelector('#rd-num').value === n", arg=n, timeout=4000)
+                except Exception:  # noqa: BLE001
+                    pass
+                return page.input_value("#rd-num")
+            page.fill("#rd-num", "2"); page.press("#rd-num", "Enter"); got_ = [box_is("2")]
+            page.wait_for_timeout(500); page.click('#reader [data-a="next"]'); got_.append(box_is("3"))
+            page.wait_for_timeout(500); page.click('#reader [data-a="prev"]'); got_.append(box_is("2"))
+            check("after typing a page, Next goes to the following page and Previous back again (it used to stay on the same page once, because the box was a page behind)", got_ == ["2", "3", "2"], str(got_))
             page.evaluate(JS_SELECT, [1, "Transparent governance"]); page.wait_for_selector("#rd-sel:not(.hide)"); page.click('#rd-sel [data-c="green"]')
             for _ in range(50):
                 if os.path.exists(sidecar(0, ".notes.json")):
@@ -505,6 +527,43 @@ def main():
                 page.keyboard.press("Control+Shift+z"); page.wait_for_timeout(300)
             check("redo brings it back", page.locator(".rd-ov .hl").count() == n_before)
             page.click("#rd-undo"); page.wait_for_timeout(200); page.click("#rd-redo"); page.wait_for_timeout(200)
+
+            print("reader: a collapsed view keeps your place when the reading line is in a 'lines hidden' bar or below every strip")
+            JS_PANE_H = "document.querySelector('#rd-pdf').getBoundingClientRect().height"
+            JS_FLOW = """() => { const p = document.querySelector('#rd-pdf'); return {h: p.getBoundingClientRect().height, all: p.scrollHeight}; }"""
+            JS_GAP_TO_LINE = """() => { const p = document.querySelector('#rd-pdf'), pr = p.getBoundingClientRect();       // the middle of the first "lines hidden" bar that has a strip after it goes on the reading line (70 px under the top of the pane)
+              const g = [...document.querySelectorAll('#rd-flow .rd-gap')].find(g => g.nextElementSibling && g.nextElementSibling.classList.contains('rd-band')); if (!g) return false;
+              const r = g.getBoundingClientRect(); p.scrollTop += r.top + r.height / 2 - (pr.top + 70); return true; }"""
+            JS_STRIP_AFTER_LINE = """() => { const p = document.querySelector('#rd-pdf'), line = p.getBoundingClientRect().top + 70;
+              const b = [...document.querySelectorAll('#rd-flow .rd-band')].find(b => b.getBoundingClientRect().top > line - 1); return b ? {k: b.dataset.n + '@' + (+b.dataset.y0).toFixed(3), off: Math.round(b.getBoundingClientRect().top - line)} : null; }"""
+            JS_LAST_STRIP = """() => { const p = document.querySelector('#rd-pdf'), pr = p.getBoundingClientRect(), bs = [...document.querySelectorAll('#rd-flow .rd-band')], b = bs[bs.length - 1];
+              const r = b.getBoundingClientRect(); return {n: b.dataset.n, endsAboveLine: r.bottom <= pr.top + 70, shown: r.bottom > pr.top && r.top < pr.bottom}; }"""
+            JS_PAGE_SHOWN = """(n) => { const p = document.querySelector('#rd-pdf').getBoundingClientRect(), r = document.querySelector(`.rd-band[data-n="${n}"]`).getBoundingClientRect(); return r.bottom > p.top && r.top < p.bottom; }"""
+            page.fill("#rd-num", "2"); page.press("#rd-num", "Enter"); page.wait_for_timeout(400)
+            page.evaluate(JS_RANGE, ["#rd-ctx", 0]); page.wait_for_timeout(500)         # (the slider re-collapses after a pause: let that pass before collapsing)
+            page.click('#reader [data-a="collapse"]'); page.wait_for_selector("#rd-collapse.on"); page.wait_for_timeout(900)
+            strips_, bars_ = page.locator("#rd-flow .rd-band").count(), page.locator("#rd-flow .rd-gap").count()
+            check("collapsed to the highlights with no context, the paper is a few short strips with 'lines hidden' bars between them", strips_ >= 3 and bars_ >= 2, "%d strips, %d bars" % (strips_, bars_))
+            vh_ = 950 - (page.evaluate(JS_PANE_H) - 200); page.set_viewport_size({"width": 1400, "height": int(vh_)}); page.wait_for_timeout(600)      # a short window, so that the strips need scrolling
+            for k_ in range(6):
+                g_ = page.evaluate(JS_FLOW)
+                if k_ >= 3 and g_["all"] >= g_["h"] + 150:
+                    break
+                page.click('#reader [data-a="zin"]'); page.wait_for_timeout(450)
+            page.evaluate(JS_GAP_TO_LINE); page.wait_for_timeout(400)
+            b0_ = page.evaluate(JS_STRIP_AFTER_LINE)
+            page.click('#reader [data-a="zout"]'); page.wait_for_timeout(600); b1_ = page.evaluate(JS_STRIP_AFTER_LINE)
+            page.click('#reader [data-a="zin"]'); page.wait_for_timeout(600); b2_ = page.evaluate(JS_STRIP_AFTER_LINE)
+            check("zooming a collapsed view with the reading line in a 'lines hidden' bar leaves the strip below it where it was (it used to slide that strip up to the line)",
+                  bool(b0_ and b1_ and b2_) and 5 < b0_["off"] < 80 and b0_["k"] == b1_["k"] == b2_["k"] and abs(b1_["off"] - b0_["off"]) <= 3 and abs(b2_["off"] - b0_["off"]) <= 3, str([b0_, b1_, b2_]))
+            page.set_viewport_size({"width": 1400, "height": int(vh_ - (page.evaluate(JS_PANE_H) - 130))}); page.wait_for_timeout(600)
+            page.evaluate("document.querySelector('#rd-pdf').scrollTop = 99999"); page.wait_for_timeout(500)
+            last_ = page.evaluate(JS_LAST_STRIP)
+            check("with the reading line below every strip (a very short window), the page number is the last strip's page, not page 1", last_["endsAboveLine"] and last_["shown"] and page.input_value("#rd-num") == last_["n"], "%s, box %s" % (last_, page.input_value("#rd-num")))
+            page.click('#reader [data-a="collapse"]'); page.wait_for_selector("#rd-collapse:not(.on)"); page.wait_for_timeout(700)
+            check("expanding from there stays at that passage (it used to jump to page 1)", page.input_value("#rd-num") == last_["n"] and page.evaluate(JS_PAGE_SHOWN, last_["n"]), "box %s, wanted %s" % (page.input_value("#rd-num"), last_["n"]))
+            page.set_viewport_size({"width": 1400, "height": 950}); page.wait_for_timeout(500)
+            page.evaluate(JS_RANGE, ["#rd-ctx", 2]); page.click('#reader [data-a="fit"]'); page.wait_for_timeout(600)
 
             print("reader: links, citations, area, explain")
             page.click(".rd-bar [data-a='back']"); page.wait_for_selector("#lf-q")
@@ -842,8 +901,15 @@ def main():
             page.select_option("#dr-cs", "numbered"); page.wait_for_function("document.querySelectorAll('.dr-refs li[value]').length === 3")
             check("numbered citations: [1], [2] in order of first citation, with a numbered reference list", page.locator(".dr-refs li[value]").count() == 3 and "[" in page.inner_text(".of[data-tool=draft] .of-sec >> nth=0"))
             page.select_option("#dr-cs", "author-year")
+            want_ = re.search(r"\(p\. (\d+)\)", page.locator(".dr-c").first.get_attribute("title") or "")      # the chip says which page its note comes from
             page.locator(".dr-c").first.click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
-            check("a citation opens the paper in the reader at the page its note came from", page.input_value("#rd-num") == "1")
+            if want_:
+                try:
+                    page.wait_for_function("(n) => document.querySelector('#rd-num').value === n", arg=want_.group(1), timeout=5000)
+                except Exception:  # noqa: BLE001
+                    pass
+            check("a citation opens the paper in the reader at the page its note names (the old reader showed the page above)", bool(want_) and page.input_value("#rd-num") == want_.group(1),
+                  [want_.group(1) if want_ else None, page.input_value("#rd-num"), page.evaluate("[...document.querySelectorAll('.rd-band')].map(b => Math.round(b.getBoundingClientRect().top - document.querySelector('#rd-pdf').getBoundingClientRect().top))")])
             page.click('#reader [data-a="back"]'); page.wait_for_selector('[data-dr="edit"]')
             page.click('[data-dr="edit"]'); page.fill("#dr-raw", page.input_value("#dr-raw") + "\n\nOne more claim that is backed by a note [P1-3].\n"); page.click('[data-dr="saveedit"]'); page.wait_for_selector(".of-m.edited")
             check("you can edit the text; the citations are checked again and the draft says it is yours", "edited by you" in page.inner_text(".of-meta") and json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.draft.json")))["edited"] is True)
