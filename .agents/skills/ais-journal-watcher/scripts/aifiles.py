@@ -30,7 +30,7 @@ def _g(*parts, rec=False):
 
 
 def _papers_files(suffix):
-    return [p for p in _g(PAPERS, "**", "*" + suffix, rec=True) if os.sep + "_folders" + os.sep not in p]
+    return [p for p in _g(PAPERS, "**", "*" + suffix, rec=True) if os.sep + "_folders" + os.sep not in p and os.sep + "_removed" + os.sep not in p]
 
 
 def kinds():

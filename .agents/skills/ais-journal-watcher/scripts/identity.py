@@ -19,7 +19,9 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
+import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -248,18 +250,46 @@ def check(entry, data):
 
 
 # --- the audit of a library ----------------------------------------------------------------------------------------------------------------------------------------
-def audit(progress=None):
-    """Read-only. For every row of Papers/_index.csv with status ok and a file, what check() says. Returns a list of dicts, mismatches first, then unverified."""
+KEPT = os.path.join(paths.STATE, "identity_ok.json")        # {file: size}: PDFs you looked at and said are the right paper; they are not read again while the file is unchanged
+
+
+def kept():
+    try:
+        with open(KEPT, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def keep(file):
+    """Remember that you checked this PDF and it is the right paper (until the file changes)."""
+    f = os.path.join(paths.ROOT, file)
+    d = kept()
+    d[file] = os.path.getsize(f)
+    os.makedirs(os.path.dirname(KEPT), exist_ok=True)
+    tmp = KEPT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=1)
+    os.replace(tmp, KEPT)
+
+
+def audit(progress=None, use_kept=False):
+    """Read-only. For every row of Papers/_index.csv with status ok and a file, what check() says. Returns a list of dicts, mismatches first, then unverified.
+    use_kept: a PDF you said is the right paper (keep()) and that has not changed is not read again (verdict "kept")."""
     idx = os.path.join(paths.PAPERS, "_index.csv")
     rows = []
     if os.path.exists(idx):
         with open(idx, newline="", encoding="utf-8") as f:
             rows = [r for r in csv.DictReader(f) if r.get("status") == "ok" and r.get("file")]
     out = []
+    ok = kept() if use_kept else {}
     for n, r in enumerate(rows, 1):
         f = os.path.join(paths.ROOT, r["file"])
         item = {"file": r["file"], "title": r.get("title", ""), "doi": r.get("doi", ""), "journal": r.get("journal", ""), "note": r.get("note", "")}
-        if not os.path.exists(f):
+        if os.path.exists(f) and ok.get(r["file"]) == os.path.getsize(f):
+            item.update(verdict="kept", reason="you checked it and said it is the right paper", pdf_says="")
+        elif not os.path.exists(f):
             item.update(verdict="missing", reason="the file is not there", pdf_says="")
         else:
             with open(f, "rb") as fh:
@@ -269,8 +299,46 @@ def audit(progress=None):
         out.append(item)
         if progress:
             progress(n, len(rows))
-    order = {"mismatch": 0, "unverified": 1, "missing": 2, "match": 3}
+    order = {"mismatch": 0, "unverified": 1, "missing": 2, "kept": 3, "match": 4}
     return sorted(out, key=lambda x: order.get(x["verdict"], 9))
+
+
+def remove(file):
+    """Take a PDF out of the library without deleting anything: the PDF and its notes, summary, card and skim files move to Papers/_removed/<time>/ (same sub-folders),
+    and its row in Papers/_index.csv becomes status "removed" (so the library no longer lists it and a download can try again). Returns the row's data for a new download
+    ({title, doi, authors, journal, date}) and where the files went."""
+    import download as dl                                  # (INDEX_COLS; imported here: download imports this module)
+    import notes_store as ns                               # (the files that belong to a PDF)
+    pdf = os.path.realpath(os.path.join(paths.ROOT, file)) if isinstance(file, str) and "\0" not in file else ""
+    if not pdf.startswith(os.path.realpath(paths.PAPERS) + os.sep) or not pdf.lower().endswith(".pdf") or not os.path.isfile(pdf) or os.sep + "_removed" + os.sep in pdf:
+        raise ValueError("That file is not in your library.")
+    idx = os.path.join(paths.PAPERS, "_index.csv")
+    with open(idx, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    mine = [r for r in rows if r.get("file") == file and r.get("status") == "ok" and os.path.realpath(os.path.join(paths.ROOT, r["file"])) == pdf]
+    if not mine:
+        raise ValueError("That file is not in your library index.")
+    row = mine[0]
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest_root = os.path.join(paths.PAPERS, "_removed", stamp)
+    moved = []
+    for src in [pdf] + ns.sidecars(pdf):
+        rel = os.path.relpath(src, paths.PAPERS)
+        dst = os.path.join(dest_root, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, dst)
+        moved.append(os.path.relpath(dst, paths.ROOT))
+    row["file"], row["status"] = "", "removed"
+    row["note"] = ("removed by Check my PDFs: it did not look like this paper (kept in %s)" % os.path.relpath(dest_root, paths.ROOT))[:300]
+    tmp = idx + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, dl.INDEX_COLS)
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, idx)
+    m = re.match(r"Papers/(\d{4}-\d{2})/", file)
+    return {"title": row.get("title", ""), "doi": row.get("doi", ""), "authors": [a for a in (row.get("authors") or "").split("; ") if a], "journal": row.get("journal", ""),
+            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, paths.ROOT), "files": moved}
 
 
 def main(argv=None):
