@@ -92,7 +92,7 @@ appears briefly during downloads; that's expected. Re-run `login` when a downloa
 1. Unpaywall OA (needs `UNPAYWALL_EMAIL` in `.env`; nothing in the app writes that key, so add the line by hand)
 2. Elsevier Article API (if `ELSEVIER_API_KEY` is set; DSS)
 3. Direct HTTP (aisel content link / publisher; usually 403)
-4. Real browser (`scripts/browser.py`) with the saved sign-ins (it follows a landing page's PDF link only when it is this article's: `Browser._pdf_link`)
+4. Real browser (`scripts/browser.py`) with the saved sign-ins (it follows a landing page's PDF link only when it is this article's: `Browser._pdf_link`); when the publisher wants a login and the library is OpenAthens or EZproxy and signed in (Settings → Library access), the same address is asked for through the library's sign-in (`signins.via`); a library session that has ended or was never opened gives the note `needs_library_login` (the card offers the library sign-in)
 5. The library's own copy (EBSCO), for the journals `library.json` lists under `via_ebsco`
 6. A free copy elsewhere (`scripts/open_copies.py`: arXiv, Semantic Scholar, Europe PMC, preprint servers)
 7. Manual: user saves the PDF into `Papers/inbox/`; the agent files it (`file_inbox_pdf`).
