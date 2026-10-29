@@ -1,6 +1,6 @@
 // Settings page: AI providers and routing, privacy and budget, usage and cost, your prompt library, reader preferences.
 // Opened from the ⚙ in the top bar (window.Settings.open("ai"|"usage"|"prompts"|"reader")) and from the reader's Ask tab.
-import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, api, toast, ico, COLORS} from "./state.js";
+import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, api, toast, ico, fileUrl, COLORS} from "./state.js";
 
 let root, D = null, tab = "ai", LOG = [];
 const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's passages"], ["explain", "Explain selection", "The one-click prompts on selected text and figures"],
@@ -148,12 +148,44 @@ function renderPrompts(body) {
 // ---------------------------------------------------------------- reader preferences, colour legend, summary templates
 // ---------------------------------------------------------------- AI files & backup
 const bytes = n => n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB" : (n / 1073741824).toFixed(1) + " GB";
+// ---- Check my PDFs: is each PDF the paper it is filed under? (identity.py; the server reads them in the background and keeps the answer until the app closes)
+let PC = null;
+function pcHtml() {
+  const c = PC && PC.counts || {}, run = PC && PC.state === "running", done = PC && PC.state === "done";
+  const total = Object.values(c).reduce((a, n) => a + n, 0), bad = (PC && PC.results || []).filter(r => r.verdict === "mismatch"), odd = (PC && PC.results || []).filter(r => r.verdict !== "mismatch");
+  const row = (r, rm) => `<div class="pc-row" data-f="${esc(r.file)}"><b>${esc(r.title || r.file)}</b>${r.doi ? ` <small>${esc(r.doi)}</small>` : ""}<div class="pmeta" style="margin:2px 0 6px">${esc(r.reason)}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">${r.verdict === "missing" ? "" : `<a class="btn small" href="${fileUrl(r.file)}" target="_blank" rel="noopener">Look at the PDF</a>`}${r.verdict === "missing" ? "" : `<button class="btn small" data-pc-keep="${esc(r.file)}">It is the right paper</button>`}${rm ? `<button class="btn small danger" data-pc-rm="${esc(r.file)}">Remove and download again</button>` : ""}</div></div>`;
+  return `<div class="row" style="gap:10px;margin-top:8px"><button class="btn primary" id="pc-go"${run ? " disabled" : ""}>${done ? "Check again" : "Check my PDFs"}</button><span class="pmeta" id="pc-prog" role="status" aria-live="polite" style="margin:0">${run ? `Checking ${PC.done} of ${PC.total || "…"}…` : ""}</span></div>
+    ${PC && PC.state === "error" ? `<p class="hint bad">${esc(PC.error)}</p>` : ""}
+    ${done ? `<p class="${bad.length ? "" : "hint ok"}" style="margin:10px 0 4px">${bad.length ? "" : "✓ "}${total} PDF${total === 1 ? "" : "s"} checked: <b>${bad.length}</b> do${bad.length === 1 ? "es" : ""} not look like the paper ${bad.length === 1 ? "it is" : "they are"} filed under, ${odd.length} could not be checked, ${(c.match || 0) + (c.kept || 0)} match${(c.kept || 0) ? ` (${c.kept} you marked as right)` : ""}.${bad.length ? "" : " (Only what it could read is vouched for: see the ones it could not check.)"}</p>
+      ${bad.map(r => row(r, true)).join("")}
+      ${odd.length ? `<details style="margin-top:8px"><summary class="hint" style="cursor:pointer">Could not be checked (${odd.length}): scans with no text, files it could not read, no title on record</summary>${odd.map(r => row(r, false)).join("")}</details>` : ""}` : ""}`;
+}
+async function pcRefresh(body) {
+  try { PC = await api("/api/library/check"); } catch (e) { PC = {state: "error", error: e.message, results: [], counts: {}}; }
+  const box = $("#pc-res", body); if (box && body.isConnected) box.innerHTML = pcHtml();
+  if (PC.state === "running" && body.isConnected && $("#pc-res", body)) setTimeout(() => pcRefresh(body), 700);
+}
+async function pcClick(body, e) {
+  const go = e.target.closest("#pc-go"), keep = e.target.closest("[data-pc-keep]"), rm = e.target.closest("[data-pc-rm]");
+  const paint = () => { const box = $("#pc-res", body); if (box) box.innerHTML = pcHtml(); };
+  if (go) { try { PC = await api("/api/library/check", {}); } catch (er) { notifyError(er); return; } paint(); pcRefresh(body); }
+  else if (keep) { try { PC = await api("/api/library/check/keep", {file: keep.dataset.pcKeep}); paint(); } catch (er) { notifyError(er); } }
+  else if (rm) {
+    const r = (PC.results || []).find(x => x.file === rm.dataset.pcRm); if (!r) return;
+    if (!confirm(`Remove this PDF from your library?\n\n${r.title}\n\n${r.reason}\n\nThe PDF and its notes, highlights and summary are moved to Papers/_removed/ (nothing is deleted), and Journal Watcher downloads the paper again. The new file is checked the same way before it is kept.`)) return;
+    try { const x = await api("/api/library/check/remove", {file: rm.dataset.pcRm}); PC = x; paint(); toast(x.download ? "Moved aside. Downloading the paper again… watch it under Watch → Past runs." : "Moved aside. Download the paper again from its page."); window.dispatchEvent(new Event("jw-library-changed")); }
+    catch (er) { notifyError(er); }
+  }
+}
 async function renderFiles(body) {
   body.innerHTML = `<div class="card st-card"><span class="ask-status">Counting files…</span></div>`;
   let R; try { R = await api("/api/aifiles"); } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
   const draw = () => {
     const total = R.kinds.reduce((a, k) => a + k.bytes, 0), b = R.backup, pdfs = $("#af-pdfs", body) ? $("#af-pdfs", body).checked : false;
-    body.innerHTML = `<div class="card st-card"><h2>Back up my data</h2>
+    body.innerHTML = `<div class="card st-card" id="pc-card"><h2>Check my PDFs</h2>
+      <p class="pmeta">Opens the first pages of every PDF in your library and checks that each one is the paper it is filed under (its DOI, or its title and authors). It changes nothing by itself: for each PDF that is not, you decide.</p><div id="pc-res">${pcHtml()}</div></div>
+    <div class="card st-card"><h2>Back up my data</h2>
       <p class="pmeta">A zip of everything that is yours: highlights and notes, paper cards, skims, conversations, folders with their matrices and idea boards, tags, reading status, the library index, your prompts and settings (no API keys). ${bytes(b.data_bytes)} in ${b.files} files.</p>
       <label class="chk"><input type="checkbox" id="af-pdfs"${pdfs ? " checked" : ""}> Include the PDFs too (${bytes(b.pdf_bytes)}; they stay where they are in <code>Papers/</code> either way)</label>
       <div class="row" style="gap:8px;margin-top:8px"><button class="btn primary" id="af-dl">Download the backup (.zip)</button>${R.export_dir ? `<button class="btn" id="af-save" title="${esc(R.export_dir)}">Save it into my export folder</button>` : `<span class="pmeta">Set an export folder in “Reader &amp; summaries” to save it there directly.</span>`}<span class="st-msg" id="af-msg"></span></div></div>
@@ -170,7 +202,9 @@ async function renderFiles(body) {
       <div class="row" style="gap:8px"><button class="btn small" data-mcpcopy="mcp-cc">Copy the Claude Code line</button><button class="btn small" data-mcpcopy="mcp-cd">Copy the Claude Desktop config</button></div></div>` : ""}`;
   };
   draw();
+  if (PC && PC.state === "running") pcRefresh(body); else api("/api/library/check").then(x => { if (!PC || PC.state !== "running") { PC = x; const box = $("#pc-res", body); if (box && body.isConnected) box.innerHTML = pcHtml(); if (x.state === "running") pcRefresh(body); } }).catch(() => {});
   body.onclick = async e => {
+    if (e.target.closest("#pc-card")) return pcClick(body, e);
     const m = $("#af-msg", body), c = e.target.closest("[data-clear]"), rs = e.target.closest("[data-restore]"), mc = e.target.closest("[data-mcpcopy]");
     if (mc) { try { await navigator.clipboard.writeText($("#" + mc.dataset.mcpcopy, body).textContent); toast("Copied."); } catch (er) { notifyError(er); } return; }
     if (e.target.closest("#af-dl")) { const a = document.createElement("a"); a.href = "/api/backup?pdfs=" + ($("#af-pdfs", body).checked ? 1 : 0); a.download = ""; document.body.append(a); a.click(); a.remove(); if (m) m.textContent = "Building the zip… the download starts in a moment."; }

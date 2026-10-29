@@ -470,6 +470,7 @@ window.addEventListener("popstate", e => {
   NAV = e.state || parseRoute(location.hash) || {view: "run", j: null}; closeDrawer(false); render();
 });
 window.addEventListener("jw-reader-closed", () => loadLibrary());   // the Library shows highlight counts
+window.addEventListener("jw-library-changed", () => loadLibrary());   // a PDF was taken out of the library (Settings → Check my PDFs)
 function openFromHash(h) {            // a link made with 🔗 in the reader: /#read=<Papers/…pdf>&p=3&y=0.31 (also what ⧉ Beside opens in its second window)
   const hash = typeof h === "string" ? h : location.hash, m = /^#read=([^&]+)(?:&p=(\d+))?(?:&y=([\d.]+))?/.exec(hash); if (!m) return;
   const file = decodeURIComponent(m[1]), row = LIB.find(r => r.file === file);
