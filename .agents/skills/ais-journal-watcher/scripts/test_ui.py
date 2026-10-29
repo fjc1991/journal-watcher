@@ -1792,7 +1792,11 @@ def main():
             check("the app starts in Light even when the computer is set to dark (unless you chose otherwise)", page.evaluate("document.documentElement.dataset.theme") == "light")
             page.evaluate("window.setTheme('auto')"); page.wait_for_timeout(150)
             check("…and 'Match my computer' follows the system setting", page.evaluate("document.documentElement.dataset.theme") == "dark" and page.evaluate("document.documentElement.dataset.themepref") == "auto")
-            page.emulate_media(color_scheme="light"); page.wait_for_timeout(150)
+            page.emulate_media(color_scheme="light")
+            try:      # the page learns of the change through the browser's media-query event, which a busy runner can deliver well after 150 ms (about 8 ms here, 120 ms with the CPU slowed 10x): wait for it
+                page.wait_for_function("document.documentElement.dataset.theme === 'light'", timeout=4000)
+            except Exception:  # noqa: BLE001
+                pass
             check("…live, when the system changes", page.evaluate("document.documentElement.dataset.theme") == "light")
             for scheme in ("light", "dark"):
                 page.evaluate("window.setTheme(%r)" % scheme)
