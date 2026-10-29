@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402
 import identity  # noqa: E402
+import signins  # noqa: E402
 
 BASE, ROOT, STATE, PAPERS = paths.BASE, paths.ROOT, paths.STATE, paths.PAPERS       # see paths.py: the project folder, or the app's data home
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -303,6 +304,25 @@ def download_paper(p, env, dry=False, browser=None):
                     member = MEMBER_FOR.get(p.get("publisher"))
                     if not data and "needs_login" in note and member and browser.renew_member(member):
                         data, note = vet(*browser.fetch_pdf(u, doi=doi))  # member session renewed silently: retry
+                    lib_ = signins.profile()
+                    if not data and "needs_login" in note and lib_["signs_in"] and lib_["configured"]:
+                        # the publisher wants a login: your university library may give the access (OpenAthens or EZproxy, set up in Settings → Library access). The same
+                        # page address is asked for through the library's sign-in with the session your library sign-in saved; without one, the card offers that sign-in.
+                        if signins.status()["library"]["signed_in"]:
+                            seen = len(refused)
+                            d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi)
+                            d4, _ = vet(d4, "browser (via your library)")
+                            if d4:
+                                data, note = d4, "browser (via your library)"
+                            elif len(refused) == seen and n4:
+                                at = n4.split(":", 1)[1].split()[0].lower() if n4.startswith("needs_login:") else ""
+                                if at and at != urllib.parse.urlsplit(u).netloc.lower():      # it ended on somebody else's sign-in page: the library session has ended
+                                    signins.forget("library")
+                                    note += "; needs_library_login (your library asked for a password at %s)" % at
+                                else:
+                                    note += "; via your library: " + n4
+                        elif not member:                  # (INFORMS and AIS papers are about your membership sign-in first: the card keeps asking for that)
+                            note += "; needs_library_login"
                     reader_host = READER_HOSTS.get(p.get("publisher"))
                     if not data and reader_host and doi:
                         # the publisher's online reader often works where the PDF link doesn't (PNAS)
