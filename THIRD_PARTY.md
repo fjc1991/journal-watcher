@@ -13,7 +13,6 @@ Journal Watcher is licensed under the GNU AGPL v3 or later (`LICENSE`). It uses,
 | [fastembed](https://github.com/qdrant/fastembed), [ONNX Runtime](https://onnxruntime.ai), BAAI/bge-small-en-v1.5 | Local embeddings for semantic search | Apache-2.0, MIT, MIT |
 | [NumPy](https://numpy.org) | Vectors | BSD-3-Clause |
 | [python-docx](https://python-docx.readthedocs.io) | Word export | MIT |
-| [pypdf](https://pypdf.readthedocs.io) | PDF helpers | BSD-3-Clause |
 | [pywebview](https://pywebview.flowrl.com) | The Mac app's window | BSD-3-Clause |
 | [PyInstaller](https://pyinstaller.org) | Packaging (the bootloader is GPL with an exception that allows any licence for the packaged app) | GPL-2.0 with exception |
 | [PyNaCl](https://pynacl.readthedocs.io) (libsodium inside) | Checking the signature of the update feed | Apache-2.0 (libsodium: ISC) |

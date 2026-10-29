@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402
+import identity  # noqa: E402
 
 BASE, ROOT, STATE, PAPERS = paths.BASE, paths.ROOT, paths.STATE, paths.PAPERS       # see paths.py: the project folder, or the app's data home
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -210,12 +211,33 @@ def download_paper(p, env, dry=False, browser=None):
     path = out_path(p)
     attempts = []
 
-    def store(data, via):
+    refused = []                # what each route gave that turned out not to be this paper
+
+    def vet(data, via):
+        """(data, via) when `data` is this paper (via then says "identity not checked" if it could not be told), (None, "") when it is another work: the refusal is recorded and
+        the route goes on to its next try. A PDF is only a paper when it IS the paper (identity.py): before 1.2 any complete PDF was accepted, and a link on a landing page
+        once led to a different work's PDF filed under this title."""
+        if not data:
+            return None, via
+        verdict, why, _ = identity.check(p, data)
+        if verdict == "mismatch":
+            refused.append("wrong paper via %s: %s" % (via, why))
+            attempts.append(refused[-1])
+            return None, ""
+        if verdict == "unverified":                              # nothing to compare (a scan, no title on record): kept, and said so
+            via = "%s; identity not checked (%s)" % (via, why)
+        return data, via
+
+    def write(data, via):
         if not dry:
             with open(path, "wb") as f:
                 f.write(data)
             save_index(p, os.path.relpath(path, ROOT), "ok", via)
         return True, path, via
+
+    def store(data, via):
+        data, via = vet(data, via)
+        return write(data, via) if data else None
 
     # 1) Unpaywall OA
     oa = try_unpaywall(doi, env.get("UNPAYWALL_EMAIL", ""))
@@ -223,8 +245,11 @@ def download_paper(p, env, dry=False, browser=None):
         try:
             data, _ = http_get(oa)
             if is_pdf(data):
-                return store(data, "OA (Unpaywall)")
-            attempts.append("unpaywall: not a PDF response")
+                got = store(data, "OA (Unpaywall)")
+                if got:
+                    return got
+            else:
+                attempts.append("unpaywall: not a PDF response")
         except Exception as e:
             attempts.append("unpaywall: %s" % str(e)[:60])
 
@@ -233,8 +258,11 @@ def download_paper(p, env, dry=False, browser=None):
         r = try_elsevier_api(doi, env.get("ELSEVIER_API_KEY", ""), env.get("ELSEVIER_INSTTOKEN"))
         if isinstance(r, bytes):
             if is_pdf(r):
-                return store(r, "elsevier-api")
-            attempts.append("elsevier-api: not a PDF")
+                got = store(r, "elsevier-api")
+                if got:
+                    return got
+            else:
+                attempts.append("elsevier-api: not a PDF")
         elif isinstance(r, str):
             attempts.append(r)
 
@@ -254,39 +282,47 @@ def download_paper(p, env, dry=False, browser=None):
         try:
             data, hdrs = http_get(u)
             if is_pdf(data):
-                return store(data, name)
-            attempts.append("%s: blocked/non-PDF" % name)
+                got = store(data, name)
+                if got:
+                    return got
+            else:
+                attempts.append("%s: blocked/non-PDF" % name)
         except Exception as e:
             attempts.append("%s: %s" % (name, str(e)[:40]))
 
-    # 4) real browser with the user's saved sign-ins (HBR: article page saved as PDF)
+    # 4) real browser with the user's saved sign-ins (HBR: article page saved as PDF). Every attempt is vetted on its own (a refused PDF does not end the route:
+    #    the member renewal, the publisher's reader and the full-text page still get their turn)
     if browser is not None and not dry:
         u = browser_pdf_url(p)
         if u:
             try:
                 if p.get("publisher") == "hbr":
-                    data, note = browser.page_to_pdf(u)
+                    data, note = vet(*browser.page_to_pdf(u))
                 else:
-                    data, note = browser.fetch_pdf(u)
+                    data, note = vet(*browser.fetch_pdf(u, doi=doi))
                     member = MEMBER_FOR.get(p.get("publisher"))
                     if not data and "needs_login" in note and member and browser.renew_member(member):
-                        data, note = browser.fetch_pdf(u)  # member session renewed silently: retry
+                        data, note = vet(*browser.fetch_pdf(u, doi=doi))  # member session renewed silently: retry
                     reader_host = READER_HOSTS.get(p.get("publisher"))
                     if not data and reader_host and doi:
                         # the publisher's online reader often works where the PDF link doesn't (PNAS)
-                        d2, n2 = browser.fetch_from_reader("https://%s/doi/epdf/%s" % (reader_host, doi))
+                        d2, n2 = vet(*browser.fetch_from_reader("https://%s/doi/epdf/%s" % (reader_host, doi)))
                         if d2:
                             data, note = d2, n2
                     if not data and p.get("publisher") == "acm" and doi:
                         # some CACM pieces are web-only (ACM sends an empty PDF): keep the
                         # full-text page; page_to_pdf refuses abstract-only pages
-                        data, note2 = browser.page_to_pdf("https://dl.acm.org/doi/full/%s" % doi, min_chars=12000)
-                        note = "full-text page saved as PDF" if data else note + "; " + note2
+                        d3, n3 = vet(*browser.page_to_pdf("https://dl.acm.org/doi/full/%s" % doi, min_chars=12000))
+                        if d3:
+                            data, note = d3, "full-text page saved as PDF"
+                        elif n3:
+                            note = (note + "; " if note else "") + n3
             except Exception as e:
                 data, note = None, "browser: %s" % str(e)[:60]
             if data:
-                return store(data, note)
-            attempts.append(note)
+                return write(data, note)
+            if note:
+                attempts.append(note)
 
     # 5) the library's own copy (e.g. EBSCO Business Source Ultimate, if library.json has an "ebsco_home") for journals
     #    the publisher site won't give us
@@ -297,21 +333,29 @@ def download_paper(p, env, dry=False, browser=None):
         except Exception as e:
             data, note = None, "library EBSCO: %s" % str(e)[:60]
         if data:
-            return store(data, note)
-        attempts.append(note)
+            got = store(data, note)
+            if got:
+                return got
+        else:
+            attempts.append(note)
     # 6) a legal free copy elsewhere (arXiv, PubMed Central, preprint servers)
     if not dry and p.get("publisher") != "hbr":
         import open_copies
-        data, note = open_copies.find_open_copy(doi, p.get("title"), http_get, browser)
+        data, note = open_copies.find_open_copy(doi, p.get("title"), http_get, browser, authors=p.get("authors"))
         if data:
-            return store(data, note)
-        attempts.append(note)
+            got = store(data, note)
+            if got:
+                return got
+        else:
+            attempts.append(note)
+            if note.startswith("wrong paper"):
+                refused.append(note)
     held = (lib.get("not_held_recent") or {}).get(p.get("abbr"))
     if held:
         attempts.append("not_in_library: %s only has %s via %s" % (lib.get("name") or "your library", p.get("abbr"), held))
 
     if not dry:                 # a dry run must leave the index alone
-        save_index(p, "", "failed", "; ".join(attempts)[:200])
+        save_index(p, "", "wrong_paper" if refused else "failed", "; ".join(refused + [a for a in attempts if a not in refused])[:300])
     return False, None, " | ".join(attempts) or "no route available"
 
 

@@ -9,8 +9,13 @@ a temporary folder so the library and Papers/_index.csv are untouched.
 "expect" is what should happen WITHOUT publisher sign-ins: ok, or needs_login
 (paywalled). After signing in via "Publisher logins", needs_login cases for that
 publisher should turn into ok.
+
+Every PDF is checked against the paper (identity.py), so a case needs its real title:
+for a DOI it is read from Crossref; a case without a DOI (HBR) ends as wrong_paper
+unless its title in CASES is the page's real headline.
 """
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -18,6 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
+import importer  # noqa: E402
 
 CASES = [
     # abbr, publisher, doi, url, expect, title
@@ -59,15 +65,24 @@ def main():
         for abbr, pub, doi, url, expect, title in cases:
             p = {"journal": abbr, "abbr": abbr, "publisher": pub, "doi": doi, "title": title,
                  "url": url or ("https://doi.org/" + doi if doi else ""), "pub_date": "2026-10"}
+            if doi:      # the app refuses a PDF that is not the paper (identity.py): compare with the paper's real title and authors, as a run would have them from Crossref
+                try:
+                    m = importer.crossref_meta(doi)
+                    if m:
+                        p.update(title=m["title"], authors=m.get("authors") or [])
+                except Exception:  # noqa: BLE001
+                    pass
             t = time.time()
             try:
                 ok, path, note = dl.download_paper(p, env, browser=br)
             except Exception as e:  # a crash is a test failure, not a skip
                 ok, path, note = False, None, "CRASH: %r" % e
-            got = "ok" if ok else ("needs_nova" if "needs_nova_login" in note else
-                                  "unavailable" if "not_in_library" in note else
-                                  "needs_login" if "needs_login" in note else
-                                  "needs_check" if "challenge:" in note else "failed")
+            own = re.sub(r"wrong paper via [^|]*", "", note)            # as pipeline.download_and_summarize: the status comes from what the routes said
+            got = "ok" if ok else ("needs_nova" if "needs_nova_login" in own else
+                                  "unavailable" if "not_in_library" in own else
+                                  "needs_login" if "needs_login" in own else
+                                  "needs_check" if "challenge:" in own else
+                                  "wrong_paper" if "wrong paper" in note else "failed")
             size = os.path.getsize(path) // 1024 if ok else 0
             rows.append((abbr, title, expect, got, time.time() - t, size, note))
             mark = "PASS" if got in expect.split("|") else ("LOGIN" if expect == "ok" and got == "needs_login" else "FAIL")
