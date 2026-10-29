@@ -16,6 +16,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import fetch_new as fx  # noqa: E402
+import identity  # noqa: E402
 
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)")
 
@@ -146,13 +147,13 @@ def add_doi(doi):
     if url:
         try:
             raw, _ = dl.http_get(url, timeout=60)
-            if dl.is_pdf(raw):
+            if dl.is_pdf(raw) and identity.check(p, raw)[0] != "mismatch":
                 data, note = raw, "added by DOI (open access, Unpaywall)"
         except Exception:
             pass
     if not data:
         import open_copies
-        raw, label = open_copies.find_open_copy(doi, p["title"], dl.http_get)
+        raw, label = open_copies.find_open_copy(doi, p["title"], dl.http_get, authors=p.get("authors"))
         if raw:
             data, note = raw, "added by DOI (%s)" % label
     if not data:

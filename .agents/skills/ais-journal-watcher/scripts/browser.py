@@ -72,6 +72,11 @@ PDF_LINK_SEL = ", ".join(s + ':not([href*="upplement"]):not([href*="/suppl"])' f
     'a[href*="/doi/pdf/"]', 'a[href*="/doi/pdfdirect/"]', 'a[href*="pdfft"]',
     'a[href*="viewcontent.cgi"]', 'a[href$=".pdf"]',
 ])  # never a "supplementary materials" PDF
+# where on a page a PDF link is NOT this article's: its reference list, "cited by", related and recommended articles, footers and menus
+# (a reference to another paper that happens to link its .pdf must never be mistaken for the article itself)
+NOT_THIS_ARTICLE = ("[class*='reference' i], [id*='reference' i], [class*='bibliograph' i], [id*='bibliograph' i], [class*='cited' i], [id*='cited' i], "
+                    "[class*='related' i], [id*='related' i], [class*='recommend' i], [id*='recommend' i], [class*='footer' i], [id*='footer' i], "
+                    "footer, nav, aside, [role='contentinfo'], [role='navigation']")
 # paywall wording (not plain "sign in"/"subscribe", which every site header has)
 LOGIN_HINTS = re.compile(r"(request access|purchase|access through your institution|check access|"
                          r"log ?in to (view|access|read)|get access|buy (this )?article|rent this article|"
@@ -243,6 +248,27 @@ class Browser:
             page.remove_listener("download", on_dl)
         return None
 
+    @staticmethod
+    def _pdf_link(page, url):
+        """The PDF link on a landing page that belongs to THIS article, or None. It is on the same site as the page, it is not in the reference list, related articles,
+        footer or a menu, and when the page we asked for names the article's DOI (/doi/pdf/<doi>), so does the link: a different article's PDF on the same site
+        (cited or related) is not it. Taking the first PDF link on the page, whatever it pointed to, once stored another paper's PDF under this paper's title."""
+        try:
+            hrefs = page.evaluate("([sel, skip]) => [...document.querySelectorAll(sel)].filter(a => !a.closest(skip)).map(a => a.href)", [PDF_LINK_SEL, NOT_THIS_ARTICLE])
+        except PWError:
+            return None
+        site = lambda u: urllib.parse.urlsplit(u).netloc.lower().removeprefix("www.")
+        m = re.search(r"/doi/(?:pdf|pdfdirect|epdf)/(10\.\d{4,9}/[^?#]+)", url)
+        doi = urllib.parse.unquote(m.group(1)).lower() if m else None
+        for h in hrefs:
+            u = urllib.parse.urljoin(page.url, h)
+            if site(u) != site(page.url):
+                continue
+            if doi and "/doi/" in u and doi not in urllib.parse.unquote(u).lower():
+                continue
+            return u
+        return None
+
     def _fetch(self, url, wait_s):
         page = self.ctx.new_page()
         self._empty_dl = False
@@ -257,9 +283,7 @@ class Browser:
                 if m:
                     cand = "https://www.sciencedirect.com/science/article/pii/%s/pdfft" % m.group(1)
             if not cand and not is_challenge(page):
-                link = page.query_selector(PDF_LINK_SEL)
-                if link:
-                    cand = urllib.parse.urljoin(page.url, link.get_attribute("href"))
+                cand = self._pdf_link(page, url)
             if cand and cand != url:
                 data = self._try(page, cand, wait_s)
                 if data:

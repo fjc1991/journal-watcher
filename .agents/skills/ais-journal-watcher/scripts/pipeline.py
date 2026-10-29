@@ -759,7 +759,8 @@ def download_and_summarize(run, ids, emit, stop):
                          "unavailable" if "not_in_library" in note else
                          "not_yet" if "not found in library EBSCO" in note else
                          "needs_login" if "needs_login" in note else
-                         "needs_check" if "challenge:" in note else "failed",
+                         "needs_check" if "challenge:" in note else
+                         "wrong_paper" if "wrong paper" in note else "failed",
                          dl_note=note, manual_url=dl.browser_pdf_url(p))
             emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
             emit("progress", {"stage": "downloading", "label": "Downloading", "done": n, "total": total})

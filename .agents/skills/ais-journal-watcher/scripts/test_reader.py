@@ -1903,6 +1903,260 @@ def main():
     check("support: nothing in the shipped dashboard/static/author.json is silently dropped when the page cleans it (https links, a photo that exists, an https tip page)", t_support_shipped)
     check("support: the reminder is due after 14 days and 5 visits, then 60 days apart, at most three times, never after 'Don't ask again' or a click on the tip link, never without a tip page", t_support_rules)
 
+    print("downloads: a PDF is only a paper if it is that paper")
+    import identity as idt
+    import pymupdf as _pm
+    ID_T = "The Pitfalls of Review Solicitation: Evidence from a Natural Experiment on TripAdvisor"
+    ID_D = "10.1287/mnsc.2024.0001"
+    ID_E = {"title": ID_T, "doi": ID_D, "authors": ["Jane Doe", "Richard Roe"]}
+    FILL = ("We estimate how asking customers for reviews changes the reviews that platforms receive, using a natural experiment in which hotels were treated at different times. " * 6)
+
+    def mkpdf(pages, pad=True, scan=False):
+        """pages: list of (big_title, body) pairs; a pdf with real text (or, with scan, only a picture per page); padded past is_pdf's 40 kB when pad."""
+        d = _pm.open()
+        for big, body in pages:
+            pg = d.new_page()
+            if scan:
+                pm = _pm.Pixmap(_pm.csRGB, _pm.IRect(0, 0, 200, 200), False); pm.set_rect(pm.irect, (200, 200, 200)); pg.insert_image(pg.rect, pixmap=pm); continue
+            if big:
+                pg.insert_textbox(_pm.Rect(60, 60, 540, 130), big, fontsize=18)
+            pg.insert_textbox(_pm.Rect(60, 150 if big else 60, 540, 790), body, fontsize=9)
+        if pad:
+            d.embfile_add("pad.bin", os.urandom(60000))
+        out = d.tobytes(garbage=0); d.close()
+        return out
+
+    RIGHT = mkpdf([(ID_T, "Jane Doe and Richard Roe. https://doi.org/%s " % ID_D + FILL)] + [("", FILL)] * 3)
+    WRONG = mkpdf([("Two-stage differences in differences", "John Gardner. This version: April 2021. " + FILL)] + [("", FILL)] * 3)
+
+    def t_identity_check():
+        v = lambda entry, data: idt.check(entry, data)
+        r = v(ID_E, RIGHT); assert r[0] == "match" and "DOI" in r[1], r                                                         # the DOI is printed
+        r = v(dict(ID_E, doi="10.1287/mnsc.9999.9999"), mkpdf([(ID_T, "Jane Doe and Richard Roe. " + FILL)] + [("", FILL)] * 3)); assert r[0] == "match" and "title" in r[1], r      # no DOI printed: the title
+        cover = [("", "Downloaded from pubsonline.informs.org by IP 1.2.3.4. For personal use only.")] + [("", "Copyright notice.")] * 3 + [(ID_T, "Jane Doe and Richard Roe. " + FILL)] + [("", FILL)] * 3
+        assert v(dict(ID_E, doi=""), mkpdf(cover))[0] == "match"                                                                 # a cover sheet and thin legal pages before the title page
+        r = v(ID_E, WRONG)
+        assert r[0] == "mismatch" and "Two-stage differences in differences" in r[1] and r[2]["pdf_says"].startswith("Two-stage"), r      # the reported case: it says what the PDF actually is
+        assert v(ID_E, mkpdf([("", "Request access. Purchase this article for $45. Sign in through your institution.")]))[0] == "mismatch"      # a paywall stub
+        assert v(ID_E, mkpdf([("", "")] * 2, scan=True))[0] == "unverified"                                                       # a scan: nothing to read, so nothing is claimed
+        assert v(dict(ID_E, doi=""), b"%PDF-1.4 this is not really a pdf" + b"x" * 50)[0] == "unverified"                         # unreadable: not proof of anything
+        assert v({"title": "", "doi": ""}, RIGHT)[0] == "unverified"                                                                # nothing on record to compare with
+        # the title is too short to be unique: it needs the DOI or the authors as well
+        ed = "Editorial"
+        assert v({"title": ed, "doi": "", "authors": ["Ann Lee"]}, mkpdf([("A different editorial", "Ann Lee. Editorial. " + FILL)]))[0] == "match"
+        assert v({"title": ed, "doi": "", "authors": ["Bob Ray"]}, mkpdf([("A different editorial", "Ann Lee. Editorial. " + FILL)]))[0] == "mismatch"
+        # a paper that only CITES the expected one does not match through its reference list
+        citing = mkpdf([("Another study of hotels", "Some Author. " + FILL + "\nReferences\nDoe J, Roe R. %s. Management Science. doi:%s" % (ID_T, ID_D))])
+        assert v(ID_E, citing)[0] == "mismatch", v(ID_E, citing)
+        assert v(ID_E, mkpdf([("Another paper on hotels", "Jane Doe and Richard Roe. " + FILL)]))[0] == "mismatch"          # same authors, other paper
+        # DOIs: a whole token only, also split by a line break, with trailing punctuation
+        assert not idt.doi_found("10.1287/mnsc.2024.000", "https://doi.org/10.1287/mnsc.2024.0001")                              # a prefix of another DOI
+        assert idt.doi_found("10.1287/mnsc.2024.0001", "doi:10.1287/mnsc.2024.0001.") and idt.doi_found("10.1287/MNSC.2024.0001", "https://doi.org/10.1287/mnsc.2024.0001")
+        assert idt.doi_found("10.1287/mnsc.2024.0001", "https://doi.org/10.1287/mnsc.\n2024.0001") and not idt.doi_found("", "10.1/x")
+        # titles: ligatures, hyphenation and line breaks do not matter; a shared subtitle does not make a match
+        assert idt.title_score("Platform Governance and Financial Outcomes", "Plat-\nform Governance and Finan-\ncial Outcomes") == 1.0
+        assert idt.title_score("The financial flow of firms", "The ﬁnancial ﬂow of ﬁrms") == 1.0
+        assert idt.title_score("Peer Effects in Online Ratings: Evidence from a Natural Experiment", ID_T) < 0.6
+        assert idt.authors_score(["Tian, Jing", "Ling Xue", "Maria Garcia-Lopez Jr."], "Tian and Xue, with Garcia") == 1.0 and idt.authors_score([], "x") is None
+        # a Crossref title with markup and entities still finds the paper that prints it as plain text
+        marked = dict(ID_E, doi="", title="Platforms &amp; <i>Bayesian</i> Governance of CO<sub>2</sub> Markets: Evidence from an Experiment")
+        plain = mkpdf([("Platforms and Bayesian Governance of CO2 Markets: Evidence from an Experiment", "Jane Doe and Richard Roe. " + FILL)] + [("", FILL)] * 3)
+        assert v(marked, plain)[0] == "match", v(marked, plain)
+    check("identity: a PDF is matched to its paper by DOI, title and authors; a different work, a paywall stub and a citing paper are refused; scans and unreadable files are only 'not checked'", t_identity_check)
+
+    def _with_downloads(body):
+        """download_paper against fakes: no network, a scratch library. body(run) where run(paper, unpaywall=None, browser=None) -> download_paper's result."""
+        saved = (dl.try_unpaywall, dl.http_get, dl.PAPERS)
+        pdfs = {}
+        dl.try_unpaywall = lambda doi, email: "http://fake.test/oa.pdf" if pdfs.get("oa") else None
+        def fake_get(url, headers=None, timeout=30):
+            if url == "http://fake.test/oa.pdf":
+                return pdfs["oa"], {}
+            raise OSError("no network in tests: " + url[:50])
+        dl.http_get = fake_get
+        dl.PAPERS = os.path.join(TMP, "Papers_gate"); os.makedirs(dl.PAPERS, exist_ok=True)
+        try:
+            body(pdfs)
+        finally:
+            dl.try_unpaywall, dl.http_get, dl.PAPERS = saved
+            shutil.rmtree(os.path.join(TMP, "Papers_gate"), ignore_errors=True)
+
+    class _FakeBrowser:
+        def __init__(self, data, note="browser"):
+            self.data, self.note, self.asked = data, note, []
+        def fetch_pdf(self, url, wait_s=25):
+            self.asked.append(url); return self.data, self.note
+        def renew_member(self, m): return False
+        def fetch_from_reader(self, url): return None, "no reader"
+        def page_to_pdf(self, url, min_chars=5000): return None, "no page"
+
+    def t_download_gate():
+        import csv
+        def body(pdfs):
+            p = {"journal": "Management Science", "abbr": "MS", "publisher": "informs", "doi": ID_D, "title": ID_T, "url": "https://doi.org/" + ID_D,
+                 "pub_date": "2025-03-01", "authors": ["Jane Doe", "Richard Roe"], "topics": []}
+            env = {"UNPAYWALL_EMAIL": "me@example.org"}
+            rows = lambda: list(csv.DictReader(open(os.path.join(dl.PAPERS, "_index.csv"), newline="")))
+            files = lambda: sorted(os.path.join(d, f) for d, _, fs in os.walk(dl.PAPERS) for f in fs if f.endswith(".pdf"))
+            # a) the only route gives a different work: refused, nothing stored, said plainly, the paper stays unavailable
+            pdfs["oa"] = WRONG
+            ok, path, note = dl.download_paper(dict(p), env)
+            assert not ok and path is None and "wrong paper via OA (Unpaywall)" in note and "Two-stage differences in differences" in note, note
+            assert files() == [] and rows()[-1]["status"] == "wrong_paper" and rows()[-1]["file"] == "", rows()
+            # b) a different work on the first route, the right one on the next: the right one is stored (the wrong one is not)
+            br = _FakeBrowser(RIGHT)
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert ok and note == "browser" and open(path, "rb").read() == RIGHT and len(files()) == 1 and rows()[-1]["status"] == "ok", note
+            for f in files(): os.remove(f)
+            # c) every route gives the different work: not stored, status wrong_paper, the reason is kept
+            ok, path, note = dl.download_paper(dict(p), env, browser=_FakeBrowser(WRONG))
+            assert not ok and "wrong paper via browser" in note and files() == [] and rows()[-1]["status"] == "wrong_paper", note
+            # d) a scan cannot be compared: accepted, and the note says it was not checked
+            pdfs["oa"] = mkpdf([("", "")] * 2, scan=True)
+            ok, path, note = dl.download_paper(dict(p), env)
+            assert ok and "identity not checked" in note and rows()[-1]["status"] == "ok", note
+            # e) a dry run checks too, and writes nothing
+            for f in files(): os.remove(f)
+            pdfs["oa"] = WRONG
+            ok, path, note = dl.download_paper(dict(p), env, dry=True)
+            assert not ok and files() == []
+        _with_downloads(body)
+    check("downloads: a different work's PDF is refused on every route (nothing stored, status 'wrong_paper', the PDF named), the next route is tried, a scan is accepted as 'not checked'", t_download_gate)
+
+    def t_open_copy_skips_wrong():
+        import open_copies as oc
+        saved = oc.candidates
+        oc.candidates = lambda doi, title, http_get: iter([("http://x.test/first.pdf", "preprint (arXiv)"), ("http://x.test/second.pdf", "open copy (Semantic Scholar)")])
+        try:
+            get = lambda url, headers=None, timeout=30: ({"http://x.test/first.pdf": WRONG, "http://x.test/second.pdf": RIGHT}[url], {})
+            data, label = oc.find_open_copy(ID_D, ID_T, get, authors=ID_E["authors"])
+            assert data == RIGHT and label == "open copy (Semantic Scholar)"                              # the first candidate was another work: skipped, not accepted
+            data, label = oc.find_open_copy(ID_D, ID_T, lambda u, headers=None, timeout=30: (WRONG, {}), authors=ID_E["authors"])
+            assert data is None and label == "no free copy found"
+        finally:
+            oc.candidates = saved
+    check("free copies: a candidate that is another work is skipped and the next one tried, with or without a PDF-reading package installed", t_open_copy_skips_wrong)
+
+    def t_add_doi_gate():
+        saved = (importer.crossref_meta, dl.try_unpaywall, dl.http_get, importer._existing)
+        importer.crossref_meta = lambda doi: {"title": ID_T, "authors": ["Jane Doe", "Richard Roe"], "container": "Management Science", "issn": ["0025-1909"], "doi": doi,
+            "pub_date": "2025-03", "url": "https://doi.org/" + doi, "volume": "1", "issue": "1", "pages": "1-2", "publisher": "INFORMS", "type": "journal-article", "abstract": None, "keywords": []}
+        importer._existing = lambda p: None
+        dl.try_unpaywall = lambda doi, email: "http://fake.test/oa.pdf"
+        served = {}
+        def fake_get(url, headers=None, timeout=30):
+            if url == "http://fake.test/oa.pdf":
+                return served["pdf"], {}
+            raise OSError("no network in tests")
+        dl.http_get = fake_get
+        try:
+            served["pdf"] = WRONG
+            try:
+                importer.add_doi(ID_D); raise AssertionError("a different work's PDF was filed")
+            except ValueError as e:
+                assert "No free copy" in str(e)
+            served["pdf"] = RIGHT
+            r = importer.add_doi(ID_D)
+            assert r["title"] == ID_T and not r["existing"] and open(os.path.join(TMP, r["file"]), "rb").read() == RIGHT, r
+        finally:
+            importer.crossref_meta, dl.try_unpaywall, dl.http_get, importer._existing = saved
+    check("add by DOI: Unpaywall's PDF must be that paper too (a different work is not filed)", t_add_doi_gate)
+
+    def t_wrong_paper_status():
+        import contextlib, pipeline as pl_
+        saved = (pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize)
+        called = []
+        pl_.dl.open_browser = lambda **k: contextlib.nullcontext(None)
+        pl_.dl.download_paper = lambda p, env, browser=None, dry=False: (False, None, "wrong paper via browser: this PDF is titled “Two-stage differences in differences”: its title is not on the first pages (0% found)")
+        pl_.summarize = lambda *a, **k: called.append(a) or (_ for _ in ()).throw(AssertionError("a summary was paid for a refused PDF"))
+        try:
+            run = pl_.Run("picks", {"label": "t"}); run.add_paper({"id": "doi:" + ID_D, "doi": ID_D, "title": ID_T, "verdict": "download", "publisher": "informs", "abbr": "MS", "journal": "Management Science"})
+            pl_.download_and_summarize(run, ["doi:" + ID_D], lambda *a, **k: None, threading.Event())
+            q = run.papers["doi:" + ID_D]
+            assert q["dl_status"] == "wrong_paper" and q["verdict"] == "download" and "Two-stage" in q["dl_note"] and q.get("manual_url") and not called, q
+        finally:
+            pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize = saved
+    check("a refused PDF keeps its paper in the download queue as 'wrong_paper' with the reason, offers the publisher's page, and no summary is paid for", t_wrong_paper_status)
+
+    def t_identity_audit():
+        import csv, hashlib
+        root = os.path.join(TMP, "audit_home"); os.makedirs(os.path.join(root, "Papers", "2025-03", "Management Science"))
+        saved = (paths.ROOT, paths.PAPERS)
+        paths.ROOT, paths.PAPERS = root, os.path.join(root, "Papers")
+        try:
+            def put(name, data):
+                rel = "Papers/2025-03/Management Science/" + name
+                open(os.path.join(root, rel), "wb").write(data); return rel
+            items = [("ok.pdf", RIGHT, ID_T, ID_D), ("wrong.pdf", WRONG, "A Study of Hotel Reviews and Their Effects on Demand", "10.1287/mnsc.2024.0002"),
+                     ("scan.pdf", mkpdf([("", "")] * 2, scan=True), "An old scanned paper", "10.1287/isre.1.1")]
+            with open(os.path.join(root, "Papers", "_index.csv"), "w", newline="") as f:
+                w = csv.writer(f); w.writerow("date_checked journal abbr title authors doi url matched_topics score file status note".split())
+                for name, data, title, doi in items:
+                    w.writerow(["2026-10-29", "Management Science", "MS", title, "Jane Doe; Richard Roe", doi, "", "", "", put(name, data), "ok", "browser"])
+                w.writerow(["2026-10-29", "Management Science", "MS", "Not downloaded", "", "10.1/none", "", "", "", "", "failed", "x"])
+            snap = lambda: sorted((os.path.relpath(os.path.join(d, f), root), hashlib.sha1(open(os.path.join(d, f), "rb").read()).hexdigest(), os.stat(os.path.join(d, f)).st_mtime_ns)
+                                  for d, _, fs in os.walk(root) for f in fs)
+            before = snap()
+            res = idt.audit()
+            assert [(r["file"].split("/")[-1], r["verdict"]) for r in res] == [("wrong.pdf", "mismatch"), ("scan.pdf", "unverified"), ("ok.pdf", "match")], res        # mismatches first; rows that were never downloaded are not looked at
+            assert "Two-stage differences in differences" in res[0]["reason"] and res[0]["pdf_says"].startswith("Two-stage")
+            assert snap() == before                                                                                                                                       # read-only: no file changed, none added
+        finally:
+            paths.ROOT, paths.PAPERS = saved
+            shutil.rmtree(root, ignore_errors=True)
+    check("identity audit: lists the PDFs in a library that are not the paper they are filed under (worst first), changes nothing", t_identity_audit)
+
+    def t_link_follow():
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            try:
+                pw.chromium.launch().close()
+            except Exception as e:  # noqa: BLE001
+                if "Executable doesn't exist" in str(e):
+                    print("  (skipped: Chromium is not installed here: python -m playwright install chromium)")
+                    return
+                raise
+        D = "10.1287/t.%s"
+        port = {}
+        class Pub(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def _send(self, code, body, ctype, extra=None):
+                self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
+                for k, v in (extra or {}).items(): self.send_header(k, v)
+                self.end_headers(); self.wfile.write(body)
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                m = re.match(r"/doi/(pdf|abs|pdfdirect)/10\.1287/t\.(\w+)$", path)
+                if path in ("/cited.pdf", "/terms.pdf", "/other.pdf"):
+                    return self._send(200, WRONG, "application/pdf")
+                if not m:
+                    return self._send(404, b"no", "text/plain")
+                kind, case = m.groups()
+                if kind == "pdf":                                              # not entitled: bounced to the abstract page
+                    return self._send(302, b"", "text/plain", {"Location": "/doi/abs/" + D % case})
+                if kind == "pdfdirect":
+                    return self._send(200, RIGHT, "application/pdf")
+                other = "http://localhost:%d/other.pdf" % port["p"]               # another host name: another site
+                body = {"cross": "<h2>References</h2><ol><li>Gardner (2021) <a href='%s'>working paper</a></li></ol>" % other,
+                        "refs": "<div class='article-references'><a href='/cited.pdf'>cited</a></div>",
+                        "footer": "<footer><a href='/terms.pdf'>terms</a></footer>",
+                        "otherdoi": "<p>Related: <a href='/doi/pdfdirect/10.1287/other.2020.9999'>another article</a></p>",
+                        "own": "<p><a href='/doi/pdfdirect/%s'>Download PDF</a></p>" % (D % case)}[case]
+                self._send(200, ("<html><body><h1>Article</h1><p>Request access to the full text. Purchase this article.</p>%s</body></html>" % body).encode(), "text/html")
+        srv2 = ThreadingHTTPServer(("127.0.0.1", 0), Pub); port["p"] = srv2.server_address[1]
+        threading.Thread(target=srv2.serve_forever, daemon=True).start()
+        try:
+            got = {}
+            with dl.open_browser() as br:
+                for case in ("cross", "refs", "footer", "otherdoi", "own"):
+                    got[case] = br.fetch_pdf("http://127.0.0.1:%d/doi/pdf/%s" % (port["p"], D % case), wait_s=10)
+            for case in ("cross", "refs", "footer", "otherdoi"):                                  # a link that is not this article's PDF is never followed
+                assert got[case][0] is None and got[case][1].startswith("needs_login"), (case, got[case][1])
+            assert got["own"][0] == RIGHT and got["own"][1] == "browser", got["own"][1]            # this article's own link, on its own site, still is
+        finally:
+            srv2.shutdown()
+    check("browser: on a paywalled landing page only THIS article's PDF link on the same site is followed (not a reference to another site, the reference list, the footer or another article); its own link still is", t_link_follow)
+
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")
     sys.exit(1 if FAILS else 0)
