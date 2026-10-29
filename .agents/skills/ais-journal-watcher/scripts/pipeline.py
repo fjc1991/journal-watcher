@@ -9,6 +9,7 @@ Run kinds:
 """
 import base64
 import csv
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import notes_store as ns  # noqa: E402
 import folders as fo  # noqa: E402
 import authorcache as ac  # noqa: E402
 import readstate as rs  # noqa: E402
+import ai  # noqa: E402
 
 BASE, ROOT, STATE, PAPERS = dl.BASE, dl.ROOT, dl.STATE, dl.PAPERS
 RUNS = os.path.join(STATE, "runs")
@@ -181,7 +183,8 @@ class Run:
         self.errors = []
         self.jstate = {}   # abbr -> {state, label, done, total} for the journal tiles
         self.week = week_of(self.created) if kind == "weekly" else None
-        self.checks = []   # weekly: timestamps of every check merged into this week
+        self.checks = []   # weekly: timestamps of every check merged into this week; a search: every time it was run again
+        self.reused = 0    # verdicts taken from earlier screening instead of asked for again (see screen)
         self._last_save = 0
 
     def slug(self):
@@ -227,6 +230,7 @@ class Run:
              "week": self.week, "checks": self.checks,
              "updated": max(self.checks) if self.checks else self.created,
              "n_papers": len(self.order), "errors": self.errors[-20:], "jstate": self.jstate,
+             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused,
              "n_download": sum(1 for p in self.papers.values() if p.get("verdict") == "download"),
              "n_borderline": sum(1 for p in self.papers.values() if p.get("verdict") == "borderline")}
         if full:
@@ -257,6 +261,7 @@ class Run:
         r.jstate = d.get("jstate", {})
         r.week = d.get("week") or (week_of(r.created) if r.kind == "weekly" else None)
         r.checks = d.get("checks") or ([r.created] if r.kind == "weekly" else [])
+        r.reused = int(d.get("reused") or 0)
         for p in d.get("papers", []):
             if p.get("dl_status") in ("downloading", "summarizing"):
                 # interrupted (dashboard closed mid-download): ready to retry
@@ -295,6 +300,23 @@ def merge_paper(a, b):
                 if src.get(k):
                     m[k] = src[k]
     return m
+
+
+def search_key(p):
+    """What makes two archive searches the same search: the years, the journals, the topics, the methods and the focus phrase (their order and the case of the phrase do not matter).
+    The page works the same string out (index.html searchKey) to say that a search was already run."""
+    return "%s-%s|%s|%s|%s|%s" % (p.get("year_from"), p.get("year_to"), ",".join(sorted(p.get("journals") or [])), ",".join(sorted(p.get("topics") or [])),
+                                   ",".join(sorted(p.get("methods") or [])), (p.get("query") or "").strip().lower())
+
+
+def find_search(params):
+    """The newest saved archive search that is the same search as `params`, or None. Pressing Search for a search you already ran continues that one (its papers, verdicts and
+    downloads stay; the journals are asked again, and only papers without a verdict are screened) instead of starting a second copy and paying for it all again."""
+    key = search_key(params)
+    for d in list_runs():
+        if d["kind"] == "search" and d.get("search_key") == key:
+            return d
+    return None
 
 
 def weekly_run(current=None):
@@ -355,6 +377,8 @@ def list_runs():
                 d = load_json(os.path.join(RUNS, fn), None)
                 if d:
                     d.pop("papers", None)
+                    if d["kind"] == "search" and not d.get("search_key"):
+                        d["search_key"] = search_key(d.get("params") or {})
                     if d["kind"] == "weekly":
                         d.setdefault("week", week_of(d["created"]))
                         d["title"] = week_label(d["week"])
@@ -450,6 +474,38 @@ def fetch_weekly(run, emit, stop):
     emit("progress", {"stage": "fetching", "label": "Fetched", "done": len(js), "total": len(js)})
 
 
+FETCHED = os.path.join(STATE, "fetched")       # what a journal's year range returned, abstracts included (a saved copy: asking Crossref again takes minutes)
+FETCH_KEEP_DAYS = 7        # a past year's articles hardly change ...
+FETCH_KEEP_DAYS_NOW = 1    # ... but the current year's list grows every week
+
+
+def _fetched_path(abbr, y0, y1):
+    return os.path.join(FETCHED, "%s_%s_%s.json" % (re.sub(r"[^A-Za-z0-9]+", "", abbr or "x"), y0, y1))
+
+
+def saved_fetch(abbr, y0, y1, now=None):
+    """(items, fetched_at) from the saved copy of this journal and year range, or (None, None) when there is none or it is older than FETCH_KEEP_DAYS days (a day when the
+    range reaches the current year)."""
+    d = load_json(_fetched_path(abbr, y0, y1), None)
+    if not d or not d.get("items") or not d.get("at"):
+        return None, None
+    try:
+        age = ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(d["at"])).total_seconds() / 86400
+    except ValueError:
+        return None, None
+    keep = FETCH_KEEP_DAYS_NOW if int(y1) >= (now or datetime.now(timezone.utc)).year else FETCH_KEEP_DAYS
+    return (d["items"], d["at"]) if 0 <= age < keep else (None, None)
+
+
+def save_fetch(abbr, y0, y1, items):
+    os.makedirs(FETCHED, exist_ok=True)
+    path = _fetched_path(abbr, y0, y1)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "items": items}, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 def fetch_search(run, emit, stop):
     p = run.params
     js = [j for j in journals() if j["abbr"] in p["journals"]]
@@ -460,6 +516,15 @@ def fetch_search(run, emit, stop):
             return
         label = "Searching %s %s–%s" % (j["abbr"], p["year_from"], p["year_to"])
         emit("progress", {"stage": "fetching", "label": label, "done": n - 1, "total": len(js)})
+        saved, when = saved_fetch(j["abbr"], int(p["year_from"]), int(p["year_to"]))
+        if saved:                                                 # asked before, not long ago: use the saved copy (abstracts included)
+            for it in saved:
+                if run.add_paper(dict(it)):
+                    emit("paper", slim(it))
+            set_j(run, emit, j["abbr"], state="fetched", label="Saved copy", found=len(saved), done=len(saved), total=len(saved))
+            emit("log", {"msg": "%s: %d articles from your saved copy of %s (fetched %s)" % (j["abbr"], len(saved), "%s–%s" % (p["year_from"], p["year_to"]), when[:10])})
+            run.save()
+            continue
         set_j(run, emit, j["abbr"], state="fetching", label="Querying Crossref")
         try:
             items = fx.crossref_journal_range(
@@ -487,6 +552,8 @@ def fetch_search(run, emit, stop):
         set_j(run, emit, j["abbr"], state="fetched", label="Fetched", found=len(items))
         emit("log", {"msg": "%s: %d articles (%d with abstract)"
                      % (j["abbr"], len(items), sum(1 for x in items if x.get("abstract")))})
+        if items and not stop.is_set():
+            save_fetch(j["abbr"], y0, y1, items)
         run.save()
     emit("progress", {"stage": "fetching", "label": "Fetched", "done": len(js), "total": len(js)})
 
@@ -608,10 +675,89 @@ def _screen_batch(system, batch, usage):
     return {}
 
 
+VERDICTS = os.path.join(STATE, "verdicts.json")      # {fingerprint: {paper id: {h, v, rel, topics, method, reason, at}}}: what the screening said, so a paper is not paid for twice
+_verdict_lock = threading.Lock()
+KEEP_VERDICTS_DAYS = 400
+
+
+def reuse_days():
+    """How many days an earlier screening verdict is believed (Settings → AI & privacy → Privacy and spending); 0 = always ask again."""
+    try:
+        return max(0, min(3650, int(((ai.config_data().get("screening") or {}).get("reuse_days", 90)))))
+    except (TypeError, ValueError, OSError):
+        return 90
+
+
+def screen_fingerprint(system):
+    """A verdict answers one question: the model and the whole instruction it was given (topics, method, focus phrase). Another question gets its own verdicts."""
+    return hashlib.sha256((MODEL + "\n" + system).encode("utf-8")).hexdigest()[:16]
+
+
+def paper_digest(p):
+    """What the model was shown of the paper. A verdict is reused only for the same text (an abstract that arrived later is a different question)."""
+    s = json.dumps([p.get("abbr"), (p.get("pub_date") or "")[:4], p.get("title"), p.get("keywords"), (p.get("abstract") or "")[:1800] or None], ensure_ascii=False)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def known_verdicts(fp, papers, days, now=None):
+    """{paper id: cached verdict} for the papers whose verdict for this question is saved, still fresh and about the same text."""
+    if days <= 0:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    with _verdict_lock:
+        mine = (load_json(VERDICTS, {}) or {}).get(fp) or {}
+    out = {}
+    for p in papers:
+        e = mine.get(p["id"])
+        if not e or e.get("h") != paper_digest(p) or e.get("v") not in ("download", "borderline", "skip"):
+            continue
+        try:
+            if (now - datetime.fromisoformat(e["at"])).total_seconds() < days * 86400:
+                out[p["id"]] = e
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+def remember_verdicts(fp, papers, now=None):
+    """Keep the verdicts the model just gave (never an error). Old ones, and old questions that nothing has asked lately, are dropped."""
+    now = now or datetime.now(timezone.utc)
+    at = now.isoformat(timespec="seconds")
+    with _verdict_lock:
+        d = load_json(VERDICTS, {}) or {}
+        mine = d.setdefault(fp, {})
+        for p in papers:
+            if p.get("verdict") in ("download", "borderline", "skip"):
+                mine[p["id"]] = {"h": paper_digest(p), "v": p["verdict"], "rel": p.get("relevance"), "topics": p.get("topics") or [], "method": p.get("method"),
+                                 "reason": p.get("reason") or "", "at": at}
+        cut = (now - timedelta(days=KEEP_VERDICTS_DAYS)).isoformat(timespec="seconds")
+        for q in list(d):
+            d[q] = {i: e for i, e in d[q].items() if (e.get("at") or "") >= cut}
+            if not d[q]:
+                del d[q]
+        os.makedirs(os.path.dirname(VERDICTS), exist_ok=True)
+        tmp = VERDICTS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, VERDICTS)
+
+
 def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
     system = screening_system(run.params.get("topics"), run.params.get("query"),
                               run.params.get("methods"))
     todo = [run.papers[i] for i in (ids or run.order) if not run.papers[i].get("verdict")]
+    fp = screen_fingerprint(system)
+    known = known_verdicts(fp, todo, reuse_days())
+    if known:                                                  # asked before, with the same question and the same text, not long ago: no second payment
+        for p in todo:
+            e = known.get(p["id"])
+            if e:
+                p["verdict"], p["relevance"], p["topics"], p["method"], p["reason"] = e["v"], e.get("rel") or 0, e.get("topics") or [], e.get("method"), e.get("reason") or ""
+                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason")})
+        todo = [p for p in todo if p["id"] not in known]
+        run.reused += len(known)
+        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question (about $%.2f not paid for again)" % (len(known), len(known) * EST_SCREEN_COST_PER_PAPER)})
+        run.save(force=True)
     batches = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
     done = 0
     emit("progress", {"stage": "screening", "label": "Screening with Sonnet 5.5", "done": 0, "total": len(todo)})
@@ -642,6 +788,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             emit("progress", {"stage": "screening", "label": "Screening with Sonnet 5.5",
                               "done": done, "total": len(todo)})
             emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d})
+            remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
             run.save()
     # remember weekly verdicts for agent.py
     if run.kind == "weekly":

@@ -382,7 +382,19 @@ def main():
             "        emit('download', {'id': i, 'dl_status': p['dl_status'], 'dl_note': p['dl_note'], 'manual_url': p['manual_url']})\n"
             "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".wrong"))
     tail = "sys.argv = ['server.py', '--port', %r, '--no-open']\nrunpy.run_path(%r, run_name='__main__')\n" % (str(port), os.path.join(TMP, "dashboard", "server.py"))
-    runner = head + FAKE_BROWSER + tail
+    search_fakes = r"""
+import zlib, fetch_new as fx
+def fake_cr(issn, y0, y1, progress=None, doi_prefix=None, work_type=None):      # three articles per journal and year: two about platforms, one about something else
+    k = zlib.crc32(str(issn).encode()) % 1000
+    return [{'title': 'Platform governance study %d-%d' % (k, i), 'doi': '10.9999/t.%d.%d.%d' % (y0, k, i), 'pub_date': '%d-03-01' % y0, 'abstract': 'We study platform governance and complementors.', 'keywords': ['platform']} for i in range(2)] + \
+           [{'title': 'Something else %d' % k, 'doi': '10.9999/o.%d.%d' % (y0, k), 'pub_date': '%d-04-01' % y0, 'abstract': 'Unrelated.', 'keywords': []}]
+fx.crossref_journal_range = fake_cr
+def fake_screen(system, batch, usage):                                            # what the model is asked, one line per batch (the test counts them)
+    open(SCREENLOG, 'a').write('%d\n' % len(batch))
+    return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
+pl._screen_batch = fake_screen
+""".replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log')))
+    runner = head + search_fakes + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = "http://127.0.0.1:%d" % port
     sidecar = lambda i, ext: os.path.join(TMP, rows[i][3][:-4] + ext)  # noqa: E731
@@ -792,6 +804,12 @@ def main():
             check("settings: providers, per-feature models and a key-free status", page.locator("tr[data-f]").count() >= 17 and page.locator("tr[data-f='ideas']").count() == 1 and "key found" in page.inner_text("tr[data-p='fake']"))
             page.fill("#st-budget", "5"); page.click("#st-save"); page.wait_for_timeout(600)
             check("settings: the monthly budget is saved", api("/api/ai/config")["budget"]["monthly_usd"] == 5)
+            check("settings: 'reuse earlier screening verdicts for N days' shows its default (90) and is saved", page.input_value("#st-reuse") == "90" and api("/api/ai/config")["screening"]["reuse_days"] == 90)
+            page.fill("#st-reuse", "30"); page.click("#st-save"); page.wait_for_timeout(600)
+            check("…the number of days is kept, and an impossible one is refused with a reason", api("/api/ai/config")["screening"]["reuse_days"] == 30 and page.inner_text("#st-msg").strip() == "Saved.")
+            page.fill("#st-reuse", "99999"); page.click("#st-save"); page.wait_for_function("document.querySelector('#st-msg.bad')", timeout=5000)
+            check("…(refused: 0 to 3650 days)", api("/api/ai/config")["screening"]["reuse_days"] == 30 and "3650" in page.inner_text("#st-msg"), page.inner_text("#st-msg"))
+            page.fill("#st-reuse", "90"); page.click("#st-save"); page.wait_for_timeout(600)
             page.click('.st-tabs button[data-t="usage"]'); page.wait_for_selector(".st-stat")
             check("usage panel shows spend, cached answers and what was sent", "cache" in page.inner_text("#st-body").lower() and page.locator(".st-table.log tr").count() > 3)
             check("the usage chart always shows the last 30 days, not just the days with spend", page.locator(".st-chart > div").count() == 30)
@@ -1799,6 +1817,50 @@ def main():
             page.evaluate("window.setTheme('light')")
             check("at 3440 px the text is as readable as at 1400 px (WCAG AA, light and dark, Watch and Library)", not con_w, str(con_w[:3]))
             page.set_viewport_size({"width": 1400, "height": 950})
+
+            print("an archive search is remembered: a repeat is not paid for twice")
+            screened = os.path.join(TMP, "screened.log")
+            def batches():
+                return open(screened).read().split() if os.path.exists(screened) else []
+            def wait_idle(n_papers, timeout=60):
+                for _ in range(timeout * 4):
+                    s_ = api("/api/state")
+                    if not s_["busy"] and s_["run"] and s_["run"]["n_papers"] >= n_papers and s_["run"]["stage"] == "ready":
+                        return s_["run"]
+                    time.sleep(0.25)
+                raise AssertionError("the search did not finish: %s" % json.dumps(api("/api/state"))[:300])
+            page.set_viewport_size({"width": 1400, "height": 950}); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#searchbtn", state="attached"); page.wait_for_timeout(600)
+            page.click('.tabs button[data-tab="search"]')
+            page.select_option("#y0", "2024"); page.select_option("#y1", "2024"); page.click("#jnone")
+            first_two = [c.get_attribute("data-abbr") for c in page.locator("#journalchips .chip:not(.off)").all()[:2]]
+            page.click('#journalchips .chip[data-abbr="%s"]' % first_two[0]); page.click("#topicchips .chip >> nth=0")
+            check("before the first search the form does not claim to have run it", "already ran" not in page.inner_text("#est"))
+            n0 = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
+            page.click("#searchbtn"); run_a = wait_idle(3)
+            check("the search finds 3 papers and screens them once (one question to the model)", run_a["n_papers"] == 3 and run_a["n_download"] == 2 and len(batches()) == 1 and batches() == ["3"], str((run_a["n_papers"], batches())))
+            page.click('#runtabs button[data-rt="search"]'); page.wait_for_function("document.querySelector('#n-search').textContent.trim() !== ''")
+            check("it is in the history under 'Archive searches', and the form now says you already ran this search", run_a["title"] in page.inner_text("#runs") and "You already ran this search" in page.inner_text("#est"), page.inner_text("#est"))
+            page.click("#searchbtn"); page.wait_for_timeout(300); run_a2 = wait_idle(3)
+            runs_ = [r_ for r_ in api("/api/runs") if r_["kind"] == "search"]
+            check("pressing Search again for the same search continues the saved one: no second copy, nothing screened again, and it says when it was updated",
+                  len(runs_) == n0 + 1 and run_a2["id"] == run_a["id"] and batches() == ["3"] and len(api("/api/runs/" + run_a["id"])["checks"]) == 2 and "updated" in page.inner_text("#runs"), str((len(runs_), n0, batches())))
+            page.click('#journalchips .chip[data-abbr="%s"]' % first_two[1])
+            page.click("#searchbtn"); run_b = wait_idle(6)
+            check("a wider search (one more journal) keeps what it can: the first journal's three papers reuse their verdicts and only the new journal's are screened (and the page says so)",
+                  run_b["id"] != run_a["id"] and run_b["reused"] == 3 and batches() == ["3", "3"], str((run_b["reused"], batches())))
+            page.wait_for_function("/reused a verdict/.test(document.querySelector('#runmeta').textContent)", timeout=8000)
+            check("…the run's description says how many papers reused a verdict", "3 papers reused a verdict from an earlier screening" in page.inner_text("#runmeta"), page.inner_text("#runmeta"))
+            page.click('#runs .runitem[data-id="%s"]' % run_a["id"]); page.wait_for_selector("#againbtn:not(.hide)")
+            page.fill("#focus", "zzz"); page.click("#jall")
+            page.click("#againbtn")
+            check("‘Search again…’ fills the form with that search's settings (years, journals, topics, focus) and says that it continues the saved search",
+                  page.input_value("#y0") == "2024" and page.input_value("#focus") == "" and page.locator("#journalchips .chip.on").count() == 1 and page.get_attribute("#journalchips .chip.on", "data-abbr") == first_two[0]
+                  and page.locator("#topicchips .chip.on").count() == 1 and "You already ran this search" in page.inner_text("#est"), page.inner_text("#est"))
+            page.evaluate("RUN = null; NAV.view = 'run'; render()")
+            page.wait_for_selector("#resume:not(.hide)")
+            check("with nothing open, the Watch page offers the last runs to pick up ('Pick up where you left off')", page.locator("#resumelist .runitem").count() >= 2 and "Archive search" in page.inner_text("#resumelist"), page.inner_text("#resume"))
+            page.click('#resumelist .runitem >> nth=0'); page.wait_for_function("document.querySelector('#resume').classList.contains('hide')")
+            check("…a click opens it (the page now shows that run, with its papers)", page.evaluate("RUN && RUN.id") == run_b["id"] and page.evaluate("papers.size") == 6, str(page.evaluate("RUN && RUN.id")))
 
             print("one dashboard per project")
             second = subprocess.run([sys.executable, os.path.join(TMP, "dashboard", "server.py"), "--port", str(port + 1), "--no-open"], cwd=TMP, env=env, capture_output=True, text=True, timeout=60)

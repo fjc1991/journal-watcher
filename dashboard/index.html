@@ -299,7 +299,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
     <div class="card runhead" id="runhead" data-tool="watch">
       <div class="row" style="justify-content:space-between;align-items:flex-start">
         <div><h1 id="runtitle">Welcome</h1><div class="meta" id="runmeta">Start a weekly check or an archive search from the panel on the right.</div></div>
-        <button class="btn danger hide" id="stopbtn">Stop</button>
+        <div class="row" style="gap:8px"><button class="btn hide" id="againbtn" title="Fill the search form with this search’s settings. Pressing Search continues this saved search: nothing already judged is paid for again.">Search again…</button><button class="btn danger hide" id="stopbtn">Stop</button></div>
       </div>
       <div class="prog" id="prog">
         <div class="row"><span id="proglabel"></span><span id="progcount"></span></div>
@@ -307,6 +307,8 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
       </div>
       <div class="stats hide" id="stats"></div>
     </div>
+
+    <div class="card hide" id="resume"><div class="list-h">Pick up where you left off</div><div class="runs" id="resumelist" style="padding-top:6px"></div></div>
 
     <div id="runview" class="hide">
       <div class="card selbar" id="selbar">
@@ -516,6 +518,7 @@ function render() {
   $("#listview").classList.toggle("hide", NAV.j === null);
   const sp = special(NAV.j);
   document.querySelectorAll("#viewtabs button").forEach(b => b.classList.toggle("on", b.dataset.vt === (sp ? NAV.j : "")));
+  drawResume(); $("#againbtn").classList.toggle("hide", !RUN || RUN.kind !== "search" || BUSY);
   $("#vfilter").classList.toggle("hide", sp);
   $("#jsel").classList.toggle("hide", !sp);
   $("#qbtn").classList.toggle("hide", NAV.j !== "~queue");
@@ -548,6 +551,21 @@ function chip(label, on, cb) {
   c.onclick = () => { if (c.classList.contains("off")) return; c.classList.toggle("on"); cb && cb(); }; return c;
 }
 function selectedJournals() { return [...document.querySelectorAll("#journalchips .chip.on")].map(c => c.dataset.abbr); }
+// the same string pipeline.search_key works out: two searches with this key are the same search (the server continues the saved one instead of starting a copy)
+function searchKey() {
+  const a = +$("#y0").value, b = +$("#y1").value, on = sel => [...document.querySelectorAll(sel + " .chip.on")].map(c => c.textContent);
+  let topics = on("#topicchips"); const methods = on("#methodchips");
+  if (!topics.length && !methods.length) topics = [...CFG.topics];
+  return `${Math.min(a, b)}-${Math.max(a, b)}|${selectedJournals().sort().join(",")}|${topics.sort().join(",")}|${methods.sort().join(",")}|${$("#focus").value.trim().slice(0, 200).trim().toLowerCase()}`;
+}
+function fillSearch(p) {
+  $("#y0").value = String(p.year_from); $("#y1").value = String(p.year_to); $("#focus").value = p.query || "";
+  const set = (sel, list, by) => document.querySelectorAll(sel + " .chip").forEach(c => c.classList.toggle("on", !c.classList.contains("off") && list.includes(by(c))));
+  set("#topicchips", p.topics || [], c => c.textContent); set("#methodchips", p.methods || [], c => c.textContent); set("#journalchips", p.journals || [], c => c.dataset.abbr);
+  updateEst();
+  const tab = document.querySelector('.tabs button[data-tab="search"]'); if (tab) tab.click();
+  $("#pane-search").scrollIntoView({block: "nearest"});
+}
 function updateEst() {
   const y0 = +$("#y0").value, y1 = +$("#y1").value, yrs = Math.abs(y1 - y0) + 1;
   const js = selectedJournals();
@@ -557,6 +575,8 @@ function updateEst() {
   $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · est. <b>$${cost.toFixed(2)}</b>` +
     (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
     (CFG.openalex_key ? "" : `<br>JMIS/DSS/NBER abstracts need a free OpenAlex key; otherwise screened by title.`);
+  const key = searchKey(), known = RUNS.find(r => r.search_key === key);
+  if (known) $("#est").innerHTML += `<br><b>You already ran this search</b> (${known.n_papers} papers, ${esc(fmtWhen(known.updated || known.created))}). Pressing Search continues it: its papers, verdicts and downloads stay, and only papers without a verdict are paid for.`;
 }
 async function init() {
   CFG = await api("/api/config");
@@ -581,6 +601,7 @@ async function init() {
   $("#tfilter").innerHTML += CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
   updateEst();
   await loadRuns(); await loadLibrary();
+  if (RUNS.length) { const newest = [...RUNS].sort((a, b) => (b.updated || b.created) > (a.updated || a.created) ? 1 : -1)[0]; RUNTAB = newest.kind === "weekly" ? "weekly" : "search"; drawRuns(); }      // the list opens on the kind you last worked with
   if (document.readyState !== "complete") await new Promise(r => addEventListener("load", r, {once: true}));   // every module script has run by "load" (a deep link to a folder tab needs all of them)
   await LibraryUI.init({getLib: () => LIB, reload: reloadLib, readPaper, openLib, go, renderNav, syncNav, tabChanged: () => { NAV.tab = LibraryUI.state.tab; history.replaceState({...NAV}, "", routeOf(NAV)); syncNav(); }, openRun: run => { startedRun(run); go({view: "run", j: "~queue"}); }, rerender: () => { if (NAV.view === "lib") renderLibrary(); }});
   window.ReviewUI && ReviewUI.refreshBadge();
@@ -613,6 +634,7 @@ function startedRun(run) {
   // a weekly check continues this week's run: load what it already holds
   api("/api/runs/" + run.id).then(r => { if (RUN && RUN.id === r.id) { setRun(r); render(); } }).catch(() => {});
 }
+$("#againbtn").onclick = () => { if (RUN && RUN.params) { fillSearch(RUN.params); toast("The search form is filled in with this search’s settings. Press “Search & screen”: it continues this saved search."); } };
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
 let SI = null;
@@ -689,7 +711,23 @@ function illLink(p) {
 // ---------- runs list
 document.querySelectorAll("#runtabs button").forEach(b => b.onclick = () => { RUNTAB = b.dataset.rt; drawRuns(); });
 const fmtWhen = ts => new Date(ts).toLocaleString(undefined, {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
-async function loadRuns() { RUNS = await api("/api/runs"); drawRuns(); }
+async function loadRuns() { RUNS = await api("/api/runs"); drawRuns(); drawResume(); if (CFG) updateEst(); }
+async function openRun(r) {
+  if (BUSY && RUN && RUN.id !== r.id) return toast("Wait for the current task to finish.");
+  SEL.clear(); setRun(await api("/api/runs/" + r.id)); go({view: "run", j: null}); drawRuns();
+}
+// nothing open (the app was just started, or you came back): the last few runs, so that what you found is one click away
+function drawResume() {
+  const box = $("#resume"), lib = NAV.view === "lib", last = [...RUNS].sort((a, b) => (b.updated || b.created) > (a.updated || a.created) ? 1 : -1).slice(0, 4);
+  box.classList.toggle("hide", lib || !!RUN || !last.length);
+  $("#resumelist").innerHTML = "";
+  last.forEach(r => {
+    const d = document.createElement("div"); d.className = "runitem"; d.dataset.id = r.id;
+    d.innerHTML = `<b>${esc(r.title)}</b><span>${r.kind === "weekly" ? "Weekly" : "Archive search"} · ${fmtWhen(r.updated || r.created)} · ${r.n_papers} papers · ${r.n_download} to download</span>`;
+    d.onclick = () => { RUNTAB = r.kind === "weekly" ? "weekly" : "search"; openRun(r); };
+    $("#resumelist").append(d);
+  });
+}
 function drawRuns() {
   const weekly = RUNS.filter(r => r.kind === "weekly"), search = RUNS.filter(r => r.kind !== "weekly");
   $("#n-weekly").textContent = weekly.length ? `(${weekly.length})` : "";
@@ -703,13 +741,10 @@ function drawRuns() {
     d.className = "runitem"; d.dataset.id = r.id;
     const got = r.kind === "weekly"
       ? `${(r.checks || []).length} check${(r.checks || []).length === 1 ? "" : "s"} · last ${fmtWhen(r.updated || r.created)}`
-      : fmtWhen(r.created);
+      : r.updated && r.updated !== r.created ? `${fmtWhen(r.created)}, updated ${fmtWhen(r.updated)}` : fmtWhen(r.created);
     d.innerHTML = `<b>${esc(r.title)}${r.week === CFG.this_week ? `<span class="now">This week</span>` : ""}</b>
       <span>${got} · ${r.n_papers} papers · ${r.n_download} to download · $${(r.cost || 0).toFixed(2)}</span>`;
-    d.onclick = async () => {
-      if (BUSY && RUN && RUN.id !== r.id) return toast("Wait for the current task to finish.");
-      SEL.clear(); setRun(await api("/api/runs/" + r.id)); go({view: "run", j: null}); drawRuns();
-    };
+    d.onclick = () => openRun(r);
     $("#runs").append(d);
   });
   document.querySelectorAll("#runs .runitem").forEach(x => x.classList.toggle("on", NAV.view === "run" && RUN && x.dataset.id === RUN.id));
@@ -740,7 +775,8 @@ function renderMeta() {
         (pr.journals || []).join(", "), (pr.topics || []).join(", "),
         (pr.methods || []).length ? "main method: " + pr.methods.join(", ") : "",
         pr.query ? `“${pr.query}”` : ""].filter(Boolean).join(" · ");
-  $("#runmeta").textContent = RUN.kind === "weekly" ? scope : `${scope} · started ${new Date(RUN.created).toLocaleString()}`;
+  $("#runmeta").textContent = (RUN.kind === "weekly" ? scope : `${scope} · started ${new Date(RUN.created).toLocaleString()}${RUN.updated && RUN.updated !== RUN.created ? `, updated ${fmtWhen(RUN.updated)}` : ""}`)
+    + (RUN.reused ? ` · ${RUN.reused} papers reused a verdict from an earlier screening (not paid for again)` : "");
   $("#stats").classList.remove("hide");
   $("#stats").innerHTML = [["Found", ps.length], ["Download", c("download")], ["Borderline", c("borderline")],
     ["Skipped", c("skip")], ["Awaiting verdict", pending], ["Downloaded", got]]
@@ -1096,6 +1132,7 @@ function setBusy(busy, kind) {
   ["#weeklybtn", "#searchbtn"].forEach(s => $(s).disabled = busy);
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
+  $("#againbtn").classList.toggle("hide", busy || !RUN || RUN.kind !== "search");
   if (!busy) { $("#prog").classList.remove("on"); $("#banner").classList.add("hide"); }
   updateSel(); renderTilesSoon();
 }

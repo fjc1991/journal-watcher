@@ -60,7 +60,8 @@ function renderAI(body) {
       <td><input type="text" class="fm" aria-label="Embedding model" value="${esc(A.embeddings.model)}"></td><td></td><td><small>“local” runs on this Mac, free</small></td></tr></table></div>
   <div class="card st-card"><h2>Privacy and spending</h2>
     <label class="chk"><input type="checkbox" id="st-local"${A.privacy.local_only ? " checked" : ""}> <b>Local-only mode</b> — never send paper text to a provider outside this computer (only Ollama works; Ask and Explain need an Ollama model)</label>
-    <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd ?? ""}" placeholder="no limit" style="width:110px"> <small>calls stop when the month's spend reaches it; a warning shows at 80%</small></label></div>
+    <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd ?? ""}" placeholder="no limit" style="width:110px"> <small>calls stop when the month's spend reaches it; a warning shows at 80%</small></label>
+    <label class="chk">Reuse earlier screening verdicts for <input type="number" id="st-reuse" min="0" max="3650" step="1" value="${(A.screening || {}).reuse_days ?? 90}" style="width:80px"> days <small>0 = always ask the AI again. A verdict is reused only for the same paper text and the same question (topics, method and focus phrase), so searching again does not pay for papers it already judged</small></label></div>
   <div class="card st-card"><h2>Prices <small>USD per million tokens — only for cost figures</small></h2>
     <table class="st-table"><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th></tr>
     ${used.map(m => `<tr data-m="${esc(m)}"><td>${esc(m)}</td>${["in", "out", "cache_write", "cache_read"].map(k => `<td><input type="number" step="0.01" min="0" data-k="${k}" aria-label="${esc(m)}: ${({in: "input", out: "output", cache_write: "cache write", cache_read: "cache read"})[k]} price per million tokens" value="${price(m)[k] ?? ""}" style="width:90px"></td>`).join("")}</tr>`).join("")}</table>
@@ -83,7 +84,7 @@ function renderAI(body) {
     const emb = $('tr[data-f="emb"]', body);
     try {
       D.ai = await api("/api/ai/config", {features, provider_models, prices, embeddings: {provider: $(".fp", emb).value, model: $(".fm", emb).value.trim()},
-        privacy: {local_only: $("#st-local", body).checked}, budget: {monthly_usd: $("#st-budget", body).value}});
+        privacy: {local_only: $("#st-local", body).checked}, budget: {monthly_usd: $("#st-budget", body).value}, screening: {reuse_days: $("#st-reuse", body).value}});
       note(msg, "Saved."); window.dispatchEvent(new Event("jw-settings-changed"));
     } catch (e) { note(msg, e.message, true); }
   };
