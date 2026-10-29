@@ -2167,10 +2167,13 @@ def main():
 
     class _FakeBrowser:
         """fetch_pdf, the reader, the full-text page and EBSCO each answer from a dict of (bytes, note); the calls are recorded."""
-        def __init__(self, data=None, note="browser", reader=None, page=None, ebsco=None, renew=False):
-            self.data, self.note, self.reader, self.page, self.ebsco, self.renew, self.calls = data, note, reader, page, ebsco, renew, []
+        def __init__(self, data=None, note="browser", reader=None, page=None, ebsco=None, renew=False, via=None):
+            self.data, self.note, self.reader, self.page, self.ebsco, self.renew, self.calls, self.via, self.urls = data, note, reader, page, ebsco, renew, [], via, []
         def fetch_pdf(self, url, wait_s=25, doi=None):
-            self.calls.append("fetch_pdf"); return self.data, self.note
+            self.calls.append("fetch_pdf"); self.urls.append(url)
+            if self.via and url.startswith(self.via[0]):            # asked for through the library's sign-in
+                return self.via[1]
+            return self.data, self.note
         def renew_member(self, m): self.calls.append("renew_member"); return self.renew
         def fetch_from_reader(self, url): self.calls.append("reader"); return self.reader or (None, "no reader")
         def page_to_pdf(self, url, min_chars=5000): self.calls.append("page_to_pdf"); return self.page or (None, "no page")
@@ -2259,6 +2262,67 @@ def main():
         hbr_pdf = mkpdf([("Managing Oneself", "By the author. " + FILL)])
         _with_downloads(body)
     check("downloads: a different work's PDF is refused on every route (nothing stored, status 'wrong_paper', the PDF named), the next route is tried (also inside the browser route), a needed sign-in stays the reason, a scan is kept as 'not checked'", t_download_gate)
+
+    def t_library_route():
+        """The publisher wants a login and your library (OpenAthens or EZproxy) is set up and signed in: the same page is asked for through the library's sign-in."""
+        import csv
+        sg = brw.si
+        OA = "https://go.openathens.net/redirector/testuni.ac.uk?url="
+        def body(pdfs):
+            p = {"journal": "Wiley Journal", "abbr": "WJ", "publisher": "wiley", "doi": ID_D, "title": ID_T, "url": "https://doi.org/" + ID_D, "pub_date": "2025-03-01", "authors": ["Jane Doe", "Richard Roe"], "topics": []}
+            env = {}
+            rows = lambda: list(csv.DictReader(open(os.path.join(dl.PAPERS, "_index.csv"), newline="")))
+            def clear():
+                for d, _, fs in os.walk(dl.PAPERS):
+                    for f in fs:
+                        if f.endswith(".pdf"): os.remove(os.path.join(d, f))
+            sg.save_profile({"mode": "openathens", "openathens": "testuni.ac.uk", "name": "Test University"})
+            sg.record("library", True)
+            # a) signed in: after the plain attempt wants a login, the library's address gives the PDF
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (RIGHT, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert ok and note == "browser (via your library)" and len(br.urls) == 2 and br.urls[1].startswith(OA) and open(path, "rb").read() == RIGHT, (note, br.urls)
+            assert "doi%2F" in br.urls[1] or "%2Fdoi%2F" in br.urls[1], br.urls[1]                                  # the publisher's own address is what the redirector is given
+            clear()
+            # b) the plain attempt worked: the library is not asked at all
+            br = _FakeBrowser(RIGHT, via=(OA, (WRONG, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert ok and note == "browser" and len(br.urls) == 1, (note, br.urls)
+            clear()
+            # c) the library gives another work: refused like any other route (the status says so)
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (WRONG, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and "wrong paper via browser (via your library)" in note and rows()[-1]["status"] == "wrong_paper", note
+            # d) the library's session has ended (it sent the browser to its own sign-in page): the tick goes, and the card offers the library sign-in
+            sg.record("library", True)
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (None, "needs_login:login.openathens.net")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and "needs_library_login" in note and "login.openathens.net" in note and sg.status()["library"]["signed_in"] is False, note
+            # e) not signed in to the library: it is not tried (it would only wait for a password), and the card offers the library sign-in
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (RIGHT, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and len(br.urls) == 1 and "needs_library_login" in note, (note, br.urls)
+            # f) a paper that is about your INFORMS membership keeps asking for that sign-in (the library is still tried when it is signed in)
+            ms = dict(p, publisher="informs", abbr="MS", journal="Management Science")
+            ok, path, note = dl.download_paper(ms, env, browser=_FakeBrowser(None, note="needs_login:pubsonline.informs.org"))
+            assert not ok and "needs_library_login" not in note and "needs_login:pubsonline.informs.org" in note, note
+            # g) EZproxy: the library's prefix goes in front of the address
+            sg.save_profile({"mode": "ezproxy", "ezproxy": "https://ezproxy.testuni.edu/login?url=", "name": "Test University"}); sg.record("library", True)
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=("https://ezproxy.testuni.edu/login?url=", (RIGHT, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert ok and note == "browser (via your library)" and br.urls[1].startswith("https://ezproxy.testuni.edu/login?url=http"), (note, br.urls)
+            clear()
+            # h) no sign-in of its own (the publishers' own institution pages, VPN, none): nothing changes, nothing is asked for
+            for mode in ("institutional", "vpn", "none"):
+                sg.save_profile({"mode": mode, "name": "Test University"})
+                br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (RIGHT, "browser")))
+                ok, path, note = dl.download_paper(dict(p), env, browser=br)
+                assert not ok and len(br.urls) == 1 and "needs_library_login" not in note, (mode, note, br.urls)
+        try:
+            _with_downloads(body)
+        finally:
+            sg.save_profile({"mode": "institutional"}); sg.forget("library")
+    check("downloads: when the publisher wants a login and your library (OpenAthens or EZproxy) is signed in, the page is asked for through it (the PDF is checked like any other); a library session that has ended or was never opened says so and offers the library sign-in; no sign-in of its own changes nothing", t_library_route)
 
     def t_open_copy_skips_wrong():
         import open_copies as oc
