@@ -214,6 +214,7 @@ def _why(r):
 
 
 LOGIN_PENDING = {"site": ""}        # which sign-in window is open right now ("" = none)
+LIBTEST_LOCK = threading.Lock()     # one "Test my access" at a time
 
 
 def start_login(which="publishers"):
@@ -1389,6 +1390,24 @@ class Handler(BaseHTTPRequestHandler):
             if which in ("library", "nova") and not signins.profile()["signs_in"]:
                 return self.send_json({"error": "Set up your library first (Settings → Library access): it has no sign-in of its own yet.", "setup": True}, 400)
             return self.started(start_login(which), None)
+        if path == "/api/library/test":          # is the library access working now? (a few seconds to half a minute: it opens the library page in the background)
+            if JOBS.busy():
+                return self.send_json({"error": "Wait for the task that is running to finish, then test again."}, 409)
+            if not LIBTEST_LOCK.acquire(blocking=False):
+                return self.send_json({"error": "A test is already running."}, 409)
+            try:
+                try:
+                    r = subprocess.run(paths.cmd("browser.py", "library-test"), cwd=ROOT, capture_output=True, text=True, timeout=120)
+                    lines = [l for l in (r.stdout or "").splitlines() if l.strip().startswith("{")]
+                    res = json.loads(lines[-1]) if lines else {"state": "error", "message": "The test could not run. %s" % (_why(r) or "No answer came back.")}
+                except subprocess.TimeoutExpired:
+                    res = {"state": "error", "message": "The test took too long and was stopped. Check your internet connection and the addresses in Settings."}
+                except ValueError:
+                    res = {"state": "error", "message": "The test gave an answer the app could not read."}
+                res = {**signins.record_test(res), "status": signins.status()}
+                return self.send_json(res)
+            finally:
+                LIBTEST_LOCK.release()
         if path == "/api/library/access":
             try:
                 return self.send_json(signins.save_profile(b))

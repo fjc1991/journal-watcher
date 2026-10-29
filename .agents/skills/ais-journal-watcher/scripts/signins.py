@@ -124,6 +124,20 @@ def record(site, ok):
     _write(STATUS_FILE, d)
 
 
+def record_test(res):
+    """Remember what the last "Test my access" found (browser.library_test). A library with a sign-in of its own is ticked when the test got through and un-ticked
+    when it was asked for a password (that is clear); any other result (a human check, a page that did not open, a page that says nothing) changes no tick."""
+    d = _read(STATUS_FILE, {})
+    d["library_test"] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **{k: str(res.get(k) or "")[:300] for k in ("state", "message", "host", "saw", "mode")}}
+    if profile()["signs_in"]:
+        if res.get("state") == "ok":
+            d["library"] = {"ok": True, "at": d["library_test"]["at"]}
+        elif res.get("state") == "login":
+            d.pop("library", None)
+    _write(STATUS_FILE, d)
+    return d["library_test"]
+
+
 def forget(site):
     d = _read(STATUS_FILE, {})
     if d.pop(site, None) is not None:
@@ -145,5 +159,12 @@ def status():
                 age = None
         ttl = TTL[s]
         out[s] = {"signed_in": bool(e.get("ok") and age is not None and age < ttl), "at": at, "failed_at": e.get("failed_at") or "", "age_hours": None if age is None else round(age, 2), "ttl_hours": ttl, "expired": bool(e.get("ok") and age is not None and age >= ttl)}
+    lt = d.get("library_test") or {}
+    age = None
+    try:
+        age = round(max(0.0, (now - datetime.fromisoformat(lt["at"]).timestamp()) / 3600), 2) if lt.get("at") else None
+    except (KeyError, ValueError):
+        age = None
+    out["library"]["test"] = {**{k: lt.get(k, "") for k in ("state", "message", "host", "saw", "mode", "at")}, "age_hours": age} if lt.get("state") else None
     out["library"].update({"name": p["name"], "mode": p["mode"], "configured": p["configured"], "signs_in": p["signs_in"], "ill_email": p["ill_email"], "home": p["home"]})
     return out

@@ -2436,7 +2436,97 @@ def main():
                     assert data is None and note.startswith("needs_login"), (case, note)
         finally:
             srv2.shutdown()
+    def t_library_test():
+        """'Test my access' against pages on a local server in headless Chromium: where each kind of answer leads, and what it says (and does not say) about it."""
+        from playwright.sync_api import sync_playwright
+        import contextlib
+        with sync_playwright() as pw:
+            try:
+                pw.chromium.launch().close()
+            except Exception as e:  # noqa: BLE001
+                if "Executable doesn't exist" in str(e):
+                    print("  (skipped: Chromium is not installed here: python -m playwright install chromium)")
+                    return
+                raise
+        PAGES = {"/open": "<h1>ScienceDirect</h1><p>Access provided by Test University</p>", "/plain": "<h1>Welcome</h1><p>Search articles</p>",
+                 "/idp/login": "<h1>Sign in</h1><form><input type=text name=u><input type=password name=p></form>", "/pwd": "<h1>Library</h1><form><input type=password name=p></form>",
+                 "/hidden": "<h1>Library</h1><div style='display:none'><input type=password></div><p>Access provided by Test University</p>",
+                 "/challenge": "<title>Just a moment...</title><p>Checking your browser before accessing</p>"}
+        REDIRECTS = {"/hop1": "/hop2", "/hop2": "/open", "/to-login": "/idp/login?x=1"}
+        class Pub(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                if path in REDIRECTS:
+                    self.send_response(302); self.send_header("Location", REDIRECTS[path]); self.end_headers(); return
+                body = ("<html><head><meta charset=utf-8></head><body>%s</body></html>" % PAGES[path]).encode() if path in PAGES else None
+                if body is None:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        srv3 = ThreadingHTTPServer(("127.0.0.1", 0), Pub)
+        threading.Thread(target=srv3.serve_forever, daemon=True).start()
+        base3 = "http://127.0.0.1:%d" % srv3.server_address[1]
+        saved = (brw.library, brw.via_library)
+        def run(path, signs_in, mode="openathens"):
+            brw.library = lambda: {"signs_in": signs_in, "home": base3 + path, "mode": mode, "name": "Test University"}
+            brw.via_library = lambda u: u
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                out = brw.library_test()
+            assert json.loads(buf.getvalue().strip().splitlines()[-1]) == out                      # what the app reads from the helper is what it returned
+            return out
+        try:
+            r = run("/hop1", True)                                                                        # two redirects, then the page: through the library's sign-in
+            assert r["state"] == "ok" and r["host"].startswith("127.0.0.1") and "without asking for a password" in r["message"] and r["saw"].startswith("Access provided by"), r
+            r = run("/plain", True); assert r["state"] == "ok" and r["saw"] == "", r                      # a sign-in library that lets it through is enough: the page need not say anything
+            r = run("/to-login", True); assert r["state"] == "login" and "Sign in now" in r["message"] and "/idp/login" not in r["host"], r       # sent to the identity provider's login
+            r = run("/pwd", True); assert r["state"] == "login", r                                        # a visible password box on an ordinary address
+            r = run("/hidden", True); assert r["state"] == "ok", r                                        # a hidden one (a pop-up for later) is not a sign-in request
+            r = run("/challenge", True); assert r["state"] == "challenge" and "human check" in r["message"], r
+            r = run("/to-login", False, "institutional"); assert r["state"] == "login" and "Other publisher sites" in r["message"] and "Sign in now" not in r["message"], r
+            r = run("/open", False, "vpn"); assert r["state"] == "ok" and "says" in r["message"] and "Access provided by Test University" in r["message"] and "Signed in:" not in r["message"], r   # no sign-in of its own: only what the page says
+            r = run("/plain", False, "vpn"); assert r["state"] == "unknown" and "does not prove" in r["message"], r                    # ... and when it says nothing, nothing is claimed
+            r = run("/gone", False, "vpn"); assert r["state"] == "error" and "did not open" in r["message"], r            # an address that answers with an empty error does not open: said so, with the reason
+            # the sign-in window with a session that still works: it says so and closes, instead of waiting half an hour for a password nobody needs to type
+            real_B = brw.Browser
+            brw.Browser = lambda visible=None, **kw: real_B(visible=False, **kw)                                                           # (no screen here: the same browser, without a window)
+            try:
+                brw.library = lambda: {"signs_in": True, "home": base3 + "/hop1", "mode": "openathens", "name": "Test University", "chooser_text": ""}
+                buf = io.StringIO(); t0 = _time.time()
+                with contextlib.redirect_stdout(buf):
+                    done = brw.library_login()
+                assert done is True and "Signed in to Test University." in buf.getvalue() and _time.time() - t0 < 40, (done, buf.getvalue())
+            finally:
+                brw.Browser = real_B
+            brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}                  # nobody listens
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                r = brw.library_test()
+            assert r["state"] == "error" and "did not open" in r["message"], r
+        finally:
+            brw.library, brw.via_library = saved
+            srv3.shutdown()
+
+    def t_library_test_record():
+        """What the test finds changes the tick only when it is clear: a library with a sign-in of its own is ticked when the test got through and un-ticked when it was asked for a password."""
+        sg = brw.si
+        sg.save_profile({"mode": "openathens", "openathens": "testuni.ac.uk", "name": "Test University"})
+        sg.forget("library")
+        assert sg.status()["library"]["signed_in"] is False and sg.status()["library"]["test"] is None
+        sg.record_test({"state": "ok", "message": "Signed in: through", "host": "x.org", "mode": "openathens"})
+        s = sg.status()["library"]; assert s["signed_in"] is True and s["test"]["state"] == "ok" and s["test"]["host"] == "x.org" and s["test"]["age_hours"] is not None, s
+        for state in ("unknown", "challenge", "error"):                                                    # unclear answers change nothing
+            sg.record_test({"state": state, "message": "m", "mode": "openathens"}); assert sg.status()["library"]["signed_in"] is True and sg.status()["library"]["test"]["state"] == state
+        sg.record_test({"state": "login", "message": "asked for a password", "mode": "openathens"})
+        assert sg.status()["library"]["signed_in"] is False and sg.status()["library"]["test"]["state"] == "login"
+        sg.save_profile({"mode": "vpn", "name": "Test University"})                                        # no sign-in of its own: a test never ticks (there is nothing to be signed in to)
+        sg.record_test({"state": "ok", "message": "says: Access provided by", "mode": "vpn"})
+        assert sg.status()["library"]["signed_in"] is False and sg.status()["library"]["test"]["state"] == "ok"
+        sg.save_profile({"mode": "institutional"})
+
     check("browser: on a paywalled landing page only THIS article's PDF link is followed (its own link wherever the page puts it: aside, tab strip, 'footer'-named wrapper, other host, citation_pdf_url; not another site, a reference list, the footer, a banner PDF, another article or one whose DOI merely starts with ours)", t_link_follow)
+    check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
+    check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")
