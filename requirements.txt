@@ -1,5 +1,4 @@
 anthropic>=0.116
-pypdf
 playwright
 pymupdf>=1.26,<2   # reader: paragraph blocks for AI (AGPL; fine for a local tool)
 fastembed         # reader: local embeddings for semantic search (ONNX, no torch)

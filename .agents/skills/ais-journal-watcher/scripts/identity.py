@@ -3,10 +3,10 @@
 
 A download is only a paper if the file that came back is that paper. Every route that fetches a PDF (the publisher through your sign-in, Unpaywall, the library, a free copy
 elsewhere) can return a *different* complete PDF: a paywall stub, a reference the page linked to, a preprint of another work. Before 1.2 the app accepted any complete PDF.
-check() compares what the PDF says (its first pages, its metadata) with what we know about the paper (DOI, title, authors) and answers one of
+check() compares what the PDF says (its first pages, its embedded title) with what we know about the paper (DOI, title, authors) and answers one of
 
-    match       the DOI is printed on the first pages, or the title (and, when it is not long enough to be unique, the authors) is
-    mismatch    the PDF is demonstrably something else: refuse it, and say what it is
+    match       the DOI is printed on the first pages, or the title is (and, when it is too short to be unique, the authors too, or it is the page's own headline)
+    mismatch    the PDF is demonstrably something else (another work, a stub, an appendix or a correction): refuse it, and say what it is
     unverified  there is nothing to compare (a scan with no text, no title or DOI on record, an unreadable file): accepted, but noted as "identity not checked"
 
 Only PyMuPDF is used (it is a hard dependency of the app), so the check is never silently skipped because an optional package is missing.
@@ -29,30 +29,39 @@ import paths  # noqa: E402
 BODY_PAGES = 3          # compare with the first pages that carry real text (cover sheets and legal pages are skipped) ...
 MAX_PAGES = 6           # ... looking at no more than this many pages
 THIN_WORDS = 150        # a page with fewer words than this is not a "body" page
-NO_TEXT_WORDS = 80      # fewer words than this in all the pages read, and some images: a scan
+SCAN_COVER = 0.5        # a page is a picture (a scan) when one image covers at least this share of it
 TITLE_FULL = 0.90       # share of the title found (in order) in the text: enough on its own
 TITLE_PARTIAL = 0.70    # ... or this much, with the authors
 AUTHORS_MIN = 0.50      # share of the authors' family names found as whole words
-MAIN_TITLE_MIN = 20     # letters in the part of the title before a colon or dash, for "the title without its subtitle"
+MAIN_TITLE_MIN = 20     # letters in the part of the title before a colon or dash, for "the title without its subtitle" (with the authors)
 SHORT_TITLE_LETTERS = 25
 SHORT_TITLE_WORDS = 3   # a title of fewer content words than this, or fewer letters than above, is too generic to identify a paper by itself
+HEADLINE_MIN_LETTERS = 12   # a short title with no author on record is accepted when it IS the page's headline, if it has at least this many letters ...
+HEADLINE_MIN_WORDS = 2      # ... and this many content words
+REF_AFTER_WORDS = 150   # a "References" heading counts only after this many words of the text (a sidebar listing of headings must not cut the title off)
 
 STOP = set("the a an of and in on for to from with by at as or is are be".split())
-REFHEAD = re.compile(r"^\s*(?:\d+[.)]?\s*)?(references|bibliography|works cited|literature cited)\s*$", re.I | re.M)
+REFHEAD = re.compile(r"^\s*(?:(?:\d+|[ivxlc]+)[.)]?\s*)?(?:r\s?eferences?(?:\s+and\s+notes)?|notes\s+and\s+references|bibliography|works\s+cited|literature\s+cited)\s*:?\s*$", re.I | re.M)
 DOI_TOKEN = re.compile(r"10\.\d{4,9}/\S+")
+LIGATURES = re.compile(r"ffi|ffl|fi|fl|ff")       # a PDF text layer often loses these glyphs: both sides drop them, so a title still matches
+COMPANION = re.compile(r"\b(online\s+appendix|appendix\s+to|supplement(?:ary|al)?|e-?\s?companion|supporting\s+information|erratum|corrigendum|correction\s+to|comment\s+on|"
+                       r"reply\s+to|rejoinder|retraction|retracted)\b", re.I)       # items that repeat a paper's title and DOI without being the paper
+_SPECIAL = str.maketrans({"ø": "o", "đ": "d", "ł": "l", "ı": "i", "ð": "d", "þ": "th", "æ": "ae", "œ": "oe", "ß": "ss",
+                          "'": "", "’": "", "`": "", "¨": "", "´": "", "ˆ": "", "˜": "", "¸": "", "ˇ": "", "˘": "", "˙": "",
+                          "˚": "", "˝": "", "¯": ""})      # letters NFKD leaves alone, apostrophes, and the spacing accents old LaTeX PDFs print before a letter
 
 
 # --- text helpers ---------------------------------------------------------------------------------------------------------------------------------------------------
 def fold(s):
-    """Lower-case, no accents, ligatures spelled out (ﬁ -> fi), soft hyphens removed."""
-    s = unicodedata.normalize("NFKD", s or "")
+    """Lower-case, no accents, ligatures spelled out (ﬁ -> fi), soft hyphens and apostrophes removed (O'Brien -> obrien, Møller -> moller)."""
+    s = unicodedata.normalize("NFKD", (s or "").lower().translate(_SPECIAL))
     s = "".join(c for c in s if not unicodedata.combining(c))
-    return s.replace("­", "").replace("‐", "-").replace("‑", "-").lower()
+    return s.replace("­", "").replace("‐", "-").replace("‑", "-")
 
 
 def squash(s):
-    """Letters and digits only: hyphenation, line breaks, dashes, quotes and spacing cannot make a title fail to match."""
-    return re.sub(r"[^a-z0-9]", "", fold(s))
+    """Letters and digits only, without the ligature letter pairs: hyphenation, line breaks, dashes, quotes, spacing and lost ligature glyphs cannot make a title fail to match."""
+    return LIGATURES.sub("", re.sub(r"[^a-z0-9]", "", fold(s)))
 
 
 def plain_title(title):
@@ -64,16 +73,25 @@ def content_words(title):
     return [w for w in re.findall(r"[a-z]+", fold(title)) if w not in STOP and len(w) > 2]
 
 
+def is_short(title):
+    return len(squash(title)) < SHORT_TITLE_LETTERS or len(content_words(title)) < SHORT_TITLE_WORDS
+
+
 # --- reading the PDF -------------------------------------------------------------------------------------------------------------------------------------------------
 def read_pdf(data):
-    """What the first pages say. Returns dict(text, meta, images, headline, pages, words); raises on a file PyMuPDF cannot open."""
+    """What the first pages say. Returns dict(text, meta, meta_title, headline, pages_read, scans, words); raises on a file PyMuPDF cannot open."""
     import pymupdf
+    flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES        # (the page pictures are not wanted: a 600 dpi scan would be copied into memory)
     with pymupdf.open(stream=data, filetype="pdf") as d:
-        parts, got, images, first_body = [], 0, 0, None
+        parts, got, scans, first_body, read = [], 0, 0, None, 0
         for i in range(min(MAX_PAGES, len(d))):
-            t = d[i].get_text()
+            pg = d[i]
+            t = pg.get_text()
             parts.append(t)
-            images += len(d[i].get_images())
+            read += 1
+            area = abs(pg.rect.width * pg.rect.height) or 1
+            if max((abs(im["bbox"][2] - im["bbox"][0]) * abs(im["bbox"][3] - im["bbox"][1]) for im in pg.get_image_info()), default=0) / area >= SCAN_COVER:
+                scans += 1
             if len(t.split()) >= THIN_WORDS:
                 got += 1
                 if first_body is None:
@@ -81,14 +99,16 @@ def read_pdf(data):
             if got >= BODY_PAGES:
                 break
         text = "\n".join(parts)
-        m = REFHEAD.search(text)
-        if m:                                    # a paper that merely CITES the expected one must not match through its reference list
-            text = text[:m.start()]
-        meta = " ".join(str(v) for v in (d.metadata or {}).values() if v)
+        for m in REFHEAD.finditer(text):         # a paper that merely CITES the expected one must not match through its reference list
+            if len(text[:m.start()].split()) >= REF_AFTER_WORDS:
+                text = text[:m.start()]
+                break
+        md = d.metadata or {}
+        meta = " ".join(str(v) for v in md.values() if v)
         headline = ""
         if len(d):
             spans = []
-            for b in d[first_body or 0].get_text("dict")["blocks"]:         # the title page, not a cover sheet
+            for b in d[first_body or 0].get_text("dict", flags=flags)["blocks"]:         # the title page, not a cover sheet
                 for ln in b.get("lines", []):
                     for sp in ln["spans"]:
                         if len(sp["text"].strip()) > 2:
@@ -96,16 +116,17 @@ def read_pdf(data):
             if spans:
                 top = max(s for s, _ in spans)
                 headline = " ".join(t for s, t in spans if s >= top - 0.5)[:140]
-        return {"text": text, "meta": meta, "images": images, "headline": headline, "pages": len(d), "words": len(text.split())}
+        return {"text": text, "meta": meta, "meta_title": (md.get("title") or "").strip(), "headline": headline, "pages_read": read, "scans": scans, "words": len(text.split())}
 
 
-# --- the three kinds of evidence ------------------------------------------------------------------------------------------------------------------------------------
+# --- the kinds of evidence ------------------------------------------------------------------------------------------------------------------------------------------
 def doi_found(doi, text):
     """The expected DOI is printed as a whole DOI (not as the start of a longer one), also when a line break splits it."""
     if not doi:
         return False
     t = re.sub(r"\s+", " ", (text or "").replace("­", ""))
-    for _ in range(3):                           # "10.1287/mnsc.\n2024.0001": rejoin a DOI broken after . / _ -
+    t = re.sub(r"(10\.\d{4,9}/) (?=[A-Za-z0-9])", r"\1", t)           # "10.1287/\nmnsc...": broken right after the prefix
+    for _ in range(3):                                               # "10.1287/mnsc.\n2024.0001": rejoin a DOI broken after . / _ -
         t = re.sub(r"(10\.\d{4,9}/\S*[./_-]) (?=\S)", r"\1", t)
     want = doi.strip().lower().rstrip(".,;:]}>\"'")
     for tok in DOI_TOKEN.findall(t.lower()):
@@ -127,39 +148,53 @@ def title_score(title, text):
     return min(1.0, got / len(t))
 
 
+def main_title(title):
+    """The title without its subtitle (the part before a colon or a dash): journals often print the subtitle apart."""
+    return re.split(r"\s*[:–—]\s+| - ", title or "", maxsplit=1)[0]
+
+
 def main_title_found(title, text):
-    """The title without its subtitle (the part before a colon or a dash) is in the text: journals often print the subtitle apart."""
-    main = squash(re.split(r"\s*[:–—]\s+| - ", title or "", maxsplit=1)[0])
+    main = squash(main_title(title))
     return len(main) >= MAIN_TITLE_MIN and main in squash(text)
 
 
 def author_names(authors):
+    """One list of acceptable family-name words per author: the last word ("Jing Tian"), the word before the comma ("Tian, Jing"), also the one before the last of three
+    ("María García López"); hyphenated names either way ("Smith-Jones"). Words of fewer than 3 letters ("Li", "Wu") are not used: they would match anything."""
     if isinstance(authors, str):
         authors = [a for a in re.split(r"\s*;\s*", authors) if a.strip()]
-    fams = []
+    out = []
     for a in authors or []:
         a = (a or "").strip()
         if not a:
             continue
         if "," in a:                                                 # "Tian, Jing": the family name comes first
-            fam = a.split(",")[0]
-        else:                                                        # "Jing Tian", "Jing Tian Jr.": the last word
+            fams = [a.split(",")[0]]
+        else:                                                        # "Jing Tian", "Jing Tian Jr.": the last word, and for three words or more the one before it
             toks = re.sub(r"[,\s]+(jr|sr|ii|iii|iv)\.?$", "", a, flags=re.I).split()
-            fam = toks[-1] if toks else ""
-        parts = [re.sub(r"[^a-z]", "", p) for p in re.split(r"[-\s]+", fold(fam))]       # "Smith-Jones": either part
-        parts = [p for p in parts if len(p) >= 3]
-        if parts:
-            fams.append(parts)
-    return fams
+            fams = ([toks[-1]] + ([toks[-2]] if len(toks) >= 3 else [])) if toks else []
+        words = []
+        for f in fams:
+            words += [re.sub(r"[^a-z]", "", p) for p in re.split(r"[-\s]+", fold(f))]
+        words = [w for w in words if len(w) >= 3]
+        if words:
+            out.append(words)
+    return out
 
 
 def authors_score(authors, text):
-    """Share of the authors whose family name appears as a whole word; None when we know no author."""
+    """Share of the authors whose family name appears as a whole word; None when we know no usable author."""
     fams = author_names(authors)
     if not fams:
         return None
     words = set(re.findall(r"[a-z]+", fold(text)))
     return sum(any(p in words for p in parts) for parts in fams) / len(fams)
+
+
+def headline_is_title(title, headline):
+    """The page's largest text is the title (it may carry a byline in the same size)."""
+    t, h = squash(title), squash(headline)
+    return bool(t) and t in h and len(h) <= 2 * len(t) + 20
 
 
 # --- the verdict -----------------------------------------------------------------------------------------------------------------------------------------------------
@@ -175,37 +210,41 @@ def check(entry, data):
         return "unverified", "the PDF could not be read (%s)" % str(e)[:60], ev
     says = r["headline"]
     ev.update(doi=doi_found(doi, r["text"] + " " + r["meta"]), words=r["words"], pdf_says=says)
+    if says and COMPANION.search(says) and not COMPANION.search(title):       # an appendix, a correction or a comment repeats the title and the DOI without being the paper
+        return "mismatch", "this PDF is titled “%s”: it is an appendix, a correction or a comment, not the paper itself" % says[:90].replace("|", "/"), ev
+    if ev["doi"]:
+        return "match", "its DOI is printed on the first pages", ev
     if title:
         ev["title"] = round(title_score(title, r["text"]), 2)
         ev["authors"] = authors_score(authors, r["text"])
+        if r["meta_title"] and title_score(title, r["meta_title"]) >= TITLE_FULL and len(squash(title)) >= HEADLINE_MIN_LETTERS:
+            return "match", "the title embedded in the PDF is this title", ev
     a = ev["authors"]
-    if ev["doi"]:
-        return "match", "its DOI is printed on the first pages", ev
-    if r["words"] < NO_TEXT_WORDS and r["images"]:
-        return "unverified", "the PDF has no text to compare (a scan?)", ev
+    scanned = r["pages_read"] and r["scans"] * 2 >= r["pages_read"]
+    if scanned and ev["title"] < TITLE_FULL:
+        return "unverified", "the PDF is a scan with no text to compare", ev
     if not title:
         return "unverified", "the DOI is not printed on the first pages and there is no title to compare", ev
-    short = len(squash(title)) < SHORT_TITLE_LETTERS or len(content_words(title)) < SHORT_TITLE_WORDS
-    if short:
+    if is_short(title):
         if ev["title"] >= TITLE_FULL and a is not None and a >= AUTHORS_MIN:
             return "match", "its title and authors are on the first pages", ev
+        if ev["title"] >= TITLE_FULL and a is None and len(squash(title)) >= HEADLINE_MIN_LETTERS and len(content_words(title)) >= HEADLINE_MIN_WORDS \
+                and headline_is_title(title, says):
+            return "match", "its title is the headline of the first page", ev
         why = "the title is too short to identify it alone and neither the DOI nor the authors are on the first pages"
     elif ev["title"] >= TITLE_FULL:
         return "match", "its title is on the first pages", ev
     elif ev["title"] >= TITLE_PARTIAL and a is not None and a >= AUTHORS_MIN:
         return "match", "most of its title and its authors are on the first pages", ev
+    elif main_title_found(title, r["text"]) and not is_short(main_title(title)):
+        return "match", "its main title is on the first pages", ev
     elif main_title_found(title, r["text"]) and a is not None and a >= AUTHORS_MIN:
         return "match", "its main title and authors are on the first pages", ev
     else:
         why = "its title is not on the first pages (%d%% found)" % round(100 * ev["title"])
     if says:
-        why = "this PDF is titled “%s”: %s" % (says[:90], why)
+        why = "this PDF is titled “%s”: %s" % (says[:90].replace("|", "/"), why)
     return "mismatch", why, ev
-
-
-def explain(verdict, reason):
-    """One line for the download note and the card."""
-    return "wrong paper: %s" % reason if verdict == "mismatch" else reason
 
 
 # --- the audit of a library ----------------------------------------------------------------------------------------------------------------------------------------

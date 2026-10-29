@@ -803,6 +803,7 @@ function dlText(p) {
   switch (p.dl_status) {
     case "ok": return `<span class="dl ok">✓ Downloaded${p.summary ? " · summary" : ""}</span>` +
       (/preprint|open copy/i.test(p.dl_note || "") ? `<span class="dl" title="Not the publisher’s final version">${esc((p.dl_note.match(/(preprint|open copy)[^|;]*/i) || [""])[0])}</span>` : "") +
+      (/identity not checked/i.test(p.dl_note || "") ? `<span class="dl" title="${esc((p.dl_note.match(/identity not checked[^|;]*/i) || [""])[0])}">Identity not checked</span>` : "") +
       (p.summary ? "" : `<span class="dl bad">No summary yet</span>`);
     case "downloading": return `<span class="dl wait">Downloading…</span>`;
     case "summarizing": return `<span class="dl wait">Summarizing…</span>`;

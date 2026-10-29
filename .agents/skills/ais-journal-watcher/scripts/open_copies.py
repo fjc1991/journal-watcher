@@ -82,7 +82,7 @@ def candidates(doi, title, http_get):
 
 def find_open_copy(doi, title, http_get, browser=None, authors=None):
     entry = {"doi": doi, "title": title, "authors": authors or []}
-    tried = set()
+    tried, refused = set(), None
     for url, label in candidates(doi, title, http_get):
         if url in tried:
             continue
@@ -97,10 +97,13 @@ def find_open_copy(doi, title, http_get, browser=None, authors=None):
                 data, _ = browser.fetch_pdf(url)
             except Exception:
                 data = None
-        if _complete(data) and identity.check(entry, data)[0] != "mismatch":
-            return data, label
+        if _complete(data):
+            verdict, why, _ = identity.check(entry, data)
+            if verdict != "mismatch":
+                return data, label
+            refused = refused or "wrong paper via %s: %s" % (label, why)
         time.sleep(0.5)
-    return None, "no free copy found"
+    return None, refused or "no free copy found"
 
 
 def _complete(data):
