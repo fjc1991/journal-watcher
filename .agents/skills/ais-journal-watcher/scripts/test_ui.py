@@ -1216,7 +1216,7 @@ def main():
                     break
                 page.wait_for_timeout(250)
             check("one click creates a 'Picks' run and starts the download queue for it", os.path.exists(marker) and open(marker).read() == "doi:10.1234/abc" and "Picks · this folder" in page.inner_text("#runtitle"), open(marker).read() if os.path.exists(marker) else "no marker")
-            page.wait_for_selector("#listview .paper, #listview .card", timeout=10000)
+            page.wait_for_function("document.querySelector('#listview') && /Couldn’t download/.test(document.querySelector('#listview').innerText)", timeout=10000)      # (not just any card: the empty-state card "No papers in this run" also matched `.card`, and the check then read the list before the paper was in it)
             check("the Download queue shows it with its status", "The platform classic" in page.inner_text("#listview") and "Cited by 3 of your papers" in page.inner_text("#listview") and "Couldn’t download" in page.inner_text("#listview"), page.inner_text("#listview")[:300])
             runs = [f for f in os.listdir(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")) if f.endswith("picks.json")]
             check("the run is saved like any other (state/runs)", len(runs) == 1)
@@ -1722,6 +1722,52 @@ def main():
             check("…and choosing a page closes it again", not page.locator("#sidebar").is_visible() and page.url.endswith("#/library"), page.url)
             page.set_viewport_size({"width": 1400, "height": 950})
             check("no page scrolls sideways at 1100, 800 or 520 px wide (Watch, Library, Folders, a folder's tabs)", not wide, str(wide[:4]))
+
+            print("large screens: the page grows with the window instead of leaving empty margins")
+            MEASURE = """() => { const w = s => { const e = document.querySelector(s); return e ? e.getBoundingClientRect().width : 0; };
+                return {content: w('#content'), layout: w('#layout'), body: getComputedStyle(document.body).fontSize, over: document.documentElement.scrollWidth - window.innerWidth}; }"""
+            ROUTES = (("#/watch", 1200), ("#/library", 1160), ("#/folders", 1160), ("#/folder/lab", 1160), ("#/folder/lab/matrix", 1160))          # the route and how wide its column was before (and still is below 1500 px)
+            WIDTHS, bad_old, bad_share, bad_over = {}, [], [], []
+            for w in (1280, 1440, 1499, 1920, 2560, 3440, 5120):
+                page.set_viewport_size({"width": w, "height": 1440})
+                for h, was in ROUTES:
+                    page.goto("about:blank"); page.goto(base + "/" + h); page.wait_for_selector("#libitem", state="attached"); page.wait_for_timeout(500)
+                    m = page.evaluate(MEASURE); WIDTHS[(w, h)] = m
+                    if m["over"] > 1:
+                        bad_over.append((w, h, m["over"]))
+                    if w < 1500 and (abs(m["layout"] - min(was, m["content"])) > 1 or m["body"] != "14px"):
+                        bad_old.append((w, h, m["layout"], min(was, m["content"]), m["body"]))                  # below 1500 px the column is what it always was, and the text size is untouched
+                    if 1900 <= w <= 3500 and m["layout"] / m["content"] < 0.65:
+                        bad_share.append((w, h, round(m["layout"] / m["content"], 2)))
+            check("below 1500 px wide nothing changed: each page's column is the same width as before and the text is still 14 px", not bad_old, str(bad_old[:4]))
+            check("at 1920, 2560 and 3440 px the page uses at least 65 % of the space beside the sidebar (Watch, Library, Folders, a folder, its Matrix); before, it was 35-62 %", not bad_share, str(bad_share[:4]))
+            check("…it grows with the window up to a limit (the Watch column is wider at 2560 than at 1920, and no wider at 5120 than 2200 px; Library no wider than 2400 px) and nothing scrolls sideways at any of these widths",
+                  WIDTHS[(2560, "#/watch")]["layout"] > WIDTHS[(1920, "#/watch")]["layout"] > 1200 and WIDTHS[(5120, "#/watch")]["layout"] <= 2200 and WIDTHS[(5120, "#/library")]["layout"] <= 2400 and not bad_over,
+                  str((WIDTHS[(1920, "#/watch")]["layout"], WIDTHS[(2560, "#/watch")]["layout"], WIDTHS[(5120, "#/watch")]["layout"], WIDTHS[(5120, "#/library")]["layout"], bad_over[:3])))
+            page.set_viewport_size({"width": 3440, "height": 1440}); page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#libitem", state="attached"); page.wait_for_timeout(500)
+            shot(page, "24-wide-library")
+            page.evaluate("window.Settings.open('ai')"); page.wait_for_selector("#st-body"); page.wait_for_timeout(300)
+            sw = page.evaluate("""() => { const r = s => { const e = document.querySelector(s); return e ? e.getBoundingClientRect() : null; };
+                return {back: r('#settings .st-head .back').left, card: r('#settings .st-body .st-card').left, body: r('#settings .st-body').width, content: r('#content').width}; }""")
+            check("in Settings the heading line starts where the cards start (before, at 3440 px it was at the left edge and the cards a thousand pixels to the right), and the cards use more of a large window", abs(sw["back"] - sw["card"]) <= 41 and sw["body"] >= 0.55 * sw["content"], str(sw))
+            page.keyboard.press("Escape"); page.evaluate("window.About.open()"); page.wait_for_selector("#au-body .st-card"); page.wait_for_timeout(300)
+            ab_ = page.evaluate("""() => { const r = s => { const e = document.querySelector(s); return e ? e.getBoundingClientRect() : null; };
+                return {back: r('#about .st-head .back').left, card: r('#au-body .st-card').left, body: r('#about .st-body').width}; }""")
+            check("…and the About page keeps its reading column (760 px), with its heading above it", abs(ab_["back"] - ab_["card"]) <= 41 and ab_["body"] <= 761, str(ab_))
+            page.keyboard.press("Escape")
+            page.evaluate("""() => { const d = document.createElement('div'); d.id = 'probe-abs'; d.className = 'abs'; d.textContent = 'word '.repeat(600); document.querySelector('#layout').append(d); }""")
+            pw_ = page.evaluate("document.querySelector('#probe-abs').getBoundingClientRect().width")
+            check("a paragraph (an abstract, a reason) keeps a readable line length on a wide column", 400 < pw_ < 1000, str(pw_))
+            page.evaluate("document.querySelector('#probe-abs').remove()")
+            con_w = []
+            for th in ("light", "dark"):
+                page.evaluate("window.setTheme(%r)" % th)
+                for h in ("#/watch", "#/library"):
+                    page.goto("about:blank"); page.goto(base + "/" + h); page.wait_for_selector("#libitem", state="attached"); page.wait_for_timeout(400)
+                    con_w += [(th, h, c) for c in page.evaluate(JS_CONTRAST, th)[:2]]
+            page.evaluate("window.setTheme('light')")
+            check("at 3440 px the text is as readable as at 1400 px (WCAG AA, light and dark, Watch and Library)", not con_w, str(con_w[:3]))
+            page.set_viewport_size({"width": 1400, "height": 950})
 
             print("one dashboard per project")
             second = subprocess.run([sys.executable, os.path.join(TMP, "dashboard", "server.py"), "--port", str(port + 1), "--no-open"], cwd=TMP, env=env, capture_output=True, text=True, timeout=60)
