@@ -92,19 +92,31 @@ jobs:
           python3 app/sign_release.py keygen --key "$RUNNER_TEMP/dry-run-key" > /dev/null
           python3 app/sign_release.py sign --dir app/dist --tag "$TAG" --repo "$GITHUB_REPOSITORY" --key "$RUNNER_TEMP/dry-run-key" --out "$RUNNER_TEMP/signed" --yes
           test -s "$RUNNER_TEMP/signed/appcast.json.sig"
-      - name: "Dry run: keep the results for a few days (also when the build failed: PyInstaller's list of what it could not find)"
+      - name: "Dry run: sort the results into two folders, with the files at the top of each"
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        run: |
+          mkdir -p stage/installer stage/details
+          if [ -f "app/dist/Journal Watcher.dmg" ]; then cp "app/dist/Journal Watcher.dmg" stage/installer/; fi
+          for f in app/dist/Journal-Watcher-*.zip app/dist/appcast.json notes.txt app/build/work/JournalWatcher/warn-JournalWatcher.txt; do
+            if [ -f "$f" ]; then cp "$f" stage/details/; fi
+          done
+          ls -l stage/installer stage/details
+      - name: "Dry run: keep the installer for a few days (download this one)"
         if: ${{ always() && github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: dry-run-${{ env.VERSION }}
           retention-days: 3
           if-no-files-found: ignore
-          path: |
-            app/dist/Journal Watcher.dmg
-            app/dist/Journal-Watcher-*.zip
-            app/dist/appcast.json
-            notes.txt
-            app/build/work/JournalWatcher/warn-JournalWatcher.txt
+          path: stage/installer
+      - name: "Dry run: keep the rest (update zip, feed, notes, and PyInstaller's list of what it could not find, also when the build failed)"
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ env.VERSION }}-details
+          retention-days: 3
+          if-no-files-found: ignore
+          path: stage/details
       - name: Publish the release
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
