@@ -232,7 +232,16 @@ async function renderAbout(body) {
   $("#ab-auto", body).onchange = async e => { try { await api("/api/update/settings", {auto: e.target.checked}); note($("#ab-msg", body), "Saved."); } catch (er) { note($("#ab-msg", body), er.message, true); } };
   $("#ab-feedsave", body).onclick = async () => { try { await api("/api/update/settings", {feed: $("#ab-feed", body).value.trim()}); note($("#ab-msg", body), "Saved."); renderAbout(body); } catch (er) { note($("#ab-msg", body), er.message, true); } };
 }
-async function renderLibraryAccess(body) {
+// what "Test my access" found, in words: green when it got through, amber when it needs you, grey when it cannot tell (and never more than the page showed)
+function testResult(r, last) {
+  if (!r || !r.state) return "";
+  const when = last && r.age_hours != null ? `<span class="hint" style="margin:0"> Last test ${esc(r.age_hours < 0.05 ? "just now" : agoWords(r.age_hours))}.</span>` : "";
+  if (r.state === "ok") return `<p class="hint ok" style="margin:8px 0 0">✓ ${esc(r.message)}${when}</p>`;
+  const box = r.state === "unknown" ? "" : r.state === "login" ? " setup" : " net";
+  return box ? `<div class="errbox${box}" style="margin:10px 0 0">${ico("warn", "sm")}<div class="eb-b"><div class="eb-d" style="margin:0;color:var(--ink)">${esc(r.message)}${when}</div></div></div>` : `<p class="hint" style="margin:8px 0 0">${esc(r.message)}${when}</p>`;
+}
+function renderLibraryAccessSigned(body, r) { const s = $("#la-signed", body); if (s) { s.textContent = "✓ Signed in · just now"; } else { const x = document.createElement("p"); x.className = "hint ok"; x.id = "la-signed"; x.textContent = "✓ Signed in · just now"; $(".st-actions", body).after(x); } }
+async function renderLibraryAccess(body, flash) {
   let P, S; try { [P, S] = await Promise.all([api("/api/library/access"), api("/api/signins")]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   const modes = [["institutional", "Through each publisher’s “sign in through your institution” page", "Works for most universities and needs no set-up: when you press Sign-ins → Other publisher sites, every publisher asks you to choose your university and you log in there once."],
     ["openathens", "My library uses OpenAthens", "Ask your library, or look for “OpenAthens” on its e-resources page. You need its domain, which looks like myuni.ac.uk."],
@@ -248,17 +257,32 @@ async function renderLibraryAccess(body) {
     <details style="margin-top:12px"${P.home || P.ill_email ? " open" : ""}><summary class="hint" style="cursor:pointer">More (optional)</summary>
       <label class="chk" style="margin-top:8px">Library page to open when signing in <input type="text" id="la-home" value="${esc(P.home)}" placeholder="https://library.myuni.edu" style="flex:1"></label>
       <label class="chk">Interlibrary-loan email <input type="text" id="la-ill" value="${esc(P.ill_email)}" placeholder="ill@library.myuni.edu" style="flex:1"> <small>adds an “Ask my library” button to papers that could not be downloaded</small></label></details>
-    <div class="st-actions" style="margin-top:14px"><button class="btn primary" id="la-save">Save</button><button class="btn" id="la-go"${P.signs_in ? "" : " disabled"}>Sign in now</button><span class="st-msg" id="la-msg"></span></div>
-    ${st && st.signed_in ? `<p class="hint ok">✓ Signed in · ${esc(agoWords(st.age_hours))}</p>` : ""}</div>
+    <div class="st-actions" style="margin-top:14px"><button class="btn primary" id="la-save">Save</button><button class="btn" id="la-go"${P.signs_in ? "" : " disabled"}>Sign in now</button><button class="btn" id="la-test">Test my access</button><span class="st-msg" id="la-msg" role="status"></span></div>
+    ${P.signs_in ? "" : `<p class="hint">“Sign in now” is for OpenAthens and EZproxy. With the other options you sign in on each publisher’s own page (Sign-ins → Other publisher sites).</p>`}
+    ${st && st.signed_in ? `<p class="hint ok" id="la-signed">✓ Signed in · ${esc(agoWords(st.age_hours))}</p>` : ""}
+    <div id="la-test-res" role="status" aria-live="polite">${testResult(S.library && S.library.test, true)}</div></div>
   <div class="card st-card"><h2>How to find out</h2><ul class="wl-list">
     <li>Search the web for your <b>university name + “OpenAthens”</b> or <b>“EZproxy”</b>, or open your library’s <b>e-resources / off-campus access</b> page.</li>
     <li>If a link on that page starts with <code>go.openathens.net</code>, it is OpenAthens; if it contains <code>ezproxy</code>, it is EZproxy.</li>
     <li>Not sure? Leave the first option selected and use <b>Sign-ins → Other publisher sites</b>: each publisher asks which university you belong to.</li></ul></div>`;
   const msg = $("#la-msg", body);
+  if (flash) note(msg, flash);
+  const pick = v => { const r = $(`input[name="la-mode"][value="${v}"]`, body); if (r && !r.checked) { r.checked = true; r.dispatchEvent(new Event("change")); } };
   $$('input[name="la-mode"]', body).forEach(r => r.onchange = () => $$(".la-mode", body).forEach(l => l.classList.toggle("on", $("input[type=radio]", l).checked)));
+  if ($("#la-oa", body)) $("#la-oa", body).oninput = () => pick("openathens");       // typing the domain chooses its option (it used to be saved, but ignored, under "each publisher’s page")
+  if ($("#la-ez", body)) $("#la-ez", body).oninput = () => pick("ezproxy");
   const collect = () => ({name: $("#la-name", body).value, mode: ($('input[name="la-mode"]:checked', body) || {}).value || "institutional", openathens: $("#la-oa", body).value, ezproxy: $("#la-ez", body).value, home: $("#la-home", body).value, ill_email: $("#la-ill", body).value});
-  $("#la-save", body).onclick = async () => { try { await api("/api/library/access", collect()); note(msg, "Saved."); if (window.loadSignins) loadSignins(); renderLibraryAccess(body); } catch (er) { note(msg, er.message, true); } };
-  $("#la-go", body).onclick = async () => { try { await api("/api/library/access", collect()); await api("/api/login", {which: "library"}); note(msg, "A sign-in window is opening; sign in there."); if (window.loadSignins) loadSignins(); } catch (er) { note(msg, er.message, true); } };
+  const missing = c => c.mode === "openathens" && !c.openathens.trim() ? "Enter your OpenAthens domain (it looks like myuni.ac.uk)." : c.mode === "ezproxy" && !c.ezproxy.trim() ? "Enter your EZproxy login address (https://… ending in url=)." : "";
+  $("#la-save", body).onclick = async () => { const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; } try { await api("/api/library/access", c); if (window.loadSignins) loadSignins(); renderLibraryAccess(body, "Saved."); } catch (er) { note(msg, er.message, true); } };       // (drawn again first, then the message: it used to be wiped at once)
+  $("#la-go", body).onclick = async () => { const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; } try { await api("/api/library/access", c); await api("/api/login", {which: "library"}); note(msg, "A sign-in window is opening; sign in there."); if (window.loadSignins) loadSignins(); } catch (er) { note(msg, er.message, true); } };
+  $("#la-test", body).onclick = async () => {
+    const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; }
+    const go = $("#la-test", body), res = $("#la-test-res", body); go.disabled = true; note(msg, "");
+    res.innerHTML = `<p class="hint">Looking at your library’s page in the background… this takes a few seconds, up to half a minute.</p>`;
+    try { await api("/api/library/access", c); const r = await api("/api/library/test", {}); if (body.isConnected) res.innerHTML = testResult({...r, age_hours: 0}); if (window.loadSignins) loadSignins(); const proxy = ["openathens", "ezproxy"].includes(r.mode); if (proxy && r.state === "ok") renderLibraryAccessSigned(body, r); else if (proxy && r.state === "login") { const s = $("#la-signed", body); if (s) s.remove(); } }
+    catch (er) { if (body.isConnected) { res.innerHTML = ""; note(msg, er.message, true); } }
+    finally { go.disabled = false; }
+  };
 }
 const agoWords = h => h == null ? "" : h < 1 ? Math.round(h * 60) + " min ago" : h < 36 ? Math.round(h) + " h ago" : Math.round(h / 24) + " days ago";
 function renderReader(body) {
