@@ -315,6 +315,8 @@ JS_SELECT = """([n, sub]) => { const q = [...document.querySelectorAll(`.rd-band
 FAKE_BROWSER = r"""import os, paths
 _cmd = paths.cmd
 def fake_cmd(script, *a):
+    if script == 'browser.py' and a[:1] == ('library-test',):      # "Test my access": answers with whatever the test put in the file
+        return [sys.executable, '-c', "import json\nprint(json.dumps(json.load(open(FILE_))))\n".replace('FILE_', repr(os.environ.get('JW_FAKE_LIBTEST', '')))]
     if script == 'browser.py':       # the sign-in window: it opens, waits until the test lets it finish (a file appears), then says it worked
         src = "import os, time\nt = time.time()\nwhile time.time() - t < 60 and not os.path.exists(GATE):\n    time.sleep(0.1)\nprint('Signed in to Test ' + ARGS + '.')\n"
         return [sys.executable, '-c', src.replace('GATE', repr(os.environ.get('JW_FAKE_SIGNIN_GATE', ''))).replace('ARGS', repr(' '.join(a)))]
@@ -367,7 +369,7 @@ def main():
     srv_up = ThreadingHTTPServer(("127.0.0.1", 0), FakeFeed)
     threading.Thread(target=srv_up.serve_forever, daemon=True).start()
     feed["url"] = "http://127.0.0.1:%d/j.zip" % srv_up.server_address[1]
-    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
+    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
     marker = os.path.join(TMP, "download-called.txt")
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
@@ -1688,6 +1690,35 @@ def main():
             check("an insecure EZproxy address is refused with a reason", "https://" in page.inner_text("#la-msg"), page.inner_text("#la-msg"))
             page.fill("#la-ez", "https://ezproxy.testuni.edu/login?url="); page.click("#la-save"); page.wait_for_selector("#la-mode, .la-mode"); page.wait_for_timeout(500)
             check("a valid EZproxy address is saved", api("/api/library/access")["mode"] == "ezproxy" and api("/api/library/access")["ezproxy"].startswith("https://ezproxy.testuni.edu") and api("/api/library/access")["signs_in"])
+            LT = os.path.join(TMP, "libtest.json")
+            def libtest(expect, **kw):          # the answer is a file the fake test reads; wait for THIS answer (the card still shows the last one until it arrives)
+                json.dump({"state": "ok", "message": "", "host": "", "saw": "", "mode": "ezproxy", **kw}, open(LT, "w"))
+                page.click("#la-test"); page.wait_for_function("t => document.querySelector('#la-test-res').innerText.includes(t) && !document.querySelector('#la-test').disabled", arg=expect, timeout=20000)
+            libtest("asked for a password", state="login", host="ezproxy.testuni.edu", message="Not signed in, or the sign-in has expired: ezproxy.testuni.edu asked for a password. Press “Sign in now” and sign in.")
+            t_login = page.inner_text("#la-test-res")
+            check("‘Test my access’ says in plain words that the library asked for a password (an amber notice), and the earlier green tick is taken away because that sign-in has expired",
+                  "asked for a password" in t_login and page.locator("#la-test-res .errbox").count() == 1 and api("/api/signins")["library"]["signed_in"] is False and api("/api/signins")["library"]["test"]["state"] == "login" and page.locator("#la-signed").count() == 0, t_login)
+            libtest("let Journal Watcher through", state="ok", host="www.sciencedirect.com", message="Signed in: your library let Journal Watcher through to www.sciencedirect.com without asking for a password.")
+            check("…and once it gets through, the card says 'Signed in · just now' and the Sign-ins row is green again (the dot on the button too)",
+                  "Signed in: your library let Journal Watcher through" in page.inner_text("#la-test-res") and "Signed in · just now" in page.inner_text("#la-signed") and api("/api/signins")["library"]["signed_in"] is True and page.wait_for_selector("#sidot:not(.hide)", timeout=5000) is not None)
+            libtest("does not prove", state="unknown", host="www.sciencedirect.com", message="www.sciencedirect.com opened, but it does not say that your university gives you access. That does not prove you have none.")
+            check("a page that says nothing is reported as 'does not prove', and changes no tick", "does not prove" in page.inner_text("#la-test-res") and page.locator("#la-test-res .errbox").count() == 0 and api("/api/signins")["library"]["signed_in"] is True)
+            page.check('input[name="la-mode"][value="institutional"]'); page.fill("#la-oa", "testuni.ac.uk")
+            check("typing an OpenAthens domain chooses the OpenAthens option (it used to be saved under 'each publisher’s page' and ignored)", page.is_checked('input[name="la-mode"][value="openathens"]') and not page.is_checked('input[name="la-mode"][value="institutional"]'))
+            page.click("#la-save")
+            try:
+                page.wait_for_selector("#la-msg:has-text('Saved.')", timeout=8000)
+            except Exception:  # noqa: BLE001  (the check below says what is wrong)
+                pass
+            page.wait_for_timeout(700)
+            check("‘Saved.’ stays visible after Save (the card used to be drawn again at once and the message vanished)", "Saved." in page.inner_text("#la-msg") and api("/api/library/access")["mode"] == "openathens" and api("/api/library/access")["openathens"] == "testuni.ac.uk")
+            page.fill("#la-oa", ""); page.click("#la-save")
+            try:
+                page.wait_for_function("/OpenAthens domain/.test(document.querySelector('#la-msg').textContent)", timeout=5000)
+            except Exception:  # noqa: BLE001
+                pass
+            check("choosing OpenAthens with no domain is refused with what to enter, and nothing is overwritten", page.locator("#la-msg.bad").count() == 1 and api("/api/library/access")["openathens"] == "testuni.ac.uk")
+            page.fill("#la-oa", "testuni.ac.uk")
             page.check('input[name="la-mode"][value="institutional"]'); page.click("#la-save"); page.wait_for_timeout(600)
             check("with 'through each publisher' chosen, the library has no sign-in of its own and says so", api("/api/library/access")["signs_in"] is False and page.locator("#la-go:disabled").count() == 1)
             page.click("#st-back"); page.click("#signinbtn"); page.wait_for_selector("#signinmenu:not(.hide)")
