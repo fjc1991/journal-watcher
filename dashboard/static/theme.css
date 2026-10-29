@@ -158,6 +158,15 @@ body.sb-open .sb-scrim { display: block; }
 .layout > .side { grid-column: 2; grid-row: 1; position: sticky; top: calc(var(--tb) + 20px); max-height: calc(100vh - var(--tb) - 40px); gap: 14px; }
 .layout[data-view="lib"] { grid-template-columns: minmax(0, 1fr); max-width: 1160px; }
 .layout[data-view="lib"] .side { display: none; }
+
+/* ---- a large screen: the page grows with the window instead of staying a 1200 px column between empty margins. Below 1500 px nothing here applies; above it the width is a share of the
+   space beside the sidebar, never less than before (so the change is smooth at the edge) and capped so that lines of text do not run across a whole 5K screen. */
+@media (min-width: 1500px) {
+  .layout { max-width: clamp(1200px, calc((100vw - var(--sbw)) * .78), 2200px); }
+  .layout[data-view="lib"] { max-width: clamp(1160px, calc((100vw - var(--sbw)) * .8), 2400px); }
+  .st:not(.au) { --stw: clamp(1100px, calc((100vw - var(--sbw)) * .7), 1800px); }
+  .abs, .reason, .take, .snip { max-width: 110ch; }      /* a paragraph keeps a readable line even when the column around it is wide */
+}
 .side .card { box-shadow: none; }
 .side .tabs, .tabs { background: none; }
 .tabs button { font-size: 13px; padding: 10px 6px; color: var(--ink-3); border-bottom-width: 2px; }
@@ -221,14 +230,15 @@ body.sb-open .sb-scrim { display: block; }
 .rd-find { background: var(--panel-2); }
 .rd-pdf { background: var(--pdf-bg); }
 .rd-ticks { background: var(--panel-2); }
-.st { inset: var(--tb) 0 0 var(--sbw); background: var(--bg); transition: left .2s ease; }
-.st-head { background: none; border-bottom: 1px solid var(--line); padding: 14px 40px 0; gap: 18px; align-items: flex-end; max-width: none; }
+.st { inset: var(--tb) 0 0 var(--sbw); background: var(--bg); transition: left .2s ease; --stw: 1100px; }      /* --stw: how wide the cards of Settings are (About: a reading column) */
+.st.au { --stw: 760px; }
+.st-head { background: none; border-bottom: 1px solid var(--line); padding: 14px max(40px, calc((100% - var(--stw)) / 2 + 40px)) 0; gap: 18px; align-items: flex-end; max-width: none; }      /* the heading starts where the cards do, whatever the window */
 .st-head h1 { font: 700 28px/1.2 var(--sans); letter-spacing: -.015em; margin: 0 0 8px; }
 .st-tabs { margin-left: 0; gap: 2px; align-self: flex-end; }
 .st-tabs button { border-radius: 8px 8px 0 0; color: var(--ink-3); padding: 9px 12px 11px; }
 .st-tabs button:hover { background: var(--hover); color: var(--ink); }
 .st-tabs button.on { background: none; color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--ink); }
-.st-body { padding: 24px 40px 80px; max-width: 1100px; }
+.st-body { padding: 24px 40px 80px; max-width: var(--stw); }
 .st-card { padding: 18px 20px; box-shadow: none; }
 .st-card h2 { font: 600 16px var(--sans); }
 .st-stat b { font: 700 24px var(--sans); }
