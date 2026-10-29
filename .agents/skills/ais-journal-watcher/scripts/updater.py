@@ -193,7 +193,7 @@ def verify_feed(data, sig_text, keys):
     except ValueError:
         sig = b""
     if len(sig) != 64:
-        raise FeedNotTrusted("The update feed’s signature is not readable, so it was ignored.")
+        raise FeedNotTrusted("The update feed’s signature is not readable, so it was ignored.", "garbled")      # (what comes back for a Wi-Fi sign-in page: not a signature at all)
     if not keys:
         raise FeedNotTrusted("The signing key built into this app is not usable, so it ignores the update feed.", "no_verifier")
     for k in keys:
@@ -208,8 +208,8 @@ def verify_feed(data, sig_text, keys):
 # ------------------------------------------------------------------------------------------------ asking the feed
 
 def _fetch(url, limit=MAX_FEED, timeout=15):
-    if not _ok_url(url):
-        raise BadAddress("The update address must start with https://")
+    if not _ok_url(url) or not url.isascii() or re.search(r"[\s\x00-\x1f\x7f]", url):
+        raise BadAddress("The update address must start with https:// and be a plain web address")
     req = urllib.request.Request(url, headers={"User-Agent": "JournalWatcher/" + version(), "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = r.read(limit + 1)
@@ -265,7 +265,23 @@ def cached_feed(st, keys):
         return None
 
 
-NETWORK_KINDS = ("not_found", "denied", "busy", "http", "offline", "timeout", "tls")      # problems on the way to the feed: their text says "Could not reach the update feed"
+NETWORK_KINDS = ("offline", "timeout", "tls")      # nothing answered: their text says "Could not reach the update feed" (a server that answered with a status did not go unreached)
+
+
+def _http_kind(c):
+    return "not_found" if c in (404, 410) else "denied" if c in (401, 403) else "busy" if c == 429 or c >= 500 else "http"
+
+
+def _bare(u):
+    """An address without what may be private in it (a login, a query with a token, a fragment): for the Details, which can be sent to the author."""
+    try:
+        p = urllib.parse.urlsplit(str(u or ""))
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return ""
+        host = "[%s]" % p.hostname if ":" in p.hostname else p.hostname
+        return ("%s://%s%s%s" % (p.scheme, host, ":%d" % p.port if p.port else "", p.path))[:300]
+    except ValueError:
+        return ""
 
 
 def classify(e):
@@ -274,15 +290,14 @@ def classify(e):
     if isinstance(e, FeedNotTrusted):
         return e.kind, 0, ""
     if isinstance(e, urllib.error.HTTPError):                       # (before OSError: an HTTPError is one)
-        c = e.code
-        return ("not_found" if c in (404, 410) else "denied" if c in (401, 403) else "busy" if c == 429 or c >= 500 else "http"), c, str(e.url or "")[:300]
+        return _http_kind(e.code), e.code, _bare(e.url)
     if isinstance(e, BadAddress):
         return "address", 0, ""
     if isinstance(e, ConnectionError):                              # (before HTTPException: RemoteDisconnected is both)
         return "offline", 0, ""
     if isinstance(e, (ValueError, KeyError, TypeError, http.client.HTTPException)):     # FeedUnreadable, a body that is not JSON or not UTF-8, a reply that is not HTTP
         return "garbled", 0, ""
-    r = getattr(e, "reason", e)
+    r = e.reason if isinstance(e, urllib.error.URLError) else e       # (a bare SSLError has a text in .reason)
     if isinstance(r, ssl.SSLError):
         return "tls", 0, ""
     if isinstance(r, (socket.timeout, TimeoutError)):
@@ -299,11 +314,12 @@ def check():
         st = load_state()
         url = feed_url()
         if not url:                                   # nothing to ask: that is not a check (no "last checked" stamp)
-            st.update({"error": "no feed", "error_kind": "no_feed", "error_code": 0, "error_url": ""})
+            st.update({"error": "no feed", "error_kind": "no_feed", "error_code": 0, "error_url": "", "asked": ""})
             _write(STATE_FILE, st)
             return public()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         st["checked"] = now                           # the last attempt, whether it worked or not
+        st["asked"] = url                             # ... at this address (what it said is no news about another one, see public())
         try:
             raw = _fetch(url)
             keys = trusted_keys()
@@ -312,8 +328,9 @@ def check():
                 try:
                     sig = _fetch(url + ".sig", limit=1024).decode("ascii", "replace")
                 except urllib.error.HTTPError as e:
-                    if e.code != 404:
+                    if e.code not in (404, 410):
                         raise
+                    parse_feed(raw)                   # a page that is not a feed is "not a feed", whatever it says about its signature (nothing of it is kept)
                     raise FeedNotTrusted("The update feed is not signed (yet), so it was ignored.", "unsigned")
                 verify_feed(raw, sig, keys)
             f = parse_feed(raw)
@@ -331,8 +348,17 @@ def check():
         return public()
 
 
+def _state_for(url):
+    """The saved state, as far as it is about `url`: what a look at another address found (after the address was changed or cleared in Settings) says nothing
+    about this one, so that part is left out. State written before 1.2 does not know its address and is kept."""
+    st = load_state()
+    if "asked" in st and st["asked"] != url:
+        st = {k: v for k, v in st.items() if k not in ("error", "error_kind", "error_code", "error_url", "ok_at", "checked")}
+    return st
+
+
 def public():
-    st, s, cur = load_state(), settings(), version()
+    st, s, cur = _state_for(feed_url()), settings(), version()
     keys = trusted_keys()
     f = cached_feed(st, keys)
     if f:
@@ -354,15 +380,24 @@ def public():
         except (OSError, ValueError):
             pass
     err = "" if (st.get("error") or "") == "no feed" else (st.get("error") or "")
-    kind = (st.get("error_kind") or "other") if err else ""            # (a state file from before 1.2 has an error and no kind)
+    kind, code = (st.get("error_kind") or ""), st.get("error_code")
+    if err and not kind:                                               # written before 1.2: the words are all there is (a bare HTTP status keeps its meaning)
+        m = re.search(r"HTTP Error (\d+)", err)
+        kind, code = (_http_kind(int(m.group(1))), int(m.group(1))) if m else ("other", 0)
+    try:
+        code = int(code or 0)
+    except (TypeError, ValueError):
+        code = 0
+    problem = {"kind": kind or "other", "code": code, "url": _bare(st.get("error_url"))} if err else None
+    kind = problem["kind"] if problem else ""
+    ok_at = st.get("ok_at") or (st.get("checked") or "" if ("error_kind" not in st and not err and st.get("latest")) else "")     # (an older good look: it had a feed answer and no error)
     source = "test" if os.environ.get("JW_UPDATE_FEED") else "yours" if s["feed"] else "built-in"
-    code = int(st.get("error_code") or 0) if err else 0
-    problem = {"kind": kind, "code": code, "url": st.get("error_url") or ""} if err else None
     # a 404 from the address built into the app, which has never answered: the usual state before the first release is published (the page says so calmly)
-    no_release = bool(err) and kind == "not_found" and code == 404 and not s["feed"] and not st.get("ok_at") and not st.get("latest") \
-        and "/releases/latest/download/" in urllib.parse.urlsplit(feed_url()).path
+    no_release = bool(err) and kind == "not_found" and code == 404 and not s["feed"] and not ok_at and not st.get("latest") \
+        and "/releases/latest/download/" in urllib.parse.urlsplit(feed_url()).path \
+        and urllib.parse.urlsplit(problem["url"]).path == urllib.parse.urlsplit(feed_url()).path          # (a 404 reached through a redirect is not "this address has nothing")
     return {"current": cur, "latest": latest, "available": avail, "skipped": avail and latest == s["skipped"], "notes": notes if avail else [], "history": history if avail else [],
-            "released": released, "size": size, "checked": st.get("checked") or "", "ok_at": st.get("ok_at") or "", "checked_ok": bool(st.get("ok_at")) and not err,
+            "released": released, "size": size, "checked": st.get("checked") or "", "ok_at": ok_at, "checked_ok": bool(ok_at) and not err,
             "error": err, "problem": problem, "no_release": no_release, "source": source,
             "feed": bool(feed_url()), "feed_url": feed_url(), "auto": s["auto"], "can_install": can_install(), "app": bool(target_app()), "progress": dict(_progress), "just_updated": just,
             "seen": seen, "signed": keys is not None, "keys": len(keys or [])}

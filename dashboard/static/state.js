@@ -36,26 +36,26 @@ export function explainError(err) {
 }
 // ---------------------------------------------------------------- "is there an update?" in plain words
 // The server (updater.py) says what kind of problem the last look at the update feed had (U.problem.kind, from the type of the failure, never from its wording);
-// this turns that into a sentence for people. tone: ok | neutral (nothing wrong) | info (blue: a setting, the network, a server) | bad (red: only a signature that did not check out, or something unexpected).
+// this turns that into a sentence for people. tone: ok | neutral (nothing wrong) | info (an amber notice: a setting, the network, a server) | bad (red: only a signature that did not check out, or something unexpected).
 export function explainUpdate(U) {
   const mk = (kind, tone, title, detail = "") => ({kind, tone, title, detail});
   const p = U.problem, code = p && p.code ? ` (${p.code})` : "";
   if (!U.feed) return mk("no_feed", "neutral", "No update address is set up, so this copy doesn’t look for updates.");
   if (p) {
-    if (U.no_release) return mk("no_release", "neutral", "No update has been published yet", "Nothing is wrong: the address Journal Watcher looks at has no release so far. When the author publishes one, a button appears in the top bar.");
+    if (U.no_release) return mk("no_release", "neutral", "No update found yet", `The built-in update address has nothing at it so far (the server said it could not find it). That is what you see before the first update is published, and there is nothing for you to do. ${U.auto ? "A button appears in the top bar when one is found." : "Press Check for updates now and then."} If this stays after an update was announced, tell the author.`);
     switch (p.kind) {
-      case "not_found": return mk("not_found", "info", "The update address doesn’t lead to an update file", `The server answered “not found”${code}. ${U.source === "yours" ? "Check the address under Update address, or clear it to use the built-in one." : "The file may have been moved or taken down."}`);
-      case "denied": return mk("denied", "info", "The update server wouldn’t hand over the file", `It answered “forbidden”${code}. A VPN, a company network or a private download page can cause this; the app can only read public downloads.`);
+      case "not_found": return mk("not_found", "info", "The update address doesn’t lead to an update file", `The server could not find the file${code}. ${U.source === "yours" ? "Check the address under Update address, or clear it to use the built-in one." : "The file may have been moved or taken down."}`);
+      case "denied": return mk("denied", "info", "The update server wouldn’t hand over the file", `The server refused the request${code}. A VPN, a company network or a private download page can cause this; the app can only read public downloads.`);
       case "busy": return mk("busy", "info", "The update server is busy", `It answered with an error${code} that usually clears by itself. ${U.auto ? "Journal Watcher tries again in a few hours; or press Check for updates later." : "Press Check for updates later."}`);
       case "http": return mk("http", "info", "The update server answered with an error", `It answered with error ${p.code || "?"}. Try again later.`);
       case "offline": return mk("offline", "info", "Can’t reach the update server", `Check that this computer is online (and your VPN, if you use one), then press Check for updates.${U.auto ? " Journal Watcher also tries again by itself every six hours." : ""}`);
       case "timeout": return mk("timeout", "info", "The update server didn’t answer in time", "The connection may be slow or blocked. Try again in a moment.");
       case "tls": return mk("tls", "info", "The secure connection to the update server failed", "A VPN, a company firewall or a wrong date or time on this computer can cause this. Nothing was changed.");
       case "garbled": return mk("garbled", "info", "The update server sent something the app can’t read", "This can happen on Wi-Fi that wants you to sign in first, or when the address points to a web page instead of the update file. Nothing was changed.");
-      case "unsigned": return mk("unsigned", "neutral", "A release is out, but it isn’t signed yet", "This copy only accepts updates signed by the author, so it ignores it for now. It will be offered once the author has signed it.");
+      case "unsigned": return mk("unsigned", "neutral", "A release is out, but it isn’t signed yet", `This copy only accepts updates signed by the author, so it ignores it for now. ${U.auto ? "It will be offered once the author has signed it." : "Press Check for updates again later."}`);
       case "bad_signature": return mk("bad_signature", "bad", "The update’s signature didn’t check out", "Journal Watcher ignored it and changed nothing. If this keeps happening, download the newest app from the author’s page instead of updating from inside the app.");
       case "no_verifier": return mk("no_verifier", "bad", "This copy can’t check update signatures", "So it ignores updates to be safe. Download the newest Journal Watcher from the author’s page.");
-      case "address": return mk("address", "info", "The update address isn’t usable", "It must start with https://. Fix it under Update address.");
+      case "address": return mk("address", "info", "The update address isn’t usable", "It must start with https:// and have no spaces or unusual characters. Fix it under Update address.");
       default: return mk("other", "bad", "Looking for updates didn’t work", "Something unexpected happened. Try again later; the details are for the author.");
     }
   }
@@ -74,7 +74,7 @@ export function updateFacts(U) {
 export function updateToast(U) {
   const x = explainUpdate(U), s = t => (/[.!?]$/.test(t) ? t : t + ".");
   if (x.tone === "ok" || x.kind === "no_feed" || x.kind === "no_release") return s(x.title);
-  return (s(x.title) + " " + ((x.detail.match(/^[^.!?]*[.!?]/) || [x.detail])[0])).slice(0, 200);
+  return s(x.title) + " More under Settings → About & updates.";
 }
 // retry = the attribute string of the button the page already handles, e.g. 'data-k="make"'; without it no "Try again" is shown
 export function errBox(err, {retry = ""} = {}) {
