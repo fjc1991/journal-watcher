@@ -811,6 +811,7 @@ function dlText(p) {
     case "not_yet": return `<span class="dl bad" title="Brand-new “articles in advance” reach the library’s EBSCO once they’re in an issue — retry in a few weeks.">Not in the library’s EBSCO yet</span>`;
     case "unavailable": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Not in your library’s holdings</span>`;
     case "needs_check": return `<span class="dl bad" title="The “verify you are human” box wasn’t ticked within 3 minutes. Select the paper and press Download again to retry.">Verification not completed</span>`;
+    case "wrong_paper": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Wrong PDF refused</span>`;
     case "failed": return `<span class="dl bad">Couldn’t download</span>`;
     default: return "";
   }
@@ -843,9 +844,9 @@ function card(p) {
       ${dlText(p)}
       ${p.dl_status === "needs_login" ? `<button class="btn small" data-act="login">Sign in</button>` : ""}
       ${["needs_nova", "needs_library"].includes(p.dl_status) ? `<button class="btn primary small" data-act="nova">Sign in to my library</button>` : ""}
-      ${["unavailable", "not_yet", "failed"].includes(p.dl_status) && illLink(p) ? `<a class="btn small" href="${illLink(p)}" title="Email your library an interlibrary-loan request for this paper">Ask my library</a>` : ""}
+      ${["unavailable", "not_yet", "failed", "wrong_paper"].includes(p.dl_status) && illLink(p) ? `<a class="btn small" href="${illLink(p)}" title="Email your library an interlibrary-loan request for this paper">Ask my library</a>` : ""}
       ${p.dl_status === "not_yet" && SIGNIN_FOR[p.publisher] ? `<button class="btn small" data-act="login">Use my ${SIGNIN_FOR[p.publisher].toUpperCase()} membership</button>` : ""}
-      ${(p.dl_status === "failed" || p.dl_status === "needs_check") && p.manual_url ? `<a class="btn small" target="_blank" href="${esc(p.manual_url)}">Open in my browser</a>` : ""}
+      ${["failed", "needs_check", "wrong_paper"].includes(p.dl_status) && p.manual_url ? `<a class="btn small" target="_blank" href="${esc(p.manual_url)}">Open in my browser</a>` : ""}
       ${p.dl_status === "ok" && p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">PDF</a>` : ""}
       ${p.summary ? `<button class="btn small" data-act="sum">Summary</button>` : ""}
       ${p.dl_status === "ok" && !p.summary ? `<button class="btn small" data-act="resum" title="${esc(p.dl_note || "")}">Retry summary</button>` : ""}
