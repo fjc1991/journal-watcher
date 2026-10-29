@@ -359,9 +359,14 @@ def main():
     marker = os.path.join(TMP, "download-called.txt")
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
-            "def fake(run, ids, emit, stop):\n    open(%r, 'w').write(','.join(ids))\n    for i in ids:\n        p = run.papers[i]; p['dl_status'] = 'failed'; p['dl_note'] = 'test: no real downloads'\n"
-            "        emit('download', {'id': i, 'dl_status': 'failed', 'dl_note': p['dl_note']})\n"
-            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker))
+            "import os\n"
+            "def fake(run, ids, emit, stop):\n    open(%r, 'w').write(','.join(ids))\n    for i in ids:\n        p = run.papers[i]\n"
+            "        wrong = os.path.exists(%r)      # a second round: the publisher's route gave another work's PDF, which the app refused\n"
+            "        p['dl_status'] = 'wrong_paper' if wrong else 'failed'\n"
+            "        p['dl_note'] = ('wrong paper via browser: this PDF is titled \\u201cTwo-stage differences in differences\\u201d: its title is not on the first pages (0%% found)' if wrong else 'test: no real downloads')\n"
+            "        p['manual_url'] = 'https://example.org/the-paper'\n"
+            "        emit('download', {'id': i, 'dl_status': p['dl_status'], 'dl_note': p['dl_note'], 'manual_url': p['manual_url']})\n"
+            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".wrong"))
     tail = "sys.argv = ['server.py', '--port', %r, '--no-open']\nrunpy.run_path(%r, run_name='__main__')\n" % (str(port), os.path.join(TMP, "dashboard", "server.py"))
     runner = head + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1203,6 +1208,18 @@ def main():
             check("the Download queue shows it with its status", "The platform classic" in page.inner_text("#listview") and "Cited by 3 of your papers" in page.inner_text("#listview") and "Couldn’t download" in page.inner_text("#listview"), page.inner_text("#listview")[:300])
             runs = [f for f in os.listdir(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")) if f.endswith("picks.json")]
             check("the run is saved like any other (state/runs)", len(runs) == 1)
+            open(marker + ".wrong", "w").write("1")                                                   # the next round of the queue: the app refuses a different work's PDF
+            page.click("#qbtn")
+            try:
+                page.wait_for_function("document.querySelector('#listview').innerText.includes('Wrong PDF refused')", timeout=15000)
+            except Exception:  # noqa: BLE001
+                pass
+            card_ = page.locator("#listview .paper:has-text('The platform classic'), #listview .card:has-text('The platform classic')").first
+            check("a refused wrong PDF shows as 'Wrong PDF refused' with the reason as its tooltip, keeps the paper in the queue (selectable) and offers the publisher's page in the browser",
+                  "Wrong PDF refused" in page.inner_text("#listview") and "Two-stage differences in differences" in (card_.locator(".dl.bad").first.get_attribute("title") or "")
+                  and card_.locator("input[type=checkbox]:not([disabled])").count() == 1 and card_.locator("a:has-text('Open in my browser')").count() == 1,
+                  page.inner_text("#listview")[:300])
+            os.remove(marker + ".wrong")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs"); page.click('.fvtabs [data-ft="discover"]'); page.wait_for_selector(".dc-row", timeout=60000)
             page.select_option('[data-s="min"]', "1"); page.click("#dc-find"); page.wait_for_selector('[data-sel="W11"]', timeout=60000)
             check("'at least 1' also lists papers cited by only one of them", page.locator('[data-sel="W11"]').count() == 1)

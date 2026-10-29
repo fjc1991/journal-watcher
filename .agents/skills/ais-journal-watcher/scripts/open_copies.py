@@ -2,15 +2,20 @@
 supply it: arXiv, Semantic Scholar's open-access link, Europe PMC, and preprint
 servers registered in Crossref (bioRxiv, medRxiv, SSRN, Research Square, …).
 
-Each candidate is checked: a complete PDF whose first page matches the title.
+Each candidate is checked: a complete PDF that identity.py recognises as this paper (its DOI, or its title and authors, are on the first pages).
+A candidate that is a different work is skipped and the next one tried.
 Returns (pdf_bytes | None, note) — the note says which version it is.
 """
 import difflib
-import io
 import json
+import os
 import re
+import sys
 import time
 import urllib.parse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import identity  # noqa: E402
 
 UA = {"User-Agent": "JournalWatcher/1.0 (academic literature tool)"}
 
@@ -22,22 +27,6 @@ def _norm(t):
 def _similar(a, b, cut=0.9):
     a, b = _norm(a), _norm(b)
     return bool(a and b) and difflib.SequenceMatcher(None, a, b).ratio() >= cut
-
-
-def _title_on_first_page(data, title):
-    """True if most title words appear on the PDF's first page (skips the check
-    when pypdf isn't installed)."""
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return True
-    try:
-        text = _norm(" ".join((PdfReader(io.BytesIO(data)).pages[i].extract_text() or "")
-                              for i in range(min(2, len(PdfReader(io.BytesIO(data)).pages)))))
-    except Exception:
-        return False
-    words = [w for w in _norm(title).split() if len(w) > 3]
-    return bool(words) and sum(w in text for w in words) / len(words) >= 0.7
 
 
 def candidates(doi, title, http_get):
@@ -91,8 +80,9 @@ def candidates(doi, title, http_get):
                 yield url, "preprint (%s)" % (it.get("publisher") or "preprint server")
 
 
-def find_open_copy(doi, title, http_get, browser=None):
-    tried = set()
+def find_open_copy(doi, title, http_get, browser=None, authors=None):
+    entry = {"doi": doi, "title": title, "authors": authors or []}
+    tried, refused = set(), None
     for url, label in candidates(doi, title, http_get):
         if url in tried:
             continue
@@ -107,10 +97,13 @@ def find_open_copy(doi, title, http_get, browser=None):
                 data, _ = browser.fetch_pdf(url)
             except Exception:
                 data = None
-        if _complete(data) and (not title or _title_on_first_page(data, title)):
-            return data, label
+        if _complete(data):
+            verdict, why, _ = identity.check(entry, data)
+            if verdict != "mismatch":
+                return data, label
+            refused = refused or "wrong paper via %s: %s" % (label, why)
         time.sleep(0.5)
-    return None, "no free copy found"
+    return None, refused or "no free copy found"
 
 
 def _complete(data):

@@ -89,11 +89,17 @@ appears briefly during downloads; that's expected. Re-run `login` when a downloa
 `needs_login:<host>`.
 
 ## Download cascade (`scripts/download.py`)
-1. Unpaywall OA (needs `UNPAYWALL_EMAIL`)
+1. Unpaywall OA (needs `UNPAYWALL_EMAIL` in `.env`; nothing in the app writes that key, so add the line by hand)
 2. Elsevier Article API (if `ELSEVIER_API_KEY` is set; DSS)
 3. Direct HTTP (aisel content link / publisher; usually 403)
-4. Real browser (`scripts/browser.py`) with the saved sign-ins
-5. Manual: user saves the PDF into `Papers/inbox/`; the agent files it (`file_inbox_pdf`).
+4. Real browser (`scripts/browser.py`) with the saved sign-ins (it follows a landing page's PDF link only when it is this article's: `Browser._pdf_link`)
+5. The library's own copy (EBSCO), for the journals `library.json` lists under `via_ebsco`
+6. A free copy elsewhere (`scripts/open_copies.py`: arXiv, Semantic Scholar, Europe PMC, preprint servers)
+7. Manual: user saves the PDF into `Papers/inbox/`; the agent files it (`file_inbox_pdf`).
+
+**Every PDF a route returns is checked against the paper** (`scripts/identity.py`: its DOI, or its title and authors, must be on the first pages). A different work is refused
+(nothing is written, the note says `wrong paper via <route>: …`, the next route is tried; the paper ends as `wrong_paper` in the index and in the run); a PDF that cannot be
+compared (a scan, no title on record) is kept and noted `identity not checked`. `python identity.py audit` lists the PDFs in a library that do not look like their paper (read-only).
 
 Files: `Papers/YYYY-MM/<Journal>/<YYYY-MM>_<ABBR>_<doi>_<slug>.pdf`; one row per paper in
 `Papers/_index.csv` (upserted, never duplicated).
@@ -102,7 +108,7 @@ The scripts also run standalone: `download.py --pick <doi,...>`, `download.py --
 `browser.py get <url> <out.pdf>`, `fetch_new.py --doi <doi>`.
 
 ## Configuration
-- **`.env` in your data folder** (the Settings page can write it for you): `ANTHROPIC_API_KEY`, `UNPAYWALL_EMAIL`, `ELSEVIER_API_KEY` (optional).
+- **`.env` in your data folder** (the Settings page writes the AI keys; add `UNPAYWALL_EMAIL` and `ELSEVIER_API_KEY` by hand if you want them): `ANTHROPIC_API_KEY`, `UNPAYWALL_EMAIL`, `ELSEVIER_API_KEY` (optional).
   Never print or commit these values.
 - `interests.json`: topics and terms (fed to the agent's system prompt and the keyword pre-score).
 - `journals.json`: feeds/ISSNs; if a feed breaks, switch that journal to `"source": "crossref"`

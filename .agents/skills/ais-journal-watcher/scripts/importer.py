@@ -16,6 +16,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import fetch_new as fx  # noqa: E402
+import identity  # noqa: E402
 
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)")
 
@@ -141,21 +142,27 @@ def add_doi(doi):
     ex = _existing(p)
     if ex:
         return {"file": ex, "title": p["title"], "existing": True, "note": "already in your library"}
-    data, note = None, ""
+    data, note, refused = None, "", ""
     url = dl.try_unpaywall(doi, dl.load_env().get("UNPAYWALL_EMAIL"))
     if url:
         try:
             raw, _ = dl.http_get(url, timeout=60)
             if dl.is_pdf(raw):
-                data, note = raw, "added by DOI (open access, Unpaywall)"
+                verdict, why, _ = identity.check(p, raw)
+                if verdict != "mismatch":
+                    data, note = raw, "added by DOI (open access, Unpaywall)"
+                else:
+                    refused = "wrong paper via Unpaywall: %s" % why
         except Exception:
             pass
     if not data:
         import open_copies
-        raw, label = open_copies.find_open_copy(doi, p["title"], dl.http_get)
+        raw, label = open_copies.find_open_copy(doi, p["title"], dl.http_get, authors=p.get("authors"))
         if raw:
             data, note = raw, "added by DOI (%s)" % label
+        elif label.startswith("wrong paper"):
+            refused = refused or label
     if not data:
-        raise ValueError("No free copy of “%s” was found. Download the PDF through your library and drop it onto the Library page — "
-                         "the DOI will be recognised." % p["title"][:80])
+        raise ValueError("No free copy of “%s” was found%s. Download the PDF through your library and drop it onto the Library page — "
+                         "the DOI will be recognised." % (p["title"][:80], " (a PDF came back, but it is not this paper: %s)" % refused.split(": ", 1)[-1] if refused else ""))
     return _file(p, data, note)

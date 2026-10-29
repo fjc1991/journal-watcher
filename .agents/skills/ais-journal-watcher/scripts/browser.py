@@ -68,10 +68,40 @@ def login_pages():
 
 
 # links on a landing page that lead to the PDF
-PDF_LINK_SEL = ", ".join(s + ':not([href*="upplement"]):not([href*="/suppl"])' for s in [
+PDF_LINK_SEL = ", ".join(s + ':not([href*="upplement"]):not([href*="/suppl"]):not([href*="type=additional"])' for s in [
     'a[href*="/doi/pdf/"]', 'a[href*="/doi/pdfdirect/"]', 'a[href*="pdfft"]',
-    'a[href*="viewcontent.cgi"]', 'a[href$=".pdf"]',
+    'a[href*="viewcontent.cgi"]', 'a[href$=".pdf" i]', 'a[href*=".pdf?" i]',
 ])  # never a "supplementary materials" PDF
+# where on a page a PDF link is NOT this article's: its reference list, "cited by", related and recommended articles, banners, footers and menus
+# (a reference to another paper that happens to link its .pdf must never be mistaken for the article itself)
+REFERENCE_LISTS = ("[class*='reference' i]:not([class*='preference' i]), [id*='reference' i]:not([id*='preference' i]), [class*='ref-list' i], [id*='ref-list' i], "
+                   "[class*='bibliograph' i], [id*='bibliograph' i], [class*='citations' i], [id*='citations' i]")
+NOT_THIS_ARTICLE = (REFERENCE_LISTS + ", [class*='cited' i]:not([class*='excited' i]), [id*='cited' i], [class*='related' i], [id*='related' i], [class*='recommend' i], [id*='recommend' i], "
+                    "[class*='footer' i], [id*='footer' i], [class*='banner' i], [class*='cookie' i], [id*='onetrust' i], footer, nav, aside, [role='contentinfo'], [role='navigation']")
+# the links of the page, and for each whether it sits in one of those places (a wrapper that is the whole page, or contains its headline, is not a footer or a list)
+PAGE_LINKS_JS = """([sel, skip, refs]) => {
+  const inside = (a, q) => { let el = a.closest(q); while (el && (el === document.documentElement || el === document.body || el.querySelector('h1'))) el = el.parentElement ? el.parentElement.closest(q) : null; return !!el; };
+  return {meta: [...document.querySelectorAll('meta[name="citation_pdf_url"], meta[name="bepress_citation_pdf_url"]')].map(m => m.content).filter(Boolean),
+          links: [...document.querySelectorAll(sel)].filter(a => typeof a.href === 'string').map(a => ({href: a.href, other: inside(a, skip), ref: inside(a, refs)}))};
+}"""
+TWO_LEVEL = {"co.uk", "ac.uk", "org.uk", "gov.uk", "com.au", "edu.au", "co.jp", "ac.jp", "co.nz", "com.br", "co.za", "com.cn", "edu.cn"}
+
+
+def site_of(u):
+    """The site a web address belongs to (its registered domain: onlinelibrary.wiley.com and cdn.wiley.com are one site; localhost and 127.0.0.1 are two)."""
+    host = (urllib.parse.urlsplit(u).hostname or "").lower().removeprefix("www.")
+    if re.fullmatch(r"[\d.]+|[0-9a-f:]+", host):
+        return host
+    labels = host.split(".")
+    return ".".join(labels[-3:] if len(labels) >= 3 and ".".join(labels[-2:]) in TWO_LEVEL else labels[-2:])
+
+
+def doi_in_url(u):
+    """The DOI a publisher address names (/doi/pdf/<doi>, /doi/abs/<doi> ...), lower-case and unquoted, or None."""
+    m = re.search(r"/doi/(?:abs/|full/|pdf/|pdfdirect/|epdf/)?(10\.\d{4,9}/[^?#]+)", u or "")
+    return urllib.parse.unquote(m.group(1)).rstrip("/").lower() if m else None
+
+
 # paywall wording (not plain "sign in"/"subscribe", which every site header has)
 LOGIN_HINTS = re.compile(r"(request access|purchase|access through your institution|check access|"
                          r"log ?in to (view|access|read)|get access|buy (this )?article|rent this article|"
@@ -243,7 +273,37 @@ class Browser:
             page.remove_listener("download", on_dl)
         return None
 
-    def _fetch(self, url, wait_s):
+    @staticmethod
+    def _pdf_link(page, url, doi=None):
+        """The PDF link on a landing page that belongs to THIS article, or None. In this order: the page's own declaration of its PDF (the citation_pdf_url tag, if on this
+        site or naming the DOI); a link that names the DOI we asked for (wherever it sits, except in a reference list); otherwise, a link of the page itself: on the same site,
+        not in the references, related articles, banners, footer or a menu, and, when the DOI is known, only the kinds of link that carry no DOI (viewcontent.cgi, pdfft:
+        another article's /doi/pdf/ link would have named its own DOI). Taking the first PDF link on the page, whatever it pointed to, once stored another paper's PDF under
+        this paper's title."""
+        try:
+            found = page.evaluate(PAGE_LINKS_JS, [PDF_LINK_SEL, NOT_THIS_ARTICLE, REFERENCE_LISTS])
+        except PWError:
+            return None
+        base = page.url
+        doi = (doi or doi_in_url(url) or doi_in_url(base) or "").lower().rstrip("/") or None
+        names = lambda u: bool(doi) and bool(re.search(re.escape(doi) + r"(?=$|[?#&/])", urllib.parse.unquote(u).lower()))
+        for m in found["meta"]:
+            u = urllib.parse.urljoin(base, m)
+            if names(u) or site_of(u) == site_of(base):
+                return u
+        links = [(urllib.parse.urljoin(base, l["href"]), l) for l in found["links"]]
+        for u, l in links:
+            if names(u) and not l["ref"]:
+                return u
+        for u, l in links:
+            if l["other"] or site_of(u) != site_of(base):
+                continue
+            if doi and ("/doi/" in u or not re.search(r"viewcontent\.cgi|pdfft", u)):
+                continue
+            return u
+        return None
+
+    def _fetch(self, url, wait_s, doi=None):
         page = self.ctx.new_page()
         self._empty_dl = False
         try:
@@ -257,9 +317,7 @@ class Browser:
                 if m:
                     cand = "https://www.sciencedirect.com/science/article/pii/%s/pdfft" % m.group(1)
             if not cand and not is_challenge(page):
-                link = page.query_selector(PDF_LINK_SEL)
-                if link:
-                    cand = urllib.parse.urljoin(page.url, link.get_attribute("href"))
+                cand = self._pdf_link(page, url, doi)
             if cand and cand != url:
                 data = self._try(page, cand, wait_s)
                 if data:
@@ -283,25 +341,25 @@ class Browser:
         finally:
             page.close()
 
-    def fetch_pdf(self, url, wait_s=25):
-        """Returns (pdf_bytes | None, note)."""
+    def fetch_pdf(self, url, wait_s=25, doi=None):
+        """Returns (pdf_bytes | None, note). `doi`: the paper's DOI, when the page we land on should name it (the publishers' own routes); a free copy on some repository does not."""
         host = urllib.parse.urlsplit(url).netloc
         if host in self.checked_hosts:
             # the user already verified this site in the visible window: stay there
             if not self.visible:
                 self._launch(visible=True)
-            data, note, again = self._fetch(url, wait_s=180)
+            data, note, again = self._fetch(url, wait_s=180, doi=doi)
             if again:
                 self._notify(again, "waiting")
             return data, note
         if self.visible and not self.start_visible:
             self._launch(visible=False)  # back to the background for other sites
-        data, note, chall = self._fetch(url, wait_s)
+        data, note, chall = self._fetch(url, wait_s, doi=doi)
         if chall and self.interactive:
             # "Verify you are human": open this page in a window for the user
             self._notify(chall, "waiting")
             self._launch(visible=True)
-            data, note, still = self._fetch(url, wait_s=180)
+            data, note, still = self._fetch(url, wait_s=180, doi=doi)
             self._notify(chall, "failed" if still else "passed")
             if not still:
                 self.checked_hosts.update({host, chall})
