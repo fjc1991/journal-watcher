@@ -1,6 +1,6 @@
 // Settings page: AI providers and routing, privacy and budget, usage and cost, your prompt library, reader preferences.
 // Opened from the ⚙ in the top bar (window.Settings.open("ai"|"usage"|"prompts"|"reader")) and from the reader's Ask tab.
-import {errBox, errInline, notifyError, $, $$, esc, api, toast, COLORS} from "./state.js";
+import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, api, toast, ico, COLORS} from "./state.js";
 
 let root, D = null, tab = "ai", LOG = [];
 const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's passages"], ["explain", "Explain selection", "The one-click prompts on selected text and figures"],
@@ -194,14 +194,18 @@ function renderLook(body) {
 }
 async function renderAbout(body) {
   let U, C = null; try { [U, C] = await Promise.all([api("/api/update"), api("/api/config").catch(() => null)]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
-  const when = U.checked ? new Date(U.checked).toLocaleString() : "not yet";
+  const X = explainUpdate(U), facts = U.problem ? updateFacts(U) : [];
+  const status = U.available ? `<p id="ab-status" style="margin:0 0 8px"><b>Version ${esc(U.latest)} is ready</b> (you have ${esc(U.current)}). <span class="hint">${U.problem ? "This is what it found earlier; the latest look did not work." : esc(X.detail)}</span></p>`
+    : X.tone === "ok" || X.tone === "neutral" ? `<p id="ab-status" style="margin:0 0 8px">${esc(X.title)}${/[.!?]$/.test(X.title) ? "" : "."} <span class="hint">${esc(X.detail)}</span></p>`
+    : "";
+  const problem = U.problem && X.tone !== "neutral" ? `<div class="errbox ${X.tone === "bad" ? "error" : X.kind === "garbled" ? "empty" : X.kind === "busy" ? "busy" : X.kind === "not_found" || X.kind === "address" ? "setup" : "net"}" id="ab-problem" role="status">${ico("warn", "sm")}<div class="eb-b"><b>${esc(X.title)}</b><div class="eb-d">${esc(X.detail)}</div></div></div>` : "";
+  const why = facts.length ? `<details id="ab-facts" style="margin:6px 0"><summary class="hint" style="cursor:pointer">Details</summary>${facts.map(f => `<p class="hint" style="margin:2px 0">${esc(f)}</p>`).join("")}</details>` : "";
   body.innerHTML = `<div class="card st-card"><h2>Journal Watcher <small>version ${esc(U.current)}</small></h2>
       <p class="hint">${C && C.home ? `Your data lives in <code>${esc(C.home)}</code> (papers, notes, folders, settings and your API keys). ` : ""}${U.app ? "This is the Mac app." : "This copy runs from the project folder."}</p>
       <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-welcome">Show the welcome guide</button><span class="hint" style="margin:0">What API keys are, how to get one, and how the publisher sign-ins work.</span></div>
       <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-author">About the author and support</button><span class="hint" style="margin:0">Who makes Journal Watcher, and how to chip in.</span></div></div>
     <div class="card st-card"><h2>Updates</h2>
-      <p id="ab-status" style="margin:0 0 8px">${U.available ? `<b>Version ${esc(U.latest)} is ready</b> (you have ${esc(U.current)}).` : U.feed ? `You have the newest version.` : `No update address is set up, so this copy doesn’t look for updates.`} <span class="hint">Last checked: ${esc(when)}.</span></p>
-      ${U.error ? `<p class="hint bad">${esc(U.error)}</p>` : ""}
+      ${status}${problem}${why}
       <p class="hint" id="ab-sig">${U.signed ? `Updates are checked against the author’s digital signature before anything is installed (${U.keys} signing key${U.keys === 1 ? "" : "s"} built into this app): a feed without a good signature is ignored.` : `This copy does not check an update’s digital signature (no signing key is built into it); it checks the download against the feed’s checksum only.`}</p>
       ${U.available && U.notes.length ? `<ul class="ab-notes">${U.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       <div class="st-actions" style="margin:8px 0"><button class="btn${U.available ? " primary" : ""}" id="ab-go">${U.available ? "Update now…" : "Check for updates"}</button></div>
@@ -211,7 +215,7 @@ async function renderAbout(body) {
       <div class="st-msg" id="ab-msg"></div></div>`;
   $("#ab-welcome", body).onclick = () => { close(); window.Welcome && window.Welcome.open(0); };
   $("#ab-author", body).onclick = () => { close(); window.About && window.About.open(); };
-  $("#ab-go", body).onclick = () => window.JWUpdate ? JWUpdate.show(!U.available) : toast("Updates are still loading.");
+  $("#ab-go", body).onclick = () => window.JWUpdate ? JWUpdate.show(!U.available).then(() => { if (body.isConnected && $("#ab-go", body)) renderAbout(body); }) : toast("Updates are still loading.");
   $("#ab-auto", body).onchange = async e => { try { await api("/api/update/settings", {auto: e.target.checked}); note($("#ab-msg", body), "Saved."); } catch (er) { note($("#ab-msg", body), er.message, true); } };
   $("#ab-feedsave", body).onclick = async () => { try { await api("/api/update/settings", {feed: $("#ab-feed", body).value.trim()}); note($("#ab-msg", body), "Saved."); renderAbout(body); } catch (er) { note($("#ab-msg", body), er.message, true); } };
 }
