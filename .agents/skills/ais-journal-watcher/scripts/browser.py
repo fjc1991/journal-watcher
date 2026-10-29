@@ -13,6 +13,7 @@ AIS_BROWSER_INTERACTIVE=0 skips such papers instead (status needs_check).
 Usage:
     python3 browser.py login          # open sign-in pages (publishers, and your library); log in, then close the window
     python3 browser.py library-login  # sign in through your university library (OpenAthens or EZproxy; set up in Settings → Library access)
+    python3 browser.py library-test   # is your library access working now? (opens your library page in the background; prints one line of JSON)
     python3 browser.py member-login informs|ais   # sign in with a membership account
     python3 browser.py get <url> <out.pdf>
 
@@ -610,6 +611,67 @@ def celebrate(page, text, sub="Journal Watcher has what it needs. This window cl
         pass
 
 
+def settle(page, seconds=12):
+    """Let the redirects of a sign-in redirector finish: the address is the same on three looks in a row (half a second apart), or `seconds` have passed."""
+    last, same, t0 = None, 0, time.time()
+    while time.time() - t0 < seconds:
+        u = page.url
+        same = same + 1 if u == last else 0
+        last = u
+        if same >= 3:
+            return
+        page.wait_for_timeout(500)
+
+
+# what a publisher's page says when your university's access is in force (ScienceDirect: "Access provided by …")
+ACCESS_SAYS = re.compile(r"(access provided by[^\n]{0,80}|provided by your (?:institution|library)[^\n]{0,60}|your institution has access[^\n]{0,60}|institutional access[^\n]{0,60})", re.I)
+
+
+def library_test():
+    """Is your library access working right now? Opens your library page (or ScienceDirect) in the background, through your library's sign-in if it has one, with the
+    sessions saved by the sign-in windows, and looks at where it ends up. Returns {state, message, host, saw, mode}; state: ok | login | challenge | unknown | error.
+    ok     OpenAthens / EZproxy let it through to the page without asking for a password; or (a library without a sign-in of its own: VPN, on campus) the page says
+           that your institution gives access.
+    login  the library asked for a password (never signed in, or the session has expired).
+    unknown  the page opened but says nothing about your access (that does not prove you have none).
+    It says what it saw and never more than that."""
+    lib = library()
+    proxy = lib["signs_in"]
+    target = lib["home"] or "https://www.sciencedirect.com/"
+    url = via_library(target)
+    out = {"mode": lib["mode"], "state": "error", "message": "", "host": "", "saw": ""}
+    try:
+        with Browser(interactive=False) as b:
+            page = b.ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            settle(page)
+            final = page.url
+            out["host"] = urllib.parse.urlsplit(final).netloc.lower()
+            host = out["host"] or "the page"
+            if is_challenge(page):
+                out.update(state="challenge", message="%s asked for a human check, which Journal Watcher cannot do in the background. Press “Sign in now” (or open the page yourself) and tick the box." % host)
+            elif looks_like_login(final) or page.locator("input[type=password]:visible").count():
+                out.update(state="login", message="Not signed in, or the sign-in has expired: %s asked for a password. %s" % (host, "Press “Sign in now” and sign in." if proxy else "Sign in on the publisher’s page (Sign-ins → Other publisher sites)."))
+            else:
+                try:
+                    text = page.inner_text("body")[:20000]
+                except PWError:
+                    text = ""
+                m = ACCESS_SAYS.search(text)
+                saw = re.sub(r"\s+", " ", m.group(0)).strip()[:100] if m else ""
+                out["saw"] = saw
+                if proxy:
+                    out.update(state="ok", message="Signed in: your library let Journal Watcher through to %s without asking for a password.%s" % (host, " The page says: “%s”." % saw if saw else ""))
+                elif saw:
+                    out.update(state="ok", message="%s says: “%s”. That looks like your university gives you access." % (host, saw))
+                else:
+                    out.update(state="unknown", message="%s opened, but it does not say that your university gives you access. That does not prove you have none: some pages only show it on a paper." % host)
+    except PWError as e:
+        out.update(state="error", message="The page did not open (%s). Check your internet connection, your VPN and the addresses in Settings." % re.sub(r"\s+", " ", str(e).split("\n")[0])[:120])
+    print(json.dumps(out, ensure_ascii=False))
+    return out
+
+
 def library_login():
     """Sign in through your university library (set up in Settings → Library access: OpenAthens or EZproxy) and close by itself once a publisher page opens."""
     lib = library()
@@ -621,6 +683,12 @@ def library_login():
     with Browser(visible=True) as b:
         page = b.ctx.pages[0] if b.ctx.pages else b.ctx.new_page()
         page.goto(via_library(target), wait_until="domcontentloaded", timeout=60_000)
+        settle(page, 8)
+        if not looks_like_login(page.url) and key in urllib.parse.urlsplit(page.url).netloc.lower():      # the saved session still works: there is no password to type
+            page.bring_to_front()
+            celebrate(page, "Already signed in to %s" % (lib["name"] or "your library"), "Nothing to do. This window closes by itself.")
+            print("Signed in to %s." % (lib["name"] or "the library"))
+            return True
         page.bring_to_front()
         print("Sign in with your %s account in the browser window." % (lib["name"] or "library"))
         print("It closes by itself once you are in.")
@@ -732,6 +800,8 @@ if __name__ == "__main__":
         login()
     elif a[:1] in (["library-login"], ["nova-login"]):
         library_login()
+    elif a[:1] == ["library-test"]:
+        library_test()
     elif a[:1] == ["member-login"] and len(a) == 2 and a[1] in MEMBER_SITES:
         member_login(a[1])
     elif a[:1] == ["get"] and len(a) == 3:
