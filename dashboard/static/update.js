@@ -15,6 +15,7 @@ export async function refresh() {
   if (pill) { const show = S.available && !S.skipped; pill.classList.toggle("hide", !show); if (show) $("span", pill).textContent = "Update to " + S.latest; pill.title = `Version ${S.latest} is ready (you have ${S.current})`; }
   if (S.just_updated) { toast(`Journal Watcher is now version ${S.current}.`); api("/api/update/settings", {ack: true}).catch(() => {}); }
   if (dlg && dlg.open) draw();
+  document.dispatchEvent(new CustomEvent("jw:update", {detail: S}));       // an open Settings → About card draws its update part again
   return S;
 }
 

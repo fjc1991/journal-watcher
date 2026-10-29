@@ -357,6 +357,8 @@ def main():
                     body = json.dumps(feed).encode()
                 elif fmode["mode"] == "garbage":
                     body = b"<html><body>Sign in to the Wi-Fi first</body></html>"
+                elif fmode["mode"] == "evil":                                # a status text with markup in it: the page must show it as text
+                    self.send_response(403, "<svg onload=window.__pwned=1>"); self.end_headers(); return
                 else:
                     self.send_response(int(fmode["mode"])); self.end_headers(); return
             if body is None:
@@ -1514,6 +1516,19 @@ def main():
             check("Index now reads the unindexed papers as one job with progress; afterwards nothing is left", idx1["pending"] == 0 and "up to date" in page.inner_text("#aitray .at-ix") or idx1["pending"] == 0, str(idx1))
             page.keyboard.press("Escape"); page.mouse.click(5, 400)
 
+            print("updates: every kind of problem is worded for people")
+            tbl = page.evaluate("""async () => { const m = await import('/static/state.js');
+              const base = {feed: true, auto: true, source: 'built-in', current: '1.0.0', latest: '', available: false, checked: '2026-10-29T10:00:00+00:00', checked_ok: false, error: 'raw urllib text', problem: null, no_release: false, feed_url: 'https://x/y'};
+              const kinds = ['not_found', 'denied', 'busy', 'http', 'offline', 'timeout', 'tls', 'garbled', 'unsigned', 'bad_signature', 'no_verifier', 'address', 'other'];
+              const row = (k, over = {}) => { const U = {...base, ...over, problem: {kind: k, code: 418, url: ''}}; const x = m.explainUpdate(U); return {k, kind: x.kind, tone: x.tone, title: x.title, detail: x.detail, toast: m.updateToast(U)}; };
+              return {on: kinds.map(k => row(k)), off: ['busy', 'offline', 'unsigned', 'not_found'].map(k => row(k, {auto: false})), norel: row('not_found', {no_release: true}), norel_off: row('not_found', {no_release: true, auto: false}),
+                      yours: row('not_found', {source: 'yours'}), current: m.explainUpdate({...base, checked_ok: true, error: ''}), never: m.explainUpdate({...base, checked: ''}), nofeed: m.explainUpdate({...base, feed: false})}; }""")
+            on, tones = tbl["on"], {"bad_signature": "bad", "no_verifier": "bad", "other": "bad", "unsigned": "neutral"}
+            check("every kind of update problem has its own plain title, a tone (red only for a bad signature or the unexpected, grey for 'not signed yet'), no raw error text, and a toast short enough to read in 4 seconds",
+                  len({r["title"] for r in on}) == len(on) and all(r["kind"] == r["k"] and r["tone"] == tones.get(r["k"], "info") and r["title"] and r["detail"] and "urllib" not in r["detail"] + r["title"] and "HTTP Error" not in r["detail"] + r["title"] and len(r["toast"]) <= 110 for r in on), str(on)[:600])
+            check("sentences that promise something by itself are only said when the automatic check is on; a typed address is told to check it; 'no update found yet' is neutral and says nothing is needed",
+                  all(not re.search(r"tries again|by itself every|every six hours|will be offered|button appears", r["detail"]) for r in tbl["off"]) and "Update address" in tbl["yours"]["detail"] and tbl["norel"]["kind"] == "no_release" and tbl["norel"]["tone"] == "neutral" and "button appears" in tbl["norel"]["detail"] and "button appears" not in tbl["norel_off"]["detail"]
+                  and tbl["current"]["title"] == "You have the newest version (1.0.0)." and "newest version" not in tbl["never"]["title"] and tbl["nofeed"]["kind"] == "no_feed", str(tbl)[:600])
             print("updates: a new version is announced, with what is new, and you choose")
             page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#lf-q"); page.wait_for_timeout(1800)
             check("with no news the Update button is not shown", page.locator("#updatepill:not(.hide)").count() == 0 and api("/api/update")["available"] is False)
@@ -1523,11 +1538,11 @@ def main():
             t0 = page.inner_text("#st-body")
             check("before the first look at the feed, Settings → About does not claim 'the newest version'; it says it has not looked yet", "Haven’t looked for updates yet" in t0 and "newest version" not in t0 and api("/api/update")["checked"] == "", t0[:500])
             fmode["mode"] = 404
-            page.click("#ab-go"); page.wait_for_function("document.querySelector('#ab-status') && /No update has been published yet/.test(document.querySelector('#ab-status').textContent)", timeout=10000)
+            page.click("#ab-go"); page.wait_for_function("document.querySelector('#ab-status') && /No update found yet/.test(document.querySelector('#ab-status').textContent)", timeout=10000)
             t1, u1 = page.inner_text("#st-body"), api("/api/update")
-            check("a 404 from the built-in release address that never answered is said calmly ('No update has been published yet'): nothing red, no raw 'HTTP Error', no 'newest version', and the toast says the same",
+            check("a 404 from the built-in release address that never answered is said calmly ('No update found yet'): nothing red, no raw 'HTTP Error', no 'newest version', and the toast says the same",
                   u1["no_release"] is True and u1["problem"]["kind"] == "not_found" and u1["problem"]["code"] == 404 and "HTTP Error" not in t1 and "newest version" not in t1 and page.locator("#ab-problem").count() == 0
-                  and page.locator("#st-body .hint.bad").count() == 0 and "No update has been published yet" in page.inner_text("#toast"), t1[:500])
+                  and page.locator("#st-body .hint.bad").count() == 0 and "No update found yet" in page.inner_text("#toast"), t1[:500])
             page.click("#ab-facts summary")
             check("…and the facts are under 'Details': what the server answered and the address asked", "HTTP 404" in page.inner_text("#ab-facts") and "releases/latest/download/appcast.json" in page.inner_text("#ab-facts") and "Last attempt" in page.inner_text("#ab-facts"), page.inner_text("#ab-facts"))
             check("…and the Update button stays hidden", page.locator("#updatepill:not(.hide)").count() == 0)
@@ -1554,26 +1569,32 @@ def main():
             check("'Skip this version' hides the button and remembers it (the file in the data folder says which)", api("/api/update")["skipped"] is True and json.load(open(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "update.json")))["skipped"] == "9.9.9")
             api("/api/update/settings", {"skipped": ""})
             page.click("#settingsbtn"); page.wait_for_selector("#st-body"); page.click('.st-tabs button[data-t="about"]'); page.wait_for_selector("#ab-go")
+            page.wait_for_function("/9[.]9[.]9/.test(document.querySelector('#st-body').textContent)")        # (the card from the early block above is drawn again by the click)
             check("Settings → About & updates shows the version, where your data lives and what the update status is", "1.0.0" in page.inner_text("#st-body") and TMP in page.inner_text("#st-body") and "9.9.9" in page.inner_text("#st-body"), page.inner_text("#st-body")[:300])
             check("…and says whether the update's digital signature is checked (this test copy has no signing key built in, so it says it only checks the checksum)", "does not check" in page.inner_text("#ab-sig") and api("/api/update")["signed"] is False, page.inner_text("#ab-sig"))
             feed["version"] = "1.0.0"; api("/api/update/check", {}); page.click('.st-tabs button[data-t="about"]'); page.wait_for_selector("#ab-go")
-            page.wait_for_function("/Checked/.test(document.querySelector('#ab-status').textContent)")
+            page.wait_for_function("/newest version/.test((document.querySelector('#ab-status') || {}).textContent || '')")
             check("a feed that names the version you have is 'the newest version', with when it was checked (and no problem box)", "You have the newest version (1.0.0)." in page.inner_text("#ab-status") and page.locator("#ab-problem").count() == 0 and api("/api/update")["checked_ok"] is True, page.inner_text("#ab-status"))
             page.click("#ab-go"); page.wait_for_selector("#toast:has-text('You have the newest version (1.0.0).')", timeout=8000)
             fmode["mode"] = 403
             page.click("#ab-go"); page.wait_for_selector("#ab-problem", timeout=10000)
             t2, u2 = page.inner_text("#st-body"), api("/api/update")
-            check("when the feed refuses (403) after it had worked, the card says so in plain words in a blue box and does not claim 'the newest version'; the raw error is not the headline",
+            check("when the feed refuses (403) after it had worked, the card says so in plain words in an amber notice and does not claim 'the newest version'; the raw error is not the headline",
                   "wouldn’t hand over the file" in page.inner_text("#ab-problem") and page.locator("#ab-problem.net").count() == 1 and page.locator("#ab-status").count() == 0 and "newest version" not in t2
                   and "HTTP Error" not in page.inner_text("#ab-problem") and u2["problem"]["kind"] == "denied" and u2["checked_ok"] is False and "wouldn’t hand over the file" in page.inner_text("#toast"), t2[:500])
             page.click("#ab-facts summary")
             check("…with the facts under 'Details' (HTTP 403, the raw message, the address)", "HTTP 403" in page.inner_text("#ab-facts") and "Forbidden" in page.inner_text("#ab-facts") and "appcast.json" in page.inner_text("#ab-facts"), page.inner_text("#ab-facts"))
+            fmode["mode"] = "evil"
+            page.click("#ab-go"); page.wait_for_function("document.querySelector('#ab-facts') && /svg onload/.test(document.querySelector('#ab-facts').textContent)", timeout=10000)
+            page.evaluate("document.querySelector('#ab-facts').open = true")
+            check("whatever the server writes in its status line is shown as text, never as markup (Details, headline and toast)", page.locator("#ab-facts svg, #ab-problem svg:not(.ico)").count() == 0 and page.evaluate("window.__pwned") is None and "<svg onload" in page.inner_text("#ab-facts"))
             fmode["mode"] = "garbage"
             page.click("#ab-go"); page.wait_for_function("document.querySelector('#ab-problem') && /can’t read/.test(document.querySelector('#ab-problem').textContent)", timeout=10000)
-            check("a web page where the feed should be (a Wi-Fi sign-in page, say) reads 'sent something the app can’t read', not a parser message", "Expecting value" not in page.inner_text("#st-body") and page.locator("#ab-problem.empty").count() == 1)
+            check("a web page where the feed should be (a Wi-Fi sign-in page, say) reads 'sent something the app can’t read', not a parser message", "Expecting value" not in page.inner_text("#ab-problem") and page.locator("#ab-problem.net").count() == 1 and "Details" in page.inner_text("#ab-updblock"))
             fmode["mode"] = 404
             page.evaluate("JWUpdate.show(true)"); page.wait_for_function("/doesn’t lead to an update file/.test(document.querySelector('#toast').textContent)", timeout=10000)
-            check("Help → Check for Updates after a failure says the same plain thing (not 'HTTP Error 404'); once the feed has worked, a 404 is a problem and not 'nothing published yet'",
+            page.wait_for_function("document.querySelector('#ab-problem') && /could not find the file/.test(document.querySelector('#ab-problem').textContent)", timeout=5000)
+            check("Help → Check for Updates after a failure says the same plain thing (not 'HTTP Error 404'), redraws the Settings card that is open behind it (no click on its button needed), and once the feed has worked a 404 is a problem and not 'nothing published yet'",
                   "HTTP Error" not in page.inner_text("#toast") and api("/api/update")["no_release"] is False and page.locator("#updatepill:not(.hide)").count() == 0 and page.locator("dialog.upd[open]").count() == 0, page.inner_text("#toast"))
             feed["version"] = "9.9.9"; fmode["mode"] = "ok"; api("/api/update/check", {}); page.click('.st-tabs button[data-t="about"]'); page.wait_for_selector("#ab-go")
             page.uncheck("#ab-auto"); page.wait_for_timeout(300)
