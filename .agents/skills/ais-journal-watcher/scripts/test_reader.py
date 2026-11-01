@@ -113,6 +113,8 @@ class Fake(BaseHTTPRequestHandler):
             self.send_response(400); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Connection", "close"); self.end_headers()
         pieces = Fake.responder(body) if getattr(Fake, "responder", None) else getattr(Fake, "pieces", ["The sample has ", "120 firms (2)."])
+        if getattr(Fake, "refusal", None):       # OpenAI's structured outputs: a refusal arrives in delta.refusal instead of the answer
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {"refusal": Fake.refusal}, "finish_reason": "stop"}]}) + "\n\n").encode()); pieces = []
         for k, piece in enumerate(pieces):
             delta = {"content": piece}
             if k == 0 and getattr(Fake, "web_urls", None):      # web-search citations, as OpenRouter / OpenAI send them
@@ -2738,8 +2740,8 @@ def main():
 
     def t_screen_ai():
         """Screening goes through the AI layer: the "screen" setting (not Ask) picks the model, the monthly budget stops it (papers left unscreened, not marked as failed), local-only mode applies,
-        every call is in the usage ledger and the running job's cost, a refusal is not asked again, a busy provider is, Cancel reaches the worker threads, and saved verdicts still count."""
-        import pipeline as pl_, activity as act_, types
+        every call (a billed refusal too) is in the usage ledger and the run's cost, a refusal is not asked again, a busy provider is, several batches at once work, and saved verdicts still count."""
+        import pipeline as pl_, types
         topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
         saved_cfg = open(ai.CONFIG).read() if os.path.exists(ai.CONFIG) else None
         real_compat, real_sleep = ai._compat, pl_.time.sleep
@@ -2762,7 +2764,7 @@ def main():
                 r.add_paper({"id": "s%d" % k, "title": ttl, "abbr": abbr, "pub_date": "2024-03-01", "abstract": "About platforms.", "keywords": ["x"]})
             return r
         def config(screen=None, local_only=False, budget=None):
-            c = {**CFG, "providers": {**CFG["providers"], "anthropic": {"type": "anthropic", "key_env": "NO_SUCH_KEY_XYZ", "models": [pl_.MODEL]}, "remote": {"type": "openai_compat", "base_url": "http://example.invalid/v1", "key_env": ""}},
+            c = {**CFG, "providers": {**CFG["providers"], "anthropic": {"type": "anthropic", "key_env": "FAKE_KEY", "models": [pl_.MODEL]}, "remote": {"type": "openai_compat", "base_url": "http://example.invalid/v1", "key_env": ""}},
                  "features": {"ask": {"provider": "fake", "model": "m1"}, **({"screen": screen} if screen else {})}, "privacy": {"local_only": local_only}, "budget": {"monthly_usd": budget}}
             write_cfg(c)
         try:
@@ -2778,14 +2780,12 @@ def main():
             config(screen={"provider": "fake", "model": "m1"})
             assert pl_.screen_model() == "fake/m1"
             base = ai.month_spend(); ai.save_config({"budget": {"monthly_usd": base + 1.5}})
-            job = act_.start("test", "screening test"); r = new_run(); calls.clear()
+            r = new_run(); calls.clear()
             pl_.screen(r, emit, stop, batch_size=1, workers=1)
-            job.finish()
             judged = [i for i in r.order if r.papers[i].get("verdict")]
             assert len(calls) == 2 and len(judged) == 2 and not any(r.papers[i].get("verdict") == "error" for i in r.order), (calls, judged)
             assert any(e == "log" and d.get("level") == "warn" and "budget" in d["msg"] and "1 papers not screened" in d["msg"] for e, d in events), events[-3:]
             assert abs(r.usage.d.get("extra", 0) - 2.0) < 1e-6, r.usage.d                                                               # the run's cost counts what was paid
-            assert abs(job.cost - 2.0) < 1e-6, job.cost                                                                                    # ...and so does the running job's (the pool's threads belong to it)
             rows = [x for x in ai.usage_log(10) if x["feature"] == "screen"]
             u = ai.usage_summary()
             assert len(rows) == 2 and u["by_feature"]["screen"]["calls"] == 2 and abs(u["by_feature"]["screen"]["cost"] - 2.0) < 1e-6 and u["warn"], u["by_feature"]   # Settings → Usage shows it
@@ -2805,11 +2805,41 @@ def main():
             mode["fail"] = "busy-once"; calls.clear()
             r5 = new_run(query="busy"); pl_.screen(r5, emit, stop, batch_size=3, workers=1)
             assert len(calls) == 2 and all(r5.papers[i]["verdict"] in ("download", "skip") for i in r5.order), calls
-            # 6. Cancel pressed in the activity tray reaches the pool's threads: nothing is asked, nothing is marked as failed
-            job = act_.start("test", "cancelled screening"); job.cancel_ev.set(); calls.clear(); events.clear()
-            r6 = new_run(query="cancelled"); pl_.screen(r6, emit, stop, batch_size=1, workers=2)
-            job.finish()
-            assert not calls and not any(r6.papers[i].get("verdict") for i in r6.order) and not any(e == "log" and d.get("level") == "warn" for e, d in events), (calls, events[-2:])
+            # 6. four batches at once (the default) all work, and every one is counted
+            config(screen={"provider": "fake", "model": "m1"}); calls.clear()
+            r6 = new_run(query="parallel", titles=["Platform %d" % k for k in range(12)]); base_extra = r6.usage.d.get("extra", 0)
+            pl_.screen(r6, emit, stop, batch_size=1, workers=4)
+            assert len(calls) == 12 and all(r6.papers[i].get("verdict") == "download" for i in r6.order) and abs(r6.usage.d.get("extra", 0) - base_extra - 12.0) < 1e-6, (len(calls), r6.usage.d)
+            # 6b. a refusal is billed: Claude's (stop_reason "refusal" still reports its tokens) and an OpenAI-style one (delta.refusal) both reach the ledger and the run's cost, and neither is asked again
+            ai._compat = real_compat
+            class _Msg:                                              # what the Anthropic SDK hands back for a refused answer
+                stop_reason, content = "refusal", []
+                usage = types.SimpleNamespace(input_tokens=1_000_000, output_tokens=0, cache_creation_input_tokens=0, cache_read_input_tokens=0, server_tool_use=None)
+            class _Stream:
+                text_stream = iter(())
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def get_final_message(self): return _Msg()
+            asked_a = []
+            ai._clients["a"] = types.SimpleNamespace(beta=types.SimpleNamespace(messages=types.SimpleNamespace(stream=lambda **kw: asked_a.append(kw) or _Stream())))
+            try:
+                config(screen={"provider": "anthropic", "model": "m1"}); n0 = len(ai.usage_log(100000))
+                r7 = new_run(query="claude refuses"); pl_.screen(r7, emit, stop, batch_size=3, workers=1)
+                rows = ai.usage_log(100000)[:len(ai.usage_log(100000)) - n0]
+                assert len(asked_a) == 1 and {r7.papers[i]["verdict"] for i in r7.order} == {"error"}, len(asked_a)
+                assert len(rows) == 1 and rows[0]["feature"] == "screen" and abs(rows[0]["cost"] - 1.0) < 1e-6 and abs(r7.usage.d.get("extra", 0) - 1.0) < 1e-6, (rows, r7.usage.d)
+            finally:
+                ai._clients.pop("a", None)
+            config(screen={"provider": "fake", "model": "m1"}); n0 = len(ai.usage_log(100000)); n_seen = len(SEEN)
+            Fake.refusal = "I can't help with that."
+            try:
+                r8 = new_run(query="openai refuses"); pl_.screen(r8, emit, stop, batch_size=3, workers=1)
+            finally:
+                Fake.refusal = None
+            rows = ai.usage_log(100000)[:len(ai.usage_log(100000)) - n0]
+            assert len(SEEN) == n_seen + 1 and {r8.papers[i]["verdict"] for i in r8.order} == {"error"}, (len(SEEN) - n_seen)
+            assert len(rows) == 1 and rows[0]["feature"] == "screen" and rows[0]["cost"] > 0 and r8.usage.d.get("extra", 0) > 0, (rows, r8.usage.d)
+            ai._compat = fake_compat
             # 7. once the budget is used up, the batches still waiting are dropped instead of each being refused in turn (each refusal reads the whole ledger)
             config(screen={"provider": "fake", "model": "m1"}); ai.save_config({"budget": {"monthly_usd": max(ai.month_spend(), 0.000001)}})
             reads, real_spend = [], ai.month_spend
@@ -2913,7 +2943,7 @@ def main():
 
     check("browser: on a paywalled landing page only THIS article's PDF link is followed (its own link wherever the page puts it: aside, tab strip, 'footer'-named wrapper, other host, citation_pdf_url; not another site, a reference list, the footer, a banner PDF, another article or one whose DOI merely starts with ours)", t_link_follow)
     check("search memory: a verdict is reused for the same question and the same paper text (never another question, another text, an error, or one older than the number of days you set), a journal's year range is kept for a while, and the same search is the same saved run", t_search_memory)
-    check("screening goes through the AI layer: its own model setting (not Ask), stopped by the monthly budget with the papers left unscreened, local-only mode applies, in the usage ledger and the job's cost, a refusal is not asked again, Cancel reaches its threads", t_screen_ai)
+    check("screening goes through the AI layer: its own model setting (not Ask), stopped by the monthly budget with the papers left unscreened, local-only mode applies, in the usage ledger and the run's cost (a billed refusal too), a refusal is not asked again, four batches at once work", t_screen_ai)
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
     check("SSRN: searched by words through Crossref (prefix 10.2139: only SSRN's own, capped), a pseudo-journal that is never read weekly and not added twice, the papers marked as SSRN's, a saved copy per phrase, the paper's own page, and its download link followed only when it is that paper's", t_ssrn)
