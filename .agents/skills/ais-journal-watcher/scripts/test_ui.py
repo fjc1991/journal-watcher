@@ -1879,12 +1879,16 @@ pl._screen_batch = fake_screen
             check("SSRN is a choice among the journals, off by default and not switched on by 'all', with a note that it needs words", page.locator('#journalchips .chip[data-abbr="SSRN"]').count() == 1 and page.locator('#journalchips .chip[data-abbr="SSRN"].on').count() == 0)
             page.click('#journalchips .chip[data-abbr="SSRN"]')
             check("choosing SSRN says it is searched by words and that a focus phrase is needed; the estimate counts its best matches, not a whole year", "focus phrase" in page.inner_text("#est") and "200 best matches" in page.inner_text("#est"), page.inner_text("#est"))
-            page.click("#searchbtn"); page.wait_for_function("document.querySelector('#toast') && /SSRN is searched by words/.test(document.querySelector('#toast').textContent)", timeout=8000)
-            check("pressing Search with SSRN and no focus phrase is refused with what to do, and starts nothing", not os.path.exists(ssrnlog) and not api("/api/state")["busy"])
+            page.click("#searchbtn")
+            try:
+                page.wait_for_function("document.querySelector('#toast') && /SSRN is searched by words/.test(document.querySelector('#toast').textContent)", timeout=8000)
+            except Exception:  # noqa: BLE001  (the check below says what is wrong)
+                pass
+            check("pressing Search with SSRN and no focus phrase is refused with what to do, and starts nothing", "SSRN is searched by words" in page.inner_text("#toast") and not os.path.exists(ssrnlog) and not api("/api/state")["busy"])
             page.click("#jnone"); page.click('#journalchips .chip[data-abbr="SSRN"]'); page.select_option("#y0", "2024"); page.select_option("#y1", "2024"); page.fill("#focus", "platform governance")
             n_runs = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
             page.click("#searchbtn"); run_s = wait_idle(2, not_ids=(run_a["id"], run_b["id"]))
-            check("with a focus phrase, SSRN is searched by those words and its papers are screened and listed as SSRN's", open(ssrnlog).read().split() == ["platform governance|2024|2024|200"] and run_s["n_papers"] == 2 and run_s["params"]["journals"] == ["SSRN"] and len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"]) == n_runs + 1,
+            check("with a focus phrase, SSRN is searched by those words and its papers are screened and listed as SSRN's", open(ssrnlog).read().splitlines() == ["platform governance|2024|2024|200"] and run_s["n_papers"] == 2 and run_s["params"]["journals"] == ["SSRN"] and len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"]) == n_runs + 1,
                   str((open(ssrnlog).read() if os.path.exists(ssrnlog) else None, run_s["n_papers"])))
             check("the page is told that SSRN is a words-only source (so it never joins the weekly check or an 'all journals' choice)", [j for j in api("/api/config")["journals"] if j["abbr"] == "SSRN"][0]["needs_query"] is True and [j for j in api("/api/config")["journals"] if j["abbr"] == "SSRN"][0]["default_off"] is True)
 
