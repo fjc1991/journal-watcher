@@ -384,7 +384,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fileUrl = p => "/files/" + p.split("/").map(encodeURIComponent).join("/");
-const JCOL = {MISQ: "#2f5d8a", ISR: "#17808f", JAIS: "#6b4f9e", JMIS: "#b0602a", ISJ: "#2e7d4f", DSS: "#b3413a",
+const JCOL = {SSRN: "#7a4a1d", MISQ: "#2f5d8a", ISR: "#17808f", JAIS: "#6b4f9e", JMIS: "#b0602a", ISJ: "#2e7d4f", DSS: "#b3413a",
   MS: "#44516a", MSOM: "#0f6e6e", ORSC: "#7a4b2a", CACM: "#1f5fa8", SCI: "#a3202f", PNAS: "#2b5a8c", NBER: "#5a6b2e", HBR: "#a3192b"};
 const PUB = {aisel: "AIS eLibrary", informs: "INFORMS", wiley: "Wiley", tandfonline: "Taylor & Francis", elsevier: "Elsevier",
   acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences", nber: "NBER", hbr: "Harvard Business Publishing"};
