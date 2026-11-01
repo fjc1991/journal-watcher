@@ -56,7 +56,11 @@ class Blocked(AIError):
 
 
 class Declined(AIError):
-    """The model refused to answer this request. Asking again would pay again for the same refusal."""
+    """The model refused to answer this request. Asking again would pay again for the same refusal. `result` carries what the refusal cost (a Result with the usage the provider reported), if known."""
+
+    def __init__(self, message, result=None):
+        super().__init__(message)
+        self.result = result
 
 
 class Cancelled(AIError):
@@ -444,21 +448,26 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
             return
     run = _anthropic if p.get("type") == "anthropic" else _compat
     got = []
-    for kind, v in run(name, p, f, messages, system, schema, max_tokens, web_search):
-        if kind == "text":
-            got.append(v)
-        if act.is_cancelled() and kind != "done":      # stop between two pieces of the answer (a finished answer is kept and logged)
-            _log_cancelled(feature, name, f, sent, "".join(got))
-            raise Cancelled("Cancelled.")
-        if kind == "done":
-            _log(feature, v, sent)
-            if key and (cache_if is None or cache_if(v.text)):
-                os.makedirs(CACHE, exist_ok=True)
-                tmp = os.path.join(CACHE, key + ".tmp")
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
-                os.replace(tmp, os.path.join(CACHE, key + ".json"))
-        yield kind, v
+    try:
+        for kind, v in run(name, p, f, messages, system, schema, max_tokens, web_search):
+            if kind == "text":
+                got.append(v)
+            if act.is_cancelled() and kind != "done":      # stop between two pieces of the answer (a finished answer is kept and logged)
+                _log_cancelled(feature, name, f, sent, "".join(got))
+                raise Cancelled("Cancelled.")
+            if kind == "done":
+                _log(feature, v, sent)
+                if key and (cache_if is None or cache_if(v.text)):
+                    os.makedirs(CACHE, exist_ok=True)
+                    tmp = os.path.join(CACHE, key + ".tmp")
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
+                    os.replace(tmp, os.path.join(CACHE, key + ".json"))
+            yield kind, v
+    except Declined as e:
+        if e.result is not None:                           # a refusal is billed like any answer: it counts in the ledger, the budget and Settings → Usage
+            _log(feature, e.result, sent)
+        raise
 
 
 def chat(feature, messages, system=None, schema=None, max_tokens=4000, **kw):
@@ -504,9 +513,10 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
         raise AIError("Anthropic: %s" % str(e)[:300])
     except anthropic.APIConnectionError as e:
         raise AIError("Can’t reach Anthropic (%s)." % str(e)[:120])
-    if msg.stop_reason == "refusal":
-        raise Declined("The model declined to answer this.")
     u = msg.usage
+    usage = {"in": u.input_tokens or 0, "out": u.output_tokens or 0, "cache_write": u.cache_creation_input_tokens or 0, "cache_read": u.cache_read_input_tokens or 0}
+    if msg.stop_reason == "refusal":
+        raise Declined("The model declined to answer this.", Result("", usage, name, f["model"], stop="refusal"))
     sources, seen = [], set()
     for b in msg.content:
         if b.type == "web_search_tool_result" and isinstance(getattr(b, "content", None), list):
@@ -514,9 +524,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
                 if getattr(r, "url", None) and r.url not in seen:
                     seen.add(r.url); sources.append({"url": r.url, "title": getattr(r, "title", "") or r.url, "date": getattr(r, "page_age", None)})
     searches = getattr(getattr(u, "server_tool_use", None), "web_search_requests", 0) or 0
-    yield "done", Result("".join(b.text for b in msg.content if b.type == "text"),
-                         {"in": u.input_tokens or 0, "out": u.output_tokens or 0,
-                          "cache_write": u.cache_creation_input_tokens or 0, "cache_read": u.cache_read_input_tokens or 0},
+    yield "done", Result("".join(b.text for b in msg.content if b.type == "text"), usage,
                          name, f["model"], stop=msg.stop_reason, sources=sources, searches=searches)
 
 
@@ -563,7 +571,7 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
             raise _http_error(name, e, raw)
         except urllib.error.URLError as e:
             raise AIError("Can’t reach %s at %s (%s)%s" % (name, p["base_url"], e.reason, " — is Ollama running?" if name == "ollama" else ""))
-    text, usage, sources, seen = "", {}, [], set()
+    text, usage, sources, seen, refusal, filtered = "", {}, [], set(), "", False
     with resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -583,6 +591,10 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
                 if d.get("content"):
                     text += d["content"]
                     yield "text", d["content"]
+                if d.get("refusal"):                        # OpenAI's structured outputs answer a refusal in this field instead of the JSON
+                    refusal += d["refusal"]
+                if ch.get("finish_reason") == "content_filter":
+                    filtered = True
                 for a in d.get("annotations") or []:        # OpenRouter / OpenAI web citations
                     u = a.get("url_citation") or {}
                     if u.get("url") and u["url"] not in seen:
@@ -590,8 +602,12 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
             if ev.get("usage"):
                 usage = ev["usage"]
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
-    yield "done", Result(text, {"in": max(0, usage.get("prompt_tokens", 0) - cached), "out": usage.get("completion_tokens", 0),
-                                "cache_read": cached}, name, f["model"], cost=usage.get("cost"), sources=sources)
+    res = Result(text, {"in": max(0, usage.get("prompt_tokens", 0) - cached), "out": usage.get("completion_tokens", 0),
+                        "cache_read": cached}, name, f["model"], cost=usage.get("cost"), sources=sources)
+    if (refusal or filtered) and not text.strip():
+        res.stop = "refusal"
+        raise Declined("The model declined to answer this." + (" (%s)" % refusal.strip()[:160] if refusal.strip() else ""), res)
+    yield "done", res
 
 
 # ---------------------------------------------------------------- embeddings

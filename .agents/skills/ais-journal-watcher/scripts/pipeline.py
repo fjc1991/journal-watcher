@@ -31,7 +31,6 @@ import folders as fo  # noqa: E402
 import authorcache as ac  # noqa: E402
 import readstate as rs  # noqa: E402
 import ai  # noqa: E402
-import activity as act  # noqa: E402
 
 BASE, ROOT, STATE, PAPERS = dl.BASE, dl.ROOT, dl.STATE, dl.PAPERS
 RUNS = os.path.join(STATE, "runs")
@@ -668,9 +667,11 @@ def _screen_batch(system, batch, usage):
     for attempt in range(3):
         try:
             res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000)
-        except ai.Declined:
+        except ai.Declined as e:
+            if e.result is not None:
+                usage.add_result(e.result)                     # a refusal is billed too
             return {}                                          # a refusal is final: asking again would pay again for the same refusal
-        except (ai.Blocked, ai.Cancelled):
+        except ai.Blocked:
             raise
         except ai.AIError:                                     # the provider was busy or unreachable: wait and ask again
             if attempt < 2:
@@ -779,8 +780,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
     emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": len(todo)})
     valid = set(topic_labels())
     with ThreadPoolExecutor(workers) as ex:
-        job_batch = act.wrap(_screen_batch)                    # the pool's threads belong to the job that called screen(): its Cancel button and its cost counter reach them
-        futs = {ex.submit(job_batch, system, b, run.usage): b for b in batches}
+        futs = {ex.submit(_screen_batch, system, b, run.usage): b for b in batches}
         for fut in as_completed(futs):
             if stop.is_set():
                 for f in futs:
@@ -791,7 +791,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                 continue
             try:
                 res = fut.result()
-            except (ai.Blocked, ai.Cancelled) as e:            # nothing more may be asked (budget, local-only, no key) or the user cancelled: the papers stay unscreened, to pick up later
+            except ai.Blocked as e:                            # nothing more may be asked (budget, local-only, no key): the papers stay unscreened, to pick up later
                 for f in futs:
                     f.cancel()
                 if blocked is None:
@@ -819,8 +819,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             run.save()
     if blocked is not None:
         left = len([p for p in todo if not p.get("verdict")])
-        if not isinstance(blocked, ai.Cancelled):
-            emit("log", {"msg": "Screening stopped with %d papers not screened: %s Search again once that is fixed: the papers already judged are kept, and only the others are screened." % (left, blocked), "level": "warn"})
+        emit("log", {"msg": "Screening stopped with %d papers not screened: %s Search again once that is fixed: the papers already judged are kept, and only the others are screened." % (left, blocked), "level": "warn"})
         run.save(force=True)
     # remember weekly verdicts for agent.py
     if run.kind == "weekly":
