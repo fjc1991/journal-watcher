@@ -2567,7 +2567,11 @@ def main():
         PAGES = {"/open": "<h1>ScienceDirect</h1><p>Access provided by Test University</p>", "/plain": "<h1>Welcome</h1><p>Search articles</p>",
                  "/idp/login": "<h1>Sign in</h1><form><input type=text name=u><input type=password name=p></form>", "/pwd": "<h1>Library</h1><form><input type=password name=p></form>",
                  "/hidden": "<h1>Library</h1><div style='display:none'><input type=password></div><p>Access provided by Test University</p>",
-                 "/challenge": "<title>Just a moment...</title><p>Checking your browser before accessing</p>"}
+                 "/challenge": "<title>Just a moment...</title><p>Checking your browser before accessing</p>",
+                 "/ssrn-own": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code99.pdf?abstractid=4723385&mirid=1'>Download This Paper</a>",
+                 "/ssrn-other": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code1.pdf?abstractid=9999999&mirid=1'>Download another</a><a href='/sol3/Delivery.cfm/SSRN_ID47233851_code1.pdf?abstractid=47233851'>a longer number</a>",
+                 "/ssrn-stray": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code4723385.pdf?abstractid=9999999'>another paper, whose code field equals our number</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=4723385&mirid=1'>This paper</a>",
+                 "/ssrn-bare": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/file_4723385.pdf'>a link with the number but no identifier</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=1111111'>names two papers</a>"}
         REDIRECTS = {"/hop1": "/hop2", "/hop2": "/open", "/to-login": "/idp/login?x=1"}
         class Pub(BaseHTTPRequestHandler):
             def log_message(self, *a): pass
@@ -2614,6 +2618,18 @@ def main():
                 assert done is True and "Signed in to Test University." in buf.getvalue() and _time.time() - t0 < 40, (done, buf.getvalue())
             finally:
                 brw.Browser = real_B
+            # SSRN's own download link carries the paper's number and no DOI: it is followed when it is this paper's, never another paper's (or a longer number that starts the same)
+            with brw.Browser(interactive=False) as b_:
+                pg_ = b_.ctx.new_page()
+                pg_.goto(base3 + "/ssrn-own"); own_ = brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.2139/ssrn.4723385")
+                assert own_ and "Delivery.cfm" in own_ and "ID4723385" in own_, own_
+                pg_.goto(base3 + "/ssrn-other"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-other", "10.2139/ssrn.4723385") is None
+                # a stray number elsewhere in a link (a "code" field) is not the paper's identifier: skipped, and the real link after it is still found
+                pg_.goto(base3 + "/ssrn-stray"); st_ = brw.Browser._pdf_link(pg_, base3 + "/ssrn-stray", "10.2139/ssrn.4723385")
+                assert st_ and "SSRN_ID4723385_code7" in st_, st_
+                # the number alone is not an identifier, and a link naming two different papers is refused
+                pg_.goto(base3 + "/ssrn-bare"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-bare", "10.2139/ssrn.4723385") is None
+                pg_.goto(base3 + "/ssrn-own"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.1287/mnsc.2024.0001") is None         # another paper's DOI: the rule does not apply
             brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}                  # nobody listens
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -2720,6 +2736,72 @@ def main():
             pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts = real
             ai.save_config({"screening": saved_state["screening"]})
 
+    def t_ssrn():
+        """SSRN is searched by words through Crossref (DOI prefix 10.2139): the request, the answer, the pseudo-journal, the saved copy, the weekly check leaving it alone, the paper's own page."""
+        import pipeline as pl_
+        import fetch_new as fx_
+        asked = []
+        answer = {"status": "ok", "message-type": "work-list", "message": {"total-results": 2815, "items": [
+            {"DOI": "10.2139/ssrn.4723385", "title": ["Hold-Up, Innovation, and Platform Governance"], "abstract": "<jats:p>Motivated by large digital platforms, I study a model.</jats:p>",
+             "author": [{"given": "Georgy", "family": "Bueno de Mesquita"}], "published": {"date-parts": [[2024]]}, "type": "posted-content"},
+            {"DOI": "10.2139/ssrn.4483039", "title": ["Two-Faced Governance in Platform Ecosystems"], "author": [{"given": "A.", "family": "Harraca"}, {"family": "Gawer"}], "posted": {"date-parts": [[2023, 6]]}},
+            {"DOI": "10.1111/not-ssrn.1", "title": ["A paper of another publisher"], "published": {"date-parts": [[2024]]}},
+            {"DOI": "10.2139/ssrn.1", "title": [""], "published": {"date-parts": [[2024]]}}]}}
+        real = fx_.http_get
+        def fake_get(url, timeout=40, headers=None):
+            asked.append(url); return json.dumps(answer).encode(), {}, 200
+        fx_.http_get = fake_get
+        try:
+            got = fx_.crossref_ssrn("platform governance", 2023, 2024)
+            u = asked[-1]
+            assert "filter=prefix:10.2139,type:posted-content,from-pub-date:2023-01-01,until-pub-date:2024-12-31" in u and "query.bibliographic=platform%20governance" in u and "rows=200" in u, u
+            assert [g["doi"] for g in got] == ["10.2139/ssrn.4723385", "10.2139/ssrn.4483039"], got                       # another publisher's DOI and an empty title are left out
+            assert got[0]["pub_date"] == "2024-01" and got[1]["pub_date"] == "2023-06" and got[0]["abstract"].startswith("Motivated by large") and "<" not in got[0]["abstract"], got
+            assert got[1]["authors"] == ["A. Harraca", "Gawer"] and got[0]["url"] == "https://doi.org/10.2139/ssrn.4723385", got
+            fx_.crossref_ssrn("x" * 500, 2024, 2024, limit=5000); assert "rows=1000" in asked[-1] and len(asked[-1]) < 700                # words and rows are capped
+            # the pseudo-journal exists for any journals.json, once, and is never read by the weekly check
+            js = pl_.journals(); assert [j["abbr"] for j in js].count("SSRN") == 1 and [j for j in js if j["abbr"] == "SSRN"][0]["needs_query"]
+            jpath = os.path.join(pl_.BASE, "journals.json"); saved = open(jpath).read() if os.path.exists(jpath) else None
+            try:
+                d = json.loads(saved) if saved else {"journals": []}
+                d["journals"] = [j for j in d["journals"] if j["abbr"] != "SSRN"] + [dict(pl_.SSRN)]
+                json.dump(d, open(jpath, "w"))
+                assert [j["abbr"] for j in pl_.journals()].count("SSRN") == 1                                                       # (already there: not added twice)
+                seen_ = []
+                real_fj = fx_.fetch_journal
+                fx_.fetch_journal = lambda j: (seen_.append(j["abbr"]) or [])
+                try:
+                    pl_.fetch_weekly(pl_.Run("weekly", {}), lambda ev, d=None: None, threading.Event())
+                finally:
+                    fx_.fetch_journal = real_fj
+                assert seen_ and "SSRN" not in seen_, seen_
+            finally:
+                open(jpath, "w").write(saved) if saved is not None else os.remove(jpath)
+            # an archive search with SSRN: the focus phrase is what is asked, the papers are SSRN's, and a saved copy is kept per phrase
+            calls = []
+            real_cr = fx_.crossref_ssrn
+            fx_.crossref_ssrn = lambda q, y0, y1, limit=200, progress=None: calls.append((q, y0, y1, limit)) or [dict(g) for g in got]
+            shutil.rmtree(pl_.FETCHED, ignore_errors=True)
+            try:
+                def search(q):
+                    r = pl_.Run("search", {"year_from": 2023, "year_to": 2024, "journals": ["SSRN"], "topics": [], "methods": [], "query": q})
+                    pl_.fetch_search(r, lambda ev, d=None: None, threading.Event()); return r
+                r = search("platform governance")
+                assert calls == [("platform governance", 2023, 2024, 200)] and len(r.order) == 2, calls
+                p0 = r.papers[r.order[0]]; assert p0["publisher"] == "ssrn" and p0["journal"] == "SSRN" and p0["abbr"] == "SSRN" and p0["source_mode"] == "search", p0
+                search("platform governance"); assert len(calls) == 1                                                                 # the same words, lately: the saved copy
+                search("Platform Governance "); assert len(calls) == 1                                                               # (case and spaces do not matter)
+                search("two-sided markets"); assert len(calls) == 2                                                                  # other words: asked again
+            finally:
+                fx_.crossref_ssrn = real_cr
+        finally:
+            fx_.http_get = real
+        # the paper's page, from its DOI (whatever publisher the card says)
+        assert dl.browser_pdf_url({"doi": "10.2139/ssrn.4723385", "publisher": "ssrn"}) == "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4723385"
+        assert dl.browser_pdf_url({"doi": "10.2139/SSRN.4723385", "publisher": ""}) == "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4723385"
+        assert dl.browser_pdf_url({"doi": "10.1287/mnsc.2024.0001", "publisher": "informs"}).startswith("https://pubsonline.informs.org/doi/pdf/")
+        assert any("papers.ssrn.com" in u for _, u in brw.PUBLISHER_LOGINS)                                                                # a tab for it in "Other publisher sites"
+
     def t_library_test_record():
         """What the test finds changes the tick only when it is clear: a library with a sign-in of its own is ticked when the test got through and un-ticked when it was asked for a password."""
         sg = brw.si
@@ -2741,6 +2823,7 @@ def main():
     check("search memory: a verdict is reused for the same question and the same paper text (never another question, another text, an error, or one older than the number of days you set), a journal's year range is kept for a while, and the same search is the same saved run", t_search_memory)
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
+    check("SSRN: searched by words through Crossref (prefix 10.2139: only SSRN's own, capped), a pseudo-journal that is never read weekly and not added twice, the papers marked as SSRN's, a saved copy per phrase, the paper's own page, and its download link followed only when it is that paper's", t_ssrn)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")

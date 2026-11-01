@@ -384,7 +384,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fileUrl = p => "/files/" + p.split("/").map(encodeURIComponent).join("/");
-const JCOL = {MISQ: "#2f5d8a", ISR: "#17808f", JAIS: "#6b4f9e", JMIS: "#b0602a", ISJ: "#2e7d4f", DSS: "#b3413a",
+const JCOL = {SSRN: "#7a4a1d", MISQ: "#2f5d8a", ISR: "#17808f", JAIS: "#6b4f9e", JMIS: "#b0602a", ISJ: "#2e7d4f", DSS: "#b3413a",
   MS: "#44516a", MSOM: "#0f6e6e", ORSC: "#7a4b2a", CACM: "#1f5fa8", SCI: "#a3202f", PNAS: "#2b5a8c", NBER: "#5a6b2e", HBR: "#a3192b"};
 const PUB = {aisel: "AIS eLibrary", informs: "INFORMS", wiley: "Wiley", tandfonline: "Taylor & Francis", elsevier: "Elsevier",
   acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences", nber: "NBER", hbr: "Harvard Business Publishing"};
@@ -570,11 +570,12 @@ function fillSearch(p) {
 function updateEst() {
   const y0 = +$("#y0").value, y1 = +$("#y1").value, yrs = Math.abs(y1 - y0) + 1;
   const js = selectedJournals();
-  const n = js.reduce((a, j) => a + (jinfo(j).per_year || 80), 0) * yrs;
+  const n = js.reduce((a, j) => a + (jinfo(j).needs_query ? (jinfo(j).limit || 200) : (jinfo(j).per_year || 80) * yrs), 0);       // (SSRN: the best matches of your focus phrase, not every year)
   const cost = n * CFG.est_cost_per_paper;
   const big = js.filter(j => (jinfo(j).per_year || 0) > 1000);
   $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · est. <b>$${cost.toFixed(2)}</b>` +
     (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
+    (js.some(j => jinfo(j).needs_query) ? `<br>SSRN is searched by words: only the ${jinfo("SSRN").limit || 200} best matches of your focus phrase are looked at${$("#focus").value.trim() ? "" : " — <b>type a focus phrase</b> to use it"}.` : "") +
     (CFG.openalex_key ? "" : `<br>JMIS/DSS/NBER abstracts need a free OpenAlex key; otherwise screened by title.`);
   const key = searchKey(), known = RUNS.find(r => r.search_key === key);
   if (known) $("#est").innerHTML += `<br><b>You already ran this search</b> (${known.n_papers} papers, ${esc(fmtWhen(known.updated || known.created))}). Pressing Search continues it: its papers, verdicts and downloads stay, and only papers without a verdict are paid for.`;
@@ -592,12 +593,14 @@ async function init() {
   (CFG.methods || []).forEach(m => { const c = chip(m.label, false); c.title = m.description || ""; $("#methodchips").append(c); });
   CFG.journals.forEach(j => {
     const can = j.archive !== false;
-    const c = chip(j.abbr, can && (j.per_year || 0) < 1000, updateEst);
-    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)");
+    const c = chip(j.abbr, can && (j.per_year || 0) < 1000 && !j.default_off, updateEst);
+    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: needs a focus phrase; only the ${j.limit || 200} best matches are looked at` : "");
+    if (j.default_off) c.dataset.optin = "1";               // never switched on by "all"
     if (!can) c.classList.add("off");
     $("#journalchips").append(c);
   });
-  $("#jall").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip:not(.off)").forEach(c => c.classList.add("on")); updateEst(); };
+  $("#focus").oninput = updateEst;                      // (the note about SSRN needing words, and the "already ran" note, follow what you type)
+  $("#jall").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip:not(.off):not([data-optin])").forEach(c => c.classList.add("on")); updateEst(); };
   $("#jnone").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip").forEach(c => c.classList.remove("on")); updateEst(); };
   $("#tfilter").innerHTML += CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
   updateEst();
@@ -965,7 +968,7 @@ async function setVerdict(ids, verdict, undo = true) {
 
 // ---------- journal tiles
 function runJournals() {
-  const ab = RUN && RUN.kind === "search" ? (RUN.params.journals || []) : CFG.journals.map(j => j.abbr);
+  const ab = RUN && RUN.kind === "search" ? (RUN.params.journals || []) : CFG.journals.filter(j => j.weekly !== false).map(j => j.abbr);      // the weekly check never reads a journal that is searched by words (SSRN): no tile that claims "No new papers"
   return CFG.journals.filter(j => ab.includes(j.abbr));
 }
 function tileState(j) {

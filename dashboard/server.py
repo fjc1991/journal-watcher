@@ -286,7 +286,7 @@ def config():
     y = datetime.date.today().year
     return {
         "journals": [{"abbr": j["abbr"], "name": j["name"], "publisher": j["publisher"],
-                      "per_year": j.get("per_year"), "archive": j.get("archive", True)}
+                      "per_year": j.get("per_year"), "archive": j.get("archive", True), "needs_query": bool(j.get("needs_query")), "default_off": bool(j.get("default_off")), "limit": j.get("limit"), "weekly": bool(j.get("weekly", True))}
                      for j in pl.journals()],
         "topics": pl.topic_labels(),
         "methods": [{"label": m.get("label", m["name"]), "description": m.get("description", "")}
@@ -1381,6 +1381,8 @@ class Handler(BaseHTTPRequestHandler):
             if not topics and not meths:
                 topics = pl.topic_labels()  # nothing picked = all interests
             params = {"year_from": y0, "year_to": y1, "journals": js, "topics": topics, "methods": meths, "query": (b.get("query") or "").strip()[:200]}
+            if not params["query"] and any(j.get("needs_query") for j in pl.journals() if j["abbr"] in js):
+                return self.send_json({"error": "SSRN is searched by words: type a focus phrase (for example “platform governance”), or leave SSRN out."}, 400)
             old = pl.find_search(params)           # the same search as one you already ran: continue that one (its papers, verdicts and downloads are kept)
             run = (JOBS.run if JOBS.run and old and JOBS.run.id == old["id"] else pl.Run.load(old["id"]) if old else None) or pl.Run("search", params)
             return self.started(start_fetch(run), run)
