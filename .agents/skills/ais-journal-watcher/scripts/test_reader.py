@@ -2813,7 +2813,7 @@ def main():
             # 7. once the budget is used up, the batches still waiting are dropped instead of each being refused in turn (each refusal reads the whole ledger)
             config(screen={"provider": "fake", "model": "m1"}); ai.save_config({"budget": {"monthly_usd": max(ai.month_spend(), 0.000001)}})
             reads, real_spend = [], ai.month_spend
-            ai.month_spend = lambda: reads.append(1) or real_spend()
+            ai.month_spend = lambda: (reads.append(1), real_sleep(0.03), real_spend())[2]          # slow reads: the main thread cancels the waiting batches long before the worker could get through 40 of them
             try:
                 r7 = new_run(query="many", titles=["Platform %d" % k for k in range(40)]); calls.clear()
                 pl_.screen(r7, emit, stop, batch_size=1, workers=1)
