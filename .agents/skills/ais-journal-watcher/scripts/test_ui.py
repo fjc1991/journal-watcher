@@ -806,6 +806,7 @@ pl._screen_batch = fake_screen
 
             page.click("#settingsbtn"); page.wait_for_selector("#st-body tr[data-p]")
             check("settings: providers, per-feature models and a key-free status", page.locator("tr[data-f]").count() >= 17 and page.locator("tr[data-f='ideas']").count() == 1 and "key found" in page.inner_text("tr[data-p='fake']"))
+            check("settings: 'Screening new papers' has its own model row (the budget and the usage page now cover it), pointing at a provider that exists", page.locator("tr[data-f='screen']").count() == 1 and page.input_value("tr[data-f='screen'] .fm") != "" and page.input_value("tr[data-f='screen'] .fp") in api("/api/ai/config")["providers"] and "screen" in api("/api/ai/config")["features"])
             page.fill("#st-budget", "5"); page.click("#st-save"); page.wait_for_timeout(600)
             check("settings: the monthly budget is saved", api("/api/ai/config")["budget"]["monthly_usd"] == 5)
             check("settings: 'reuse earlier screening verdicts for N days' shows its default (90) and is saved", page.input_value("#st-reuse") == "90" and api("/api/ai/config")["screening"]["reuse_days"] == 90)
