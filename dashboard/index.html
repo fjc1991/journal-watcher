@@ -968,7 +968,7 @@ async function setVerdict(ids, verdict, undo = true) {
 
 // ---------- journal tiles
 function runJournals() {
-  const ab = RUN && RUN.kind === "search" ? (RUN.params.journals || []) : CFG.journals.map(j => j.abbr);
+  const ab = RUN && RUN.kind === "search" ? (RUN.params.journals || []) : CFG.journals.filter(j => j.weekly !== false).map(j => j.abbr);      // the weekly check never reads a journal that is searched by words (SSRN): no tile that claims "No new papers"
   return CFG.journals.filter(j => ab.includes(j.abbr));
 }
 function tileState(j) {

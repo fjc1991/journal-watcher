@@ -302,8 +302,11 @@ class Browser:
         for u, l in links:
             if l["other"] or site_of(u) != site_of(base):
                 continue
-            if ssrn and re.search(r"Delivery\.cfm", u, re.I) and re.search(r"(?<!\d)%s(?!\d)" % ssrn.group(1), u):      # SSRN's own download link carries the paper's number (and no DOI)
-                return u
+            if ssrn and re.search(r"Delivery\.cfm", u, re.I):      # SSRN's own download link carries the paper's number (and no DOI), as SSRN_ID<n> and/or abstractid=<n>
+                ids = set(re.findall(r"SSRN_ID(\d+)|[?&;]abstract_?id=(\d+)", u, re.I))
+                ids = {a or b for a, b in ids}
+                if ids == {ssrn.group(1)}:          # explicit identifiers only, and none that names another paper (a stray "code" number that happens to match does not count)
+                    return u
             if doi and ("/doi/" in u or not re.search(r"viewcontent\.cgi|pdfft", u)):
                 continue
             return u
