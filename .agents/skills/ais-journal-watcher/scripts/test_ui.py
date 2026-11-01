@@ -389,11 +389,15 @@ def fake_cr(issn, y0, y1, progress=None, doi_prefix=None, work_type=None):      
     return [{'title': 'Platform governance study %d-%d' % (k, i), 'doi': '10.9999/t.%d.%d.%d' % (y0, k, i), 'pub_date': '%d-03-01' % y0, 'abstract': 'We study platform governance and complementors.', 'keywords': ['platform']} for i in range(2)] + \
            [{'title': 'Something else %d' % k, 'doi': '10.9999/o.%d.%d' % (y0, k), 'pub_date': '%d-04-01' % y0, 'abstract': 'Unrelated.', 'keywords': []}]
 fx.crossref_journal_range = fake_cr
+def fake_ssrn(query, y0, y1, limit=200, progress=None):                             # two SSRN papers for any words (and what was asked is written down)
+    open(SSRNLOG, 'a').write('%s|%s|%s|%s\n' % (query, y0, y1, limit))
+    return [{'title': 'Platform governance on SSRN %d' % i, 'doi': '10.2139/ssrn.99000%d%d' % (y0, i), 'pub_date': '%d-01' % y0, 'abstract': 'We study platform governance on SSRN.', 'keywords': None, 'authors': ['A. Author']} for i in range(2)]
+fx.crossref_ssrn = fake_ssrn
 def fake_screen(system, batch, usage):                                            # what the model is asked, one line per batch (the test counts them)
     open(SCREENLOG, 'a').write('%d\n' % len(batch))
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen
-""".replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log')))
+""".replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = "http://127.0.0.1:%d" % port
@@ -1822,11 +1826,11 @@ pl._screen_batch = fake_screen
             screened = os.path.join(TMP, "screened.log")
             def batches():
                 return open(screened).read().split() if os.path.exists(screened) else []
-            def wait_idle(n_papers, min_checks=1, timeout=60):          # the search run itself (not the run that was open before it started), idle, with this many papers and times started
+            def wait_idle(n_papers, min_checks=1, timeout=60, not_ids=()):          # the search run itself (not the run that was open before it started), idle, with this many papers and times started
                 for _ in range(timeout * 4):
                     s_ = api("/api/state")
                     r_ = s_["run"]
-                    if not s_["busy"] and r_ and r_["kind"] == "search" and r_["n_papers"] >= n_papers and len(r_.get("checks") or []) >= min_checks and r_["stage"] == "ready":
+                    if not s_["busy"] and r_ and r_["kind"] == "search" and r_["n_papers"] >= n_papers and len(r_.get("checks") or []) >= min_checks and r_["stage"] == "ready" and r_["id"] not in not_ids:
                         return r_
                     time.sleep(0.25)
                 raise AssertionError("the search did not finish: %s" % json.dumps(api("/api/state"))[:300])
@@ -1866,6 +1870,32 @@ pl._screen_batch = fake_screen
             check("with nothing open, the Watch page offers the last runs to pick up ('Pick up where you left off')", page.locator("#resumelist .runitem").count() >= 2 and "Archive search" in page.inner_text("#resumelist"), page.inner_text("#resume"))
             page.click('#resumelist .runitem >> nth=0'); page.wait_for_function("document.querySelector('#resume').classList.contains('hide')")
             check("…a click opens it (the page now shows that run, with its papers)", page.evaluate("RUN && RUN.id") == run_b["id"] and page.evaluate("papers.size") == 6, str(page.evaluate("RUN && RUN.id")))
+
+            print("SSRN is searched by words")
+            ssrnlog = os.path.join(TMP, "ssrn.log")
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#searchbtn", state="attached"); page.wait_for_timeout(500)
+            page.click('.tabs button[data-tab="search"]')
+            page.click("#jall"); page.fill("#focus", "")
+            check("SSRN is a choice among the journals, off by default and not switched on by 'all', with a note that it needs words", page.locator('#journalchips .chip[data-abbr="SSRN"]').count() == 1 and page.locator('#journalchips .chip[data-abbr="SSRN"].on').count() == 0)
+            page.click('#journalchips .chip[data-abbr="SSRN"]')
+            check("choosing SSRN says it is searched by words and that a focus phrase is needed; the estimate counts its best matches, not a whole year", "focus phrase" in page.inner_text("#est") and "200 best matches" in page.inner_text("#est"), page.inner_text("#est"))
+            page.click("#searchbtn")
+            try:
+                page.wait_for_function("document.querySelector('#toast') && /SSRN is searched by words/.test(document.querySelector('#toast').textContent)", timeout=8000)
+            except Exception:  # noqa: BLE001  (the check below says what is wrong)
+                pass
+            check("pressing Search with SSRN and no focus phrase is refused with what to do, and starts nothing", "SSRN is searched by words" in page.inner_text("#toast") and not os.path.exists(ssrnlog) and not api("/api/state")["busy"])
+            page.click("#jnone"); page.click('#journalchips .chip[data-abbr="SSRN"]'); page.select_option("#y0", "2024"); page.select_option("#y1", "2024"); page.fill("#focus", "platform governance")
+            n_runs = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
+            page.click("#searchbtn"); run_s = wait_idle(2, not_ids=(run_a["id"], run_b["id"]))
+            check("with a focus phrase, SSRN is searched by those words and its papers are screened and listed as SSRN's", open(ssrnlog).read().splitlines() == ["platform governance|2024|2024|200"] and run_s["n_papers"] == 2 and run_s["params"]["journals"] == ["SSRN"] and len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"]) == n_runs + 1,
+                  str((open(ssrnlog).read() if os.path.exists(ssrnlog) else None, run_s["n_papers"])))
+            check("the page is told that SSRN is a words-only source (so it never joins the weekly check or an 'all journals' choice)", [j for j in api("/api/config")["journals"] if j["abbr"] == "SSRN"][0]["needs_query"] is True and [j for j in api("/api/config")["journals"] if j["abbr"] == "SSRN"][0]["default_off"] is True)
+            cfg_s = api("/api/config")["journals"]
+            tiles_w = page.evaluate("(() => { const old = RUN; RUN = {kind: 'weekly', params: {}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
+            tiles_s = page.evaluate("(() => { const old = RUN; RUN = {kind: 'search', params: {journals: ['SSRN']}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
+            check("a weekly check shows no SSRN tile (it is never read there, so it would claim 'No new papers'), while an archive search that chose SSRN still shows it",
+                  [j for j in cfg_s if j["abbr"] == "SSRN"][0]["weekly"] is False and all(j["weekly"] is True for j in cfg_s if j["abbr"] != "SSRN") and "SSRN" not in tiles_w and len(tiles_w) == len(cfg_s) - 1 and tiles_s == ["SSRN"], str((tiles_w, tiles_s)))
 
             print("Check my PDFs: a PDF that is not the paper it is filed under can be found, kept or taken out")
             import pymupdf as _pmu

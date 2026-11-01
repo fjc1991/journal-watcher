@@ -57,8 +57,15 @@ def load_json(path, default):
     return dl.load_json(path, default)
 
 
+SSRN = {"name": "SSRN", "abbr": "SSRN", "publisher": "ssrn", "source": "ssrn", "issn": None, "doi_prefix": fx.SSRN_PREFIX, "crossref_type": "posted-content", "per_year": None,
+        "archive": True, "weekly": False, "needs_query": True, "default_off": True, "limit": fx.SSRN_LIMIT}
+
+
 def journals():
-    return load_json(os.path.join(BASE, "journals.json"), {"journals": []})["journals"]
+    """The journals of your journals.json, and SSRN: a place to search by words (an archive search with a focus phrase), never read in the weekly check and never selected
+    by itself. It is added here so that a journals.json copied before SSRN existed has it too."""
+    js = load_json(os.path.join(BASE, "journals.json"), {"journals": []})["journals"]
+    return js + [dict(SSRN)] if not any(j.get("abbr") == "SSRN" for j in js) else js
 
 
 def interests():
@@ -421,7 +428,7 @@ def set_j(run, emit, abbr, **kw):
 def fetch_weekly(run, emit, stop):
     seen_path = os.path.join(STATE, "seen.json")
     seen = load_json(seen_path, {})
-    js = journals()
+    js = [j for j in journals() if j.get("weekly", True)]
     fresh_all = []
     for j in js:
         set_j(run, emit, j["abbr"], state="queued", label="Waiting", done=0, total=0)
@@ -479,14 +486,15 @@ FETCH_KEEP_DAYS = 7        # a past year's articles hardly change ...
 FETCH_KEEP_DAYS_NOW = 1    # ... but the current year's list grows every week
 
 
-def _fetched_path(abbr, y0, y1):
-    return os.path.join(FETCHED, "%s_%s_%s.json" % (re.sub(r"[^A-Za-z0-9]+", "", abbr or "x"), y0, y1))
+def _fetched_path(abbr, y0, y1, words=""):
+    tag = "_" + hashlib.sha1(words.strip().lower().encode("utf-8")).hexdigest()[:8] if words else ""         # (a search by words: the words are part of what was asked)
+    return os.path.join(FETCHED, "%s_%s_%s%s.json" % (re.sub(r"[^A-Za-z0-9]+", "", abbr or "x"), y0, y1, tag))
 
 
-def saved_fetch(abbr, y0, y1, now=None):
+def saved_fetch(abbr, y0, y1, now=None, words=""):
     """(items, fetched_at) from the saved copy of this journal and year range, or (None, None) when there is none or it is older than FETCH_KEEP_DAYS days (a day when the
     range reaches the current year)."""
-    d = load_json(_fetched_path(abbr, y0, y1), None)
+    d = load_json(_fetched_path(abbr, y0, y1, words), None)
     if not d or not d.get("items") or not d.get("at"):
         return None, None
     try:
@@ -497,9 +505,9 @@ def saved_fetch(abbr, y0, y1, now=None):
     return (d["items"], d["at"]) if 0 <= age < keep else (None, None)
 
 
-def save_fetch(abbr, y0, y1, items):
+def save_fetch(abbr, y0, y1, items, words=""):
     os.makedirs(FETCHED, exist_ok=True)
-    path = _fetched_path(abbr, y0, y1)
+    path = _fetched_path(abbr, y0, y1, words)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "items": items}, f, ensure_ascii=False)
@@ -516,7 +524,8 @@ def fetch_search(run, emit, stop):
             return
         label = "Searching %s %s–%s" % (j["abbr"], p["year_from"], p["year_to"])
         emit("progress", {"stage": "fetching", "label": label, "done": n - 1, "total": len(js)})
-        saved, when = saved_fetch(j["abbr"], int(p["year_from"]), int(p["year_to"]))
+        words = p.get("query") or "" if j.get("source") == "ssrn" else ""
+        saved, when = saved_fetch(j["abbr"], int(p["year_from"]), int(p["year_to"]), words=words)
         if saved:                                                 # asked before, not long ago: use the saved copy (abstracts included)
             for it in saved:
                 if run.add_paper(dict(it)):
@@ -527,10 +536,13 @@ def fetch_search(run, emit, stop):
             continue
         set_j(run, emit, j["abbr"], state="fetching", label="Querying Crossref")
         try:
-            items = fx.crossref_journal_range(
-                j.get("issn"), int(p["year_from"]), int(p["year_to"]),
-                progress=lambda a, b, ab=j["abbr"]: set_j(run, emit, ab, done=a, total=b),
-                doi_prefix=j.get("doi_prefix"), work_type=j.get("crossref_type", "journal-article"))
+            if j.get("source") == "ssrn":                       # SSRN is only searched by words: the best matches of the focus phrase
+                items = fx.crossref_ssrn(words, int(p["year_from"]), int(p["year_to"]), limit=j.get("limit") or fx.SSRN_LIMIT)
+            else:
+                items = fx.crossref_journal_range(
+                    j.get("issn"), int(p["year_from"]), int(p["year_to"]),
+                    progress=lambda a, b, ab=j["abbr"]: set_j(run, emit, ab, done=a, total=b),
+                    doi_prefix=j.get("doi_prefix"), work_type=j.get("crossref_type", "journal-article"))
         except Exception as e:
             run.errors.append("%s: %s" % (j["abbr"], str(e)[:120]))
             emit("log", {"msg": "%s search failed: %s" % (j["abbr"], str(e)[:120]), "level": "warn"})
@@ -553,7 +565,7 @@ def fetch_search(run, emit, stop):
         emit("log", {"msg": "%s: %d articles (%d with abstract)"
                      % (j["abbr"], len(items), sum(1 for x in items if x.get("abstract")))})
         if items and not stop.is_set():
-            save_fetch(j["abbr"], y0, y1, items)
+            save_fetch(j["abbr"], y0, y1, items, words=words)
         run.save()
     emit("progress", {"stage": "fetching", "label": "Fetched", "done": len(js), "total": len(js)})
 
