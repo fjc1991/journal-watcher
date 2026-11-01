@@ -50,15 +50,26 @@ class AIError(Exception):
     """A problem the user can act on (missing key, provider down...): shown as-is in the UI."""
 
 
+class Blocked(AIError):
+    """The call was not made, and trying again now cannot help: this month's budget is used up, local-only mode forbids the provider, no key or no provider is set.
+    A job that makes many calls (screening) stops on it instead of retrying and instead of marking every paper as failed."""
+
+
+class Declined(AIError):
+    """The model refused to answer this request. Asking again would pay again for the same refusal."""
+
+
 class Cancelled(AIError):
     """The user pressed Cancel in the activity tray: the call stops between two pieces of the answer (what was already generated is still billed)."""
 
 
 # ---------------------------------------------------------------- config
 
+SCREEN_FEATURE = {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}      # the screening of new papers (pipeline.screen): what it used before it had a setting of its own
+
 DEFAULT = {
     "providers": {"anthropic": {"type": "anthropic", "key_env": "ANTHROPIC_API_KEY", "models": ["claude-sonnet-5-5"]}},
-    "features": {"ask": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}},
+    "features": {"ask": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}, "screen": dict(SCREEN_FEATURE)},
     "embeddings": {"provider": "local", "model": "BAAI/bge-small-en-v1.5"},
     "prices": {},
     "privacy": {"local_only": False},
@@ -72,6 +83,9 @@ def config_data():
     c.setdefault("privacy", {"local_only": False})
     c.setdefault("budget", {"monthly_usd": None})
     c.setdefault("screening", {"reuse_days": 90})
+    feats = c.setdefault("features", {})
+    if "screen" not in feats:           # an ai.json from before screening had a setting: screening keeps Claude (it does not follow the Ask setting, which may be another provider), unless that provider is not there at all
+        feats["screen"] = dict(SCREEN_FEATURE) if SCREEN_FEATURE["provider"] in (c.get("providers") or {}) else dict(feats.get("ask") or SCREEN_FEATURE)
     return c
 
 
@@ -309,15 +323,15 @@ def _route(feature, override=None, web=False):
         f.update({k: v for k, v in override.items() if k in ("provider", "model", "effort") and v})
     p = c["providers"].get(f["provider"])
     if not p:
-        raise AIError("No provider is set for “%s”. Choose one in Settings → AI." % feature)
+        raise Blocked("No provider is set for “%s”. Choose one in Settings → AI." % feature)
     if c["privacy"].get("local_only") and not is_local(p):
-        raise AIError("Local-only mode is on, so “%s” can’t use %s. Choose Ollama for this feature or turn local-only off in Settings → AI." % (feature, f["provider"]))
+        raise Blocked("Local-only mode is on, so “%s” can’t use %s. Choose Ollama for this feature or turn local-only off in Settings → AI." % (feature, f["provider"]))
     if p.get("key_env") and not _key(p["key_env"]):
-        raise AIError("%s isn’t set up: add %s=… to the .env file in the project folder (no restart needed), "
+        raise Blocked("%s isn’t set up: add %s=… to the .env file in the project folder (no restart needed), "
                       "or pick another provider in Settings → AI." % (f["provider"], p["key_env"]))
     bud = c["budget"].get("monthly_usd")
     if bud and month_spend() >= bud:
-        raise AIError("This month’s AI budget ($%.2f) is used up. Raise it in Settings → Usage, or wait until next month." % bud)
+        raise Blocked("This month’s AI budget ($%.2f) is used up. Raise it in Settings → Usage, or wait until next month." % bud)
     if web and not can_search_web(p):
         raise AIError("%s can’t search the web. Pick Claude, OpenRouter or OpenAI for this feature in Settings → AI." % f["provider"])
     return f["provider"], p, f
@@ -491,7 +505,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     except anthropic.APIConnectionError as e:
         raise AIError("Can’t reach Anthropic (%s)." % str(e)[:120])
     if msg.stop_reason == "refusal":
-        raise AIError("The model declined to answer this.")
+        raise Declined("The model declined to answer this.")
     u = msg.usage
     sources, seen = [], set()
     for b in msg.content:

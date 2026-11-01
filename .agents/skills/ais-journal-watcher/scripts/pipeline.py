@@ -31,6 +31,7 @@ import folders as fo  # noqa: E402
 import authorcache as ac  # noqa: E402
 import readstate as rs  # noqa: E402
 import ai  # noqa: E402
+import activity as act  # noqa: E402
 
 BASE, ROOT, STATE, PAPERS = dl.BASE, dl.ROOT, dl.STATE, dl.PAPERS
 RUNS = os.path.join(STATE, "runs")
@@ -657,6 +658,8 @@ def screening_system(topics, query, method_names=None):
 
 
 def _screen_batch(system, batch, usage):
+    """One batch of papers judged by the model of the "screen" feature (Settings → AI), through the AI layer: the monthly budget stops it, local-only mode applies, and
+    every call is in the usage ledger. Raises ai.Blocked when nothing more may be asked (the caller stops the whole screening); {} when the batch could not be judged."""
     items = []
     for n, p in enumerate(batch, 1):
         items.append({"n": n, "journal": p.get("abbr"), "year": (p.get("pub_date") or "")[:4],
@@ -664,26 +667,21 @@ def _screen_batch(system, batch, usage):
                       "abstract": (p.get("abstract") or "")[:1800] or None})
     for attempt in range(3):
         try:
-            msg = client().beta.messages.create(
-                model=MODEL, max_tokens=8000, betas=BETAS, fallbacks="default",
-                thinking={"type": "adaptive"},
-                output_config={"effort": "low",
-                               "format": {"type": "json_schema", "schema": SCREEN_SCHEMA}},
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": json.dumps(items, ensure_ascii=False)}],
-            )
-        except anthropic.RateLimitError:
-            time.sleep(10 * (attempt + 1))
+            res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000)
+        except ai.Declined:
+            return {}                                          # a refusal is final: asking again would pay again for the same refusal
+        except (ai.Blocked, ai.Cancelled):
+            raise
+        except ai.AIError:                                     # the provider was busy or unreachable: wait and ask again
+            if attempt < 2:
+                time.sleep(10 * (attempt + 1))
             continue
-        usage.add(msg.usage)
-        if msg.stop_reason == "refusal":
-            return {}
-        text = "".join(b.text for b in msg.content if b.type == "text")
+        usage.add_result(res)
         try:
-            res = json.loads(text)["results"]
-        except (ValueError, KeyError):
+            out = json.loads(res.text)["results"]
+        except (ValueError, KeyError, TypeError):
             continue
-        return {r["n"]: r for r in res if isinstance(r.get("n"), int)}
+        return {r["n"]: r for r in out if isinstance(r, dict) and isinstance(r.get("n"), int)}
     return {}
 
 
@@ -700,9 +698,15 @@ def reuse_days():
         return 90
 
 
+def screen_model():
+    """The model that screens, as Settings → AI sets it. Claude Sonnet 5.5 is named as before (so verdicts saved earlier still count); another provider or model by name."""
+    prov, model = ai.feature_model("screen")
+    return MODEL if (prov, model) == ("anthropic", MODEL) else "%s/%s" % (prov, model)
+
+
 def screen_fingerprint(system):
     """A verdict answers one question: the model and the whole instruction it was given (topics, method, focus phrase). Another question gets its own verdicts."""
-    return hashlib.sha256((MODEL + "\n" + system).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256((screen_model() + "\n" + system).encode("utf-8")).hexdigest()[:16]
 
 
 def paper_digest(p):
@@ -771,17 +775,28 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
         emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question (about $%.2f not paid for again)" % (len(known), len(known) * EST_SCREEN_COST_PER_PAPER)})
         run.save(force=True)
     batches = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
-    done = 0
-    emit("progress", {"stage": "screening", "label": "Screening with Sonnet 5.5", "done": 0, "total": len(todo)})
+    done, blocked = 0, None
+    emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": len(todo)})
     valid = set(topic_labels())
     with ThreadPoolExecutor(workers) as ex:
-        futs = {ex.submit(_screen_batch, system, b, run.usage): b for b in batches}
+        job_batch = act.wrap(_screen_batch)                    # the pool's threads belong to the job that called screen(): its Cancel button and its cost counter reach them
+        futs = {ex.submit(job_batch, system, b, run.usage): b for b in batches}
         for fut in as_completed(futs):
             if stop.is_set():
                 for f in futs:
                     f.cancel()
                 break
-            batch, res = futs[fut], fut.result()
+            batch = futs[fut]
+            if fut.cancelled():                                # cancelled below once nothing more may be asked: never started, not paid for
+                continue
+            try:
+                res = fut.result()
+            except (ai.Blocked, ai.Cancelled) as e:            # nothing more may be asked (budget, local-only, no key) or the user cancelled: the papers stay unscreened, to pick up later
+                for f in futs:
+                    f.cancel()
+                if blocked is None:
+                    blocked = e
+                continue
             for n, p in enumerate(batch, 1):
                 r = res.get(n)
                 if not r:
@@ -797,11 +812,16 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                     p["method"] = r.get("method")
                 emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason")})
             done += len(batch)
-            emit("progress", {"stage": "screening", "label": "Screening with Sonnet 5.5",
+            emit("progress", {"stage": "screening", "label": "Screening",
                               "done": done, "total": len(todo)})
             emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d})
             remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
             run.save()
+    if blocked is not None:
+        left = len([p for p in todo if not p.get("verdict")])
+        if not isinstance(blocked, ai.Cancelled):
+            emit("log", {"msg": "Screening stopped with %d papers not screened: %s Search again once that is fixed: the papers already judged are kept, and only the others are screened." % (left, blocked), "level": "warn"})
+        run.save(force=True)
     # remember weekly verdicts for agent.py
     if run.kind == "weekly":
         jpath = os.path.join(STATE, "judged.json")

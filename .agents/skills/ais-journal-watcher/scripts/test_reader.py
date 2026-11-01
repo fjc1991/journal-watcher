@@ -2736,6 +2736,98 @@ def main():
             pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts = real
             ai.save_config({"screening": saved_state["screening"]})
 
+    def t_screen_ai():
+        """Screening goes through the AI layer: the "screen" setting (not Ask) picks the model, the monthly budget stops it (papers left unscreened, not marked as failed), local-only mode applies,
+        every call is in the usage ledger and the running job's cost, a refusal is not asked again, a busy provider is, Cancel reaches the worker threads, and saved verdicts still count."""
+        import pipeline as pl_, activity as act_, types
+        topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
+        saved_cfg = open(ai.CONFIG).read() if os.path.exists(ai.CONFIG) else None
+        real_compat, real_sleep = ai._compat, pl_.time.sleep
+        calls, events, stop = [], [], threading.Event()
+        emit = lambda ev, d=None: events.append((ev, d))
+        mode = {"fail": None}
+        def fake_compat(name, p, f, messages, system, schema, max_tokens, web=False):
+            calls.append((name, f["model"], schema is not None, "Topics" in (system or "") or "Topic" in (system or "")))
+            if mode["fail"] == "declined":
+                raise ai.Declined("The model declined to answer this.")
+            if mode["fail"] == "busy-once":
+                mode["fail"] = None
+                raise ai.AIError("fake: overloaded")
+            items = json.loads(messages[-1]["content"])
+            yield "done", ai.Result(json.dumps({"results": [{"n": it["n"], "verdict": "download" if "Platform" in it["title"] else "skip", "relevance": 80, "topics": [topic], "reason": "because", "method": None} for it in items]}),
+                                    {"in": 1_000_000, "out": 0}, name, f["model"])         # $1.00 a call at the test price
+        def new_run(query="", titles=("Platform A", "Platform B", "Other C")):
+            r = pl_.Run("search", {"year_from": 2024, "year_to": 2024, "journals": [abbr], "topics": [topic], "methods": [], "query": query})
+            for k, ttl in enumerate(titles):
+                r.add_paper({"id": "s%d" % k, "title": ttl, "abbr": abbr, "pub_date": "2024-03-01", "abstract": "About platforms.", "keywords": ["x"]})
+            return r
+        def config(screen=None, local_only=False, budget=None):
+            c = {**CFG, "providers": {**CFG["providers"], "anthropic": {"type": "anthropic", "key_env": "NO_SUCH_KEY_XYZ", "models": [pl_.MODEL]}, "remote": {"type": "openai_compat", "base_url": "http://example.invalid/v1", "key_env": ""}},
+                 "features": {"ask": {"provider": "fake", "model": "m1"}, **({"screen": screen} if screen else {})}, "privacy": {"local_only": local_only}, "budget": {"monthly_usd": budget}}
+            write_cfg(c)
+        try:
+            ai._compat = fake_compat; pl_.time.sleep = lambda s: None
+            if os.path.exists(pl_.VERDICTS): os.remove(pl_.VERDICTS)
+            # 1. a settings file from before screening had its own setting: screening keeps Claude Sonnet 5.5, it does not follow the Ask model, and saved verdicts stay valid
+            config()
+            assert ai.feature_model("screen") == ("anthropic", pl_.MODEL) and ai.feature_model("ask") == ("fake", "m1") and pl_.screen_model() == pl_.MODEL
+            assert pl_.screen_fingerprint("sys") == pl_.hashlib.sha256((pl_.MODEL + "\nsys").encode()).hexdigest()[:16]            # the same fingerprint as before: nothing saved is lost
+            c0 = json.loads(open(ai.CONFIG).read()); del c0["providers"]["anthropic"]; write_cfg(c0)                                          # no Claude provider in the file at all: screening follows Ask rather than pointing at nothing
+            assert ai.feature_model("screen") == ("fake", "m1") and ai.config()["features"]["screen"]["provider"] in ai.config()["providers"]
+            # 2. the budget: two calls fit, the third is refused; the paper it would have judged stays unscreened (no "error" verdict) and is judged on the next search
+            config(screen={"provider": "fake", "model": "m1"})
+            assert pl_.screen_model() == "fake/m1"
+            base = ai.month_spend(); ai.save_config({"budget": {"monthly_usd": base + 1.5}})
+            job = act_.start("test", "screening test"); r = new_run(); calls.clear()
+            pl_.screen(r, emit, stop, batch_size=1, workers=1)
+            job.finish()
+            judged = [i for i in r.order if r.papers[i].get("verdict")]
+            assert len(calls) == 2 and len(judged) == 2 and not any(r.papers[i].get("verdict") == "error" for i in r.order), (calls, judged)
+            assert any(e == "log" and d.get("level") == "warn" and "budget" in d["msg"] and "1 papers not screened" in d["msg"] for e, d in events), events[-3:]
+            assert abs(r.usage.d.get("extra", 0) - 2.0) < 1e-6, r.usage.d                                                               # the run's cost counts what was paid
+            assert abs(job.cost - 2.0) < 1e-6, job.cost                                                                                    # ...and so does the running job's (the pool's threads belong to it)
+            rows = [x for x in ai.usage_log(10) if x["feature"] == "screen"]
+            u = ai.usage_summary()
+            assert len(rows) == 2 and u["by_feature"]["screen"]["calls"] == 2 and abs(u["by_feature"]["screen"]["cost"] - 2.0) < 1e-6 and u["warn"], u["by_feature"]   # Settings → Usage shows it
+            assert calls[0][2] is True                                                                                                     # the answer is asked as JSON matching the schema
+            # 3. after the budget is raised, the same search screens only the paper that is left; the other two come from the saved verdicts at no cost
+            ai.save_config({"budget": {"monthly_usd": None}}); calls.clear(); events.clear()
+            r2 = new_run(); pl_.screen(r2, emit, stop, batch_size=1, workers=1)
+            assert len(calls) == 1 and r2.reused == 2 and all(r2.papers[i].get("verdict") for i in r2.order), (calls, r2.reused)
+            # 4. local-only mode applies to screening: a remote provider is refused before anything is sent
+            config(screen={"provider": "remote", "model": "m"}, local_only=True); calls.clear(); events.clear()
+            r3 = new_run(query="local only"); pl_.screen(r3, emit, stop, batch_size=1, workers=1)
+            assert not calls and not any(r3.papers[i].get("verdict") for i in r3.order) and any(e == "log" and "Local-only" in d["msg"] for e, d in events), (calls, events[-2:])
+            # 5. a refusal is final (asked once), a busy provider is asked again
+            config(screen={"provider": "fake", "model": "m1"}); mode["fail"] = "declined"; calls.clear()
+            r4 = new_run(query="refused"); pl_.screen(r4, emit, stop, batch_size=3, workers=1)
+            assert len(calls) == 1 and {r4.papers[i]["verdict"] for i in r4.order} == {"error"}, calls
+            mode["fail"] = "busy-once"; calls.clear()
+            r5 = new_run(query="busy"); pl_.screen(r5, emit, stop, batch_size=3, workers=1)
+            assert len(calls) == 2 and all(r5.papers[i]["verdict"] in ("download", "skip") for i in r5.order), calls
+            # 6. Cancel pressed in the activity tray reaches the pool's threads: nothing is asked, nothing is marked as failed
+            job = act_.start("test", "cancelled screening"); job.cancel_ev.set(); calls.clear(); events.clear()
+            r6 = new_run(query="cancelled"); pl_.screen(r6, emit, stop, batch_size=1, workers=2)
+            job.finish()
+            assert not calls and not any(r6.papers[i].get("verdict") for i in r6.order) and not any(e == "log" and d.get("level") == "warn" for e, d in events), (calls, events[-2:])
+            # 7. once the budget is used up, the batches still waiting are dropped instead of each being refused in turn (each refusal reads the whole ledger)
+            config(screen={"provider": "fake", "model": "m1"}); ai.save_config({"budget": {"monthly_usd": max(ai.month_spend(), 0.000001)}})
+            reads, real_spend = [], ai.month_spend
+            ai.month_spend = lambda: reads.append(1) or real_spend()
+            try:
+                r7 = new_run(query="many", titles=["Platform %d" % k for k in range(40)]); calls.clear()
+                pl_.screen(r7, emit, stop, batch_size=1, workers=1)
+            finally:
+                ai.month_spend = real_spend
+            assert not calls and len(reads) < 12 and not any(r7.papers[i].get("verdict") for i in r7.order), (len(reads), calls)
+            ai.save_config({"budget": {"monthly_usd": None}})
+        finally:
+            ai._compat, pl_.time.sleep = real_compat, real_sleep
+            if saved_cfg is None:
+                os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
+            else:
+                open(ai.CONFIG, "w").write(saved_cfg)
+
     def t_ssrn():
         """SSRN is searched by words through Crossref (DOI prefix 10.2139): the request, the answer, the pseudo-journal, the saved copy, the weekly check leaving it alone, the paper's own page."""
         import pipeline as pl_
@@ -2821,6 +2913,7 @@ def main():
 
     check("browser: on a paywalled landing page only THIS article's PDF link is followed (its own link wherever the page puts it: aside, tab strip, 'footer'-named wrapper, other host, citation_pdf_url; not another site, a reference list, the footer, a banner PDF, another article or one whose DOI merely starts with ours)", t_link_follow)
     check("search memory: a verdict is reused for the same question and the same paper text (never another question, another text, an error, or one older than the number of days you set), a journal's year range is kept for a while, and the same search is the same saved run", t_search_memory)
+    check("screening goes through the AI layer: its own model setting (not Ask), stopped by the monthly budget with the papers left unscreened, local-only mode applies, in the usage ledger and the job's cost, a refusal is not asked again, Cancel reaches its threads", t_screen_ai)
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
     check("SSRN: searched by words through Crossref (prefix 10.2139: only SSRN's own, capped), a pseudo-journal that is never read weekly and not added twice, the papers marked as SSRN's, a saved copy per phrase, the paper's own page, and its download link followed only when it is that paper's", t_ssrn)

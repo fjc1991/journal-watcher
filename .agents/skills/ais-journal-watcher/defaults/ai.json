@@ -69,6 +69,11 @@
       "model": "claude-sonnet-5-5",
       "effort": "low"
     },
+    "screen": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "effort": "low"
+    },
     "summarize": {
       "provider": "anthropic",
       "model": "claude-sonnet-5-5",
