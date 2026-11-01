@@ -4,7 +4,8 @@ import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, 
 
 let root, D = null, tab = "ai", LOG = [];
 const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's passages"], ["explain", "Explain selection", "The one-click prompts on selected text and figures"],
-  ["suggest", "Suggested questions", "Ideas for what to ask next"], ["summarize", "Paper summaries", "The pipeline's summary for each downloaded paper"],
+  ["suggest", "Suggested questions", "Ideas for what to ask next"], ["screen", "Screening new papers", "Judges each new paper from its title and abstract (weekly check and archive search). The monthly budget stops it; what is left unscreened is picked up by the next search"],
+  ["summarize", "Paper summaries", "The pipeline's summary for each downloaded paper"],
   ["card", "Paper cards", "The structured, cited card of each paper (needs long, reliable JSON output)"], ["events", "Ideas Lab: current events", "Searches the web: pick Claude, OpenAI or OpenRouter"],
   ["ideas", "Ideas Lab: ideas and outlines", "Writes the research ideas and develops them — your strongest model"], ["reviewer", "Reviewer 2: a critical read of your text", "Needs judgement and care — use your strongest model"], ["audio", "Spoken briefings", "Writes the two-minute script that your browser reads aloud — a cheap model is enough"], ["flashcards", "Flashcards", "Writes question-and-answer cards from your paper cards — a cheap model is enough"], ["synthesis", "Synthesis map and gaps", "Reads all the cards of a folder at once — a strong model finds more"], ["claims", "Claim check", "Judges whether your papers support what you wrote — a strong model checks more carefully"], ["draft", "Related-work drafter", "Writes the section from your paper cards — prose matters, so use a strong model"], ["critique", "Ideas Lab: the editor", "Scores each idea for novelty, feasibility, significance and fit"],
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
@@ -53,7 +54,7 @@ function renderAI(body) {
     <table class="st-table"><tr><th>Feature</th><th>Provider</th><th>Model</th><th>Effort</th><th></th></tr>
     ${FEATURES.map(([k, t, d]) => { const f = A.features[k] || A.features.ask; return `<tr data-f="${k}"><td><b>${t}</b><br><small>${d}</small></td>
       <td><select class="fp">${pnames.map(n => `<option${f.provider === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></td>
-      <td><input type="text" class="fm" list="dl-${k}" aria-label="Model for ${esc(k)}" value="${esc(f.model)}"><datalist id="dl-${k}">${(A.providers[f.provider].models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist></td>
+      <td><input type="text" class="fm" list="dl-${k}" aria-label="Model for ${esc(k)}" value="${esc(f.model)}"><datalist id="dl-${k}">${((A.providers[f.provider] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist></td>
       <td><select class="fe">${["low", "medium", "high"].map(e => `<option${(f.effort || "low") === e ? " selected" : ""}>${e}</option>`).join("")}</select></td>
       <td><button class="btn small" data-testf="${k}">Test</button> <span class="tres"></span></td></tr>`; }).join("")}
     <tr data-f="emb"><td><b>Embeddings</b><br><small>Used to find relevant passages</small></td><td><select class="fp">${["local", ...pnames].map(n => `<option${A.embeddings.provider === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></td>

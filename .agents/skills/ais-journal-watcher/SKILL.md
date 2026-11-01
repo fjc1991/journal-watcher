@@ -33,7 +33,7 @@ Double-click **`Journal Watcher.command`** in the checkout (or use the Mac app).
   Filter, tick, then **Download & summarize**. Per-paper status is live, and summaries open in the side drawer.
 - **Publisher logins** button = `browser.py login`. **Library** = everything downloaded. **Past runs** reopen saved runs
   (`state/runs/*.json`).
-- Engine: `scripts/pipeline.py` (fetch / screen / download / summarize with an `emit` callback). Screening uses batches of 25,
+- Engine: `scripts/pipeline.py` (fetch / screen / download / summarize with an `emit` callback). Screening goes through the AI layer (`ai.chat("screen", …)`: model set in Settings → AI, monthly budget, usage ledger) in batches of 25,
   4 in parallel, structured JSON output at effort `low`, about $0.0015 per paper (a full year of all 7 journals is ~900 papers, ~$1.40).
 - JMIS and DSS have no abstracts in Crossref. Add a free `OPENALEX_API_KEY` to `.env` to fill them; otherwise those papers
   are screened on title and tagged "title only".

@@ -557,6 +557,18 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** SSRN's own site was unreachable from the sandbox (403), so the page, its download link's real form and the sign-in were never seen: the link rule assumes a `Delivery.cfm` link carrying the paper number. The first real try on the author's Mac decides.
 
+### Item 9. Screening bypassed the monthly budget
+
+**Found.** While planning the next steps: `pipeline._screen_batch` called the Anthropic client directly, so `ai.json` → `budget.monthly_usd` never stopped screening, the calls were absent from `state/ai_usage.jsonl` (Settings → Usage), and local-only mode did not apply to it. Screening is the largest spender (every new paper), so the budget guarded the small calls and not the big one.
+
+**Decision (the author's).** Route it through the budgeted layer instead of adding a second budget check.
+
+**What changed.** `_screen_batch` calls `ai.chat("screen", …, schema=SCREEN_SCHEMA)`. `ai.py`: a "screen" feature (default Claude Sonnet 5.5, effort low, the same as before; an `ai.json` written before it existed gets this default and does *not* fall back to the Ask model, which could silently be another provider); `ai.Blocked` (budget used up, local-only forbids the provider, no key or provider: asking again cannot help) and `ai.Declined` (a refusal) as subclasses of `AIError`, raised by `_route` / `_anthropic`. `pipeline.screen`: the batches run in the activity job of the caller (`activity.wrap`: otherwise the tray's Cancel and cost counter do not reach the pool's threads); on `Blocked` or a cancel the pending batches are dropped, the batches already paid for are still applied and saved, the remaining papers keep *no* verdict (not "error") with a warning that says why, and the next search of the same saved run screens only those. A refusal is not asked again; a busy provider is, up to three times. The verdict fingerprint names the model as before when it is Claude Sonnet 5.5, so saved verdicts stay valid (another model gets its own). Settings → AI has a "Screening new papers" row. The budget is checked before each call, so with 4 batches in flight it can be exceeded by up to 4 calls (a few cents).
+
+**Tests.** `test_reader.py` `t_screen_ai` (fake provider at the adapter, $1 a call): an old `ai.json` keeps Claude and the same fingerprint; the budget lets 2 of 3 calls through, leaves the third paper unscreened with a warning, the run's cost, the job's cost and the ledger/Usage show exactly the 2 calls; after raising the budget only the left paper is asked (2 verdicts reused); local-only refuses a remote provider before anything is sent; a refusal is asked once and a busy provider twice; a cancelled job asks nothing. The test found a real bug in the first version (cancelled pending batches raised `CancelledError` in the result loop).
+
+**Not verified.** No real model was called. A user whose `ai.json` has an Anthropic provider without the `betas` / `fallbacks` / `thinking` entries that `defaults/ai.json` carries will now screen without them (before, they were always sent); the default file has them.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
