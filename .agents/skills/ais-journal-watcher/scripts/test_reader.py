@@ -2569,7 +2569,9 @@ def main():
                  "/hidden": "<h1>Library</h1><div style='display:none'><input type=password></div><p>Access provided by Test University</p>",
                  "/challenge": "<title>Just a moment...</title><p>Checking your browser before accessing</p>",
                  "/ssrn-own": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code99.pdf?abstractid=4723385&mirid=1'>Download This Paper</a>",
-                 "/ssrn-other": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code1.pdf?abstractid=9999999&mirid=1'>Download another</a><a href='/sol3/Delivery.cfm/SSRN_ID47233851_code1.pdf?abstractid=47233851'>a longer number</a>"}
+                 "/ssrn-other": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code1.pdf?abstractid=9999999&mirid=1'>Download another</a><a href='/sol3/Delivery.cfm/SSRN_ID47233851_code1.pdf?abstractid=47233851'>a longer number</a>",
+                 "/ssrn-stray": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code4723385.pdf?abstractid=9999999'>another paper, whose code field equals our number</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=4723385&mirid=1'>This paper</a>",
+                 "/ssrn-bare": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/file_4723385.pdf'>a link with the number but no identifier</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=1111111'>names two papers</a>"}
         REDIRECTS = {"/hop1": "/hop2", "/hop2": "/open", "/to-login": "/idp/login?x=1"}
         class Pub(BaseHTTPRequestHandler):
             def log_message(self, *a): pass
@@ -2622,7 +2624,12 @@ def main():
                 pg_.goto(base3 + "/ssrn-own"); own_ = brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.2139/ssrn.4723385")
                 assert own_ and "Delivery.cfm" in own_ and "ID4723385" in own_, own_
                 pg_.goto(base3 + "/ssrn-other"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-other", "10.2139/ssrn.4723385") is None
-                pg_.goto(base3 + "/ssrn-own"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.1287/mnsc.2024.0001") is None          # another paper's DOI: the rule does not apply
+                # a stray number elsewhere in a link (a "code" field) is not the paper's identifier: skipped, and the real link after it is still found
+                pg_.goto(base3 + "/ssrn-stray"); st_ = brw.Browser._pdf_link(pg_, base3 + "/ssrn-stray", "10.2139/ssrn.4723385")
+                assert st_ and "SSRN_ID4723385_code7" in st_, st_
+                # the number alone is not an identifier, and a link naming two different papers is refused
+                pg_.goto(base3 + "/ssrn-bare"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-bare", "10.2139/ssrn.4723385") is None
+                pg_.goto(base3 + "/ssrn-own"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.1287/mnsc.2024.0001") is None         # another paper's DOI: the rule does not apply
             brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}                  # nobody listens
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):

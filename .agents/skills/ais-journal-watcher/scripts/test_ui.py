@@ -1891,6 +1891,11 @@ pl._screen_batch = fake_screen
             check("with a focus phrase, SSRN is searched by those words and its papers are screened and listed as SSRN's", open(ssrnlog).read().splitlines() == ["platform governance|2024|2024|200"] and run_s["n_papers"] == 2 and run_s["params"]["journals"] == ["SSRN"] and len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"]) == n_runs + 1,
                   str((open(ssrnlog).read() if os.path.exists(ssrnlog) else None, run_s["n_papers"])))
             check("the page is told that SSRN is a words-only source (so it never joins the weekly check or an 'all journals' choice)", [j for j in api("/api/config")["journals"] if j["abbr"] == "SSRN"][0]["needs_query"] is True and [j for j in api("/api/config")["journals"] if j["abbr"] == "SSRN"][0]["default_off"] is True)
+            cfg_s = api("/api/config")["journals"]
+            tiles_w = page.evaluate("(() => { const old = RUN; RUN = {kind: 'weekly', params: {}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
+            tiles_s = page.evaluate("(() => { const old = RUN; RUN = {kind: 'search', params: {journals: ['SSRN']}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
+            check("a weekly check shows no SSRN tile (it is never read there, so it would claim 'No new papers'), while an archive search that chose SSRN still shows it",
+                  [j for j in cfg_s if j["abbr"] == "SSRN"][0]["weekly"] is False and all(j["weekly"] is True for j in cfg_s if j["abbr"] != "SSRN") and "SSRN" not in tiles_w and len(tiles_w) == len(cfg_s) - 1 and tiles_s == ["SSRN"], str((tiles_w, tiles_s)))
 
             print("Check my PDFs: a PDF that is not the paper it is filed under can be found, kept or taken out")
             import pymupdf as _pmu
