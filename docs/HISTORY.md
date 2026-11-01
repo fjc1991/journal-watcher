@@ -569,6 +569,14 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** No real model was called. A user whose `ai.json` has an Anthropic provider without the `betas` / `fallbacks` / `thinking` entries that `defaults/ai.json` carries will now screen without them (before, they were always sent); the default file has them.
 
+### Item 10. The macOS 14 runner is retired (CI)
+
+**Found.** After the merge of #16 the `tests` run on `main` showed a red ✗ with both jobs cancelled within a second and no step run. The annotation said: "This job failed because of a scheduled macOS 14 runner image brownout. macOS 14 runner images will be retired on November 2, 2026" (actions/runner-images#13518). Every job that asks for `macos-14` fails from then on, not only in the brownout windows, so the tests and the release build would have stopped.
+
+**What changed.** `tests.yml` (both jobs) and `release.yml` use `macos-15` (Arm64, like `macos-14`; `macos-latest` would move under us again). No code changed.
+
+**Verified.** The pull request's own `tests` run is the check: it runs on `macos-15`. **Not verified:** `release.yml` on `macos-15`. A dry run costs a full macOS build and was not run; do one before the first real release (it is already on the list of things to do before releasing). Python 3.14 comes from `setup-python`, and the Mac app's wheels are prebuilt, so a different runner OS should not change what the app needs to run; the dry run is what shows it.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

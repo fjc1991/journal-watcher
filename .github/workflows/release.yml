@@ -21,7 +21,7 @@ permissions:
   contents: write
 jobs:
   mac:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
