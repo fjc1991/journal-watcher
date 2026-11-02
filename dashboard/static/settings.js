@@ -273,48 +273,83 @@ function testResult(r, last) {
   if (!r || !r.state) return "";
   const when = last && r.age_hours != null ? `<span class="hint" style="margin:0"> Last test ${esc(r.age_hours < 0.05 ? "just now" : agoWords(r.age_hours))}.</span>` : "";
   if (r.state === "ok") return `<p class="hint ok" style="margin:8px 0 0">✓ ${esc(r.message)}${when}</p>`;
-  const box = r.state === "unknown" ? "" : r.state === "login" ? " setup" : " net";
+  const box = r.state === "unknown" ? "" : ["login", "setup"].includes(r.state) ? " setup" : " net";
   return box ? `<div class="errbox${box}" style="margin:10px 0 0">${ico("warn", "sm")}<div class="eb-b"><div class="eb-d" style="margin:0;color:var(--ink)">${esc(r.message)}${when}</div></div></div>` : `<p class="hint" style="margin:8px 0 0">${esc(r.message)}${when}</p>`;
+}
+// what "Find my library's settings" found: the answer, the evidence (which pages, how many links) so it can be checked, and a button that fills the form in
+function detectResult(r) {
+  if (!r) return "";
+  const pages = (r.pages || []).filter(p => p.found).map(p => `<li><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url.replace(/^https?:\/\//, ""))}</a> <span class="hint" style="margin:0">${esc(p.found)}</span></li>`).join("");
+  const looked = (r.pages || []).length;
+  const good = r.mode === "openathens" ? r.verified !== false : !!r.mode;
+  const head = r.mode ? `<p class="hint${good ? " ok" : ""}" style="margin:10px 0 4px">${good ? "✓ " : ""}${esc(r.message)}</p>` : `<p class="hint" style="margin:10px 0 4px">${esc(r.message)}</p>`;
+  const use = (r.mode && good) || (!r.mode && r.ebsco_home) ? `<button class="btn primary" id="la-use" style="margin-top:6px">Use these settings</button>` : "";
+  return `${head}${pages ? `<details class="hint" style="margin:4px 0"><summary style="cursor:pointer">Where this was seen (${looked} page${looked === 1 ? "" : "s"} read)</summary><ul class="wl-list" style="margin:6px 0">${pages}</ul></details>` : ""}${use}`;
 }
 function renderLibraryAccessSigned(body, r) { const s = $("#la-signed", body); if (s) { s.textContent = "✓ Signed in · just now"; } else { const x = document.createElement("p"); x.className = "hint ok"; x.id = "la-signed"; x.textContent = "✓ Signed in · just now"; $(".st-actions", body).after(x); } }
 async function renderLibraryAccess(body, flash) {
   let P, S; try { [P, S] = await Promise.all([api("/api/library/access"), api("/api/signins")]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
-  const modes = [["institutional", "Through each publisher’s “sign in through your institution” page", "Works for most universities and needs no set-up: when you press Sign-ins → Other publisher sites, every publisher asks you to choose your university and you log in there once."],
-    ["openathens", "My library uses OpenAthens", "Ask your library, or look for “OpenAthens” on its e-resources page. You need its domain, which looks like myuni.ac.uk."],
-    ["ezproxy", "My library gives me an EZproxy link", "A web address that begins your library’s sign-in, for example https://ezproxy.myuni.edu/login?url= (the paper’s address is added after it)."],
-    ["vpn", "I am on campus or use my university’s VPN", "Access is by network address: connect the VPN and downloads just work. Nothing to sign in."],
+  const modes = [["openathens", "My library uses OpenAthens", "Works on and off campus: on campus your network address usually gives access already, off campus Journal Watcher goes through your library’s OpenAthens sign-in. Its domain looks like myuni.ac.uk (you can also paste any go.openathens.net link from your library’s site)."],
+    ["ezproxy", "My library gives me an EZproxy link", "Works on and off campus, like OpenAthens. A web address that begins your library’s sign-in, for example https://ezproxy.myuni.edu/login?url= (you can paste a whole proxied link: the part after url= is cut off)."],
+    ["institutional", "Through each publisher’s “sign in through your institution” page", "No set-up here: Sign-ins → Other publisher sites opens each publisher, where you choose your university and log in once per publisher."],
+    ["vpn", "Only on campus or on my university’s VPN", "Access by network address only. Nothing to sign in; off campus without the VPN, paywalled papers will not download."],
     ["none", "I have no institutional access", "Only open-access papers, your INFORMS/AIS memberships and any copy you add yourself."]];
   const e = S.library || {}, st = e.signs_in && S.library.signed_in !== undefined ? S.library : null;
-  body.innerHTML = `<div class="card st-card"><h2>Your university library</h2>
+  body.innerHTML = `<div class="card st-card"><h2>Find my library’s settings</h2>
+    <p class="hint">Paste your library’s web address (or any link to a database copied from its site). Journal Watcher reads a few of its pages, finds how it lets you in (OpenAthens, EZproxy, an EBSCO start page) and checks an OpenAthens domain with OpenAthens itself. Nothing is sent anywhere else.</p>
+    <div class="st-actions" style="margin-top:6px"><input type="text" id="la-find" value="${esc(P.home)}" placeholder="e.g. library.myuni.edu" style="flex:1;min-width:240px" aria-label="Your library's web address"><button class="btn primary" id="la-findgo">Find</button></div>
+    <div id="la-found" role="status" aria-live="polite"></div></div>
+  <div class="card st-card"><h2>Your university library</h2>
     <p class="hint">Many journals are free to you through your university. Tell Journal Watcher how your library lets you in and it will use that to download papers. This is stored in <code>library.json</code> in your data folder; nothing is sent anywhere.</p>
-    <label class="chk">Name of your university or library <input type="text" id="la-name" value="${esc(P.name)}" placeholder="e.g. University of Somewhere Library" style="flex:1"></label>
+    <label class="chk">Name of your university or library <input type="text" id="la-name" value="${esc(P.name)}" placeholder="e.g. University of Somewhere Library (optional)" style="flex:1"></label>
     <div class="la-modes" role="radiogroup" aria-label="How your library lets you in">${modes.map(([k, t, d]) => `<label class="lk-opt la-mode${P.mode === k ? " on" : ""}"><input type="radio" name="la-mode" value="${k}"${P.mode === k ? " checked" : ""}><b>${t}</b><span>${d}</span>
       ${k === "openathens" ? `<input type="text" id="la-oa" value="${esc(P.openathens)}" placeholder="myuni.ac.uk" aria-label="OpenAthens domain">` : ""}${k === "ezproxy" ? `<input type="text" id="la-ez" value="${esc(P.ezproxy)}" placeholder="https://ezproxy.myuni.edu/login?url=" aria-label="EZproxy login address">` : ""}</label>`).join("")}</div>
-    <details style="margin-top:12px"${P.home || P.ill_email ? " open" : ""}><summary class="hint" style="cursor:pointer">More (optional)</summary>
-      <label class="chk" style="margin-top:8px">Library page to open when signing in <input type="text" id="la-home" value="${esc(P.home)}" placeholder="https://library.myuni.edu" style="flex:1"></label>
+    <details style="margin-top:12px" open><summary class="hint" style="cursor:pointer">More (optional)</summary>
+      <label class="chk" style="margin-top:8px">Your library’s web site <input type="text" id="la-home" value="${esc(P.home)}" placeholder="https://library.myuni.edu" style="flex:1"> <small>opened as a tab in the publisher sign-in window</small></label>
+      <label class="chk">EBSCO start page <input type="text" id="la-eb" value="${esc(P.ebsco_home)}" placeholder="https://research.ebsco.com/c/abc123" style="flex:1"></label>
+      <label class="chk"><input type="checkbox" id="la-useeb"${P.use_ebsco || !P.ebsco_home ? " checked" : ""}> When a publisher does not give a paper, look for it in my library’s EBSCO (Business Source and others hold many business and IS journals)</label>
+      <label class="chk">Download pace <select id="la-pace">${[["careful", "Careful (recommended): 45 s between papers from sites with human checks, 20 s for others"], ["normal", "Normal: about 20 s and 8 s"], ["fast", "Fast: almost no pause (more “verify you are human” checks)"]].map(([k, t]) => `<option value="${k}"${(P.pace || "careful") === k ? " selected" : ""}>${t}</option>`).join("")}</select></label>
+      <p class="hint" style="margin:-4px 0 8px">Publishers such as ScienceDirect ask “are you human?” when papers are fetched one after another. While Journal Watcher waits between them it writes the summaries of the papers it already has.</p>
       <label class="chk">Interlibrary-loan email <input type="text" id="la-ill" value="${esc(P.ill_email)}" placeholder="ill@library.myuni.edu" style="flex:1"> <small>adds an “Ask my library” button to papers that could not be downloaded</small></label></details>
     <div class="st-actions" style="margin-top:14px"><button class="btn primary" id="la-save">Save</button><button class="btn" id="la-go"${P.signs_in ? "" : " disabled"}>Sign in now</button><button class="btn" id="la-test">Test my access</button><span class="st-msg" id="la-msg" role="status"></span></div>
-    ${P.signs_in ? "" : `<p class="hint">“Sign in now” is for OpenAthens and EZproxy. With the other options you sign in on each publisher’s own page (Sign-ins → Other publisher sites).</p>`}
+    ${P.signs_in ? `<p class="hint">“Sign in now” opens ScienceDirect through your library, so that your university’s sign-in page appears; type your password there. “Test my access” does the same in the background, with no window.</p>` : `<p class="hint">“Sign in now” is for OpenAthens and EZproxy. With the other options you sign in on each publisher’s own page (Sign-ins → Other publisher sites).</p>`}
     ${st && st.signed_in ? `<p class="hint ok" id="la-signed">✓ Signed in · ${esc(agoWords(st.age_hours))}</p>` : ""}
-    <div id="la-test-res" role="status" aria-live="polite">${testResult(S.library && S.library.test, true)}</div></div>
-  <div class="card st-card"><h2>How to find out</h2><ul class="wl-list">
-    <li>Search the web for your <b>university name + “OpenAthens”</b> or <b>“EZproxy”</b>, or open your library’s <b>e-resources / off-campus access</b> page.</li>
-    <li>If a link on that page starts with <code>go.openathens.net</code>, it is OpenAthens; if it contains <code>ezproxy</code>, it is EZproxy.</li>
-    <li>Not sure? Leave the first option selected and use <b>Sign-ins → Other publisher sites</b>: each publisher asks which university you belong to.</li></ul></div>`;
+    <div id="la-test-res" role="status" aria-live="polite">${testResult(S.library && S.library.test, true)}</div></div>`;
   const msg = $("#la-msg", body);
   if (flash) note(msg, flash);
   const pick = v => { const r = $(`input[name="la-mode"][value="${v}"]`, body); if (r && !r.checked) { r.checked = true; r.dispatchEvent(new Event("change")); } };
   $$('input[name="la-mode"]', body).forEach(r => r.onchange = () => $$(".la-mode", body).forEach(l => l.classList.toggle("on", $("input[type=radio]", l).checked)));
   if ($("#la-oa", body)) $("#la-oa", body).oninput = () => pick("openathens");       // typing the domain chooses its option (it used to be saved, but ignored, under "each publisher’s page")
   if ($("#la-ez", body)) $("#la-ez", body).oninput = () => pick("ezproxy");
-  const collect = () => ({name: $("#la-name", body).value, mode: ($('input[name="la-mode"]:checked', body) || {}).value || "institutional", openathens: $("#la-oa", body).value, ezproxy: $("#la-ez", body).value, home: $("#la-home", body).value, ill_email: $("#la-ill", body).value});
-  const missing = c => c.mode === "openathens" && !c.openathens.trim() ? "Enter your OpenAthens domain (it looks like myuni.ac.uk)." : c.mode === "ezproxy" && !c.ezproxy.trim() ? "Enter your EZproxy login address (https://… ending in url=)." : "";
+  const collect = () => ({name: $("#la-name", body).value, mode: ($('input[name="la-mode"]:checked', body) || {}).value || "institutional", openathens: $("#la-oa", body).value, ezproxy: $("#la-ez", body).value, home: $("#la-home", body).value, ebsco_home: $("#la-eb", body).value, use_ebsco: $("#la-useeb", body).checked, pace: $("#la-pace", body).value, ill_email: $("#la-ill", body).value});
+  const missing = c => c.mode === "openathens" && !c.openathens.trim() ? "Enter your OpenAthens domain (it looks like myuni.ac.uk), or use “Find my library’s settings” above." : c.mode === "ezproxy" && !c.ezproxy.trim() ? "Enter your EZproxy login address (https://… ending in url=)." : "";
+  $("#la-findgo", body).onclick = async () => {
+    const given = $("#la-find", body).value.trim(), out = $("#la-found", body), go = $("#la-findgo", body);
+    if (!given) { out.innerHTML = `<p class="hint bad" style="margin:8px 0 0">Paste your library’s web address first.</p>`; return; }
+    go.disabled = true; out.innerHTML = `<p class="hint" style="margin:8px 0 0">Reading your library’s pages… this takes a few seconds, up to a minute.</p>`;
+    try {
+      const r = await api("/api/library/detect", {given});
+      if (!body.isConnected) return;
+      out.innerHTML = detectResult(r);
+      const use = $("#la-use", out);
+      if (use) use.onclick = async () => {
+        if (r.mode === "openathens") { $("#la-oa", body).value = r.openathens; pick("openathens"); }
+        else if (r.mode === "ezproxy") { $("#la-ez", body).value = r.ezproxy; pick("ezproxy"); }
+        if (r.ebsco_home) { $("#la-eb", body).value = r.ebsco_home; $("#la-useeb", body).checked = true; }
+        if (/^https?:\/\/|^[\w.-]+\.[a-z]{2,}/i.test(given) && !/openathens|login\?q?url=/i.test(given) && !$("#la-home", body).value.trim()) $("#la-home", body).value = given;
+        const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; }
+        try { await api("/api/library/access", c); if (window.loadSignins) loadSignins(); await renderLibraryAccess(body, "Saved. Now press “Sign in now” (or “Test my access” if you are on campus)."); } catch (er) { note(msg, er.message, true); }
+      };
+    } catch (er) { if (body.isConnected) out.innerHTML = `<p class="hint bad" style="margin:8px 0 0">${esc(er.message)}</p>`; }
+    finally { go.disabled = false; }
+  };
+  $("#la-find", body).onkeydown = ev => { if (ev.key === "Enter") $("#la-findgo", body).click(); };
   $("#la-save", body).onclick = async () => { const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; } try { await api("/api/library/access", c); if (window.loadSignins) loadSignins(); renderLibraryAccess(body, "Saved."); } catch (er) { note(msg, er.message, true); } };       // (drawn again first, then the message: it used to be wiped at once)
-  $("#la-go", body).onclick = async () => { const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; } try { await api("/api/library/access", c); await api("/api/login", {which: "library"}); note(msg, "A sign-in window is opening; sign in there."); if (window.loadSignins) loadSignins(); } catch (er) { note(msg, er.message, true); } };
+  $("#la-go", body).onclick = async () => { const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; } try { await api("/api/library/access", c); await api("/api/login", {which: "library"}); note(msg, "A sign-in window is opening on ScienceDirect; sign in with your university account there."); if (window.loadSignins) loadSignins(); } catch (er) { note(msg, er.message, true); } };
   $("#la-test", body).onclick = async () => {
     const c = collect(), need = missing(c); if (need) { note(msg, need, true); return; }
     const go = $("#la-test", body), res = $("#la-test-res", body); go.disabled = true; note(msg, "");
-    res.innerHTML = `<p class="hint">Looking at your library’s page in the background… this takes a few seconds, up to half a minute.</p>`;
+    res.innerHTML = `<p class="hint">Opening ScienceDirect through your library in the background… this takes a few seconds, up to half a minute.</p>`;
     try { await api("/api/library/access", c); const r = await api("/api/library/test", {}); if (body.isConnected) res.innerHTML = testResult({...r, age_hours: 0}); if (window.loadSignins) loadSignins(); const proxy = ["openathens", "ezproxy"].includes(r.mode); if (proxy && r.state === "ok") renderLibraryAccessSigned(body, r); else if (proxy && r.state === "login") { const s = $("#la-signed", body); if (s) s.remove(); } }
     catch (er) { if (body.isConnected) { res.innerHTML = ""; note(msg, er.message, true); } }
     finally { go.disabled = false; }

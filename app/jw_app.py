@@ -107,6 +107,38 @@ def chooser_page(suggest, note=""):
             % (NAME, STYLE, MARK, "".join(opts), note))
 
 
+def busy_page(other, healthy):
+    """Another Journal Watcher already holds this data folder (server.take_lock): say which, and what to do. Until 1.2.0 the app silently showed that other copy,
+    which (an old copy started from Terminal whose files had moved) answered with a bare {"error": "not found"}."""
+    other = other or {}
+    esc = lambda x: str(x or "").replace("&", "&amp;").replace("<", "&lt;")
+    by = {"source": "a copy started from the source code (the “Journal Watcher.command” Terminal window)", "app": "another Journal Watcher app"}.get(other.get("by"), "another copy of Journal Watcher")
+    where = (" in %s" % esc(other.get("code"))) if other.get("code") else ""
+    when = (", started %s UTC" % esc(str(other.get("started", "")).replace("T", " ")[:16])) if other.get("started") else ""
+    ver = (" (version %s)" % esc(other.get("version"))) if other.get("version") else ""
+    if healthy:
+        what = "<p>It is running%s%s%s at %s. Two copies at once would overwrite each other's notes and folders, so this window will not start a second one.</p>" % (ver, where, when, esc(other.get("url")))
+        use = '<button class="opt" data-k="use"><b>Show that copy in this window</b><span>Nothing is lost: it is the same folder</span></button>'
+    else:
+        what = ("<p>It is not answering properly%s%s%s (it may be an old copy whose files were moved or deleted). Close it, then press Try again. "
+                "If it was started from Terminal, close that Terminal window.</p>" % (ver, where, when))
+        use = ""
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Journal Watcher is already open for this folder</h1><p>It is held by %s.</p>%s%s"
+            '<button class="opt" data-k="retry"><b>Try again</b><span>After closing the other copy</span></button>'
+            '<button class="opt" data-k="pick"><b>Use another folder…</b><span>Start with a different data folder</span></button><div class=err id=e></div></main>'
+            "<script>document.querySelectorAll('.opt').forEach(b => b.onclick = async () => { const r = await pywebview.api.busy_choice(b.dataset.k); if (r && r.error) document.getElementById('e').textContent = r.error; });</script>"
+            % (NAME, STYLE, MARK, by, what, use))
+
+
+def answers(url):
+    """Does a dashboard at `url` serve its page (not just its API)? The copy that held the folder in the case above answered /api/config but not /."""
+    try:
+        with urllib.request.urlopen(url + "/", timeout=3) as r:
+            return r.status == 200 and "html" in (r.headers.get("Content-Type") or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def error_page(msg):
     return "<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Journal Watcher could not start</h1><p>Something went wrong while starting up. If it keeps happening, tell whoever maintains the app what is written below.</p><div class=err>%s</div></main>" % (
         NAME, STYLE, MARK, (msg or "").replace("<", "&lt;"))
@@ -141,6 +173,22 @@ class Api:
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             return {"error": str(e)[:200]}
+
+    def busy_choice(self, kind):
+        """The buttons of busy_page: show the other copy, try again, or choose another folder."""
+        w = webview.windows[0]
+        if kind == "use" and BUSY.get("url") and answers(BUSY["url"]):
+            API.url = BUSY["url"]
+            w.load_url(BUSY["url"])
+            return {"ok": True}
+        if kind == "retry":
+            if not BUSY.get("home"):
+                return {"error": "Nothing to try again."}
+            relaunch()                                             # a fresh process: the lock and the imported server start clean
+            return {"ok": True}
+        if kind == "pick":
+            return self.change_home()
+        return {"error": "That copy is not answering any more. Press Try again."}
 
     def change_home(self):
         r = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER, directory=self.home or os.path.expanduser("~/Documents"))
@@ -230,13 +278,15 @@ class Api:
 
 
 API = Api()
+BUSY = {}                                      # set when another copy holds the data folder (busy_page): {home, url}
 
 
 def relaunch():
     b = bundle_path()
     if b:
         subprocess.Popen(["/usr/bin/open", "-n", b])
-    os._exit(0)
+        os._exit(0)
+    os.execv(sys.executable, [sys.executable] + sys.argv)       # run from the project folder: start this same script again
 
 
 # ------------------------------------------------------------------------------------------------ start-up
@@ -269,8 +319,17 @@ def launch(window, home):
         import updater                                 # noqa: E402
         updater.EXIT = lambda: os._exit(0)             # "Update now": the new app is swapped in once this process has gone
         srv, url = server.start(PORT, quiet=True)
-        if srv is not None:
-            threading.Thread(target=srv.serve_forever, daemon=True, name="dashboard-server").start()
+        if srv is None:                                # another copy holds this folder: say so (never show it silently: it may be another version, or broken)
+            other = {}
+            try:
+                with open(os.path.join(server.pl.dl.STATE, "server.lock"), encoding="utf-8") as f:
+                    other = json.load(f)
+            except (OSError, ValueError):
+                pass
+            BUSY.update(home=home, url=url or other.get("url"))
+            window.load_html(busy_page({**other, "url": url or other.get("url")}, bool(url) and answers(url)))
+            return
+        threading.Thread(target=srv.serve_forever, daemon=True, name="dashboard-server").start()
         if not url or not wait_for(url):
             raise RuntimeError("The dashboard did not answer at %s." % url)
         API.home, API.url = home, url

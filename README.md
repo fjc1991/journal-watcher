@@ -61,6 +61,16 @@ app/test_update.sh          # end-to-end proof of "Update now" with the real app
 
 **Before the first release, once:** `python app/sign_release.py keygen` makes your signing key (kept in `~/.journal-watcher/`, back it up) and prints the public half; put that line in `app/update_public_key.txt` and commit it. Builds that contain it only believe an update feed signed with your key. **After each release:** the workflow publishes the build, then you sign it on your own computer: `python app/sign_release.py sign --tag vX.Y.Z --upload` (it shows what it signs, recomputes the zip's checksum, and attaches `appcast.json.sig`; `--dir` works on files you downloaded, e.g. while the repository is private). Installed copies see the update once it is signed. **To rehearse a release without publishing anything:** Actions → release → Run workflow (a dry run: it builds, rehearses the signing with a throw-away key and keeps the files for three days; a full macOS build).
 
+**Checklist for a release (the first one included):**
+
+1. `CHANGELOG.md` has a `## X.Y.Z` section, and `app/VERSION` says `X.Y.Z` (the workflow sets it from the tag, but local builds read the file).
+2. Once, before the first release: `python app/sign_release.py keygen`, then commit `app/update_public_key.txt`. A build without it accepts an unsigned update feed.
+3. `.venv/bin/python .agents/skills/ais-journal-watcher/scripts/test_reader.py` passes (on a Mac, all of it).
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`. Wait for the release workflow, then check that the release has `Journal Watcher.dmg`, the zip and `appcast.json`.
+5. `python app/sign_release.py sign --tag vX.Y.Z --upload`.
+
+While the repository is private, only people signed in to GitHub with access can download the release, and installed apps cannot read the update feed (`releases/latest/download/appcast.json` answers 404 to them). Make the repository public, or host the feed elsewhere (Settings → About & updates), before giving the app to others.
+
 Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`: it builds on a macOS runner, writes the update feed `appcast.json` (the notes come from `CHANGELOG.md`), and attaches the `.dmg`, the `.zip` and the feed to the GitHub release. The app's built-in feed address is `https://github.com/<owner>/<repo>/releases/latest/download/appcast.json`. Signing with an Apple Developer ID and notarising are supported through repository secrets (see the workflow); without them the app is ad-hoc signed.
 
 ## Privacy and safety

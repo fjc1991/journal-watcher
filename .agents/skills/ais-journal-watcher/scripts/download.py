@@ -123,6 +123,12 @@ READER_HOSTS = {"pnas": "www.pnas.org", "aaas": "www.science.org", "informs": "p
                 "wiley": "onlinelibrary.wiley.com", "tandfonline": "www.tandfonline.com"}
 
 
+def _site_word(url):
+    """The part of a publisher's host that survives an EZproxy rewrite: onlinelibrary.wiley.com → wiley, www.sciencedirect.com → sciencedirect."""
+    parts = urllib.parse.urlsplit(url).netloc.lower().split(":")[0].split(".")
+    return parts[-3] if len(parts) >= 3 and ".".join(parts[-2:]) in ("co.uk", "ac.uk", "org.uk", "com.au", "co.jp") else parts[-2] if len(parts) >= 2 else ".".join(parts)
+
+
 def browser_pdf_url(p):
     """PDF URL for the real-browser route (browser.py)."""
     pub, doi = p.get("publisher"), p.get("doi")
@@ -308,24 +314,41 @@ def download_paper(p, env, dry=False, browser=None):
                     if not data and "needs_login" in note and member and browser.renew_member(member):
                         data, note = vet(*browser.fetch_pdf(u, doi=doi))  # member session renewed silently: retry
                     lib_ = signins.profile()
-                    if not data and "needs_login" in note and lib_["signs_in"] and lib_["configured"]:
-                        # the publisher wants a login: your university library may give the access (OpenAthens or EZproxy, set up in Settings → Library access). The same
-                        # page address is asked for through the library's sign-in with the session your library sign-in saved; without one, the card offers that sign-in.
-                        if signins.status()["library"]["signed_in"]:
+                    paywalled = "needs_login" in note or note.startswith("browser: no PDF at")
+                    if not data and paywalled and lib_["signs_in"] and lib_["configured"]:
+                        # The publisher did not give the PDF to this computer as it is (on campus the network address usually does; off campus it does not). Your
+                        # university library may (OpenAthens or EZproxy, set up in Settings → Library access): the same page address is asked for through the library's
+                        # address. This is tried whatever the sign-in tick says: the tick is a guess from the time of the last sign-in, and the university's single
+                        # sign-on often lets a saved session through without a password long after it. Only when the library has asked for a password in this batch
+                        # is it not asked again (each try would only wait for a password); the card then offers the library sign-in.
+                        if getattr(browser, "library_signed_out", False):
+                            note += "; needs_library_login"
+                        else:
                             seen = len(refused)
                             d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi)
                             d4, _ = vet(d4, "browser (via your library)")
                             if d4:
                                 data, note = d4, "browser (via your library)"
+                                signins.record("library", True)                       # it worked: the sign-in is current, whatever the clock said
+                            elif len(refused) == seen and n4 and n4.startswith("library_setup:"):
+                                try:                                                  # a wrong OpenAthens domain: no paper can come this way; asking again would not help
+                                    browser.library_signed_out = True
+                                except AttributeError:
+                                    pass
+                                note += "; " + n4
                             elif len(refused) == seen and n4:
                                 at = n4.split(":", 1)[1].split()[0].lower() if n4.startswith("needs_login:") else ""
-                                if at and at != urllib.parse.urlsplit(u).netloc.lower():      # it ended on somebody else's sign-in page: the library session has ended
+                                # it ended on somebody else's sign-in page: the library session has ended. The publisher's own host, also as an EZproxy rewrites it
+                                # (onlinelibrary-wiley-com.ezproxy.uni.edu still contains "wiley"), is the publisher's paywall, not the library asking for a password.
+                                if at and _site_word(u) not in at:
                                     signins.forget("library")
+                                    try:
+                                        browser.library_signed_out = True
+                                    except AttributeError:
+                                        pass
                                     note += "; needs_library_login (your library asked for a password at %s)" % at
                                 else:
                                     note += "; via your library: " + n4
-                        elif not member:                  # (INFORMS and AIS papers are about your membership sign-in first: the card keeps asking for that)
-                            note += "; needs_library_login"
                     reader_host = READER_HOSTS.get(p.get("publisher"))
                     if not data and reader_host and doi:
                         # the publisher's online reader often works where the PDF link doesn't (PNAS)
@@ -349,8 +372,15 @@ def download_paper(p, env, dry=False, browser=None):
 
     # 5) the library's own copy (e.g. EBSCO Business Source Ultimate, if library.json has an "ebsco_home") for journals
     #    the publisher site won't give us
+    #    Set up in Settings → Library access ("Find my library's settings" finds the start page). With a list in library.json via_ebsco.journals only those journals
+    #    are looked for there; without one, every paper the publisher did not give is (a search takes some seconds). Not tried once the library has asked for a
+    #    password in this batch (the EBSCO search goes through the same sign-in).
     lib = load_json(os.path.join(BASE, "library.json"), {})
-    if browser is not None and not dry and p.get("abbr") in (lib.get("via_ebsco") or {}).get("journals", []):
+    prof = signins.profile()                                # (the same library.json, read with its defaults filled in)
+    only = (prof.get("via_ebsco") or {}).get("journals") or []
+    free_kind = p.get("publisher") in ("nber",) or re.fullmatch(r"10\.2139/ssrn\.\d+", doi or "", re.I)      # working papers: not in a subscription database
+    if (browser is not None and not dry and prof["use_ebsco"] and (doi or p.get("title")) and (not only or p.get("abbr") in only)
+            and not free_kind and not getattr(browser, "library_signed_out", False)):
         try:
             data, note = browser.fetch_via_ebsco(doi, p.get("title"))
         except Exception as e:
@@ -360,6 +390,11 @@ def download_paper(p, env, dry=False, browser=None):
             if got:
                 return got
         else:
+            if note == "needs_library_login":
+                try:
+                    browser.library_signed_out = True
+                except AttributeError:
+                    pass
             attempts.append(note)
     # 6) a legal free copy elsewhere (arXiv, PubMed Central, preprint servers)
     if not dry and p.get("publisher") != "hbr":

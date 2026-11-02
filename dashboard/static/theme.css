@@ -251,6 +251,13 @@ body.sb-open .sb-scrim { display: block; }
 .card.paper:last-child, .card.librow:last-child { border-bottom: 0; }
 .ptitle { font: 600 15.5px/1.35 var(--sans); letter-spacing: -.005em; }
 .librow { column-gap: var(--sp-4); position: relative; }
+/* "Ready to read": the paper's AI summary is written. A green bar at the row's left edge (the theme's "done" green, --dl, in light and dark), explained by .readykey */
+.card.librow.ready::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 3px; background: var(--dl); }
+.readykey { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; vertical-align: middle; }
+.reshead .readykey { margin-left: 12px; }
+.readykey i { width: 3px; height: 15px; border-radius: 3px; background: var(--dl); flex: none; }
+.readykey small { color: var(--ink-3); font-size: 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .librow .actions { flex-wrap: nowrap; gap: 6px; align-items: center; align-self: start; }
 .librow .actions .btn.small { padding: 4px 10px; white-space: nowrap; }
 .librow .actions .btn.star { font-size: 14px; padding: 3px 9px; } .librow .actions .btn.star.on { color: var(--bl); }
