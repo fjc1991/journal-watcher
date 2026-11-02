@@ -2820,6 +2820,122 @@ def main():
             brw.library, brw.via_library, brw.si.probe_url = saved
             srv3.shutdown()
 
+    def t_terms():
+        """Search by terms: what a term matches, and what it does not."""
+        import terms as T
+        assert T.parse("difference-in-differences + DiD, “staggered” ; did ; x ; DID") == ["difference-in-differences", "DiD", "staggered", "did", "DID"], T.parse("difference-in-differences + DiD, “staggered” ; did ; x ; DID")
+        assert T.parse(["Event study", "event STUDY"]) == ["Event study"] and len(T.parse(",".join("t%d" % i for i in range(30)))) == T.MAX_TERMS
+        assert T.is_acronym("DiD") and T.is_acronym("DID") and T.is_acronym("RDD") and not T.is_acronym("did") and not T.is_acronym("Did") and not T.is_acronym("LLMsXY")
+        m = T.matcher(["difference-in-differences", "DiD"])
+        yes = ["We use a difference in differences design", "A Difference\u2010in\u2010Differences approach", "differences-in-differences estimates", "a difference-in-difference estimator",
+               "Using DiD, we", "Using DID, we", "an event study (DiD-style) design", "differenceindifferences"]
+        no = ["We did not find effects", "Did platforms matter? We ask.", "a candidate test", "the difference in prices", "DIDO lines"]
+        for t in yes:
+            assert m({"title": "", "abstract": t}), t
+        for t in no:
+            assert not m({"title": "", "abstract": t}), t
+        h = m({"title": "DiD evidence", "abstract": "<jats:p>A difference-in-differences design</jats:p>", "keywords": ["x"]})
+        assert [(x["term"], x["field"], x["text"]) for x in h] == [("difference-in-differences", "abstract", "difference-in-differences"), ("DiD", "title", "DiD")], h
+        assert T.describe(h) == "Matched: difference-in-differences (abstract), DiD (title)"
+        assert T.matcher(["did"])({"abstract": "we did not"}) and T.matcher(["platform"])({"keywords": ["Digital platforms"]})       # lower case: any case; keywords count; plurals
+        assert not T.matcher(["platform"])({"abstract": "platformization"})                                                            # whole words only
+        # found by the review: "p < 0.01 … > 5%" is text, not a tag (it used to delete what lay between); -es plurals both ways; acronyms in capital-letter titles
+        assert m({"abstract": "(p < 0.01). Using a difference-in-differences design, we find gains > 5%."}) and m({"abstract": "(p<0.01) from a DiD with n>500"})
+        for a_, b_ in (("focus", "focuses"), ("focuses", "focus"), ("approaches", "approach"), ("status", "statuses"), ("matches", "match")):
+            assert T.matcher([a_])({"abstract": b_}), (a_, b_)
+        assert not m({"title": "HOW DID FIRMS RESPOND TO TARIFFS AND PRICES"}) and m({"abstract": "two DiDs agree"})
+        assert T.parse("difference-in-differences + DiD, C++ ; A+B testing ; (DiD) ; C#") == ["difference-in-differences", "DiD", "C++", "A+B testing", "C#"]
+        assert T.matcher(["C++"])({"abstract": "written in C++."}) and not T.matcher(["C++"])({"abstract": "written in C."})
+    check("search by terms: any of the terms in the title, abstract or keywords; case, hyphens or spaces, and singular/plural ignored; whole words; an acronym typed with capitals (DiD) does not match the ordinary word (did)", t_terms)
+
+    def t_openalex_budget():
+        """OpenAlex without a key shares a small daily budget per network: when it is used up the app does not wait (it used to sleep 30 s three times per call), free
+        lookups by DOI still work, many DOIs are asked in one call, and a key goes in the Authorization header, never in the address."""
+        import fetch_new as fx_, pipeline as pl_, time as _t
+        seen = []
+        class OA(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                path = urllib.parse.unquote(self.path)
+                if path.startswith("/works?") and "spent" in STATE:
+                    body = b'{"error":"Rate limit exceeded","message":"Insufficient budget"}'
+                    self.send_response(429); self.send_header("Retry-After", "10200"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+                if path.startswith("/works?filter=doi:"):
+                    ds = path.split("filter=doi:", 1)[1].split("&")[0].split("|")
+                    res = [{"doi": "https://doi.org/" + d, "abstract_inverted_index": {"batch": [0], d: [1]}} for d in ds if not d.endswith("9")]
+                    body = json.dumps({"results": res}).encode()
+                elif path.startswith("/works/doi:"):
+                    d = path[len("/works/doi:"):]
+                    body = json.dumps({"doi": "https://doi.org/" + d, "abstract_inverted_index": {"single": [0], d: [1]}}).encode()
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        STATE = {}
+        srv_ = ThreadingHTTPServer(("127.0.0.1", 0), OA); threading.Thread(target=srv_.serve_forever, daemon=True).start()
+        old_url, old_key = os.environ.get("JW_OPENALEX_URL"), os.environ.get("OPENALEX_API_KEY")
+        os.environ["JW_OPENALEX_URL"] = "http://127.0.0.1:%d/" % srv_.server_address[1]
+        os.environ.pop("OPENALEX_API_KEY", None)
+        saved_key = fx_.openalex_key
+        fx_.openalex_key = lambda: os.environ.get("OPENALEX_API_KEY")
+        try:
+            fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            items = [{"doi": "10.3386/w%d" % n, "title": "t"} for n in range(100, 160)]
+            pl_.fill_abstracts(items, lambda *a, **k: None, threading.Event(), "NBER")
+            calls = [p_ for p_, _ in seen if p_.startswith("/works?")]
+            assert len(calls) == 2 and all(i.get("abstract") for i in items), (len(calls), [i for i in items if not i.get("abstract")][:2])        # 60 DOIs: two calls of 50 and 10; the six OpenAlex lacks asked one by one
+            assert sum(1 for i in items if i["abstract"].startswith("single")) == 6
+            # the day's budget is used up: no waiting, the free lookups still work, the next list call is not even made
+            STATE["spent"] = True; seen.clear(); t0 = _t.time()
+            assert fx_.openalex_abstracts_dois(["10.1/a", "10.1/b"]) == {} and _t.time() - t0 < 3 and fx_.openalex_spent()
+            assert fx_.openalex_abstract_doi("10.1/a").startswith("single")
+            n0 = len(seen); assert fx_.openalex_abstracts_dois(["10.1/c"]) == {} and len(seen) == n0                                   # not asked again until it resets
+            items = [{"doi": "10.3386/w%d" % n, "title": "t"} for n in range(200, 210)]
+            logs = []; pl_.fill_abstracts(items, lambda e, d=None: logs.append((d or {}).get("msg", "")), threading.Event(), "NBER")
+            assert all(i.get("abstract") for i in items) and any("allowance" in l and "Paper sources" in l for l in logs), logs
+            # with a key: its own allowance (the keyless one being spent does not stop it), sent in the header
+            os.environ["OPENALEX_API_KEY"] = "k123"; STATE.clear(); seen.clear()
+            assert not fx_.openalex_spent() and fx_.openalex_abstracts_dois(["10.1/a"])
+            assert seen and all(a == "Bearer k123" and "api_key" not in p_ and "k123" not in p_ for p_, a in seen), seen
+        finally:
+            fx_.openalex_key = saved_key
+            fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            for k, v in (("JW_OPENALEX_URL", old_url), ("OPENALEX_API_KEY", old_key)):
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v
+            srv_.shutdown()
+    check("OpenAlex: many DOIs in one call (an NBER year: 26 calls instead of 1,300), the rest one by one; a used-up daily budget answers at once instead of waiting and stops only the paid calls; a key is sent in the header, never in the address", t_openalex_budget)
+
+    def t_term_run():
+        """A search by terms keeps only the articles that contain a term, says what matched, keeps the full saved copy for later searches, and is its own saved search."""
+        import pipeline as pl_
+        abbr = pl_.journals()[0]["abbr"]
+        arts = [{"doi": "10.1/a", "title": "Platform entry", "abstract": "A difference-in-differences design.", "pub_date": "2024-02"},
+                {"doi": "10.1/b", "title": "Why firms did not grow", "abstract": "We did interviews.", "pub_date": "2024-03"},
+                {"doi": "10.1/c", "title": "A DiD study of apps", "abstract": "", "pub_date": "2024-04"}]
+        saved = (pl_.fx.crossref_journal_range, pl_.fill_abstracts, pl_.saved_fetch, pl_.save_fetch)
+        stored = {}
+        pl_.fx.crossref_journal_range = lambda *a, **k: [dict(x) for x in arts]
+        pl_.fill_abstracts = lambda *a, **k: None
+        pl_.saved_fetch = lambda *a, **k: (None, None)
+        pl_.save_fetch = lambda ab, y0, y1, items, words="": stored.setdefault("items", items)
+        try:
+            params = {"year_from": 2024, "year_to": 2024, "journals": [abbr], "topics": pl_.topic_labels(), "methods": [], "query": "", "terms": ["difference-in-differences", "DiD"]}
+            run = pl_.Run("search", params)
+            pl_.fetch_search(run, lambda *a, **k: None, threading.Event())
+            got = {p_["doi"]: p_ for p_ in run.papers.values()}
+            assert set(got) == {"10.1/a", "10.1/c"}, set(got)                                                                          # "did" (the verb) is not DiD
+            assert got["10.1/a"]["reason"] == "Matched: difference-in-differences (abstract)" and got["10.1/c"]["term_hits"][0]["field"] == "title"
+            assert len(stored["items"]) == 3 and not any("term_hits" in x for x in stored["items"])                                    # the saved copy is every article, unmarked
+            arch = dict(params, terms=[])
+            assert pl_.search_key(params) != pl_.search_key(arch) and pl_.search_key(arch) == pl_.search_key({k: v for k, v in arch.items() if k != "terms"})   # archive keys are unchanged
+            assert pl_.search_key(dict(params, terms=["did", "difference-in-differences"])) != pl_.search_key(params)          # did ≠ DiD
+            assert run.title() == "2024 · terms: difference-in-differences, DiD"
+            assert pl_.search_key(dict(params, topics=["something else"])) == pl_.search_key(params)                              # editing your interests does not make it another search
+        finally:
+            pl_.fx.crossref_journal_range, pl_.fill_abstracts, pl_.saved_fetch, pl_.save_fetch = saved
+    check("a search by terms keeps only the articles with a term (and says which, where), keeps the whole saved copy for other searches, and is a saved search of its own", t_term_run)
+
     def t_search_memory():
         """A search is not paid for twice: verdicts are reused for the same question and the same text (and expire), a journal's year range is kept for a while, and the same search is the same saved run."""
         import contextlib, pipeline as pl_

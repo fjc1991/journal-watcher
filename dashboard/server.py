@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -194,6 +195,12 @@ def start_fetch(run):
         else:
             pl.fetch_search(run, emit, JOBS.stop)
         pl.mark_downloaded(run)
+        if run.params.get("terms"):             # a search by terms: the matches are shown as they are (free); "Screen with AI" asks the model only if you want
+            if JOBS.stop.is_set():
+                emit("log", {"msg": "Stopped: %d papers found so far contain your terms. Search again to continue." % len(run.order), "level": "warn"})
+                return
+            emit("log", {"msg": "Finished: %d papers contain your terms. Tick the ones you want and press Download, or press “Screen with AI” to rank them against your interests." % len(run.order), "level": "ok"})
+            return
         if not JOBS.stop.is_set() and run.order:
             pl.screen(run, emit, JOBS.stop)
         n_dl = sum(1 for p in run.papers.values() if p.get("verdict") == "download")
@@ -246,6 +253,72 @@ def start_pdfcheck():
             PDFCHECK.update(state="error", error="The check stopped: %s" % str(e)[:200])
     threading.Thread(target=job, daemon=True).start()
     return True
+
+
+# ---------------------------------------------------------------- where papers come from: OpenAlex, Unpaywall, Elsevier (Settings → Paper sources)
+
+SOURCES = {"openalex_key": "OPENALEX_API_KEY", "unpaywall_email": "UNPAYWALL_EMAIL", "elsevier_key": "ELSEVIER_API_KEY", "elsevier_insttoken": "ELSEVIER_INSTTOKEN"}
+
+
+def _env_get(name):
+    return os.environ.get(name) or pl.dl.load_env().get(name, "")
+
+
+def sources_state():
+    """What is set (keys are never sent back: only whether there is one; the Unpaywall email is shown, it is yours and not a secret)."""
+    return {"openalex_key": bool(_env_get("OPENALEX_API_KEY")), "unpaywall_email": _env_get("UNPAYWALL_EMAIL"),
+            "elsevier_key": bool(_env_get("ELSEVIER_API_KEY")), "elsevier_insttoken": bool(_env_get("ELSEVIER_INSTTOKEN")),
+            "openalex_spent": pl.fx.openalex_spent()}
+
+
+def _check_openalex(key):
+    """Ask OpenAlex whether the key is good: one free lookup (by ID) with the key. 401/403 = a key OpenAlex does not know. None when OpenAlex cannot be reached."""
+    req = urllib.request.Request("https://api.openalex.org/works/W2741809807", headers={"Authorization": "Bearer " + key, "User-Agent": "JournalWatcher"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status == 200
+    except urllib.error.HTTPError as e:
+        return False if e.code in (401, 403) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def sources_save(b):
+    """Save the fields sent ({openalex_key, unpaywall_email, elsevier_key, elsevier_insttoken}; "" removes one) in the data home's .env (mode 600)."""
+    new = {}
+    for field, name in SOURCES.items():
+        if field not in b:
+            continue
+        v = str(b.get(field) or "").strip()
+        if v and field == "unpaywall_email" and not re.fullmatch(r"[^@\s\"'\\]+@[^@\s\"'\\]+\.[^@\s\"'\\]+", v):
+            raise ValueError("Unpaywall needs an email address: it is sent only to Unpaywall, with each lookup, so that it knows who is asking.")
+        if v and (len(v) > 400 or re.search(r"[\s\"'\\]", v)):
+            raise ValueError("That doesn’t look right: paste just the key, with no spaces or quotes.")
+        if v and field == "openalex_key" and _check_openalex(v) is False:
+            raise ValueError("OpenAlex does not recognise that key. Copy it again from openalex.org/settings/api.")
+        new[name] = v
+    gone = [n for n, v in new.items() if not v]
+    old_env = os.path.join(paths.BASE, ".env")                  # (the older layout kept keys in the settings folder: a removed key must go from there too)
+    if gone and os.path.exists(old_env) and os.path.abspath(old_env) != os.path.abspath(os.path.join(ROOT, ".env")):
+        keep_ = [l for l in open(old_env, encoding="utf-8").read().splitlines() if not any(re.match(r"\s*%s\s*=" % re.escape(n), l) for n in gone)]
+        with open(old_env, "w", encoding="utf-8") as f:
+            f.write("\n".join(keep_) + ("\n" if keep_ else ""))
+    path = os.path.join(ROOT, ".env")
+    lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
+    lines = [l for l in lines if not any(re.match(r"\s*%s\s*=" % re.escape(n), l) for n in new)] + ["%s=%s" % (n, v) for n, v in new.items() if v]
+    tmp = path + ".sources.tmp"                                    # (not ai.set_key's .env.tmp: two saves at once must not write the same scratch file)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+    os.replace(tmp, path)
+    for n, v in new.items():
+        if v:
+            os.environ[n] = v
+        else:
+            os.environ.pop(n, None)
+    if new.get("OPENALEX_API_KEY") is not None:
+        pl.fx.OPENALEX_SPENT.update(until=0.0)         # a new key: its own allowance
+    return sources_state()
 
 
 LOGIN_PENDING = {"site": ""}        # which sign-in window is open right now ("" = none)
@@ -612,6 +685,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(config())
         if path == "/api/signins":      # who is signed in (informs, ais, library, publishers), and which sign-in window is open now
             return self.send_json({**signins.status(), "pending": LOGIN_PENDING["site"]})
+        if path == "/api/sources":
+            return self.send_json(sources_state())
         if path == "/api/library/access":   # which university library you use and how it lets you in
             return self.send_json(signins.profile())
         if path == "/api/update":       # the version, whether a newer one is announced, its notes, the progress of an update that is running
@@ -1386,6 +1461,27 @@ class Handler(BaseHTTPRequestHandler):
             old = pl.find_search(params)           # the same search as one you already ran: continue that one (its papers, verdicts and downloads are kept)
             run = (JOBS.run if JOBS.run and old and JOBS.run.id == old["id"] else pl.Run.load(old["id"]) if old else None) or pl.Run("search", params)
             return self.started(start_fetch(run), run)
+        if path == "/api/run/terms":             # search the chosen journals and years for papers that contain any of the terms (terms.py); no AI unless asked
+            import terms as tm
+            try:
+                y0, y1 = sorted([int(b["year_from"]), int(b["year_to"])])
+            except (KeyError, ValueError):
+                return self.send_json({"error": "year_from and year_to required"}, 400)
+            words = tm.parse(b.get("terms") or "")
+            if not words:
+                return self.send_json({"error": "Type at least one term (for example difference-in-differences, DiD)."}, 400)
+            js = [j for j in b.get("journals") or [] if j in {x["abbr"] for x in pl.journals() if x.get("archive", True)}]
+            if not js:
+                return self.send_json({"error": "pick at least one journal"}, 400)
+            params = {"year_from": y0, "year_to": y1, "journals": js, "topics": pl.topic_labels(), "methods": [], "query": "", "terms": words}   # (topics: what "Screen with AI" ranks against)
+            old = pl.find_search(params)
+            run = (JOBS.run if JOBS.run and old and JOBS.run.id == old["id"] else pl.Run.load(old["id"]) if old else None) or pl.Run("search", params)
+            return self.started(start_fetch(run), run)
+        if path == "/api/sources":               # keys and addresses for where papers come from (OpenAlex, Unpaywall, Elsevier): saved in .env, never sent back
+            try:
+                return self.send_json(sources_save(b))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         if path == "/api/download":
             ids = [i for i in b.get("ids") or [] if JOBS.run and i in JOBS.run.papers]
             if not ids:
@@ -1414,9 +1510,13 @@ class Handler(BaseHTTPRequestHandler):
             run.save(force=True)
             return self.send_json({"ok": True, "changed": changed})
         if path == "/api/rescreen":
-            run = JOBS.run
+            rid = str(b.get("run_id") or "")                # the run on the page (another may have been the last one to work)
+            if JOBS.busy():
+                return self.started(False, None)
+            run = JOBS.run if JOBS.run and (not rid or JOBS.run.id == rid) else (pl.Run.load(rid) if rid else None)
             if not run:
                 return self.send_json({"error": "no run"}, 400)
+            JOBS.run = run
             for p in run.papers.values():
                 if p.get("verdict") == "error":
                     p.pop("verdict")

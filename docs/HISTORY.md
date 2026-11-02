@@ -613,6 +613,16 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Verified.** `test_reader.py` "download pace" (a fake clock: the gap, summarising during it, the doubled gap after a check, another site not waiting, Stop, fast); the journal page drawn in light and dark themes. **Not verified:** whether 45 s is enough for ScienceDirect on the author's network.
 
+### Item 13. Search by terms, a place for the OpenAlex key, and NBER searches that seemed to hang (2026-11-02)
+
+**Asked.** The author could not find where to enter an OpenAlex key, wanted a tab that searches for specific terms only (difference-in-differences + did, case not mattering), and found NBER searches slow. Asked before building: the tab lives in Watch and searches journal archives; any of the terms matches; a short acronym typed with a capital (DiD) must match only text with a capital after its first letter (so not the verb "did"), otherwise case is ignored; matches are shown free, AI screening optional.
+
+**Found (NBER).** A 2025 NBER search reads 1,289 Crossref records in 4.5 s, none with an abstract, so `fill_abstracts` looked each up in OpenAlex one by one (≈75 s with 4 threads), and then all 1,289 were screened by AI. Worse: OpenAlex now gives keyless callers a daily budget shared by the whole network address ($0.10; lists and searches cost, lookups of one work by DOI are free). Once spent it answers 429 with `Retry-After: 10200`; `http_get` slept up to 30 s three times per call, so a search looked hung. Measured in this workspace, whose shared budget was spent: one batched call took 92 s and returned nothing.
+
+**What changed.** `fetch_new.http_get` raises a 429 whose Retry-After exceeds 60 s at once. `_openalex` records the spent budget (`OPENALEX_SPENT`, per keyed/keyless) and skips paid calls until it resets; free single-work lookups go on; the key goes in `Authorization: Bearer` (not the URL). `openalex_abstracts_dois`: 50 DOIs per call; `fill_abstracts` batches first, then single lookups (8 threads). NBER 2025 with the budget spent: 36.8 s, 1,216 of 1,289 abstracts. `terms.py`: parsing and matching (rules above, plus hyphens/spaces/slashes interchangeable, -s/-es, whole words, title/abstract/keywords). `fetch_search` keeps only matching articles in a term run (marks `term_hits`, reason "Matched: …"), the saved copy stays complete; `search_key` gets `|terms:` only for term runs; `/api/run/terms`; `start_fetch` does not screen term runs; "Screen with AI" (`/api/rescreen`) does on request. Settings → Paper sources (`/api/sources`): OpenAlex key (checked with a free lookup), Unpaywall email (route 1 had silently never run without `UNPAYWALL_EMAIL`), Elsevier key and institutional token, all in `.env` (mode 600), keys never sent back.
+
+**Verified.** `test_reader.py`: terms rules, the OpenAlex fake (batches, spent budget, header), a term run. In a browser against the live services: "difference-in-differences, DiD" over ISR, DSS and NBER 2025 found 62 papers in 54 s, no AI cost; Paper sources refuses a key OpenAlex does not know. **Not verified:** a real OpenAlex key's speed (none available here).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

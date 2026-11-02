@@ -56,6 +56,7 @@ label.lbl span { text-transform: none; letter-spacing: 0; font-weight: 400; }
 select, input[type=text], input[type=search] { background: var(--panel-2); border: 1px solid var(--line);
   border-radius: 8px; padding: 6px 9px; width: 100%; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.termprev { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; } .termprev:empty { display: none; } .termprev .chip { cursor: default; } .termprev small { opacity: .75; font-size: 11px; margin-left: 3px; }
 .chip { border: 1px solid var(--line); background: var(--panel-2); border-radius: 99px; padding: 3px 10px;
   font-size: 12px; cursor: pointer; user-select: none; }
 .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
@@ -255,6 +256,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
       <div class="tabs">
         <button class="on" data-tab="weekly">This week</button>
         <button data-tab="search">Search archive</button>
+        <button data-tab="terms">Search terms</button>
       </div>
       <div class="pane on" id="pane-weekly">
         <p>Fetch the newest papers from every journal, skip anything seen before, and let the AI screen them against all your interests (Sonnet 5.5 unless you chose another model in Settings → AI).
@@ -276,6 +278,18 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <div class="est" id="est"></div>
         <button class="btn primary full" id="searchbtn">Search &amp; screen</button>
         <div class="est">Starts a new run. To narrow the list you’re viewing, use the filters above the results.</div>
+      </div>
+      <div class="pane" id="pane-terms">
+        <p>Every paper of the chosen journals and years whose title, abstract or keywords contain <b>any</b> of your terms. No AI and no cost: the matches are listed as they are found. You can still rank them with AI afterwards.</p>
+        <label class="lbl" for="terms">Terms <span>(separate with commas, or “ + ”)</span></label>
+        <input type="text" id="terms" placeholder="e.g. difference-in-differences, DiD" autocomplete="off">
+        <div class="termprev" id="termprev"></div>
+        <label class="lbl">Years</label>
+        <div class="row"><select id="ty0"></select><span>to</span><select id="ty1"></select></div>
+        <label class="lbl">Journals <span>(<a href="#" id="tjall">all</a> · <a href="#" id="tjnone">none</a>)</span></label>
+        <div class="chips" id="tjournalchips"></div>
+        <div class="est" id="test"></div>
+        <button class="btn primary full" id="termsbtn">Find papers</button>
       </div>
     </div>
     <div class="card">
@@ -299,7 +313,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
     <div class="card runhead" id="runhead" data-tool="watch">
       <div class="row" style="justify-content:space-between;align-items:flex-start">
         <div><h1 id="runtitle">Welcome</h1><div class="meta" id="runmeta">Start a weekly check or an archive search from the panel on the right.</div></div>
-        <div class="row" style="gap:8px"><button class="btn hide" id="againbtn" title="Fill the search form with this search’s settings. Pressing Search continues this saved search: nothing already judged is paid for again.">Search again…</button><button class="btn danger hide" id="stopbtn">Stop</button></div>
+        <div class="row" style="gap:8px"><button class="btn hide" id="screenbtn" title="Ask the AI to judge the matches against your interests (download / borderline / skip). Costs a little; stopped by your monthly budget.">Screen with AI</button><button class="btn hide" id="againbtn" title="Fill the search form with this search’s settings. Pressing Search continues this saved search: nothing already judged is paid for again.">Search again…</button><button class="btn danger hide" id="stopbtn">Stop</button></div>
       </div>
       <div class="prog" id="prog">
         <div class="row"><span id="proglabel"></span><span id="progcount"></span></div>
@@ -604,6 +618,22 @@ async function init() {
   $("#jnone").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip").forEach(c => c.classList.remove("on")); updateEst(); };
   $("#tfilter").innerHTML += CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
   updateEst();
+  for (const id of ["#ty0", "#ty1"]) { $(id).innerHTML = CFG.years.map(y => `<option>${y}</option>`).join(""); $(id).onchange = updateTermsEst; }
+  $("#ty0").value = String(CFG.years[0] - 1); $("#ty1").value = String(CFG.years[0]);
+  CFG.journals.forEach(j => {
+    const can = j.archive !== false;
+    const c = chip(j.abbr, can && !j.default_off, updateTermsEst);
+    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: only the ${j.limit || 200} best matches of your terms are looked at` : "");
+    if (j.default_off) c.dataset.optin = "1";
+    if (!can) c.classList.add("off");
+    $("#tjournalchips").append(c);
+  });
+  $("#terms").oninput = updateTermsEst;
+  $("#terms").onkeydown = e => { if (e.key === "Enter") $("#termsbtn").click(); };
+  $("#tjall").onclick = e => { e.preventDefault(); document.querySelectorAll("#tjournalchips .chip:not(.off):not([data-optin])").forEach(c => c.classList.add("on")); updateTermsEst(); };
+  $("#tjnone").onclick = e => { e.preventDefault(); document.querySelectorAll("#tjournalchips .chip").forEach(c => c.classList.remove("on")); updateTermsEst(); };
+  addEventListener("jw-sources-changed", async () => { try { CFG.openalex_key = (await api("/api/sources")).openalex_key; updateEst(); updateTermsEst(); } catch (e) { /* the note only */ } });
+  updateTermsEst();
   await loadRuns(); await loadLibrary();
   if (RUNS.length) { const newest = [...RUNS].sort((a, b) => (b.updated || b.created) > (a.updated || a.created) ? 1 : -1)[0]; RUNTAB = newest.kind === "weekly" ? "weekly" : "search"; drawRuns(); }      // the list opens on the kind you last worked with
   if (document.readyState !== "complete") await new Promise(r => addEventListener("load", r, {once: true}));   // every module script has run by "load" (a deep link to a folder tab needs all of them)
@@ -618,6 +648,36 @@ async function init() {
   openFromHash(START_HASH);
 }
 
+// Search terms (scripts/terms.py does the matching; this only shows how each term will be read)
+const isAcronym = t => /^[0-9A-Za-z]{2,5}$/.test(t) && /[A-Z]/.test(t.slice(1));
+function parseTerms(s) {
+  const seen = new Set(), out = [];
+  for (let t of String(s || "").split(/[,;\n]|\s\+\s/)) {          // (a "+" with spaces on both sides separates: "a + b"; "C++" stays one term)
+    t = t.replace(/\s+/g, " ").trim().replace(/^["'“”‘’()\[\]{}.:!?]+|["'“”‘’()\[\]{}.:!?]+$/g, "").trim().slice(0, 80);
+    const n = t.replace(/[^0-9A-Za-z\u00C0-\u024F]/g, "").length;
+    if (n < 2 && !(n && /[+#]/.test(t))) continue;
+    const k = isAcronym(t) ? t : t.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(t); }
+  }
+  return out.slice(0, 12);
+}
+function selectedTermJournals() { return [...document.querySelectorAll("#tjournalchips .chip.on")].map(c => c.dataset.abbr); }
+function updateTermsEst() {
+  const ts = parseTerms($("#terms").value);
+  $("#termprev").innerHTML = ts.map(t => isAcronym(t)
+    ? `<span class="chip on" title="An acronym typed with capitals: it matches ${esc(t)} or ${esc(t.toUpperCase())} in a paper, but not the ordinary word “${esc(t.toLowerCase())}”">${esc(t)} <small>needs a capital</small></span>`
+    : `<span class="chip on" title="Case, hyphens and spaces between its words, and singular or plural are ignored; whole words only">${esc(t)} <small>any case</small></span>`).join("");
+  const y0 = +$("#ty0").value, y1 = +$("#ty1").value, yrs = Math.abs(y1 - y0) + 1, js = selectedTermJournals();
+  const n = js.reduce((a, j) => a + (jinfo(j).needs_query ? (jinfo(j).limit || 200) : (jinfo(j).per_year || 80) * yrs), 0);
+  $("#test").innerHTML = (ts.length ? `Any of ${ts.length} term${ts.length === 1 ? "" : "s"} · ` : "") + `≈ ${n.toLocaleString()} articles read · free (no AI)` +
+    (js.some(j => (jinfo(j).per_year || 0) > 1000) ? `<br>NBER publishes over a thousand papers a year: reading its abstracts takes ${CFG.openalex_key ? "a few seconds" : "about half a minute"} a year.` : "") +
+    (CFG.openalex_key ? "" : `<br>JMIS, DSS and NBER abstracts come from OpenAlex: <a href="#" id="toakey">add a free OpenAlex key</a> so they are all read, and quickly.`);
+  const a = $("#toakey"); if (a) a.onclick = e => { e.preventDefault(); Settings.open("sources"); };
+}
+$("#termsbtn").onclick = async () => {
+  const ts = parseTerms($("#terms").value);
+  if (!ts.length) { toast("Type at least one term, for example: difference-in-differences, DiD"); $("#terms").focus(); return; }
+  try { const r = await api("/api/run/terms", {terms: ts, year_from: +$("#ty0").value, year_to: +$("#ty1").value, journals: selectedTermJournals()}); startedRun(r.run); } catch (e) { toast(e.message); }
+};
 $("#weeklybtn").onclick = async () => {
   try { const r = await api("/api/run/weekly", {}); startedRun(r.run); } catch (e) { toast(e.message); }
 };
@@ -638,7 +698,24 @@ function startedRun(run) {
   // a weekly check continues this week's run: load what it already holds
   api("/api/runs/" + run.id).then(r => { if (RUN && RUN.id === r.id) { setRun(r); render(); } }).catch(() => {});
 }
-$("#againbtn").onclick = () => { if (RUN && RUN.params) { fillSearch(RUN.params); toast("The search form is filled in with this search’s settings. Press “Search & screen”: it continues this saved search."); } };
+$("#againbtn").onclick = () => {
+  if (!RUN || !RUN.params) return;
+  if (RUN.params.terms) {                                   // a search by terms: its own form
+    $("#terms").value = RUN.params.terms.join(", "); $("#ty0").value = String(RUN.params.year_from); $("#ty1").value = String(RUN.params.year_to);
+    document.querySelectorAll("#tjournalchips .chip").forEach(c => c.classList.toggle("on", !c.classList.contains("off") && RUN.params.journals.includes(c.dataset.abbr)));
+    updateTermsEst(); document.querySelector('.tabs button[data-tab="terms"]').click(); $("#pane-terms").scrollIntoView({block: "nearest"});
+    toast("The term form is filled in with this search’s settings. Press “Find papers”: it continues this saved search."); return;
+  }
+  fillSearch(RUN.params); toast("The search form is filled in with this search’s settings. Press “Search & screen”: it continues this saved search.");
+};
+// "Screen with AI" on a search by terms: the matches are listed without a verdict; this asks the model about those that have none (your interests, the monthly budget)
+function updateScreenBtn() {
+  const b = $("#screenbtn"); if (!b) return;
+  const pending = RUN && RUN.params && RUN.params.terms ? [...papers.values()].filter(p => !p.verdict).length : 0;
+  b.classList.toggle("hide", !pending || BUSY);
+  b.textContent = `Screen with AI (${pending} · ≈ $${(pending * CFG.est_cost_per_paper).toFixed(2)})`;
+}
+$("#screenbtn").onclick = async () => { if (!RUN) return; try { await api("/api/rescreen", {run_id: RUN.id}); toast("Screening the matches against your interests…"); } catch (e) { toast(e.message); } };
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
 let SI = null;
@@ -727,7 +804,7 @@ function drawResume() {
   $("#resumelist").innerHTML = "";
   last.forEach(r => {
     const d = document.createElement("div"); d.className = "runitem"; d.dataset.id = r.id;
-    d.innerHTML = `<b>${esc(r.title)}</b><span>${r.kind === "weekly" ? "Weekly" : "Archive search"} · ${fmtWhen(r.updated || r.created)} · ${r.n_papers} papers · ${r.n_download} to download</span>`;
+    d.innerHTML = `<b>${esc(r.title)}</b><span>${r.kind === "weekly" ? "Weekly" : (r.params || {}).terms ? "Search by terms" : "Archive search"} · ${fmtWhen(r.updated || r.created)} · ${r.n_papers} papers · ${r.n_download} to download</span>`;
     d.onclick = () => { RUNTAB = r.kind === "weekly" ? "weekly" : "search"; openRun(r); };
     $("#resumelist").append(d);
   });
@@ -775,6 +852,8 @@ function renderMeta() {
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
       (RUN.updated ? `, last ${fmtWhen(RUN.updated)}` : "")
+    : pr.terms ? "Search by terms: " + [pr.year_from === pr.year_to ? pr.year_from : pr.year_from + "–" + pr.year_to, (pr.journals || []).join(", "),
+        "any of: " + pr.terms.join(", ")].join(" · ")
     : "Archive search: " + [pr.year_from === pr.year_to ? pr.year_from : pr.year_from + "–" + pr.year_to,
         (pr.journals || []).join(", "), (pr.topics || []).join(", "),
         (pr.methods || []).length ? "main method: " + pr.methods.join(", ") : "",
@@ -782,10 +861,12 @@ function renderMeta() {
   $("#runmeta").textContent = (RUN.kind === "weekly" ? scope : `${scope} · started ${new Date(RUN.created).toLocaleString()}${RUN.updated && RUN.updated !== RUN.created ? `, updated ${fmtWhen(RUN.updated)}` : ""}`)
     + (RUN.reused ? ` · ${RUN.reused} papers reused a verdict from an earlier screening (not paid for again)` : "");
   $("#stats").classList.remove("hide");
-  $("#stats").innerHTML = [["Found", ps.length], ["Download", c("download")], ["Borderline", c("borderline")],
-    ["Skipped", c("skip")], ["Awaiting verdict", pending], ["Downloaded", got]]
+  $("#stats").innerHTML = (pr.terms ? [["Matches", ps.length], ["Not screened", pending], ["Download", c("download")], ["Borderline", c("borderline")], ["Skipped", c("skip")], ["Downloaded", got]]
+    : [["Found", ps.length], ["Download", c("download")], ["Borderline", c("borderline")], ["Skipped", c("skip")], ["Awaiting verdict", pending], ["Downloaded", got]])
     .map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
   $("#vt-bl").textContent = ` (${c("borderline")})`;
+  $("#selrec").textContent = pr.terms ? "Select all matches" : "Select all “download”";
+  updateScreenBtn();
   const needsWork = p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary);
   const queued = ps.filter(needsWork).length;
   $("#vt-q").textContent = ` (${queued} to get${got ? `, ${ps.filter(p => p.verdict === "download" && p.dl_status === "ok").length} done` : ""})`;
@@ -868,7 +949,8 @@ function card(p) {
   el.dataset.id = p.id;
   const tags = (p.topics || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") +
     (p.method ? `<span class="tag" title="Main method">⚙ ${esc(p.method)}</span>` : "") +
-    (p.abstract ? "" : `<span class="tag warn">title only</span>`) + fitChip(p);
+    (p.abstract ? "" : `<span class="tag warn">title only</span>`) + fitChip(p) +
+    (/^Matched:/.test(p.reason || "") ? "" : (p.term_hits || []).map(h => `<span class="tag you" title="Found in the ${esc(h.field)}: one of your search terms">≈ ${esc(h.text)}</span>`).join(""));   // (after "Screen with AI" the reason is the model's: the matched terms stay as tags)
   el.innerHTML = `
     <input type="checkbox" ${SEL.has(p.id) ? "checked" : ""} ${p.dl_status === "ok" ? "disabled" : ""} aria-label="Select for download">
     <div>
@@ -880,7 +962,7 @@ function card(p) {
       <div class="tags">${tags}${p.user_set ? `<span class="tag you">✋ ${p.verdict === "download" ? "moved to queue by you" : "your call"}</span>` : ""}</div>
     </div>
     <div class="pside">
-      <span class="verdict v-${v}">${v === "pending" ? "screening…" : esc(v)}</span>
+      <span class="verdict v-${v}">${v === "pending" ? (RUN && RUN.params && RUN.params.terms ? "matched" : "screening…") : esc(v)}</span>
       ${p.relevance != null ? `<div class="rel" title="Relevance ${p.relevance}"><i style="width:${p.relevance}%"></i></div>` : ""}
       ${dlText(p)}
       ${p.dl_status === "needs_login" ? `<button class="btn small" data-act="login">Sign in</button>` : ""}
@@ -932,7 +1014,7 @@ document.querySelectorAll("#vfilter button").forEach(b => b.onclick = () => {
 });
 ["#yfilter", "#tfilter", "#sort"].forEach(s => $(s).onchange = renderList);
 $("#q").oninput = () => { clearTimeout($("#q")._t); $("#q")._t = setTimeout(renderList, 200); };
-$("#selrec").onclick = () => { papers.forEach(p => { if (p.verdict === "download" && p.dl_status !== "ok") SEL.add(p.id); }); if (NAV.j !== null) renderList(); updateSel(); };
+$("#selrec").onclick = () => { const terms = RUN && RUN.params && RUN.params.terms; papers.forEach(p => { if ((terms ? (!p.verdict || p.verdict === "download") && visible(p) : p.verdict === "download") && p.dl_status !== "ok") SEL.add(p.id); }); if (NAV.j !== null) renderList(); updateSel(); };
 $("#selnone").onclick = () => { SEL.clear(); if (NAV.j !== null) renderList(); updateSel(); };
 $("#dlbtn").onclick = async () => {
   try { await api("/api/download", {ids: [...SEL]}); toast(`Downloading ${SEL.size} papers in the background.`); }
@@ -1133,7 +1215,8 @@ function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
   $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
   $("#status").classList.toggle("busy", busy);
-  ["#weeklybtn", "#searchbtn"].forEach(s => $(s).disabled = busy);
+  ["#weeklybtn", "#searchbtn", "#termsbtn"].forEach(s => $(s).disabled = busy);
+  updateScreenBtn();
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
   $("#againbtn").classList.toggle("hide", busy || !RUN || RUN.kind !== "search");
