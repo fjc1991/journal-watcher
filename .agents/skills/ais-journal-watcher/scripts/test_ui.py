@@ -2068,9 +2068,14 @@ pl._screen_batch = fake_screen
                 r_ = page.evaluate(JS_A11Y); bad_ += [("name", x) for x in r_["noname"]] + [("id", x) for x in r_["dupid"]] + [(scheme, x) for x in page.evaluate(JS_CONTRAST, scheme)]
             page.evaluate("window.setTheme('light')")
             check("every control of the reminder has a name, and its text is readable (WCAG AA) in the light and the dark theme", not bad_, str(bad_[:4]))
-            page.set_viewport_size({"width": 520, "height": 800}); page.wait_for_timeout(200)
-            check("on a narrow window it still fits the screen and the page does not scroll sideways",
-                  page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") and page.evaluate("(() => { const r = document.querySelector('.sup').getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; })()"))
+            page.set_viewport_size({"width": 520, "height": 800})
+            JS_FIT = "(() => { const r = document.querySelector('.sup').getBoundingClientRect(); return document.documentElement.scrollWidth <= window.innerWidth && r.left >= 0 && r.right <= window.innerWidth; })()"
+            try:                                   # the page re-lays itself out after the resize: wait for it instead of guessing 200 ms (a slow runner measured too early)
+                page.wait_for_function(JS_FIT, timeout=5000)
+            except Exception:  # noqa: BLE001  (the check below says what is wrong, with the numbers)
+                pass
+            check("on a narrow window it still fits the screen and the page does not scroll sideways", page.evaluate(JS_FIT),
+                  str(page.evaluate("[document.documentElement.scrollWidth, window.innerWidth, document.querySelector('.sup').getBoundingClientRect().toJSON()]")))
             page.set_viewport_size({"width": 1400, "height": 950})
             page.focus("#sup-later"); page.keyboard.press("Escape"); page.wait_for_selector(".sup", state="detached")
             check("Escape closes it", page.locator(".sup").count() == 0)
