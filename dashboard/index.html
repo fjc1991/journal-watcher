@@ -211,7 +211,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<button class="skip" id="skipnav">Skip to the page</button>
+<button class="skip-link" id="skipnav">Skip to the page</button>
 <div class="app" id="app">
 <aside class="sidebar" id="sidebar" aria-label="Navigation">
   <div class="sb-head">
@@ -313,7 +313,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
     <div class="card runhead" id="runhead" data-tool="watch">
       <div class="row" style="justify-content:space-between;align-items:flex-start">
         <div><h1 id="runtitle">Welcome</h1><div class="meta" id="runmeta">Start a weekly check or an archive search from the panel on the right.</div></div>
-        <div class="row" style="gap:8px"><button class="btn hide" id="screenbtn" title="Ask the AI to judge the matches against your interests (download / borderline / skip). Costs a little; stopped by your monthly budget.">Screen with AI</button><button class="btn hide" id="againbtn" title="Fill the search form with this search’s settings. Pressing Search continues this saved search: nothing already judged is paid for again.">Search again…</button><button class="btn danger hide" id="stopbtn">Stop</button></div>
+        <div class="row" style="gap:8px"><button class="btn hide" id="screenbtn" title="Ask the AI to add topics, the method and a relevance order to the matches. Every match stays a download: the card says when the AI would have skipped it. Costs a little; stopped by your monthly budget.">Screen with AI</button><button class="btn hide" id="againbtn" title="Fill the search form with this search’s settings. Pressing Search continues this saved search: nothing already judged is paid for again.">Search again…</button><button class="btn danger hide" id="stopbtn">Stop</button></div>
       </div>
       <div class="prog" id="prog">
         <div class="row"><span id="proglabel"></span><span id="progcount"></span></div>
@@ -608,7 +608,7 @@ async function init() {
   CFG.journals.forEach(j => {
     const can = j.archive !== false;
     const c = chip(j.abbr, can && (j.per_year || 0) < 1000 && !j.default_off, updateEst);
-    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: needs a focus phrase; only the ${j.limit || 200} best matches are looked at` : "");
+    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: needs a focus phrase; only the ${j.limit || 200} best matches are looked at` : "") + (j.archive_note ? " — " + j.archive_note : "");
     if (j.default_off) c.dataset.optin = "1";               // never switched on by "all"
     if (!can) c.classList.add("off");
     $("#journalchips").append(c);
@@ -623,7 +623,7 @@ async function init() {
   CFG.journals.forEach(j => {
     const can = j.archive !== false;
     const c = chip(j.abbr, can && !j.default_off, updateTermsEst);
-    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: only the ${j.limit || 200} best matches of your terms are looked at` : "");
+    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: only the ${j.limit || 200} best matches of your terms are looked at` : "") + (j.archive_note ? " — " + j.archive_note : "");
     if (j.default_off) c.dataset.optin = "1";
     if (!can) c.classList.add("off");
     $("#tjournalchips").append(c);
@@ -715,7 +715,7 @@ function updateScreenBtn() {
   b.classList.toggle("hide", !pending || BUSY);
   b.textContent = `Screen with AI (${pending} · ≈ $${(pending * CFG.est_cost_per_paper).toFixed(2)})`;
 }
-$("#screenbtn").onclick = async () => { if (!RUN) return; try { await api("/api/rescreen", {run_id: RUN.id}); toast("Screening the matches against your interests…"); } catch (e) { toast(e.message); } };
+$("#screenbtn").onclick = async () => { if (!RUN) return; try { await api("/api/rescreen", {run_id: RUN.id}); toast("Ranking the matches against your interests…"); } catch (e) { toast(e.message); } };
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
 let SI = null;
@@ -950,6 +950,7 @@ function card(p) {
   const tags = (p.topics || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") +
     (p.method ? `<span class="tag" title="Main method">⚙ ${esc(p.method)}</span>` : "") +
     (p.abstract ? "" : `<span class="tag warn">title only</span>`) + fitChip(p) +
+    (p.model_verdict && p.model_verdict !== p.verdict ? `<span class="tag" title="In a search by terms every match is a download. This is what the AI said about it against your interests.">AI said ${esc(p.model_verdict)}</span>` : "") +
     (/^Matched:/.test(p.reason || "") ? "" : (p.term_hits || []).map(h => `<span class="tag you" title="Found in the ${esc(h.field)}: one of your search terms">≈ ${esc(h.text)}</span>`).join(""));   // (after "Screen with AI" the reason is the model's: the matched terms stay as tags)
   el.innerHTML = `
     <input type="checkbox" ${SEL.has(p.id) ? "checked" : ""} ${p.dl_status === "ok" ? "disabled" : ""} aria-label="Select for download">

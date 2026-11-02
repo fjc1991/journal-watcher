@@ -141,10 +141,13 @@
       "issn": null,
       "doi_prefix": null,
       "lookup": false,
-      "archive": false,
+      "archive": true,
+      "archive_source": "hbr_issues",
+      "default_off": true,
+      "archive_note": "Year searches read HBR's print issues (title, authors and a one-line summary). Web-only articles come only in the weekly check.",
       "base_url": "https://hbr.org",
-      "per_year": null,
-      "_note": "Digital articles feed (no DOIs, not in Crossref): weekly checks only; saved as PDF from the article page."
+      "per_year": 120,
+      "_note": "No DOIs, not in Crossref. Weekly: the digital articles feed. Year searches: the print issues' contents pages (fetch_new.hbr_archive). Saved as PDF from the article page."
     }
   ]
 }

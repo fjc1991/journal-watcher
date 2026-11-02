@@ -2402,6 +2402,34 @@ def main():
             ms = dict(p, publisher="informs", abbr="MS", journal="Management Science")
             ok, path, note = dl.download_paper(ms, env, browser=_FakeBrowser(None, note="needs_login:pubsonline.informs.org"))
             assert not ok and "needs_library_login" not in note and "needs_login:pubsonline.informs.org" in note, note
+            # f2) the PDF route starts at doi.org (MIS Quarterly and JAIS on the AIS eLibrary; a DSS paper found by an archive search, without its ScienceDirect address).
+            #     Through the library it ends on the publisher's own sign-in page again: that is the publisher saying no, not your library asking for a password. The
+            #     sign-in tick stays and the next papers of the batch are still tried through the library. (Before, "doi" was compared with the host it ended on, so the
+            #     first MISQ paper of a batch cleared the library sign-in and every later paper said "Needs library sign-in" without being tried.)
+            sg.record("library", True)
+            misq = dict(p, publisher="aisel", abbr="MISQ", journal="MIS Quarterly")
+            assert dl.browser_pdf_url(misq).startswith("https://doi.org/")
+            br = _FakeBrowser(None, note="needs_login:aisel.aisnet.org", via=(OA, (None, "needs_login:aisel.aisnet.org")))
+            ok, path, note = dl.download_paper(dict(misq), env, browser=br)
+            assert not ok and len(br.urls) == 2 and br.urls[1].startswith(OA) and "needs_library_login" not in note, (note, br.urls)
+            assert not getattr(br, "library_signed_out", False) and sg.status()["library"]["signed_in"] is True, note
+            ok, path, note = dl.download_paper(dict(misq), env, browser=br)
+            assert not ok and len(br.urls) == 4 and br.urls[3].startswith(OA) and "needs_library_login" not in note, (note, br.urls)   # the next paper still goes through the library
+            dss = dict(p, publisher="elsevier", abbr="DSS", journal="Decision Support Systems")
+            assert dl.browser_pdf_url(dss).startswith("https://doi.org/")
+            br = _FakeBrowser(None, note="browser: no PDF at https://www.sciencedirect.com/science/article/abs/pii/S0167923625000001",
+                              via=(OA, (None, "needs_login:www.sciencedirect.com")))
+            ok, path, note = dl.download_paper(dict(dss), env, browser=br)
+            assert not ok and "needs_library_login" not in note and sg.status()["library"]["signed_in"] is True, note
+            # f3) the same doi.org papers, when the library really asks for a password (the university's single sign-on, OpenAthens): still said, still offered
+            br = _FakeBrowser(None, note="needs_login:aisel.aisnet.org", via=(OA, (None, "needs_login:sso.testuni.ac.uk")))
+            ok, path, note = dl.download_paper(dict(misq), env, browser=br)
+            assert not ok and "needs_library_login" in note and "sso.testuni.ac.uk" in note and br.library_signed_out and sg.status()["library"]["signed_in"] is False, note
+            sg.record("library", True)
+            br = _FakeBrowser(None, note="needs_login:login.openathens.net", via=(OA, (None, "needs_login:login.openathens.net")))    # the plain attempt already met a sign-in page
+            ok, path, note = dl.download_paper(dict(misq), env, browser=br)
+            assert not ok and "needs_library_login" in note and br.library_signed_out, note
+            sg.record("library", True)
             # g) EZproxy: the library's prefix goes in front of the address
             sg.save_profile({"mode": "ezproxy", "ezproxy": "https://ezproxy.testuni.edu/login?url=", "name": "Test University"}); sg.record("library", True)
             br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=("https://ezproxy.testuni.edu/login?url=", (RIGHT, "browser")))
@@ -2935,6 +2963,133 @@ def main():
         finally:
             pl_.fx.crossref_journal_range, pl_.fill_abstracts, pl_.saved_fetch, pl_.save_fetch = saved
     check("a search by terms keeps only the articles with a term (and says which, where), keeps the whole saved copy for other searches, and is a saved search of its own", t_term_run)
+
+    def t_hbr_archive():
+        """HBR by year: its print issues' contents pages (stream-item tags), monthly codes before 2017 and six a year since, an empty page is no issue, each article once
+        (its copies merged), nothing from another year, an issue that cannot be read stops the search with its code. An old journals.json gets the year search;
+        a search by terms keeps the HBR articles whose title or summary has a term, with the same paper id as the weekly feed gives them."""
+        import fetch_new as fx_, pipeline as pl_
+        assert fx_.hbr_issue_codes(2016) == list(range(1, 13)) and fx_.hbr_issue_codes(2017) == list(range(1, 7))
+        def item(url, title="", authors="", summary="", topic=""):
+            return '<stream-item class="stream-item" data-url="%s" data-title="%s" data-authors="%s" data-summary="%s" data-topic="%s"><h3>x</h3></stream-item>' % (url, title, authors, summary, topic)
+        page = ("<html><body><ul>" + item("/2024/03/a-staggered-did-on-pricing", "A Staggered DiD on Pricing", "", "Short.")
+                + item("/2024/03/plain-strategy-note", "Plain &amp; Simple Strategy", "Ann Lee;Bo Chen;", "We use difference-in-differences to study it.", "Strategy")
+                + item("/2024/03/a-staggered-did-on-pricing", "A Staggered DiD on Pricing", "Cy Doe;", "Short.")       # its long copy: the authors come from here
+                + item("/2019/05/an-old-classic", "An Old Classic", "Dee Old", "From another year.")                # not this issue's year: left out
+                + item("/2024/03/no-title-here", "", "X", "y") + item("/resources/whatever", "Not an article") + "</ul></body></html>")
+        its = fx_.hbr_issue_items(page, 2024)
+        assert [i["url"] for i in its] == ["https://hbr.org/2024/03/a-staggered-did-on-pricing", "https://hbr.org/2024/03/plain-strategy-note"], its
+        assert its[0]["authors"] == ["Cy Doe"] and its[1]["authors"] == ["Ann Lee", "Bo Chen"] and its[1]["title"] == "Plain & Simple Strategy" and its[1]["topic"] == "Strategy" and its[0]["pub_date"] == "2024-03"
+        assert fx_.hbr_issue_items("<html><body>The Magazine</body></html>", 2024) == []
+        asked, prog = [], []
+        def get(url, timeout=40):
+            asked.append(url)
+            return (page.encode() if url.endswith("BR2402") else b"<html>no issue</html>"), url, {}
+        got = fx_.hbr_archive(2024, 2024, progress=lambda a, b: prog.append((a, b)), pause=0, get=get)
+        assert asked == [fx_.HBR_TOC % (24, n) for n in range(1, 7)] and prog[-1] == (6, 6) and len(got) == 2, (asked, prog, got)
+        assert got[1] == {"doi": None, "title": "Plain & Simple Strategy", "url": "https://hbr.org/2024/03/plain-strategy-note", "abstract": "We use difference-in-differences to study it.",
+                          "authors": ["Ann Lee", "Bo Chen"], "keywords": ["Strategy"], "pub_date": "2024-03"}, got[1]
+        assert len(fx_.hbr_archive(2015, 2016, pause=0, get=lambda u, timeout=40: (b"", u, {}))) == 0
+        tries = []
+        def flaky(url, timeout=40):                        # one failure is asked again; two stop the search, naming the issue
+            tries.append(url)
+            if url.endswith("BR2403"):
+                raise OSError("timed out")
+            if url.endswith("BR2401") and tries.count(url) == 1:
+                raise OSError("reset")
+            return b"<html></html>", url, {}
+        try:
+            fx_.hbr_archive(2024, 2024, pause=0, get=flaky, retry_wait=0); raise AssertionError("a missing issue went unnoticed")
+        except RuntimeError as e:
+            assert "BR2403" in str(e) and tries.count(fx_.HBR_TOC % (24, 1)) == 2 and tries.count(fx_.HBR_TOC % (24, 3)) == 2, (str(e), tries)
+        # a journals.json from before: HBR "weekly checks only" is read with the year search; one that says how it is searched is left as it is
+        jpath = os.path.join(pl_.BASE, "journals.json"); keep = open(jpath, encoding="utf-8").read()
+        try:
+            json.dump({"journals": [{"name": "Harvard Business Review", "abbr": "HBR", "publisher": "hbr", "source": "rss", "feed": "http://feeds.hbr.org/harvardbusiness", "archive": False, "per_year": None},
+                                    {"name": "Other HBR", "abbr": "OH", "publisher": "hbr", "archive": False, "archive_source": "none"}]}, open(jpath, "w"))
+            js = {j["abbr"]: j for j in pl_.journals()}
+            assert js["HBR"]["archive"] is True and js["HBR"]["archive_source"] == "hbr_issues" and js["HBR"]["default_off"] and js["HBR"]["feed"] and js["OH"]["archive"] is False, js
+        finally:
+            open(jpath, "w", encoding="utf-8").write(keep)
+        hbr = next(j for j in pl_.journals() if j["abbr"] == "HBR")
+        assert hbr["archive"] and hbr["archive_source"] == "hbr_issues"                                                   # the starting settings have it too
+        saved = (pl_.fx.hbr_archive, pl_.saved_fetch, pl_.save_fetch, pl_.fx.crossref_journal_range)
+        pl_.fx.hbr_archive = lambda y0, y1, progress=None: [dict(x) for x in got]
+        pl_.fx.crossref_journal_range = lambda *a, **k: (_ for _ in ()).throw(AssertionError("HBR is not in Crossref"))
+        pl_.saved_fetch = lambda *a, **k: (None, None)
+        pl_.save_fetch = lambda *a, **k: None
+        try:
+            run = pl_.Run("search", {"year_from": 2024, "year_to": 2024, "journals": ["HBR"], "topics": [], "methods": [], "query": "", "terms": ["difference-in-differences", "DiD"]})
+            pl_.fetch_search(run, lambda *a, **k: None, threading.Event())
+            ps = list(run.papers.values())
+            assert len(ps) == 2 and {p_["publisher"] for p_ in ps} == {"hbr"} and {p_["source"] for p_ in ps} == {"hbr-issues"}, ps
+            byt = {p_["title"]: p_ for p_ in ps}
+            assert byt["A Staggered DiD on Pricing"]["term_hits"][0]["field"] == "title" and byt["Plain & Simple Strategy"]["term_hits"][0]["field"] == "abstract"
+            assert byt["Plain & Simple Strategy"]["id"] == fx_.key_for(None, "Harvard Business Review", "Plain & Simple Strategy")     # the weekly feed's id for it too
+        finally:
+            pl_.fx.hbr_archive, pl_.saved_fetch, pl_.save_fetch, pl_.fx.crossref_journal_range = saved
+    check("HBR by year: its print issues' contents pages (monthly codes before 2017, six since; an empty page is no issue), each article once with its authors, nothing from another year, an unreadable issue stops the search with its code; an old journals.json gets it; a terms search keeps the matches with the weekly feed's ids", t_hbr_archive)
+
+    def t_term_screen():
+        """A search by terms: every match is a download. "Screen with AI" adds topics, the method, a relevance and a reason; its own borderline or skip is kept as
+        model_verdict (also in the verdict cache, so another search with the same question gets the model's word, not "download"), never as the verdict. A verdict you
+        set stays yours. A run saved before this rule is read with it applied. A search without terms is unchanged."""
+        import pipeline as pl_
+        abbr = pl_.journals()[0]["abbr"]
+        hit = [{"term": "DiD", "field": "abstract", "text": "DiD"}]
+        def fake_batch(system, batch, usage):
+            return {n: {"n": n, "verdict": ["download", "borderline", "skip"][n % 3], "relevance": 10 * n, "topics": [], "reason": "r%d" % n, "method": "Econometrics (DiD)"}
+                    for n, _ in enumerate(batch, 1)}
+        def arts(with_hits):
+            return [dict({"id": "t%d" % k, "title": "Paper %d" % k, "abbr": abbr, "pub_date": "2024-03-01", "abstract": "A DiD design %d." % k, "keywords": None},
+                         **({"term_hits": hit} if with_hits else {})) for k in range(6)]
+        real = pl_._screen_batch
+        pl_._screen_batch = fake_batch
+        try:
+            if os.path.exists(pl_.VERDICTS): os.remove(pl_.VERDICTS)
+            params = {"year_from": 2024, "year_to": 2024, "journals": [abbr], "topics": pl_.topic_labels(), "methods": [], "query": "", "terms": ["DiD"]}
+            run = pl_.Run("search", params)
+            for a in arts(True): run.add_paper(a)
+            events = []
+            pl_.screen(run, lambda ev, d=None: events.append((ev, d)), threading.Event())
+            ps = [run.papers["t%d" % k] for k in range(6)]
+            assert [p_["verdict"] for p_ in ps] == ["download"] * 6, [p_["verdict"] for p_ in ps]
+            assert [p_["model_verdict"] for p_ in ps] == ["borderline", "skip", "download"] * 2 and ps[0]["relevance"] == 10 and ps[0]["method"] == "Econometrics (DiD)" and ps[1]["reason"] == "r2"
+            sent = {d["id"]: d for ev, d in events if ev == "verdict"}
+            assert sent["t1"]["verdict"] == "download" and sent["t1"]["model_verdict"] == "skip" and pl_.slim(ps[1])["model_verdict"] == "skip"
+            cache = json.load(open(pl_.VERDICTS))
+            assert sorted(e["v"] for q in cache.values() for e in q.values()) == sorted(["borderline", "skip", "download"] * 2), cache   # the model's word is what is kept
+            # the same question without terms (same topics, no focus): the cached verdicts are reused as the model gave them
+            plain = pl_.Run("search", dict(params, terms=[]))
+            for a in arts(False): plain.add_paper(a)
+            pl_.screen(plain, lambda *a, **k: None, threading.Event())
+            assert [plain.papers["t%d" % k]["verdict"] for k in range(6)] == ["borderline", "skip", "download"] * 2 and not any("model_verdict" in p_ for p_ in plain.papers.values())
+            # the same terms search again: the cached verdicts go through the rule too
+            again = pl_.Run("search", params)
+            for a in arts(True): again.add_paper(a)
+            pl_.screen(again, lambda *a, **k: None, threading.Event())
+            assert [again.papers["t%d" % k]["verdict"] for k in range(6)] == ["download"] * 6 and again.papers["t1"]["model_verdict"] == "skip"
+            # a run saved before the rule: skipped and borderline matches become downloads; yours, errors and unscreened ones stay as they are; loading twice changes nothing more
+            old = pl_.Run("search", params)
+            olds = arts(True)
+            for a, v in zip(olds, ["skip", "borderline", "download", "error", None, "skip"]):
+                if v: a["verdict"] = v
+            olds[5].update(user_set=True, ai_verdict="download")
+            for a in olds: old.add_paper(a)
+            old.save(force=True)
+            for _ in range(2):
+                back = pl_.Run.load(old.id)
+                got = [(back.papers["t%d" % k].get("verdict"), back.papers["t%d" % k].get("model_verdict")) for k in range(6)]
+                assert got == [("download", "skip"), ("download", "borderline"), ("download", "download"), ("error", None), (None, None), ("skip", None)], got
+                back.save(force=True)
+            # a search without terms is never touched by the rule
+            weekly = pl_.Run("search", dict(params, terms=[]))
+            q = dict(arts(True)[0], verdict="skip"); pl_.terms_rule(weekly, q)
+            assert q["verdict"] == "skip" and "model_verdict" not in q
+        finally:
+            pl_._screen_batch = real
+            if os.path.exists(pl_.VERDICTS): os.remove(pl_.VERDICTS)
+    check("a search by terms: every match is a download; Screen with AI only adds topics, method, relevance and a reason (its own skip is shown, and cached as it was said); your verdicts stay; older saved runs are read with the rule", t_term_screen)
 
     def t_search_memory():
         """A search is not paid for twice: verdicts are reused for the same question and the same text (and expire), a journal's year range is kept for a while, and the same search is the same saved run."""

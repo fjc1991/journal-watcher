@@ -1844,6 +1844,14 @@ pl._screen_batch = fake_screen
             n0 = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
             page.click("#searchbtn"); run_a = wait_idle(3)
             check("the search finds 3 papers and screens them once (one question to the model)", run_a["n_papers"] == 3 and run_a["n_download"] == 2 and len(batches()) == 1 and batches() == ["3"], str((run_a["n_papers"], batches())))
+            # the skipped paper is listed under "Skipped" like any other card. A skipped card once shared its class (skip) with the hidden "Skip to the page" link, whose
+            # rule put every skipped card 60 px above the window, all stacked over the header
+            page.wait_for_function("RUN && RUN.id === %s" % json.dumps(run_a["id"]), timeout=8000)
+            page.evaluate("go({j: '*'})"); page.click('#vfilter button[data-v="skip"]')
+            page.wait_for_selector("#papers .paper.skip:not(.hide)", timeout=8000)
+            box = page.evaluate("(() => { const c = document.querySelector('#papers .paper.skip:not(.hide)'), a = c.getBoundingClientRect(), b = document.querySelector('#papers').getBoundingClientRect(); return {pos: getComputedStyle(c).position, top: a.top, ltop: b.top, h: a.height, n: document.querySelectorAll('#papers .paper.skip:not(.hide)').length}; })()")
+            check("the Skipped filter lists the skipped paper inside the list, where it can be read and clicked (not hidden above the window)", box["pos"] == "static" and box["top"] >= box["ltop"] and box["h"] > 30 and box["n"] == 1, str(box))
+            page.click('#vfilter button[data-v="relevant"]'); page.evaluate("go({j: null})")
             page.click('#runtabs button[data-rt="search"]'); page.wait_for_function("document.querySelector('#n-search').textContent.trim() !== '' && /You already ran this search/.test(document.querySelector('#est').innerText)", timeout=15000)
             check("it is in the history under 'Archive searches', and the form now says you already ran this search", run_a["title"] in page.inner_text("#runs") and "You already ran this search" in page.inner_text("#est"), page.inner_text("#est"))
             page.click("#searchbtn"); run_a2 = wait_idle(3, min_checks=2)

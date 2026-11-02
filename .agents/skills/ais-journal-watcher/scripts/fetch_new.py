@@ -154,6 +154,85 @@ def item_to_paper(d, j):
     }
 
 
+# ---------- HBR magazine archive ----------
+# HBR has no DOIs and is not in Crossref. Its website lists every print issue on a contents page, hbr.org/archive-toc/BR<YY><NN>. Each article there is a
+# <stream-item> tag that carries its address, title, authors, topic and one-line summary as attributes (the same article can appear twice, short and long:
+# the copies are merged). Monthly up to 2016, with some months combined, so not every number is an issue. Six issues a year since 2017. A number that is
+# not an issue answers with a page that has no articles. HBR's web-only articles are not in any issue: only the weekly feed has them.
+HBR_TOC = "https://hbr.org/archive-toc/BR%02d%02d"
+HBR_SIX_A_YEAR_FROM = 2017
+
+
+def hbr_issue_codes(year):
+    """The issue numbers to try for a year: 1–6 from 2017, 1–12 before (some of those are not issues)."""
+    return list(range(1, 7 if year >= HBR_SIX_A_YEAR_FROM else 13))
+
+
+def hbr_issue_items(html, year):
+    """The articles of one issue page: [{url, title, authors, summary, topic, pub_date}], in page order, one per address. Only articles of that year count (a page
+    that is not an issue lists none, and nothing from another year is taken for this one)."""
+    from html.parser import HTMLParser
+
+    class _Items(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.found = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "stream-item":
+                self.found.append(dict(attrs))
+
+    p = _Items()
+    p.feed(html)
+    out, by_url = [], {}
+    for a in p.found:
+        m = re.fullmatch(r"/(\d{4})/(\d{2})/[A-Za-z0-9-]+", (a.get("data-url") or "").strip())
+        if not m or int(m.group(1)) != year:
+            continue
+        it = {"url": "https://hbr.org" + m.group(0), "title": strip_html(a.get("data-title") or ""),
+              "authors": [x.strip() for x in (a.get("data-authors") or "").split(";") if x.strip()],
+              "summary": strip_html(a.get("data-summary") or ""), "topic": (a.get("data-topic") or "").strip(),
+              "pub_date": "%s-%s" % (m.group(1), m.group(2))}
+        old = by_url.get(it["url"])
+        if old is None:
+            by_url[it["url"]] = it
+            out.append(it)
+        else:                                       # the second copy fills what the first left empty
+            for k in ("title", "authors", "summary", "topic"):
+                if not old[k] and it[k]:
+                    old[k] = it[k]
+    return [it for it in out if it["title"]]
+
+
+def hbr_archive(y0, y1, progress=None, pause=0.5, get=None, retry_wait=3):
+    """Every article of HBR's print issues from y0 to y1, as archive-search items (no DOI; the one-line summary as the abstract; the topic as keywords). An
+    issue page that cannot be read stops the search with an error naming it, so that a year is never saved with an issue silently missing."""
+    get = get or http_get
+    codes = [(y, n) for y in range(int(y0), int(y1) + 1) for n in hbr_issue_codes(y)]
+    out, seen = [], set()
+    for k, (y, n) in enumerate(codes, 1):
+        url = HBR_TOC % (y % 100, n)
+        for attempt in range(2):
+            try:
+                raw, _, _ = get(url, timeout=40)
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt:
+                    raise RuntimeError("HBR issue BR%02d%02d could not be read (%s)" % (y % 100, n, str(e)[:80]))
+                time.sleep(retry_wait)
+        for it in hbr_issue_items(raw.decode("utf-8", "replace"), y):
+            if it["url"] in seen:
+                continue
+            seen.add(it["url"])
+            out.append({"doi": None, "title": it["title"], "url": it["url"], "abstract": it["summary"] or None, "authors": it["authors"],
+                        "keywords": [it["topic"]] if it["topic"] else None, "pub_date": it["pub_date"]})
+        if progress:
+            progress(k, len(codes))
+        if pause and k < len(codes):
+            time.sleep(pause)                      # a light pace: these are HBR's own web pages
+    return out
+
+
 # ---------- crossref ----------
 
 def cr_strip_jats(x):

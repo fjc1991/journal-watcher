@@ -129,6 +129,38 @@ def _site_word(url):
     return parts[-3] if len(parts) >= 3 and ".".join(parts[-2:]) in ("co.uk", "ac.uk", "org.uk", "com.au", "co.jp") else parts[-2] if len(parts) >= 2 else ".".join(parts)
 
 
+# The host words (as _site_word gives them) of each publisher's own sites. A paper's PDF route can start at doi.org (MISQ and JAIS; a DSS paper found by an archive
+# search, which has no ScienceDirect address yet): that address names no publisher, so the page an attempt ends on is compared with these instead.
+PUBLISHER_SITES = {"aisel": ("aisnet",), "informs": ("informs",), "wiley": ("wiley",), "tandfonline": ("tandfonline",), "elsevier": ("sciencedirect",),
+                   "acm": ("acm",), "aaas": ("science",), "pnas": ("pnas",), "nber": ("nber",), "hbr": ("hbr",), "ssrn": ("ssrn",)}
+_RESOLVERS = ("doi.org", "handle.net")
+# a sign-in service's host (OpenAthens, Microsoft, Okta, a university's sso./idp./login. host): never "the publisher's site"
+_IDP_HOST = re.compile(r"(^|[.-])(login|signin|sso|idp|shibboleth|adfs|cas|wayf|auth)[.-]|openathens\.net$|microsoftonline\.com$|okta\.com$")
+
+
+def _ended_on(note):
+    """The host a browser attempt ended on, from its note ("needs_login:<host> …" or "browser: no PDF at <address>"); "" when the note does not say."""
+    m = re.match(r"needs_login:([^\s;()]+)", note or "")
+    if m:
+        return m.group(1).lower()
+    m = re.match(r"browser: no PDF at (\S+)", note or "")
+    return urllib.parse.urlsplit(m.group(1)).netloc.lower().split(":")[0] if m else ""
+
+
+def _publisher_words(p, start, first_note):
+    """The host words that mean "the publisher's own site" for this paper: the publisher's known sites, the address the attempt started from (unless it is a DOI
+    resolver), and the site the plain attempt (without the library) ended on, unless that was already a sign-in service. Through the library, ending on one of these
+    is the publisher's paywall. Ending anywhere else means the library asked for a password."""
+    words = set(PUBLISHER_SITES.get(p.get("publisher"), ()))
+    host = urllib.parse.urlsplit(start or "").netloc.lower().split(":")[0]
+    if host and not host.endswith(_RESOLVERS):
+        words.add(_site_word(start))
+    first = _ended_on(first_note)
+    if first and not _IDP_HOST.search(first):
+        words.add(_site_word("https://" + first + "/"))
+    return {w for w in words if w}
+
+
 def browser_pdf_url(p):
     """PDF URL for the real-browser route (browser.py)."""
     pub, doi = p.get("publisher"), p.get("doi")
@@ -324,7 +356,7 @@ def download_paper(p, env, dry=False, browser=None):
                         if getattr(browser, "library_signed_out", False):
                             note += "; needs_library_login"
                         else:
-                            seen = len(refused)
+                            seen, plain = len(refused), note
                             d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi)
                             d4, _ = vet(d4, "browser (via your library)")
                             if d4:
@@ -340,7 +372,8 @@ def download_paper(p, env, dry=False, browser=None):
                                 at = n4.split(":", 1)[1].split()[0].lower() if n4.startswith("needs_login:") else ""
                                 # it ended on somebody else's sign-in page: the library session has ended. The publisher's own host, also as an EZproxy rewrites it
                                 # (onlinelibrary-wiley-com.ezproxy.uni.edu still contains "wiley"), is the publisher's paywall, not the library asking for a password.
-                                if at and _site_word(u) not in at:
+                                # "The publisher's own host" is not only the start address's: from doi.org (MISQ, JAIS) it is where the plain attempt ended.
+                                if at and not any(w in at for w in _publisher_words(p, u, plain)):
                                     signins.forget("library")
                                     try:
                                         browser.library_signed_out = True
