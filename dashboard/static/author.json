@@ -1,11 +1,20 @@
 {
-  "name": "",
-  "role": "",
-  "university": "",
+  "name": "Francis Joseph Costello",
+  "role": "Tenure-Track Assistant Professor of Management Information Systems",
+  "university": "Nova School of Business and Economics",
   "university_url": "",
   "photo": "",
-  "bio": [],
-  "links": [],
+  "bio": [
+    "I currently serve as a tenure-track Assistant Professor of Management Information Systems in the Technology Group within the Department of Operations, Technology and Innovation Management (OTIM) at NOVA School of Business and Economics.",
+    "My research examines digital intermediation and how technology platforms shape markets, organizations, and decision-making. My work spans artificial intelligence, open innovation, entrepreneurial information systems, platform subscriptions, and human-AI collaboration, using causal inference, behavioral experiments, and computational methods. My research has appeared in Management Science, Decision Support Systems, and the Journal of Business Research, among other outlets."
+  ],
+  "links": [
+    {"label": "Website", "url": "https://fjc-research.com/"},
+    {"label": "Research", "url": "https://fjc-research.com/2.research.html"},
+    {"label": "Publications", "url": "https://fjc-research.com/3.publications.html"},
+    {"label": "CV", "url": "https://fjc-research.com/4.cv.html"},
+    {"label": "Contact", "url": "https://fjc-research.com/6.contact.html"}
+  ],
   "support": {"service": "Ko-fi", "url": "https://ko-fi.com/fjc91"},
   "repo": "https://github.com/fjc1991/journal-watcher"
 }
