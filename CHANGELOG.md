@@ -2,6 +2,13 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.1
+
+- In a search by terms every match is a download. “Screen with AI” no longer skips a paper that contains your term. It adds topics, the method and a relevance order, and the card says “AI said skip” when the AI would have left it out. Terms searches you already screened are shown this way too.
+- Harvard Business Review can be searched by year, in archive searches and in Search terms. Journal Watcher reads the contents pages of HBR's print issues, which list each article's title, authors and a one-line summary. HBR's web-only articles are in no issue, so they still come only through the weekly check. HBR is off until you tick it.
+- Fixed: the Skipped filter showed no papers, and its cards were piled up above the window, over the header.
+- Fixed: off campus, one MIS Quarterly, JAIS or DSS paper could stop a whole download batch. Its publisher's own login page was taken for your library asking for a password, so your library sign-in was cleared and every later paper said “Needs library sign-in” without being tried.
+
 ## 1.2.0
 
 - Watch has a third tab, Search terms. Type one or more terms (for example difference-in-differences, DiD), pick journals and years, and Journal Watcher lists every paper whose title, abstract or keywords contain any of them. It is free and needs no AI. Case, hyphens or spaces between words, and singular or plural are ignored. An acronym typed with capitals (DiD) does not match the ordinary word "did". “Screen with AI” can rank the matches against your interests afterwards.

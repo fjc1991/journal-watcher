@@ -359,7 +359,7 @@ def config():
     y = datetime.date.today().year
     return {
         "journals": [{"abbr": j["abbr"], "name": j["name"], "publisher": j["publisher"],
-                      "per_year": j.get("per_year"), "archive": j.get("archive", True), "needs_query": bool(j.get("needs_query")), "default_off": bool(j.get("default_off")), "limit": j.get("limit"), "weekly": bool(j.get("weekly", True))}
+                      "per_year": j.get("per_year"), "archive": j.get("archive", True), "needs_query": bool(j.get("needs_query")), "default_off": bool(j.get("default_off")), "limit": j.get("limit"), "weekly": bool(j.get("weekly", True)), "archive_note": j.get("archive_note") or ""}
                      for j in pl.journals()],
         "topics": pl.topic_labels(),
         "methods": [{"label": m.get("label", m["name"]), "description": m.get("description", "")}

@@ -63,10 +63,16 @@ SSRN = {"name": "SSRN", "abbr": "SSRN", "publisher": "ssrn", "source": "ssrn", "
         "archive": True, "weekly": False, "needs_query": True, "default_off": True, "limit": fx.SSRN_LIMIT}
 
 
+# HBR's print issues can be searched by year (fetch_new.hbr_archive). A journals.json copied before that has HBR as "weekly checks only": it is read with these.
+HBR_ARCHIVE = {"archive": True, "archive_source": "hbr_issues", "per_year": 120, "default_off": True,
+               "archive_note": "Year searches read HBR's print issues (title, authors and a one-line summary). Web-only articles come only in the weekly check."}
+
+
 def journals():
     """The journals of your journals.json, and SSRN: a place to search by words (an archive search with a focus phrase), never read in the weekly check and never selected
-    by itself. It is added here so that a journals.json copied before SSRN existed has it too."""
+    by itself. It is added here so that a journals.json copied before SSRN existed has it too. HBR gets its year search (HBR_ARCHIVE) the same way."""
     js = load_json(os.path.join(BASE, "journals.json"), {"journals": []})["journals"]
+    js = [dict(j, **HBR_ARCHIVE) if j.get("publisher") == "hbr" and not j.get("archive_source") else j for j in js]
     return js + [dict(SSRN)] if not any(j.get("abbr") == "SSRN" for j in js) else js
 
 
@@ -278,6 +284,7 @@ class Run:
                 # interrupted (dashboard closed mid-download): ready to retry
                 p["dl_status"] = "ok" if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])) else None
                 p["dl_note"] = "interrupted — press Download again"
+            terms_rule(r, p)                    # a search by terms screened before 1.2.1: its skipped and borderline matches become downloads (the model's word is kept)
             r.add_paper(p)
         return r
 
@@ -408,7 +415,7 @@ def slim(p):
     """Paper fields the UI needs."""
     keys = ("id", "journal", "abbr", "title", "authors", "doi", "url", "pub_date", "abstract",
             "keywords", "publisher", "verdict", "relevance", "topics", "method", "reason", "dl_status",
-            "ai_verdict", "user_set",
+            "ai_verdict", "user_set", "model_verdict",
             "dl_note", "file", "summary", "manual_url", "term_hits")
     return {k: p.get(k) for k in keys}
 
@@ -562,9 +569,11 @@ def fetch_search(run, emit, stop):
                                                                                         "; %d contain your terms" % kept if match else "")})
             run.save()
             continue
-        set_j(run, emit, j["abbr"], state="fetching", label="Querying Crossref")
+        set_j(run, emit, j["abbr"], state="fetching", label="Reading HBR's issues" if j.get("archive_source") == "hbr_issues" else "Querying Crossref")
         try:
-            if j.get("source") == "ssrn" and p.get("terms"):    # by terms: each term on its own (one query of all of them would favour papers with all), then together
+            if j.get("archive_source") == "hbr_issues":           # HBR: its print issues' contents pages (no DOIs, not in Crossref)
+                items = fx.hbr_archive(int(p["year_from"]), int(p["year_to"]), progress=lambda a, b, ab=j["abbr"]: set_j(run, emit, ab, done=a, total=b))
+            elif j.get("source") == "ssrn" and p.get("terms"):    # by terms: each term on its own (one query of all of them would favour papers with all), then together
                 items, seen_ = [], set()
                 for t in p["terms"]:
                     for it in fx.crossref_ssrn(t, int(p["year_from"]), int(p["year_to"]), limit=j.get("limit") or fx.SSRN_LIMIT):
@@ -592,7 +601,7 @@ def fetch_search(run, emit, stop):
         kept = 0
         for it in items:
             it.update({"journal": j["name"], "abbr": j["abbr"], "publisher": j["publisher"],
-                       "source": "crossref", "source_mode": "search"})
+                       "source": "hbr-issues" if j.get("archive_source") == "hbr_issues" else "crossref", "source_mode": "search"})
             it["id"] = fx.key_for(it.get("doi"), j["name"], it["title"])
             row = dict(it)                                     # (the saved copy keeps every article, without the marks of this search)
             if keep(row):
@@ -797,16 +806,29 @@ def known_verdicts(fp, papers, days, now=None):
     return out
 
 
+def terms_rule(run, p):
+    """A search by terms: every paper in it contains one of your terms (in its title, abstract or keywords: terms.py), and that alone makes it a paper to download.
+    "Screen with AI" still gives each one topics, the method, a relevance (which orders the list) and a reason. Its own download / borderline / skip is kept as
+    model_verdict (the card shows it when it is not "download") and never takes a match out of the download list. Applied once per verdict of the model: a paper
+    that already has model_verdict, or whose verdict you set yourself, is left as it is."""
+    if not (run.params.get("terms") and p.get("term_hits")) or p.get("user_set") or "model_verdict" in p:
+        return
+    if p.get("verdict") in ("download", "borderline", "skip"):
+        p["model_verdict"], p["verdict"] = p["verdict"], "download"
+
+
 def remember_verdicts(fp, papers, now=None):
-    """Keep the verdicts the model just gave (never an error). Old ones, and old questions that nothing has asked lately, are dropped."""
+    """Keep the verdicts the model just gave (never an error; in a search by terms the model's own word, not the download the terms rule made of it). Old ones, and
+    old questions that nothing has asked lately, are dropped."""
     now = now or datetime.now(timezone.utc)
     at = now.isoformat(timespec="seconds")
     with _verdict_lock:
         d = load_json(VERDICTS, {}) or {}
         mine = d.setdefault(fp, {})
         for p in papers:
-            if p.get("verdict") in ("download", "borderline", "skip"):
-                mine[p["id"]] = {"h": paper_digest(p), "v": p["verdict"], "rel": p.get("relevance"), "topics": p.get("topics") or [], "method": p.get("method"),
+            v = p.get("model_verdict") or p.get("verdict")
+            if v in ("download", "borderline", "skip"):
+                mine[p["id"]] = {"h": paper_digest(p), "v": v, "rel": p.get("relevance"), "topics": p.get("topics") or [], "method": p.get("method"),
                                  "reason": p.get("reason") or "", "at": at}
         cut = (now - timedelta(days=KEEP_VERDICTS_DAYS)).isoformat(timespec="seconds")
         for q in list(d):
@@ -831,7 +853,9 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             e = known.get(p["id"])
             if e:
                 p["verdict"], p["relevance"], p["topics"], p["method"], p["reason"] = e["v"], e.get("rel") or 0, e.get("topics") or [], e.get("method"), e.get("reason") or ""
-                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason")})
+                p.pop("model_verdict", None)
+                terms_rule(run, p)
+                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
         todo = [p for p in todo if p["id"] not in known]
         run.reused += len(known)
         emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question (about $%.2f not paid for again)" % (len(known), len(known) * EST_SCREEN_COST_PER_PAPER)})
@@ -871,7 +895,9 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                         p["topics"] = list(searched)
                     p["reason"] = r["reason"]
                     p["method"] = r.get("method")
-                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason")})
+                    p.pop("model_verdict", None)
+                    terms_rule(run, p)
+                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
             done += len(batch)
             emit("progress", {"stage": "screening", "label": "Screening",
                               "done": done, "total": len(todo)})
