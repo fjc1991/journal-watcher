@@ -65,8 +65,10 @@ def login_pages():
     """One tab per publisher, and first your own library's page if you have set one up."""
     lib = si.profile()
     pages = []
+    if lib["signs_in"]:                       # the library's own sign-in, through a publisher page (the library's web site is not protected: going there signs nobody in)
+        pages.append(("%s — your library's sign-in (OpenAthens/EZproxy)" % (lib["name"] or "Library"), si.via(si.probe_url())))
     if lib["home"]:
-        pages.append(("%s — your library" % (lib["name"] or "Library"), si.via(lib["home"]) if lib["signs_in"] else lib["home"]))
+        pages.append(("%s — your library's web site" % (lib["name"] or "Library"), lib["home"]))
     return pages + PUBLISHER_LOGINS
 
 
@@ -344,6 +346,16 @@ class Browser:
                 return None, "needs_login:%s" % urllib.parse.urlsplit(page.url).netloc, None
             if self._empty_dl:
                 return None, "needs_login:%s (publisher sent an empty file)" % urllib.parse.urlsplit(url).netloc, None
+            if OA_NOT_ENABLED.search(text):
+                return None, "library_setup: OpenAthens says the library's domain is not enabled (check Settings → Library access)", None
+            try:
+                pwd = page.locator("input[type=password]:visible").count()
+            except PWError:
+                pwd = 0
+            if looks_like_login(page.url) or pwd:
+                # it ended on a sign-in page (an identity provider's, such as the university's single sign-on through OpenAthens, or the publisher's own): the host
+                # says whose, which tells a library session that has ended (another host than the publisher's) from a publisher that wants its own login
+                return None, "needs_login:%s" % host, None
             if LOGIN_HINTS.search(text) or "login.cgi" in page.url:
                 return None, "needs_login:%s" % host, None
             return None, "browser: no PDF at %s" % page.url[:120], None
@@ -477,7 +489,7 @@ class Browser:
     def _library_signin(self, page, target):
         """Reach `target` (an EBSCO URL) with the library session; renew it through
         OpenAthens + the remembered Microsoft account when possible.
-        Returns True when signed in, False when a password is needed."""
+        Returns True when signed in, "login" when a password is needed, False when it did not get there (and nothing asked for a password)."""
         try:
             page.goto(target, wait_until="domcontentloaded", timeout=60_000)
         except PWError:
@@ -493,13 +505,18 @@ class Browser:
             page.wait_for_timeout(1000)
             if "research.ebsco.com" in page.url and not on_library_login(page):
                 return True
+            try:
+                if page.locator("input[type=password]:visible").count():
+                    return "login"  # any identity provider asking for the password: the user has to sign in again
+            except PWError:
+                pass
             if "login.openathens.net" in page.url and library().get("chooser_text"):
                 opt = page.get_by_text(library()["chooser_text"], exact=False).first
                 if opt.count():
                     opt.click()
             elif "login.microsoftonline.com" in page.url:
                 if page.locator("input[type=password]").count():
-                    return False  # password needed: the user has to sign in again
+                    return "login"  # password needed: the user has to sign in again
                 tiles = page.locator("[data-test-id] >> text=/@/")
                 if tiles.count() == 1:
                     tiles.first.click()
@@ -514,8 +531,11 @@ class Browser:
         try:
             queries = (["DI " + doi] if doi else []) + (['TI "%s"' % title.replace('"', "")] if title else [])
             first = base + "/search/results?q=" + urllib.parse.quote(queries[0])
-            if not self._library_signin(page, first):
+            got = self._library_signin(page, first)
+            if got == "login":
                 return None, "needs_library_login"
+            if got is not True:
+                return None, "library EBSCO: the library's sign-in did not finish (no password was asked for)"
             for q in queries:
                 url = base + "/search/results?q=" + urllib.parse.quote(q)
                 if page.url != url:
@@ -633,45 +653,95 @@ def settle(page, seconds=12):
 
 # what a publisher's page says when your university's access is in force (ScienceDirect: "Access provided by …")
 ACCESS_SAYS = re.compile(r"(access provided by[^\n]{0,80}|provided by your (?:institution|library)[^\n]{0,60}|your institution has access[^\n]{0,60}|institutional access[^\n]{0,60})", re.I)
+# an address on the way through a library's sign-in: an identity provider, OpenAthens, or a publisher's "institution login" step (Elsevier: auth.elsevier.com/ShibAuth/
+# institutionLogin). Seeing one of these between the start and the publisher's page is what shows that the library's sign-in was really used (silently, with a saved
+# session, or with a password).
+_SIGNIN_STEP = re.compile(r"openathens\.net/(?!redirector)|shibauth|institutionlogin|/saml2?/|/idp/|/sso|wayf|seamlessaccess|microsoftonline|/adfs/|okta\.com|/cas/login|login\?q?url=", re.I)
+OA_NOT_ENABLED = re.compile(r"redirector is not enabled for the specified customer domain", re.I)
+
+
+def signin_step(url):
+    """An address that is a step of a sign-in (see _SIGNIN_STEP). The OpenAthens redirector itself is not one: it is where every attempt starts, signed in or not."""
+    u = url or ""
+    if "go.openathens.net/redirector/" in u.lower():
+        return False
+    return bool(_SIGNIN_STEP.search(u)) or looks_like_login(u)
+
+
+def _site_key(url):
+    """The part of a publisher's host that survives an EZproxy rewrite: www.sciencedirect.com → sciencedirect (www-sciencedirect-com.ezproxy.uni.edu contains it too)."""
+    host = urllib.parse.urlsplit(url).netloc.lower().removeprefix("www.")
+    parts = host.split(".")
+    return parts[-3] if len(parts) >= 3 and ".".join(parts[-2:]) in TWO_LEVEL else parts[-2] if len(parts) >= 2 else host
+
+
+def _steps(chain, start, final):
+    """The sign-in steps among the addresses a page went through: not the address it started from (the OpenAthens redirector or the EZproxy link, which every
+    attempt starts from, signed in or not), not the page it ended on, only addresses that are steps of a sign-in (signin_step)."""
+    return [u for u in chain if u != final and u != start and not u.startswith(start.split("?")[0] + "?") and signin_step(u)]
+
+
+def _track(page):
+    """The addresses the page's main frame goes through from now on (redirects included), as a list that keeps filling."""
+    seen = []
+    page.on("framenavigated", lambda f: seen.append(f.url) if f == page.main_frame else None)
+    page.on("request", lambda r: seen.append(r.url) if r.is_navigation_request() and r.frame == page.main_frame else None)
+    return seen
 
 
 def library_test():
-    """Is your library access working right now? Opens your library page (or ScienceDirect) in the background, through your library's sign-in if it has one, with the
-    sessions saved by the sign-in windows, and looks at where it ends up. Returns {state, message, host, saw, mode}; state: ok | login | challenge | unknown | error.
-    ok     OpenAthens / EZproxy let it through to the page without asking for a password; or (a library without a sign-in of its own: VPN, on campus) the page says
-           that your institution gives access.
-    login  the library asked for a password (never signed in, or the session has expired).
-    unknown  the page opened but says nothing about your access (that does not prove you have none).
-    It says what it saw and never more than that."""
+    """Is your library access working right now? Opens a publisher page (ScienceDirect, or library.json "probe") in the background through your library's sign-in, with
+    the sessions saved by the sign-in windows, follows where it goes and classifies where it ends. Returns {state, message, host, saw, mode}; state: ok | login | setup
+    | challenge | unknown | error.
+    ok      OpenAthens / EZproxy took it through your library's sign-in (an identity-provider or institution-login step is in the chain of addresses, or the address is
+            the EZproxy's own) back to the publisher without asking for a password; or the publisher's page says that your institution gives access.
+    login   the library asked for a password (never signed in, or the session has expired).
+    setup   the library's address itself is wrong (OpenAthens: "the redirector is not enabled for the specified customer domain").
+    unknown the publisher's page opened but nothing shows that your library's sign-in was used, and the page does not say so either (that does not prove you have none:
+            on campus the access is by network address, which a page often does not show).
+    Until 1.2.0 the library's own web site was opened instead. It is not a protected resource, so OpenAthens just passes through to it and the test said "Signed in"
+    without any sign-in having happened. It says what it saw and never more than that."""
     lib = library()
     proxy = lib["signs_in"]
-    target = lib["home"] or "https://www.sciencedirect.com/"
+    target = si.probe_url()
     url = via_library(target)
     out = {"mode": lib["mode"], "state": "error", "message": "", "host": "", "saw": ""}
     try:
         with Browser(interactive=False) as b:
             page = b.ctx.new_page()
+            chain = _track(page)
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             settle(page)
             final = page.url
             out["host"] = urllib.parse.urlsplit(final).netloc.lower()
             host = out["host"] or "the page"
-            if is_challenge(page):
+            try:
+                text = page.inner_text("body")[:20000]
+            except PWError:
+                text = ""
+            on_publisher = _site_key(target) in out["host"]
+            steps = _steps(chain, url, final)
+            if lib["mode"] == "ezproxy":            # through EZproxy the publisher is served under the proxy's own host name: that, and only that, shows the proxy session
+                via_signin = bool(_ezproxy_host(lib)) and out["host"].endswith(_ezproxy_host(lib))
+            else:
+                via_signin = bool(steps)
+            if OA_NOT_ENABLED.search(text):
+                out.update(state="setup", message="OpenAthens says its redirector is not enabled for “%s”: that is not your library's OpenAthens domain. Use “Find my library's settings” above, or ask your library." % lib.get("openathens", ""))
+            elif is_challenge(page):
                 out.update(state="challenge", message="%s asked for a human check, which Journal Watcher cannot do in the background. Press “Sign in now” (or open the page yourself) and tick the box." % host)
             elif looks_like_login(final) or page.locator("input[type=password]:visible").count():
                 out.update(state="login", message="Not signed in, or the sign-in has expired: %s asked for a password. %s" % (host, "Press “Sign in now” and sign in." if proxy else "Sign in on the publisher’s page (Sign-ins → Other publisher sites)."))
             else:
-                try:
-                    text = page.inner_text("body")[:20000]
-                except PWError:
-                    text = ""
                 m = ACCESS_SAYS.search(text)
                 saw = re.sub(r"\s+", " ", m.group(0)).strip()[:100] if m else ""
                 out["saw"] = saw
-                if proxy:
-                    out.update(state="ok", message="Signed in: your library let Journal Watcher through to %s without asking for a password.%s" % (host, " The page says: “%s”." % saw if saw else ""))
+                step = urllib.parse.urlsplit(steps[0]).netloc if steps else ""
+                if proxy and on_publisher and via_signin:
+                    out.update(state="ok", message="Signed in: your library's sign-in%s let Journal Watcher through to %s without asking for a password.%s" % (" (%s)" % step if step else "", host, " The page says: “%s”." % saw if saw else ""))
                 elif saw:
                     out.update(state="ok", message="%s says: “%s”. That looks like your university gives you access." % (host, saw))
+                elif proxy:
+                    out.update(state="unknown", message="%s opened, but your library's sign-in was not part of the way there and the page does not say whose access it is. On campus that can be normal (access by network address); off campus, press “Sign in now”." % host)
                 else:
                     out.update(state="unknown", message="%s opened, but it does not say that your university gives you access. That does not prove you have none: some pages only show it on a paper." % host)
     except PWError as e:
@@ -680,20 +750,39 @@ def library_test():
     return out
 
 
+def _ezproxy_host(lib):
+    """ezproxy.myuni.edu for an EZproxy prefix https://ezproxy.myuni.edu/login?url= (a proxied publisher's host ends with it: www-sciencedirect-com.ezproxy.myuni.edu)."""
+    return urllib.parse.urlsplit(lib.get("ezproxy") or "").netloc.lower().split(":")[0]
+
+
 def library_login():
-    """Sign in through your university library (set up in Settings → Library access: OpenAthens or EZproxy) and close by itself once a publisher page opens."""
+    """Sign in through your university library (set up in Settings → Library access: OpenAthens or EZproxy) and close by itself once a publisher page opens.
+    The window starts on a publisher page through the library's address (ScienceDirect, see signins.PROBE): that is what makes OpenAthens or EZproxy ask for your
+    university sign-in. A saved session counts as "already signed in" only when the way there went through the library's sign-in and back to the publisher."""
     lib = library()
     if not lib["signs_in"]:
         print("Your library has no sign-in of its own (%s): use “Publisher sites” instead, or set it up in Settings → Library access." % lib["mode"])
         return False
-    target = lib["home"] or "https://www.sciencedirect.com/"
-    key = urllib.parse.urlsplit(target).netloc.lower().replace("www.", "").split(".")[0]       # "sciencedirect", "ebsco" …: also found in the proxied address of an EZproxy
+    target = si.probe_url()
+    key = _site_key(target)        # "sciencedirect": also found in the proxied address of an EZproxy
     with Browser(visible=True) as b:
         page = b.ctx.pages[0] if b.ctx.pages else b.ctx.new_page()
-        page.goto(via_library(target), wait_until="domcontentloaded", timeout=60_000)
+        chain = _track(page)
+        start = via_library(target)
+        page.goto(start, wait_until="domcontentloaded", timeout=60_000)
         settle(page, 8)
-        if not looks_like_login(page.url) and key in urllib.parse.urlsplit(page.url).netloc.lower():      # the saved session still works: there is no password to type
-            page.bring_to_front()
+        try:
+            text = page.inner_text("body")[:4000]
+        except PWError:
+            text = ""
+        if OA_NOT_ENABLED.search(text):
+            print("Sign-in not possible: OpenAthens says its redirector is not enabled for “%s”. That is not your library's OpenAthens domain: check Settings → Library access." % lib.get("openathens", ""))
+            page.wait_for_timeout(4000)
+            return False
+        here = urllib.parse.urlsplit(page.url).netloc.lower()
+        through = (bool(_ezproxy_host(lib)) and here.endswith(_ezproxy_host(lib))) if lib["mode"] == "ezproxy" else bool(_steps(chain, start, page.url))
+        if through and not looks_like_login(page.url) and key in urllib.parse.urlsplit(page.url).netloc.lower() and not page.locator("input[type=password]:visible").count():
+            page.bring_to_front()           # the saved session still works: the way went through the library's sign-in and there is no password to type
             celebrate(page, "Already signed in to %s" % (lib["name"] or "your library"), "Nothing to do. This window closes by itself.")
             print("Signed in to %s." % (lib["name"] or "the library"))
             return True
@@ -722,8 +811,8 @@ def library_login():
                     elif cur.locator("input[type=password], input[type=email]").count():
                         cur.bring_to_front()
                         picked.add("account")
-                if looks_like_login(u) or u.startswith("about:"):
-                    seen_login = seen_login or looks_like_login(u)
+                if signin_step(u) or u.startswith("about:"):
+                    seen_login = seen_login or signin_step(u)
                 elif seen_login and key in urllib.parse.urlsplit(u).netloc.lower():
                     cur.wait_for_timeout(2500)           # let the site finish setting its session
                     celebrate(cur, "Signed in to %s" % (lib["name"] or "your library"))

@@ -1688,19 +1688,31 @@ def main():
         assert si.profile()["mode"] == "institutional" and not si.profile()["configured"] and not si.profile()["signs_in"]          # nothing set up: the publishers' own institution pages
         json.dump({"name": "Example University Library", "openathens": "myuni.example.edu", "redirector": "https://go.openathens.net/redirector/myuni.example.edu?url={url}", "ebsco_home": "https://research.ebsco.com/c/x"}, open(si.PROFILE_FILE, "w"))
         p = si.profile()
-        assert p["mode"] == "openathens" and p["configured"] and p["signs_in"] and p["home"].endswith("/c/x"), p                      # a library.json from before modes existed still works
+        assert p["mode"] == "openathens" and p["configured"] and p["signs_in"] and p["ebsco_home"].endswith("/c/x") and p["home"] == "", p   # a library.json from before modes existed still works (its EBSCO address is not the library's web site)
         assert si.via("https://a.org/x y") == "https://go.openathens.net/redirector/myuni.example.edu?url=https%3A%2F%2Fa.org%2Fx%20y"
         q = si.save_profile({"name": "Uni of Somewhere", "mode": "ezproxy", "ezproxy": "https://ezproxy.somewhere.edu/login?url=", "ill_email": "ill@somewhere.edu"})
         assert q["mode"] == "ezproxy" and q["signs_in"] and "redirector" not in json.load(open(si.PROFILE_FILE)) and q["ebsco_home"].endswith("/c/x"), q   # the old OpenAthens redirector goes, notes you did not touch stay
         assert si.via("https://a.org/p") == "https://ezproxy.somewhere.edu/login?url=https://a.org/p"
         assert si.save_profile({"mode": "openathens", "openathens": "somewhere.ac.uk"})["configured"] and si.via("https://a.org/").startswith("https://go.openathens.net/redirector/somewhere.ac.uk?url=")
-        v = si.save_profile({"mode": "vpn"})
-        assert v["configured"] and not v["signs_in"] and si.via("https://a.org/") == "https://a.org/"                              # on the VPN there is no address of its own
-        for bad in ({"mode": "wifi"}, {"ezproxy": "http://insecure.edu/login?url="}, {"ezproxy": "https://ezproxy.edu/login"}, {"openathens": "https://x.ac.uk/"}, {"ill_email": "not an email"}, {"home": "ftp://x"}):
+        v = si.save_profile({"mode": "vpn", "name": ""})
+        assert v["configured"] and not v["signs_in"] and si.via("https://a.org/") == "https://a.org/"                              # on the VPN there is no address of its own (and no name is needed)
+        # what people paste is tidied, not refused (1.2.0 refused these, and a working set-up ended up saved as something else)
+        assert si.save_profile({"mode": "openathens", "openathens": "https://go.openathens.net/redirector/myuni.example.edu?url=https%3A%2F%2Fwww.jstor.org%2F"})["openathens"] == "myuni.example.edu"
+        assert si.save_profile({"openathens": " Uni.ac.uk "})["openathens"] == "uni.ac.uk"
+        assert si.save_profile({"openathens": "uniname"})["openathens"] == "uniname"                                               # (a domain without a dot, accepted before, still is)
+        assert si.save_profile({"home": "library.uni.ac.uk"})["home"] == "https://library.uni.ac.uk"
+        assert si.save_profile({"mode": "ezproxy", "ezproxy": "https://ezproxy.uni.edu/login?url=https://www.jstor.org/stable/1"})["ezproxy"] == "https://ezproxy.uni.edu/login?url="
+        e = si.save_profile({"ebsco_home": "https://research.ebsco.com/c/XXXXXX/"})
+        assert e["ebsco_home"] == "https://research.ebsco.com/c/XXXXXX" and e["use_ebsco"], e
+        assert si.save_profile({"use_ebsco": False})["use_ebsco"] is False and si.save_profile({"use_ebsco": True})["use_ebsco"] is True
+        si.save_profile({"mode": "vpn"})
+        for bad in ({"mode": "wifi"}, {"ezproxy": "http://insecure.edu/login?url="}, {"ezproxy": "https://ezproxy.edu/login"}, {"openathens": "Example University"}, {"openathens": "https://library.uni.ac.uk/"}, {"openathens": "go.openathens.net"}, {"openathens": "https://login.openathens.net/auth/x"},
+                    {"ill_email": "not an email"}, {"home": "ftp://x"}, {"ebsco_home": "https://search.example.com/c/x"}):
             try:
                 si.save_profile(bad); raise AssertionError("accepted %s" % bad)
             except ValueError:
                 pass
+        assert not si.save_profile({"ebsco_home": ""})["use_ebsco"]                                                                 # no start page: no EBSCO route (the tests after this one assume none)
     def t_si_status():
         assert not si.status()["informs"]["signed_in"]
         si.record("informs", True); si.record("library", True); si.record("library", False)
@@ -1718,8 +1730,72 @@ def main():
         assert not brw.looks_like_login("https://research.ebsco.com/c/XXXXXX/search/results?q=DI+10.1000%2Fx") and not brw.looks_like_login("https://www.tandfonline.com/doi/full/10.1080/07421222.2026.1")
         si.save_profile({"name": "Uni", "mode": "openathens", "openathens": "uni.ac.uk", "home": "https://lib.uni.ac.uk"})
         pages = brw.login_pages()
-        assert pages[0][0].startswith("Uni") and "go.openathens.net" in pages[0][1] and len(pages) == len(brw.PUBLISHER_LOGINS) + 1 and not any("myuni" in u for _, u in pages)
+        assert pages[0][0].startswith("Uni") and pages[0][1].startswith("https://go.openathens.net/redirector/uni.ac.uk?url=https%3A%2F%2Fwww.sciencedirect.com"), pages[0]   # the sign-in goes through a protected publisher page
+        assert pages[1][1] == "https://lib.uni.ac.uk" and len(pages) == len(brw.PUBLISHER_LOGINS) + 2 and not any("myuni" in u for _, u in pages), pages[:2]         # the library's own site is opened as it is (it signs nobody in)
+        # the steps of a sign-in, as the test and the sign-in window recognise them: the redirector itself is where every attempt starts, so it is not one
+        assert not brw.signin_step("https://go.openathens.net/redirector/uni.ac.uk?url=https%3A%2F%2Fwww.sciencedirect.com%2F")
+        assert brw.signin_step("https://auth.elsevier.com/ShibAuth/institutionLogin?entityID=https%3A%2F%2Fidp.uni.ac.uk%2Fopenathens&appReturnURL=x")
+        assert brw.signin_step("https://login.openathens.net/auth/uni.ac.uk/o/123") and brw.signin_step("https://idp.uni.edu/idp/profile/SAML2/Redirect/SSO?x=1")
+        assert brw.signin_step("https://ezproxy.uni.edu/login?url=https://www.jstor.org/") and not brw.signin_step("https://www.sciencedirect.com/science/article/pii/S1")
+        start = "https://ezproxy.uni.edu/login?url=https%3A%2F%2Fwww.sciencedirect.com%2F"
+        assert brw._steps([start, "https://www.sciencedirect.com/"], start, "https://www.sciencedirect.com/") == []                # EZproxy sent the browser straight on: no sign-in happened
+        assert brw._steps(["https://pub.org/ssostart", "https://pub.org/ssostart"], "https://go.openathens.net/redirector/u.ac.uk?url=x", "https://pub.org/ssostart") == []   # the final page is not a step before itself
+        assert brw._steps(["https://go.openathens.net/redirector/u.ac.uk?url=x", "https://auth.elsevier.com/ShibAuth/institutionLogin?e=1", "https://www.sciencedirect.com/"],
+                          "https://go.openathens.net/redirector/u.ac.uk?url=x", "https://www.sciencedirect.com/") == ["https://auth.elsevier.com/ShibAuth/institutionLogin?e=1"]
+        assert brw._site_key("https://www.sciencedirect.com/") == "sciencedirect" and brw._site_key("https://onlinelibrary.wiley.com/x") == "wiley" and brw._site_key("https://www.bbc.co.uk/") == "bbc"
+    def t_si_detect():
+        site = {
+            "https://lib.uni.ac.uk": '<a href="/about/">About</a><a href="/a-to-z/">A-Z databases</a><a href="/off-campus/">Off-campus access</a><a href="/news/">News</a><a href="/wp-content/x.pdf">databases guide (pdf)</a>',
+            "https://lib.uni.ac.uk/a-to-z/": '<a href="/databases/acs/">ACS</a><a href="/databases/sciencedirect/">ScienceDirect</a><a href="/databases/jstor/">JSTOR</a><a href="/databases/business-source-ultimate/">Business Source Ultimate</a><a href="https://other.org/databases/x/">elsewhere</a>',
+            "https://lib.uni.ac.uk/databases/sciencedirect/": '<a href="https://go.openathens.net/redirector/uni.ac.uk?url=https%3A%2F%2Fwww.sciencedirect.com%2F">Access</a>',
+            "https://lib.uni.ac.uk/databases/jstor/": '<a href="https://go.openathens.net/redirector/uni.ac.uk?url=http%3A%2F%2Fwww.jstor.org%2F">Access</a><a href="https://go.openathens.net/redirector/uni.ac.uk?url=x">again</a>',
+            "https://lib.uni.ac.uk/databases/business-source-ultimate/": '<a href="https://research.ebsco.com/c/abc123">EBSCO</a>',
+        }
+        opened = []
+        def fetch(u):
+            opened.append(u)
+            if u not in site:
+                raise OSError("404")
+            return u, site[u]
+        r = si.detect("lib.uni.ac.uk", fetch=fetch, verify=lambda d: (True, "auth.elsevier.com"))
+        assert r["mode"] == "openathens" and r["openathens"] == "uni.ac.uk" and r["verified"] is True and r["ebsco_home"] == "https://research.ebsco.com/c/abc123", r
+        assert "seen in 3 links" in r["message"] and "OpenAthens confirms" in r["message"] and "EBSCO" in r["message"], r["message"]
+        assert opened.index("https://lib.uni.ac.uk/databases/sciencedirect/") < opened.index("https://lib.uni.ac.uk/databases/acs/") if "https://lib.uni.ac.uk/databases/acs/" in opened else True   # a big publisher's page first
+        assert not any("other.org" in u or u.endswith(".pdf") for u in opened), opened                                  # never another site, never a file
+        # a pasted link that already shows the answer: nothing is opened
+        opened.clear()
+        r = si.detect("https://go.openathens.net/redirector/uni.ac.uk?url=https%3A%2F%2Fwww.jstor.org%2F", fetch=fetch, verify=lambda d: (True, "x"))
+        assert r["mode"] == "openathens" and r["openathens"] == "uni.ac.uk" and opened == [], (r, opened)
+        # OpenAthens says the domain is not one of its customers: the answer says so plainly
+        r = si.detect("https://go.openathens.net/redirector/wrong.pt?url=x", fetch=fetch, verify=lambda d: (False, "OpenAthens says its redirector is not enabled for “wrong.pt”: that is not your library's OpenAthens domain"))
+        assert r["verified"] is False and "not your library's OpenAthens domain" in r["message"], r
+        # EZproxy, as a prefix and as a rewritten host name
+        r = si.detect("https://ezproxy.uni.edu/login?url=https://www.jstor.org/stable/1", fetch=fetch)
+        assert r["mode"] == "ezproxy" and r["ezproxy"] == "https://ezproxy.uni.edu/login?url=", r
+        r = si.detect("https://www-sciencedirect-com.ezproxy.uni.edu/science/article/pii/S1", fetch=fetch)
+        assert r["mode"] == "ezproxy" and r["ezproxy"] == "https://ezproxy.uni.edu/login?url=", r
+        # a malformed link does not end the search; a start page that redirects to the university's main site is followed there; LibGuides counts as the library's
+        site3 = {"https://library.uni.edu": '<a href="http://[broken/x">bad</a><a href="https://uni.libguides.com/az.php">A-Z databases</a>',
+                 "https://uni.libguides.com/az.php": '<a href="https://go.openathens.net/redirector/uni.edu?url=a">1</a><a href="https://go.openathens.net/redirector/uni.edu?url=b">2</a><a href="https://go.openathens.net/redirector/uni.edu?url=c">3</a>'}
+        r = si.detect("https://library.uni.edu", fetch=lambda u: (u, site3[u]), verify=lambda d: (True, "x"))
+        assert r["openathens"] == "uni.edu" and len(r["pages"]) == 2, r
+        site4 = {"https://lib.uni.edu": "", "https://www.uni.edu/library/": '<a href="/library/databases/">Databases</a>', "https://www.uni.edu/library/databases/": '<a href="https://go.openathens.net/redirector/uni.edu?url=a">x</a>'}
+        r = si.detect("https://lib.uni.edu", fetch=lambda u: ("https://www.uni.edu/library/", site4["https://www.uni.edu/library/"]) if u == "https://lib.uni.edu" else (u, site4[u]), verify=lambda d: (True, "x"))
+        assert r["openathens"] == "uni.edu", r
+        # OCLC-hosted EZproxy, as a prefix and a rewritten host; a prefix and its proxied hosts are one proxy; an unrelated host with "proxy" in its name is not one
+        c = si.scan('<a href="https://login.ezproxy.lib.uni.edu/login?qurl=https%3A%2F%2Fx">a</a> https://www-jstor-org.ezproxy.lib.uni.edu/stable/1 https://www.proxy-checker.com/ https://uni.idm.oclc.org/login?url=https://y https://www-jstor-org.uni2.idm.oclc.org/x')
+        assert c["ezproxy"] == {"https://login.ezproxy.lib.uni.edu/login?qurl=": 1, "https://uni.idm.oclc.org/login?url=": 1, "https://uni2.idm.oclc.org/login?url=": 1}, c["ezproxy"]
+        # nothing to be found: said, and nothing invented
+        site2 = {"https://plain.edu": '<a href="/databases/">Databases</a>', "https://plain.edu/databases/": "<p>Use the campus network.</p>"}
+        r = si.detect("https://plain.edu", fetch=lambda u: (u, site2[u]), verify=lambda d: (_ for _ in ()).throw(AssertionError("no domain to verify")))
+        assert r["mode"] == "" and not r["openathens"] and "No OpenAthens or EZproxy link was found on 2 pages" in r["message"], r
+        # OpenAthens itself is asked the way the app does it (the redirect it answers with, or its 403)
+        assert si.verify_openathens("uni.ac.uk", fetch_status=lambda u: (302, "https://auth.elsevier.com/ShibAuth/institutionLogin?x"))[0] is True
+        ok_, why_ = si.verify_openathens("typo.example", fetch_status=lambda u: (403, ""))
+        assert ok_ is False and "typo.example" in why_
+        assert si.verify_openathens("uni.ac.uk", fetch_status=lambda u: (_ for _ in ()).throw(OSError("offline")))[0] is None
     check("library access: a mode per way of getting in, old files understood, bad addresses refused, notes kept", t_si_profile)
+    check("find my library's settings: OpenAthens, EZproxy and EBSCO read from the library's own pages (big publishers' pages first, never another site or a file), a pasted link read without opening anything, the domain confirmed with OpenAthens, nothing invented when nothing is there", t_si_detect)
     check("sign-in status: a sign-in counts for as long as it normally lasts, then says expired", t_si_status)
     check("sign-in pages: your library first, then the publishers' own institution pages (no university built in)", t_si_login_pages)
     def t_celebrate():
@@ -2241,8 +2317,8 @@ def main():
             ok, path, note = dl.download_paper(ai, {})
             dl.try_aisel = saved_ai
             assert not ok and "wrong paper via aisel-content" in note and files() == [], note
-            lib = os.path.join(dl.BASE, "library.json"); saved_lib = open(lib).read() if os.path.exists(lib) else None
-            json.dump({"via_ebsco": {"journals": ["MS"]}}, open(lib, "w"))
+            lib = brw.si.PROFILE_FILE; saved_lib = open(lib).read() if os.path.exists(lib) else None
+            json.dump({"mode": "institutional", "ebsco_home": "https://research.ebsco.com/c/x", "via_ebsco": {"journals": ["MS"]}}, open(lib, "w"))
             try:
                 ok, path, note = dl.download_paper(dict(p), {}, browser=_FakeBrowser(None, note="needs_login:x", ebsco=(WRONG, "library EBSCO")))
             finally:
@@ -2300,10 +2376,28 @@ def main():
             br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (None, "needs_login:login.openathens.net")))
             ok, path, note = dl.download_paper(dict(p), env, browser=br)
             assert not ok and "needs_library_login" in note and "login.openathens.net" in note and sg.status()["library"]["signed_in"] is False, note
-            # e) not signed in to the library: it is not tried (it would only wait for a password), and the card offers the library sign-in
+            # e) the tick says "not signed in" (it is only a guess from the clock): the library is tried anyway, because the university's single sign-on often lets a
+            #    saved session through; when it works the tick comes back
+            assert sg.status()["library"]["signed_in"] is False
             br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (RIGHT, "browser")))
             ok, path, note = dl.download_paper(dict(p), env, browser=br)
-            assert not ok and len(br.urls) == 1 and "needs_library_login" in note, (note, br.urls)
+            assert ok and len(br.urls) == 2 and note == "browser (via your library)" and sg.status()["library"]["signed_in"] is True, (note, br.urls)
+            clear()
+            # e2) once the library has asked for a password in a batch, the next papers of that batch do not ask it again (each would only wait for a password)
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (None, "needs_login:login.microsoftonline.com")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and len(br.urls) == 2 and "needs_library_login" in note and br.library_signed_out is True, (note, br.urls)
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and len(br.urls) == 3 and "needs_library_login" in note, (note, br.urls)                 # one more plain attempt, no second library attempt
+            # e3) off campus a publisher may answer the PDF address with an ordinary page (no "log in" words): that also sends the paper through the library
+            br = _FakeBrowser(None, note="browser: no PDF at https://onlinelibrary.wiley.com/doi/abs/x", via=(OA, (RIGHT, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert ok and note == "browser (via your library)" and len(br.urls) == 2, (note, br.urls)
+            clear()
+            # e4) a human check is not a paywall: the library is not asked (the check is the user's to pass)
+            br = _FakeBrowser(None, note="challenge:onlinelibrary.wiley.com", via=(OA, (RIGHT, "browser")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and len(br.urls) == 1, (note, br.urls)
             # f) a paper that is about your INFORMS membership keeps asking for that sign-in (the library is still tried when it is signed in)
             ms = dict(p, publisher="informs", abbr="MS", journal="Management Science")
             ok, path, note = dl.download_paper(ms, env, browser=_FakeBrowser(None, note="needs_login:pubsonline.informs.org"))
@@ -2314,6 +2408,18 @@ def main():
             ok, path, note = dl.download_paper(dict(p), env, browser=br)
             assert ok and note == "browser (via your library)" and br.urls[1].startswith("https://ezproxy.testuni.edu/login?url=http"), (note, br.urls)
             clear()
+            # g2) through EZproxy the publisher's paywall comes under the proxy's host name: that is the publisher saying no, not the library asking for a password
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=("https://ezproxy.testuni.edu/login?url=", (None, "needs_login:onlinelibrary-wiley-com.ezproxy.testuni.edu")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and "needs_library_login" not in note and not getattr(br, "library_signed_out", False) and sg.status()["library"]["signed_in"], note
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=("https://ezproxy.testuni.edu/login?url=", (None, "needs_login:ezproxy.testuni.edu")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and "needs_library_login" in note and br.library_signed_out, note                         # the proxy's own login page: the session has ended
+            # g3) a wrong OpenAthens domain: said as such (not "asked for a password"), and not asked again in the batch
+            sg.save_profile({"mode": "openathens", "openathens": "testuni.ac.uk"})
+            br = _FakeBrowser(None, note="needs_login:onlinelibrary.wiley.com", via=(OA, (None, "library_setup: OpenAthens says the library's domain is not enabled (check Settings → Library access)")))
+            ok, path, note = dl.download_paper(dict(p), env, browser=br)
+            assert not ok and "library_setup:" in note and "password" not in note and br.library_signed_out, note
             # h) no sign-in of its own (the publishers' own institution pages, VPN, none): nothing changes, nothing is asked for
             for mode in ("institutional", "vpn", "none"):
                 sg.save_profile({"mode": mode, "name": "Test University"})
@@ -2387,6 +2493,58 @@ def main():
             assert status_for("browser: no PDF at https://x | no free copy found")["dl_status"] == "failed"
         finally:
             pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize = saved
+    def t_pace():
+        """A publisher's papers are spaced out (the pace in Settings), the waits are used to write summaries, a site that asked for a human check gets longer gaps, Stop stops."""
+        import contextlib, pipeline as pl_
+        saved = (pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize)
+        t, log, hooks = [0.0], [], {}
+        clock, sleep = (lambda: t[0]), (lambda d: t.__setitem__(0, t[0] + d))
+        class _Br:
+            def __init__(self, on_challenge=None, **k): hooks["ch"] = on_challenge
+            def __enter__(self): return None
+            def __exit__(self, *a): return False
+        def fake_dl(p, env, browser=None, dry=False):
+            log.append(("dl", p["id"], t[0]))
+            if p["id"] == "E2" and hooks.get("ch"):
+                hooks["ch"]("www.sciencedirect.com", "waiting")            # ScienceDirect asks for a human check during E2
+            t[0] += 10
+            f = os.path.join(TMP, "Papers", "pace_%s.pdf" % p["id"]); os.makedirs(os.path.dirname(f), exist_ok=True); open(f, "wb").write(b"%PDF")
+            return True, f, "browser"
+        def fake_sum(p, path, usage):
+            log.append(("sum", p["id"], t[0])); t[0] += 30
+            return "summary"
+        pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize = fake_dl, _Br, fake_sum
+        def go(papers, pace="careful", stop=None):
+            si.save_profile({"pace": pace}); log.clear(); t[0] = 0.0
+            run = pl_.Run("picks", {"label": "pace"})
+            for pid, pub in papers:
+                run.add_paper({"id": pid, "doi": "10.1/%s" % pid, "title": pid, "verdict": "download", "publisher": pub, "abbr": "X", "journal": "J"})
+            pl_.download_and_summarize(run, [pid for pid, _ in papers], lambda *a, **k: None, stop or threading.Event(), sleep=sleep, clock=clock)
+            return run
+        try:
+            run = go([("E1", "elsevier"), ("E2", "elsevier"), ("E3", "elsevier"), ("W1", "wiley")])
+            at = {(k, i): x for k, i, x in log}
+            assert at[("dl", "E2")] >= 10 + 45 * 0.75 and at[("dl", "E2")] <= 10 + 30 + 45 * 1.35 + 1, log                           # careful: about 45 s after E1 ended
+            assert at[("sum", "E1")] < at[("dl", "E2")], log                                                                              # the wait was used to summarise E1
+            assert at[("dl", "E3")] - (at[("dl", "E2")] + 10) >= 2 * 45 * 0.75, log                                                       # after the human check: twice the gap
+            assert at[("dl", "W1")] - (at[("dl", "E3")] + 10) <= 31, log                                                                  # another site does not wait for ScienceDirect's gap
+            assert all(run.papers[i].get("summary") for i in ("E1", "E2", "E3", "W1")) and sum(1 for k, *_ in log if k == "sum") == 4, log   # every paper summarised once
+            run = go([("E1", "elsevier"), ("E2", "elsevier")], pace="fast")
+            at = {(k, i): x for k, i, x in log}
+            assert at[("dl", "E2")] - 10 <= 2 * 1.35 + 0.01 and at[("sum", "E1")] > at[("dl", "E2")], log                                 # fast: no real pause, summaries after
+            ev = threading.Event()
+            pl_.summarize = lambda p, path, usage: ev.set() or log.append(("sum", p["id"], t[0])) or "s"                                    # Stop pressed while waiting
+            run = go([("E1", "elsevier"), ("E2", "elsevier")], stop=ev)
+            assert [i for k, i, _ in log if k == "dl"] == ["E1"], log
+            assert pl_.pace_gap("aisel", "careful", rnd=lambda a, b: 1.0) == 20 and pl_.pace_gap("elsevier", "normal", True, rnd=lambda a, b: 1.0) == 40
+            try:
+                si.save_profile({"pace": "turbo"}); raise AssertionError("accepted a pace that does not exist")
+            except ValueError:
+                pass
+        finally:
+            pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize = saved
+            si.save_profile({"pace": "careful"})
+    check("download pace: a publisher's papers are spaced out (careful by default, about 45 s for sites with human checks), the wait is used to write summaries, a site that asked for a human check gets twice the gap, another site does not wait, Stop stops, 'fast' barely pauses", t_pace)
     check("a refused PDF keeps its paper in the download queue as 'wrong_paper' with the reason (a needed sign-in stays the reason; the PDF's own headline never decides the status), offers the publisher's page, and no summary is paid for", t_wrong_paper_status)
 
     def t_identity_audit():
@@ -2574,7 +2732,9 @@ def main():
                  "/ssrn-other": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code1.pdf?abstractid=9999999&mirid=1'>Download another</a><a href='/sol3/Delivery.cfm/SSRN_ID47233851_code1.pdf?abstractid=47233851'>a longer number</a>",
                  "/ssrn-stray": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code4723385.pdf?abstractid=9999999'>another paper, whose code field equals our number</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=4723385&mirid=1'>This paper</a>",
                  "/ssrn-bare": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/file_4723385.pdf'>a link with the number but no identifier</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=1111111'>names two papers</a>"}
-        REDIRECTS = {"/hop1": "/hop2", "/hop2": "/open", "/to-login": "/idp/login?x=1"}
+        PAGES["/oa-off"] = "<title>OpenAthens: 403 Forbidden</title><p>The redirector is not enabled for the specified customer domain. Please contact your OpenAthens administrator.</p>"
+        REDIRECTS = {"/hop1": "/hop2", "/hop2": "/open", "/to-login": "/idp/login?x=1",
+                     "/through": "/ShibAuth/institutionLogin?entityID=x", "/ShibAuth/institutionLogin": "/plain"}     # a silent pass through an institution-login step, back to the publisher
         class Pub(BaseHTTPRequestHandler):
             def log_message(self, *a): pass
             def do_GET(self):
@@ -2588,9 +2748,10 @@ def main():
         srv3 = ThreadingHTTPServer(("127.0.0.1", 0), Pub)
         threading.Thread(target=srv3.serve_forever, daemon=True).start()
         base3 = "http://127.0.0.1:%d" % srv3.server_address[1]
-        saved = (brw.library, brw.via_library)
+        saved = (brw.library, brw.via_library, brw.si.probe_url)
         def run(path, signs_in, mode="openathens"):
-            brw.library = lambda: {"signs_in": signs_in, "home": base3 + path, "mode": mode, "name": "Test University"}
+            brw.library = lambda: {"signs_in": signs_in, "home": base3 + "/never-opened", "mode": mode, "name": "Test University", "openathens": "testuni.ac.uk"}
+            brw.si.probe_url = lambda: base3 + path                                  # the publisher page the test opens (ScienceDirect in real life), not the library's web site
             brw.via_library = lambda u: u
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -2598,9 +2759,13 @@ def main():
             assert json.loads(buf.getvalue().strip().splitlines()[-1]) == out                      # what the app reads from the helper is what it returned
             return out
         try:
-            r = run("/hop1", True)                                                                        # two redirects, then the page: through the library's sign-in
-            assert r["state"] == "ok" and r["host"].startswith("127.0.0.1") and "without asking for a password" in r["message"] and r["saw"].startswith("Access provided by"), r
-            r = run("/plain", True); assert r["state"] == "ok" and r["saw"] == "", r                      # a sign-in library that lets it through is enough: the page need not say anything
+            r = run("/through", True)                                                                     # through an institution-login step and back, no password: signed in
+            assert r["state"] == "ok" and r["host"].startswith("127.0.0.1") and "without asking for a password" in r["message"] and "institutionLogin" not in r["host"], r
+            r = run("/hop1", True)                                                                        # no sign-in step on the way, but the page says whose access it is
+            assert r["state"] == "ok" and r["saw"].startswith("Access provided by") and "says" in r["message"] and "Signed in:" not in r["message"], r
+            r = run("/plain", True)                                                                       # straight to a page that says nothing: no sign-in was involved, so none is claimed
+            assert r["state"] == "unknown" and "was not part of the way" in r["message"], r               #   (1.2.0 said "Signed in" here: OpenAthens passing through to an unprotected page)
+            r = run("/oa-off", True); assert r["state"] == "setup" and "testuni.ac.uk" in r["message"] and "not your library's OpenAthens domain" in r["message"], r
             r = run("/to-login", True); assert r["state"] == "login" and "Sign in now" in r["message"] and "/idp/login" not in r["host"], r       # sent to the identity provider's login
             r = run("/pwd", True); assert r["state"] == "login", r                                        # a visible password box on an ordinary address
             r = run("/hidden", True); assert r["state"] == "ok", r                                        # a hidden one (a pop-up for later) is not a sign-in request
@@ -2613,13 +2778,26 @@ def main():
             real_B = brw.Browser
             brw.Browser = lambda visible=None, **kw: real_B(visible=False, **kw)                                                           # (no screen here: the same browser, without a window)
             try:
-                brw.library = lambda: {"signs_in": True, "home": base3 + "/hop1", "mode": "openathens", "name": "Test University", "chooser_text": ""}
+                brw.library = lambda: {"signs_in": True, "home": base3 + "/never-opened", "mode": "openathens", "name": "Test University", "chooser_text": "", "openathens": "testuni.ac.uk"}
+                brw.si.probe_url = lambda: base3 + "/through"
                 buf = io.StringIO(); t0 = _time.time()
                 with contextlib.redirect_stdout(buf):
                     done = brw.library_login()
                 assert done is True and "Signed in to Test University." in buf.getvalue() and _time.time() - t0 < 40, (done, buf.getvalue())
+                # a wrong OpenAthens domain: said at once (it used to wait half an hour for a password that no page would ask for)
+                brw.si.probe_url = lambda: base3 + "/oa-off"
+                buf = io.StringIO(); t0 = _time.time()
+                with contextlib.redirect_stdout(buf):
+                    done = brw.library_login()
+                assert done is False and "not your library's OpenAthens domain" in buf.getvalue() and _time.time() - t0 < 40, (done, buf.getvalue())
             finally:
                 brw.Browser = real_B
+            # a download attempt that ends on an identity provider's sign-in page names that host (download.py tells an ended library session from a publisher's paywall by it)
+            with brw.Browser(interactive=False) as b_:
+                d_, n_ = b_.fetch_pdf(base3 + "/to-login", wait_s=8)
+                assert d_ is None and n_.startswith("needs_login:127.0.0.1"), n_
+                d_, n_ = b_.fetch_pdf(base3 + "/pwd", wait_s=8)
+                assert d_ is None and n_.startswith("needs_login:"), n_
             # SSRN's own download link carries the paper's number and no DOI: it is followed when it is this paper's, never another paper's (or a longer number that starts the same)
             with brw.Browser(interactive=False) as b_:
                 pg_ = b_.ctx.new_page()
@@ -2632,13 +2810,14 @@ def main():
                 # the number alone is not an identifier, and a link naming two different papers is refused
                 pg_.goto(base3 + "/ssrn-bare"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-bare", "10.2139/ssrn.4723385") is None
                 pg_.goto(base3 + "/ssrn-own"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.1287/mnsc.2024.0001") is None         # another paper's DOI: the rule does not apply
-            brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}                  # nobody listens
+            brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}
+            brw.si.probe_url = lambda: "http://127.0.0.1:1/x"                                                                          # nobody listens
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 r = brw.library_test()
             assert r["state"] == "error" and "did not open" in r["message"], r
         finally:
-            brw.library, brw.via_library = saved
+            brw.library, brw.via_library, brw.si.probe_url = saved
             srv3.shutdown()
 
     def t_search_memory():

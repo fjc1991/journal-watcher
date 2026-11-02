@@ -1061,12 +1061,12 @@ function renderLibrary() {
     });
     $("#liball").onclick = e => { e.preventDefault(); go({j: "*"}); };
   } else if (NAV.j === "*") {
-    box.innerHTML = CFG.journals.filter(j => byJ[j.abbr]).map(j =>
+    box.innerHTML = (window.LibraryUI && LIB.length ? `<div class="reshead">${LibraryUI.readyKey(LIB)}</div>` : "") + CFG.journals.filter(j => byJ[j.abbr]).map(j =>
       `<div class="jgroup"><h2>${mono(j.abbr, "sm")}${esc(j.name)}</h2>${groups(j.abbr)}</div>`).join("");
   } else {
     const j = jinfo(NAV.j);
     box.innerHTML = `<div class="card runhead"><div class="row">${mono(j.abbr)}<div><h1 style="margin:0">${esc(j.name)}</h1>
-      <div class="meta">${(byJ[j.abbr] || []).length} downloaded papers</div></div></div></div>${groups(j.abbr)}`;
+      <div class="meta">${(byJ[j.abbr] || []).length} downloaded papers${window.LibraryUI && (byJ[j.abbr] || []).length ? " · " + LibraryUI.readyKey((byJ[j.abbr] || []).map(x => x[0])) : ""}</div></div></div></div>${groups(j.abbr)}`;
   }
   box.querySelectorAll("[data-i]").forEach(b => b.onclick = () => openLib(LIB[+b.dataset.i]));
   box.querySelectorAll("[data-read]").forEach(b => b.onclick = () => readPaper(LIB[+b.dataset.read]));

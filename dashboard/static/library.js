@@ -20,15 +20,20 @@ async function loadTags() { try { TAGS = (await api("/api/tags")).tags; } catch 
 const folderName = id => (FOLDERS.find(f => f.id === id) || {}).name || id;
 const download = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 
+// the key to the green bar on a row: a paper whose AI summary is written, ready to be explored (rows = the papers of the list it explains)
+function readyKey(rows) {
+  const n = (rows || []).filter(r => r && r.summary).length;
+  return `<span class="readykey" title="A green bar beside a paper means its AI summary is written: open it to explore"><i aria-hidden="true"></i>Ready to read <small>${n} of ${(rows || []).length} summarised by AI</small></span>`;
+}
 // ---------------------------------------------------------------- one paper row (used by every Library list)
 function row(r, i, snips) {
   const st = r.state || {}, fl = (r.folders || []).map(id => FOLDERS.find(f => f.id === id)).filter(Boolean);
   const nt = r.notes ? `<span class="tag you" title="Highlights and notes you made in the reader">✎ ${r.notes.highlights} highlight${r.notes.highlights === 1 ? "" : "s"}${r.notes.cards ? ` · ${r.notes.cards} note${r.notes.cards === 1 ? "" : "s"}` : ""}</span>` : "";
   const prog = st.status === "reading" && st.progress ? `<span class="prog-mini" title="Page ${st.page || "?"}"><i style="width:${Math.round(st.progress * 100)}%"></i></span>` : "";
   const sn = (snips || []).map(s => `<div class="snip"><b>${s.kind === "highlight" ? "highlight" + (s.page ? " p." + s.page : "") : s.kind}</b> ${esc(s.text || "")}</div>`).join("");
-  return `<div class="card librow" data-file="${esc(r.file)}">
+  return `<div class="card librow${r.summary ? " ready" : ""}" data-file="${esc(r.file)}">
     <div class="rowmain">
-      <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}</div></div>
+      <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}${r.summary ? `<span class="sr-only"> (ready to read: summarised by AI)</span>` : ""}</div></div>
       <div class="pauth">${esc(authors(r.authors))}</div>
       <div class="pmeta">${esc(r.journal)} · ${esc(r.year || "")}${r.matched_topics ? " · " + esc(r.matched_topics) : ""}</div>
       ${st.takeaway ? `<div class="take" data-take="${esc(r.file)}" title="Click to edit">“${esc(st.takeaway)}”</div>` : ""}
@@ -178,7 +183,8 @@ async function results(opts) {
   let res = [];
   try { res = await api("/api/library/search?" + q2s(F)); } catch (e) { box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   if (my !== seq) return;
-  box.innerHTML = `<div class="reshead">${res.length} paper${res.length === 1 ? "" : "s"}${F.q ? ` matching “${esc(F.q)}”` : ""}</div>` +
+  const found = res.map(x => lib()[byFile(x.file)]).filter(Boolean);
+  box.innerHTML = `<div class="reshead">${res.length} paper${res.length === 1 ? "" : "s"}${F.q ? ` matching “${esc(F.q)}”` : ""}${found.length ? readyKey(found) : ""}</div>` +
     (res.map(x => { const i = byFile(x.file); return i < 0 ? "" : row(lib()[i], i, x.snippets); }).join("") || `<div class="card empty"><h2>Nothing matches</h2>Try fewer filters or other words.</div>`);
   bindRows(box);
   actionbar();
@@ -331,7 +337,7 @@ function showFolderTab() {
   $$(".fvtabs button", FV.box).forEach(b => b.classList.toggle("on", b.dataset.ft === FV.tab));
   if (FV.tab === "papers") {
     const rows = lib().map((r, i) => [r, i]).filter(([r]) => (r.folders || []).includes(FV.id));
-    body.innerHTML = `<div class="papers" id="fv-list">${rows.map(([r, i]) => row(r, i)).join("") || `<div class="card empty"><h2>This folder is empty</h2>Drop PDFs here, use <b>＋ Add papers</b>, or use the 📁 button on any paper in the Library.</div>`}</div>`;
+    body.innerHTML = (rows.length ? `<div class="reshead">${readyKey(rows.map(([r]) => r))}</div>` : "") + `<div class="papers" id="fv-list">${rows.map(([r, i]) => row(r, i)).join("") || `<div class="card empty"><h2>This folder is empty</h2>Drop PDFs here, use <b>＋ Add papers</b>, or use the 📁 button on any paper in the Library.</div>`}</div>`;
     bindRows(body);
   } else if (FV.tab === "ask") window.AskUI.mount(body, {folder: FV.id});
   else if (FV.tab === "matrix") window.MatrixUI.mount(body, FV.id);
@@ -440,7 +446,7 @@ async function tagManager() {
 function openTab(t) { F.tab = t; if (ctx.go && t === "folders") return ctx.go({view: "lib", j: null, tab: "folders"}); if (TOP) tabs(TOP.el, TOP.opts); }
 window.LibraryUI = {
   init(c) { ctx = c; const wire = () => ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "FoldersUI", "DropImport", "Palette", "Activity", "DraftUI", "ClaimsUI", "SynthUI", "ReviewUI", "WorkspaceUI", "BibImport"].forEach(n => window[n] && window[n].init(c)); wire(); addEventListener("load", wire, {once: true});   /* the other tab modules may still be loading */ wireRows(); return Promise.all([loadFolders(), loadTags()]); },
-  row, top, shelf, folderView, folderName, folderTab, addDialog, openTab,
+  row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab,
   refreshFolders: loadFolders, state: F,
   folderCount: () => FOLDERS.length, folders: () => FOLDERS,
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added

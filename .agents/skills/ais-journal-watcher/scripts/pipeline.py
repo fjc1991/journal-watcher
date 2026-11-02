@@ -25,6 +25,7 @@ import anthropic
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS)
 import download as dl  # noqa: E402
+import signins  # noqa: E402
 import fetch_new as fx  # noqa: E402
 import notes_store as ns  # noqa: E402
 import folders as fo  # noqa: E402
@@ -901,8 +902,46 @@ def summarize(p, pdf_path, usage, template=None):
     return text
 
 
-def download_and_summarize(run, ids, emit, stop):
+# How long to leave between two papers from the same publisher, in seconds: (sites known for "verify you are human" checks, other sites). Fetching a site's PDFs
+# back to back is what makes it suspect a robot; spacing them out (with some randomness) is what a person reading would do. Settings → Library access → Download
+# pace (library.json "pace"). These are cautious guesses, not published limits: no publisher says how many downloads trigger its check.
+PACES = {"careful": (45, 20), "normal": (20, 8), "fast": (2, 0)}
+CHECKY = {"elsevier", "wiley", "tandfonline", "informs", "aaas", "pnas", "ssrn"}       # behind Cloudflare-style checks (ScienceDirect above all)
+SITE_NAMES = {"elsevier": "ScienceDirect", "wiley": "Wiley", "tandfonline": "Taylor & Francis", "informs": "INFORMS", "aaas": "Science", "pnas": "PNAS",
+              "aisel": "AIS eLibrary", "acm": "ACM", "nber": "NBER", "hbr": "HBR", "ssrn": "SSRN"}
+
+
+def pace_gap(publisher, pace, challenged=False, rnd=None):
+    """Seconds to wait before the next paper from `publisher`: the pace's base gap, times 0.75–1.35 at random (a fixed rhythm is itself robot-like), doubled for a
+    site that has already asked for a human check in this batch."""
+    import random
+    base = PACES.get(pace, PACES["careful"])[0 if publisher in CHECKY else 1]
+    return base * (rnd or random.uniform)(0.75, 1.35) * (2 if challenged else 1)
+
+
+def _summarize_one(run, p, emit):
+    """Write one paper's summary (the reader's Summary tab, and the "Ready to read" bar in the Library); a failure is noted on the paper, never raised."""
+    p["dl_status"] = "summarizing"
+    emit("download", {"id": p["id"], "dl_status": "summarizing", "file": p["file"]})
+    try:
+        summarize(p, os.path.join(ROOT, p["file"]), run.usage)
+        p["summary"] = p["file"][:-4] + ".md"
+        p["dl_status"] = "ok"
+    except Exception as e:
+        p["dl_status"], p["dl_note"] = "ok", "summary failed: %s" % str(e)[:100]
+    emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "summary")})
+    emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d})
+    run.save()
+
+
+def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None):
+    """Download the papers `ids` (one browser, a site's papers together), then summarise them. Papers from the same publisher are spaced out (pace_gap); the
+    waiting time is used to summarise papers already downloaded, so a careful pace costs little time overall. `sleep`/`clock` are for the tests."""
     env = dl.load_env()
+    sleep = sleep or (lambda t: stop.wait(t))
+    clock = clock or time.monotonic
+    pace = (signins.profile().get("pace") or "careful")
+    last_at, challenged = {}, set()
     papers = [run.papers[i] for i in ids if i in run.papers]
     # same publisher back to back: after one manual "verify you are human" the
     # rest of that site's papers go through the same window
@@ -918,6 +957,9 @@ def download_and_summarize(run, ids, emit, stop):
                "failed": "%s check wasn't completed; that paper was skipped." % host}[state]
         emit("challenge", {"host": host, "state": state, "msg": msg})
         emit("log", {"msg": msg, "level": "warn" if state != "passed" else "ok"})
+        if state == "waiting" and current.get("pub"):
+            challenged.add(current["pub"])                  # that site is watching: leave more time between its papers for the rest of the batch
+    current = {}
 
     with dl.open_browser(on_challenge=on_challenge) as br:
         for n, p in enumerate(papers, 1):
@@ -926,6 +968,21 @@ def download_and_summarize(run, ids, emit, stop):
             if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])):
                 got.append(p)
                 continue
+            pub = p.get("publisher") or "other"
+            if pub in last_at:
+                due = last_at[pub] + pace_gap(pub, pace, pub in challenged)
+                if clock() < due:
+                    emit("log", {"msg": "Waiting %d s before the next %s paper (%s download pace, so the site does not take Journal Watcher for a robot)." % (
+                        round(due - clock()), SITE_NAMES.get(pub, pub), pace)})
+                while clock() < due and not stop.is_set():
+                    ready = next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
+                    if ready and due - clock() > 5:
+                        _summarize_one(run, ready, emit)         # use the wait: this paper becomes "Ready to read" sooner
+                    else:
+                        sleep(min(1.0, max(0.0, due - clock())))
+                if stop.is_set():
+                    break
+            current["pub"] = pub
             p["dl_status"] = "downloading"
             emit("download", {"id": p["id"], "dl_status": "downloading"})
             ok, path, note = dl.download_paper(dict(p), env, browser=br)
@@ -934,15 +991,16 @@ def download_and_summarize(run, ids, emit, stop):
                 got.append(p)
             else:
                 own = re.sub(r"wrong paper via [^|]*", "", note)           # what the routes said, without what a refused PDF said about itself (its headline is not a status)
-                p.update(dl_status="needs_library" if "needs_library_login" in own else
+                p.update(dl_status="needs_library" if ("needs_library_login" in own or "library_setup:" in own) else
                          "unavailable" if "not_in_library" in own else
+                         "needs_login" if "needs_login" in own else           # (before "not yet in EBSCO": EBSCO is now asked for any paper, so its "not found" must not hide a sign-in the paper needs)
                          "not_yet" if "not found in library EBSCO" in own else
-                         "needs_login" if "needs_login" in own else
                          "needs_check" if "challenge:" in own else
                          "wrong_paper" if "wrong paper" in note else "failed",
                          dl_note=note, manual_url=dl.browser_pdf_url(p))
             emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
             emit("progress", {"stage": "downloading", "label": "Downloading", "done": n, "total": total})
+            last_at[pub] = clock()
             run.save()
     todo = [p for p in got if not p.get("summary")]
     for n, p in enumerate(todo, 1):
@@ -950,15 +1008,5 @@ def download_and_summarize(run, ids, emit, stop):
             break
         emit("progress", {"stage": "summarizing", "label": "Summarizing with Sonnet 5.5",
                           "done": n - 1, "total": len(todo)})
-        p["dl_status"] = "summarizing"
-        emit("download", {"id": p["id"], "dl_status": "summarizing", "file": p["file"]})
-        try:
-            summarize(p, os.path.join(ROOT, p["file"]), run.usage)
-            p["summary"] = p["file"][:-4] + ".md"
-            p["dl_status"] = "ok"
-        except Exception as e:
-            p["dl_status"], p["dl_note"] = "ok", "summary failed: %s" % str(e)[:100]
-        emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "summary")})
-        emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d})
-        run.save()
+        _summarize_one(run, p, emit)
     emit("progress", {"stage": "summarizing", "label": "Done", "done": len(todo), "total": len(todo)})

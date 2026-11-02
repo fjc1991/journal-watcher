@@ -1488,6 +1488,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(signins.save_profile(b))
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
+        if path == "/api/library/detect":        # work out OpenAthens / EZproxy / EBSCO from the library's web site or a link copied from it (reads a few of its pages)
+            given = str(b.get("given") or "").strip()
+            if not given:
+                return self.send_json({"error": "Paste your library's web address, or a link to a database copied from its site."}, 400)
+            try:
+                return self.send_json(signins.detect(given))
+            except Exception as e:  # noqa: BLE001
+                return self.send_json({"error": "Could not read that site: %s" % str(e)[:160]}, 502)
         if path == "/api/update/check":
             return self.send_json(updater.check())
         if path == "/api/update/install":
@@ -1568,7 +1576,8 @@ def take_lock(port):
         f.close()
         return old or {"pid": None, "port": None, "url": None}
     f.seek(0); f.truncate()
-    json.dump({"pid": os.getpid(), "port": port, "url": "http://localhost:%d" % port, "started": datetime.now(timezone.utc).isoformat(timespec="seconds")}, f)
+    json.dump({"pid": os.getpid(), "port": port, "url": "http://localhost:%d" % port, "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               "by": "app" if paths.FROZEN else "source", "code": os.path.dirname(HERE) if not paths.FROZEN else "", "version": updater.version()}, f)   # who holds the folder (the Mac app explains a clash with it)
     f.flush()
     _LOCK = f
     return None
