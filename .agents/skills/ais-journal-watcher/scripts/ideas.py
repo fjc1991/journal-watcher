@@ -304,7 +304,7 @@ def _openalex_search(query, n=6):
         time.sleep(1.5)
         d = fx._openalex(path)
     if d is None:
-        raise RuntimeError("OpenAlex didn’t answer")
+        raise RuntimeError("OpenAlex’s daily allowance is used up (a free key in Settings → Paper sources gives you your own)" if fx.openalex_spent() else "OpenAlex didn’t answer")
     out = []
     for w in d.get("results") or []:
         doi = (w.get("doi") or "").replace("https://doi.org/", "")

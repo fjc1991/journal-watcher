@@ -11,7 +11,7 @@ const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's 
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
   ["skim", "Skim layer", "Finds the key sentences of a paper by lens (question, finding, limitation…)"]];
 const money = v => v == null ? "—" : v < 0.01 && v > 0 ? "$" + v.toFixed(4) : "$" + v.toFixed(2);
-const TABS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["look", "Appearance"], ["about", "About & updates"]];
+const TABS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["about", "About & updates"]];
 
 function build() {
   if (root) return;
@@ -34,7 +34,7 @@ function render() {
   if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
   $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   const body = $("#st-body", root);
-  ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, look: renderLook, about: renderAbout})[tab](body);
+  ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, about: renderAbout})[tab](body);
 }
 const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); };
 
@@ -354,6 +354,34 @@ async function renderLibraryAccess(body, flash) {
     catch (er) { if (body.isConnected) { res.innerHTML = ""; note(msg, er.message, true); } }
     finally { go.disabled = false; }
   };
+}
+// Settings → Paper sources: the free keys and the address that let Journal Watcher find abstracts and open-access copies (saved in .env; keys never shown again)
+async function renderSources(body, flash) {
+  let S; try { S = await api("/api/sources"); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
+  const set = on => on ? `<span class="hint ok" style="margin:0">✓ saved</span>` : `<span class="hint" style="margin:0">not set</span>`;
+  body.innerHTML = `<div class="card st-card"><h2>OpenAlex</h2>
+    <p class="hint">OpenAlex supplies the abstracts that Crossref lacks (JMIS, DSS, NBER), and the references behind Discover. Without a key, everyone on your network shares one small daily allowance; when it is used up, abstracts are looked up one by one and searches take longer. A free key gives you your own allowance ($1 of use a day, plenty for this app). Make an account at <a href="https://openalex.org/" target="_blank" rel="noopener">openalex.org</a> and copy the key from <a href="https://openalex.org/settings/api" target="_blank" rel="noopener">openalex.org/settings/api</a>.</p>
+    <label class="chk">OpenAlex API key <input type="password" id="ps-oa" placeholder="${S.openalex_key ? "•••••••• (saved; type a new one to replace it)" : "paste your key"}" autocomplete="off" style="flex:1"> ${set(S.openalex_key)}</label>
+    ${S.openalex_spent ? `<p class="hint bad" style="margin:4px 0 0">OpenAlex says today’s ${S.openalex_key ? "allowance for your key" : "shared keyless allowance"} is used up (it resets at midnight UTC).</p>` : ""}</div>
+  <div class="card st-card"><h2>Unpaywall (open-access copies)</h2>
+    <p class="hint">Before using your sign-ins, Journal Watcher asks Unpaywall whether a free, legal copy of the paper exists. Unpaywall needs an email address with each request so that it knows who is asking. It is sent only to Unpaywall. Without one, this step is skipped.</p>
+    <label class="chk">Email for Unpaywall <input type="text" id="ps-up" value="${esc(S.unpaywall_email || "")}" placeholder="you@university.edu" style="flex:1"></label></div>
+  <div class="card st-card"><h2>Elsevier (optional)</h2>
+    <p class="hint">An Elsevier API key (free at <a href="https://dev.elsevier.com/" target="_blank" rel="noopener">dev.elsevier.com</a>) lets Journal Watcher fetch ScienceDirect PDFs through Elsevier’s official interface, without the “are you human?” check. It only works from your university’s network, or with an institutional token from your library.</p>
+    <label class="chk">Elsevier API key <input type="password" id="ps-el" placeholder="${S.elsevier_key ? "•••••••• (saved)" : "optional"}" autocomplete="off" style="flex:1"> ${set(S.elsevier_key)}</label>
+    <label class="chk">Institutional token <input type="password" id="ps-et" placeholder="${S.elsevier_insttoken ? "•••••••• (saved)" : "optional, from your library"}" autocomplete="off" style="flex:1"> ${set(S.elsevier_insttoken)}</label></div>
+  <div class="card st-card"><div class="st-actions"><button class="btn primary" id="ps-save">Save</button>${S.openalex_key || S.elsevier_key || S.elsevier_insttoken ? `<button class="btn" id="ps-clear">Remove saved keys…</button>` : ""}<span class="st-msg" id="ps-msg" role="status"></span></div>
+    <p class="hint">Saved in the <code>.env</code> file of your data folder (readable only by you). Keys are never shown again, and each is sent only to its own service.</p></div>`;
+  const msg = $("#ps-msg", body);
+  if (flash) note(msg, flash);
+  $("#ps-save", body).onclick = async () => {
+    const b = {unpaywall_email: $("#ps-up", body).value.trim()};
+    [["ps-oa", "openalex_key"], ["ps-el", "elsevier_key"], ["ps-et", "elsevier_insttoken"]].forEach(([id, k]) => { const v = $("#" + id, body).value.trim(); if (v) b[k] = v; });     // an empty key box keeps the saved key
+    note(msg, b.openalex_key ? "Checking the key with OpenAlex…" : "Saving…");
+    try { await api("/api/sources", b); renderSources(body, "Saved."); window.dispatchEvent(new Event("jw-sources-changed")); } catch (er) { note(msg, er.message, true); }
+  };
+  const cl = $("#ps-clear", body);
+  if (cl) cl.onclick = async () => { if (!confirm("Remove the saved OpenAlex and Elsevier keys from this computer?")) return; try { await api("/api/sources", {openalex_key: "", elsevier_key: "", elsevier_insttoken: ""}); renderSources(body, "Removed."); window.dispatchEvent(new Event("jw-sources-changed")); } catch (er) { note(msg, er.message, true); } };
 }
 const agoWords = h => h == null ? "" : h < 1 ? Math.round(h * 60) + " min ago" : h < 36 ? Math.round(h) + " h ago" : Math.round(h / 24) + " days ago";
 function renderReader(body) {

@@ -26,6 +26,7 @@ SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS)
 import download as dl  # noqa: E402
 import signins  # noqa: E402
+import terms as tm  # noqa: E402
 import fetch_new as fx  # noqa: E402
 import notes_store as ns  # noqa: E402
 import folders as fo  # noqa: E402
@@ -220,6 +221,8 @@ class Run:
             parts.append("method: " + ", ".join(p["methods"]))
         if not p.get("topics") and not p.get("methods"):
             parts.append("all interests")
+        if p.get("terms"):
+            return " · ".join([yrs, "terms: " + ", ".join(p["terms"])])
         if p.get("query"):
             parts.append('"%s"' % p["query"])
         return " · ".join(parts)
@@ -313,6 +316,9 @@ def merge_paper(a, b):
 def search_key(p):
     """What makes two archive searches the same search: the years, the journals, the topics, the methods and the focus phrase (their order and the case of the phrase do not matter).
     The page works the same string out (index.html searchKey) to say that a search was already run."""
+    if p.get("terms"):                      # a search by terms: the years, the journals and the terms (not your interests: editing them must not make it another search)
+        return "%s-%s|%s|terms:%s" % (p.get("year_from"), p.get("year_to"), ",".join(sorted(p.get("journals") or [])),
+                                      ",".join(sorted(t if tm.is_acronym(t) else t.lower() for t in p["terms"])))
     return "%s-%s|%s|%s|%s|%s" % (p.get("year_from"), p.get("year_to"), ",".join(sorted(p.get("journals") or [])), ",".join(sorted(p.get("topics") or [])),
                                    ",".join(sorted(p.get("methods") or [])), (p.get("query") or "").strip().lower())
 
@@ -403,7 +409,7 @@ def slim(p):
     keys = ("id", "journal", "abbr", "title", "authors", "doi", "url", "pub_date", "abstract",
             "keywords", "publisher", "verdict", "relevance", "topics", "method", "reason", "dl_status",
             "ai_verdict", "user_set",
-            "dl_note", "file", "summary", "manual_url")
+            "dl_note", "file", "summary", "manual_url", "term_hits")
     return {k: p.get(k) for k in keys}
 
 
@@ -516,8 +522,20 @@ def save_fetch(abbr, y0, y1, items, words=""):
 
 
 def fetch_search(run, emit, stop):
+    """Every article of the chosen journals in the year range (a saved copy when there is a recent one), with abstracts filled in. A search by terms (params "terms")
+    keeps only the articles whose title, abstract or keywords contain one of the terms (terms.py), each with what matched; the rest are not added to the run."""
     p = run.params
     js = [j for j in journals() if j["abbr"] in p["journals"]]
+    match = tm.matcher(p["terms"]) if p.get("terms") else None
+
+    def keep(it):
+        if not match:
+            return True
+        h = match(it)
+        if h:
+            it["term_hits"] = h
+            it["reason"] = tm.describe(h)
+        return bool(h)
     for j in js:
         set_j(run, emit, j["abbr"], state="queued", label="Waiting", done=0, total=0)
     for n, j in enumerate(js, 1):
@@ -525,19 +543,34 @@ def fetch_search(run, emit, stop):
             return
         label = "Searching %s %s–%s" % (j["abbr"], p["year_from"], p["year_to"])
         emit("progress", {"stage": "fetching", "label": label, "done": n - 1, "total": len(js)})
-        words = p.get("query") or "" if j.get("source") == "ssrn" else ""
+        words = (p.get("query") or " ".join(p.get("terms") or [])) if j.get("source") == "ssrn" else ""
         saved, when = saved_fetch(j["abbr"], int(p["year_from"]), int(p["year_to"]), words=words)
         if saved:                                                 # asked before, not long ago: use the saved copy (abstracts included)
+            if j.get("source") != "ssrn" and any(not it.get("abstract") and it.get("doi") for it in saved):
+                fill_abstracts(saved, emit, stop, j["abbr"])      # a copy saved while OpenAlex could not be asked lacks abstracts: try again (a term would otherwise be missed)
+                if not stop.is_set():
+                    save_fetch(j["abbr"], int(p["year_from"]), int(p["year_to"]), saved, words=words)
+            kept = 0
             for it in saved:
-                if run.add_paper(dict(it)):
-                    emit("paper", slim(it))
-            set_j(run, emit, j["abbr"], state="fetched", label="Saved copy", found=len(saved), done=len(saved), total=len(saved))
-            emit("log", {"msg": "%s: %d articles from your saved copy of %s (fetched %s)" % (j["abbr"], len(saved), "%s–%s" % (p["year_from"], p["year_to"]), when[:10])})
+                it = dict(it)
+                if keep(it):
+                    kept += 1
+                    if run.add_paper(it):
+                        emit("paper", slim(it))
+            set_j(run, emit, j["abbr"], state="fetched", label="Saved copy", found=kept, done=kept, total=kept)
+            emit("log", {"msg": "%s: %d articles from your saved copy of %s (fetched %s)%s" % (j["abbr"], len(saved), "%s–%s" % (p["year_from"], p["year_to"]), when[:10],
+                                                                                        "; %d contain your terms" % kept if match else "")})
             run.save()
             continue
         set_j(run, emit, j["abbr"], state="fetching", label="Querying Crossref")
         try:
-            if j.get("source") == "ssrn":                       # SSRN is only searched by words: the best matches of the focus phrase
+            if j.get("source") == "ssrn" and p.get("terms"):    # by terms: each term on its own (one query of all of them would favour papers with all), then together
+                items, seen_ = [], set()
+                for t in p["terms"]:
+                    for it in fx.crossref_ssrn(t, int(p["year_from"]), int(p["year_to"]), limit=j.get("limit") or fx.SSRN_LIMIT):
+                        if it["doi"] not in seen_:
+                            seen_.add(it["doi"]); items.append(it)
+            elif j.get("source") == "ssrn":                     # SSRN is only searched by words: the best matches of the focus phrase
                 items = fx.crossref_ssrn(words, int(p["year_from"]), int(p["year_to"]), limit=j.get("limit") or fx.SSRN_LIMIT)
             else:
                 items = fx.crossref_journal_range(
@@ -556,15 +589,19 @@ def fetch_search(run, emit, stop):
                  and y0 <= int((it.get("pub_date") or "0")[:4] or 0) <= y1]
         set_j(run, emit, j["abbr"], state="enriching", label="Filling missing abstracts")
         fill_abstracts(items, emit, stop, j["abbr"])
+        kept = 0
         for it in items:
             it.update({"journal": j["name"], "abbr": j["abbr"], "publisher": j["publisher"],
                        "source": "crossref", "source_mode": "search"})
             it["id"] = fx.key_for(it.get("doi"), j["name"], it["title"])
-            if run.add_paper(it):
-                emit("paper", slim(it))
-        set_j(run, emit, j["abbr"], state="fetched", label="Fetched", found=len(items))
-        emit("log", {"msg": "%s: %d articles (%d with abstract)"
-                     % (j["abbr"], len(items), sum(1 for x in items if x.get("abstract")))})
+            row = dict(it)                                     # (the saved copy keeps every article, without the marks of this search)
+            if keep(row):
+                kept += 1
+                if run.add_paper(row):
+                    emit("paper", slim(row))
+        set_j(run, emit, j["abbr"], state="fetched", label="Fetched", found=kept if match else len(items))
+        emit("log", {"msg": "%s: %d articles (%d with abstract)%s"
+                     % (j["abbr"], len(items), sum(1 for x in items if x.get("abstract")), "; %d contain your terms" % kept if match else "")})
         if items and not stop.is_set():
             save_fetch(j["abbr"], y0, y1, items, words=words)
         run.save()
@@ -578,11 +615,34 @@ def fill_abstracts(items, emit, stop, abbr):
     if not todo:
         return
     emit("log", {"msg": "%s: looking up %d missing abstracts (OpenAlex)" % (abbr, len(todo))})
-    fails = 0
+    # many at a time first (one OpenAlex call per 50 DOIs: an NBER year of ~1,300 papers is 26 calls instead of 1,300, seconds instead of minutes), then one by one
+    # for what those calls did not return
+    by_doi = {it["doi"].lower(): it for it in todo}
+    chunks = [list(by_doi)[i:i + 50] for i in range(0, len(by_doi), 50)]
     with ThreadPoolExecutor(4) as ex:
+        futs = [ex.submit(fx.openalex_abstracts_dois, c) for c in chunks]
+        for fut in as_completed(futs):
+            if stop.is_set():
+                for f in futs:
+                    f.cancel()                                  # (Stop: the calls not yet started are dropped, not waited for)
+                return
+            for d, ab in (fut.result() or {}).items():
+                if d in by_doi and ab:
+                    by_doi[d]["abstract"] = ab
+    todo = [it for it in todo if not it.get("abstract")]
+    if not todo:
+        return
+    if fx.openalex_spent():
+        emit("log", {"msg": "OpenAlex's daily allowance %s is used up, so the quick lookups were not possible; looking abstracts up one by one (slower). %s" % (
+            "for your key" if fx.openalex_key() else "for keyless use from your network",
+            "" if fx.openalex_key() else "A free OpenAlex key (Settings → Paper sources) gives you an allowance of your own."), "level": "warn"})
+    fails = 0
+    with ThreadPoolExecutor(8) as ex:
         futs = {ex.submit(fx.openalex_abstract_doi, it["doi"]): it for it in todo}
         for fut in as_completed(futs):
             if stop.is_set():
+                for f in futs:
+                    f.cancel()
                 break
             ab = fut.result()
             if ab:
@@ -591,8 +651,8 @@ def fill_abstracts(items, emit, stop, abbr):
             else:
                 fails += 1
                 if fails >= 8 and not fx.openalex_key():
-                    emit("log", {"msg": "OpenAlex is rate-limiting; add a free OPENALEX_API_KEY to .env "
-                                        "for JMIS/DSS abstracts. Screening those on title.", "level": "warn"})
+                    emit("log", {"msg": "OpenAlex is rate-limiting; add a free OpenAlex key in Settings → Paper sources "
+                                        "for JMIS/DSS/NBER abstracts. Screening those on title.", "level": "warn"})
                     for f in futs:
                         f.cancel()
                     break

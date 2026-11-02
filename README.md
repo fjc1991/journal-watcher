@@ -2,7 +2,7 @@
 
 A research desk for Information Systems journals (and any others you add). Once a week it checks the journals you follow, screens every new paper against **your** research interests with an AI model, downloads the PDFs you are entitled to, and gives you one place to **read, highlight and ask questions** about them.
 
-- **Watch** — a weekly check of 14 journals (MISQ, ISR, JMIS, JAIS, ISJ, DSS, Management Science, MSOM, Organization Science, CACM, Science, PNAS, NBER, HBR), or a search of the archive by year, topic and method. You see the AI's verdict and reason for each paper, tick the ones you want, and it downloads and summarises them.
+- **Watch** — a weekly check of 14 journals (MISQ, ISR, JMIS, JAIS, ISJ, DSS, Management Science, MSOM, Organization Science, CACM, Science, PNAS, NBER, HBR), a search of the archive by year, topic and method, or a free search by terms (for example difference-in-differences, DiD). You see the AI's verdict and reason for each paper, tick the ones you want, and it downloads and summarises them.
 - **Library** — everything you have: search titles *and the text of your own highlights*, filter, star, mark as to-read. Drag PDFs you already have into the window.
 - **Reader** — highlights in colours with your own meanings, tags, a notes canvas, in-paper search, text-to-speech, "explain this selection", **Ask** the paper with page-cited answers, a structured *paper card* (question, theory, method, findings, limits).
 - **Folders** — group papers for a project, then ask the whole folder, compare papers in a **matrix**, map evidence and gaps, brainstorm in an **Ideas Lab**, draft **related work** from your cards (citations checked against what the model was given), run a claim check, a "Reviewer 2".

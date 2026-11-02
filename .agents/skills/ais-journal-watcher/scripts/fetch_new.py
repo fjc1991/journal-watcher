@@ -41,10 +41,13 @@ def http_get(url, timeout=40, headers=None):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read(), r.geturl(), dict(r.headers)
         except urllib.error.HTTPError as e:
-            # Crossref/OpenAlex throttle bursts with 429: wait and retry
+            # Crossref/OpenAlex throttle bursts with 429: wait and retry. A wait of more than a minute is not a burst but a budget used up for the day (OpenAlex
+            # without a key answers "retry in 10200 s"): waiting 30 s three times on every call only made searches hang, so that is raised at once.
             if e.code != 429 or attempt == 3:
                 raise
             wait = e.headers.get("Retry-After") if e.headers else None
+            if wait and wait.isdigit() and int(wait) > 60:
+                raise
             time.sleep(min(int(wait), 30) if wait and wait.isdigit() else 3 * (attempt + 1))
 
 
@@ -276,16 +279,35 @@ def openalex_key():
     return None
 
 
+OPENALEX_SPENT = {"until": 0.0, "keyed": None}     # OpenAlex said the day's budget is used up: when it resets, and whether a key was used
+
+
+def openalex_spent():
+    """True while OpenAlex's daily budget is used up (for the key in use, or for keyless calls from this network). Lookups of one work by its DOI or ID are free and
+    still work; lists, filters and searches are not asked until the budget resets."""
+    return time.time() < OPENALEX_SPENT["until"] and OPENALEX_SPENT["keyed"] == bool(openalex_key())
+
+
 def _openalex(path):
-    """GET an OpenAlex path; keyless calls are heavily rate-limited, so use
-    OPENALEX_API_KEY (free) from .env when present."""
+    """GET an OpenAlex path. Without a key OpenAlex gives everyone on your network a small shared daily budget ($0.10: about 1,000 list calls or 100 searches); with a
+    free key (Settings → Paper sources, or OPENALEX_API_KEY in .env) it is $1 a day of your own. Lookups of one work by DOI or ID are free either way. The key is sent
+    in the Authorization header (not in the address, which ends up in logs). When the budget is used up the call returns None at once instead of waiting."""
     key = openalex_key()
     url = (os.environ.get("JW_OPENALEX_URL") or "https://api.openalex.org/") + path     # (the override is for tests and mirrors)
+    single = bool(re.match(r"works/(doi:|W\d)", path)) and "?" not in path
+    if not single and openalex_spent():
+        return None
+    h = {"Accept": "application/json"}
     if key:
-        url += ("&" if "?" in url else "?") + "api_key=" + urllib.parse.quote(key)
+        h["Authorization"] = "Bearer " + key
     try:
-        raw, _, _ = http_get(url, timeout=30, headers={"Accept": "application/json"})
+        raw, _, _ = http_get(url, timeout=30, headers=h)
         return json.loads(raw.decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        wait = (e.headers.get("Retry-After") if e.headers else None) or ""
+        if e.code == 429 and wait.isdigit() and int(wait) > 60:
+            OPENALEX_SPENT.update(until=time.time() + int(wait), keyed=bool(key))
+        return None
     except Exception:
         return None
 
@@ -304,6 +326,22 @@ def openalex_abstract(title):
     data = _openalex("works?search=%s&per-page=1" % urllib.parse.quote(title[:200]))
     w = ((data or {}).get("results") or [None])[0]
     return _inverted_to_text(w.get("abstract_inverted_index")) if w else None
+
+
+def openalex_abstracts_dois(dois):
+    """{doi (lower case): abstract} for up to 50 DOIs in one OpenAlex call (a filter on doi, "|" between them). DOIs OpenAlex does not have, or has without an abstract,
+    are left out; {} when the call fails (the caller then asks one by one)."""
+    dois = [d for d in dois if d][:50]
+    if not dois:
+        return {}
+    data = _openalex("works?filter=doi:%s&select=doi,abstract_inverted_index&per-page=50" % "|".join(urllib.parse.quote(d, safe="/") for d in dois))
+    out = {}
+    for w in (data or {}).get("results") or []:
+        d = re.sub(r"^https?://(dx\.)?doi\.org/", "", (w.get("doi") or ""), flags=re.I).lower()
+        ab = _inverted_to_text(w.get("abstract_inverted_index"))
+        if d and ab:
+            out[d] = ab
+    return out
 
 
 def openalex_abstract_doi(doi):
