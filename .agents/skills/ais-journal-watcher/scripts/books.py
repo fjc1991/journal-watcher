@@ -333,7 +333,8 @@ def confirm(token, fields):
     pd = date + "-01" if re.fullmatch(r"\d{4}", date) else date
     p = {"title": title, "authors": authors, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "journal": JOURNAL, "abbr": ABBR,
          "pub_date": pd or datetime.now().strftime("%Y-%m-%d"), "topics": []}
-    note = {"lookup": "added by you (details from a book database, confirmed by you)", "edited": "added by you (details from a book database, edited by you)"}.get(f.get("source"), "added by you (details typed by you)")
+    note = {"lookup": "added by you (details from a book database, confirmed by you)", "edited": "added by you (details from a book database or the file, edited by you)",
+            "file": "added by you (details from the file itself, confirmed by you)"}.get(f.get("source"), "added by you (details typed by you)")
     claimed = path + ".claimed"
     try:
         os.replace(path, claimed)

@@ -100,3 +100,4 @@
 .di-det li.bad small { color: var(--err, #c0392b); }
 .dp-list { margin-top: 8px; max-height: 320px; } .dp-t { display: flex; flex-direction: column; min-width: 0; } .dp-t b { font-weight: 600; font-size: 13px; line-height: 1.3; } .dp-t small { margin: 0; }
 .di-opt input[type=checkbox] { flex: none; width: auto; margin: 0; }
+.ir-kind { display: inline-flex; gap: 10px; align-items: center; font-size: 13px; color: var(--ink-2); flex: none; } .ir-kind label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; } .ir-kind input { width: auto; margin: 0; }

@@ -35,7 +35,7 @@ function row(r, i, snips) {
     <div class="rowmain">
       <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}${r.summary ? `<span class="sr-only"> (ready to read: summarised by AI)</span>` : ""}</div></div>
       <div class="pauth">${esc(authors(r.authors))}</div>
-      <div class="pmeta">${esc(r.journal)} · ${esc(r.year || "")}${r.matched_topics ? " · " + esc(r.matched_topics) : ""}</div>
+      <div class="pmeta">${r.book ? esc("Book" + (r.book.publisher ? " · " + r.book.publisher : "") + (r.year ? " · " + r.year : "") + (r.book.pages ? " · " + r.book.pages + " pages" : "") + (r.book.source === "epub" ? " · EPUB" : " · PDF") + ((r.book.toc || []).length ? " · outline of " + r.book.toc.length + " item" + (r.book.toc.length === 1 ? "" : "s") : "")) : `${esc(r.journal)} · ${esc(r.year || "")}${r.matched_topics ? " · " + esc(r.matched_topics) : ""}`}</div>
       ${st.takeaway ? `<div class="take" data-take="${esc(r.file)}" title="Click to edit">“${esc(st.takeaway)}”</div>` : ""}
       <div class="tags">${st.status ? `<span class="tag stt st-${esc(st.status)}" title="Reading status">${esc(ST[st.status] || st.status)}</span>` : ""}${nt}${r.card ? `<span class="tag you" data-card="${esc(r.file)}" title="This paper has a card (question, theory, method, findings, limitations…). Click to open it." style="cursor:pointer">📇 card</span>` : ""}${fl.map(f => `<span class="tag fol" data-openfolder="${esc(f.id)}">📁 ${esc(f.name)}</span>`).join("")}${prog}</div>
       ${sn}
@@ -70,7 +70,7 @@ async function setState(file, patch) {
 let TOP = null;
 function top(el, opts) {
   TOP = {el, opts}; QUEUE = null;
-  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers"], ["ask", "Ask"], ["discover", "Discover"], ["hl", "Highlights"], ["review", "Review"], ["tags", "Tags"]].map(([k, t]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}${t}</button>`).join("")}</div>
+  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers"], ["books", "Books"], ["ask", "Ask"], ["discover", "Discover"], ["hl", "Highlights"], ["review", "Review"], ["tags", "Tags"]].map(([k, t]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}${t}</button>`).join("")}</div>
     <div id="lib-papers">
       <div class="card libtools">
         <div class="row lt-top"><input type="search" id="lf-q" placeholder="Search titles, authors, summaries — and your own highlights and notes…" autocomplete="off">
@@ -92,7 +92,7 @@ function top(el, opts) {
       <div id="lib-upnext"></div>
       <div id="lib-results"></div>
     </div>
-    <div id="lib-folders" class="hide"></div><div id="lib-ask" class="hide"></div><div id="lib-discover" class="hide"></div><div id="lib-hl" class="hide"></div><div id="lib-review" class="hide"></div><div id="lib-tags" class="hide"></div><div class="actionbar card hide" id="lib-actionbar"></div>`;
+    <div id="lib-folders" class="hide"></div><div id="lib-books" class="hide"></div><div id="lib-ask" class="hide"></div><div id="lib-discover" class="hide"></div><div id="lib-hl" class="hide"></div><div id="lib-review" class="hide"></div><div id="lib-tags" class="hide"></div><div class="actionbar card hide" id="lib-actionbar"></div>`;
   const bind = (id, ev, fn) => $("#" + id, el).addEventListener(ev, fn);
   const refresh = debounce(() => results(opts), 220);
   bind("lf-q", "input", e => { F.q = e.target.value; refresh(); });
@@ -116,8 +116,9 @@ function top(el, opts) {
 }
 function fillControls(el) {
   const L = lib(), opt = (v, t, cur) => `<option value="${esc(v)}"${cur === v ? " selected" : ""}>${esc(t)}</option>`;
-  const js = [...new Map(L.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
-  const ys = [...new Set(L.map(r => r.year).filter(Boolean))].sort().reverse();
+  const P = L.filter(r => r.journal !== "Books");           // (books have their own tab: they are not a journal to filter papers by)
+  const js = [...new Map(P.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const ys = [...new Set(P.map(r => r.year).filter(Boolean))].sort().reverse();
   $("#lf-q", el).value = F.q; $("#lf-status", el).value = F.status; $("#lf-sort", el).value = F.sort;
   $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + FOLDERS.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")", F.folder)).join("");
   $("#lf-journal", el).innerHTML = opt("", "Any journal", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
@@ -134,18 +135,64 @@ function fillControls(el) {
   const gt = $('[data-gotab="folders"]', el); if (gt) gt.onclick = () => openTab("folders");
 }
 function tabs(el, opts) {
-  if (F.tab !== "folders" && !["papers", "ask", "discover", "hl", "review", "tags"].includes(F.tab)) F.tab = "papers";
+  if (F.tab !== "folders" && !["papers", "books", "ask", "discover", "hl", "review", "tags"].includes(F.tab)) F.tab = "papers";
   $$(".libtabs button", el).forEach(b => b.classList.toggle("on", b.dataset.tab === F.tab));
   $(".libtabs", el).classList.toggle("hide", F.tab === "folders"); $("#lib-head")?.classList.toggle("hide", F.tab === "folders");
   ctx.tabChanged && ctx.tabChanged();
   $("#lib-papers", el).classList.toggle("hide", F.tab !== "papers"); $("#lib-hl", el).classList.toggle("hide", F.tab !== "hl"); $("#lib-tags", el).classList.toggle("hide", F.tab !== "tags"); $("#lib-review", el).classList.toggle("hide", F.tab !== "review"); $("#lib-ask", el).classList.toggle("hide", F.tab !== "ask"); $("#lib-discover", el).classList.toggle("hide", F.tab !== "discover"); $("#lib-folders", el).classList.toggle("hide", F.tab !== "folders");
   if (opts && opts.browse) opts.browse.classList.toggle("hide", F.tab !== "papers" || active());
-  if (F.tab === "papers") results(opts); else if (F.tab === "hl") highlightsHub(); else if (F.tab === "tags") tagManager();
+  $("#lib-books", el).classList.toggle("hide", F.tab !== "books");
+  if (F.tab === "papers") results(opts); else if (F.tab === "books") booksTab(); else if (F.tab === "hl") highlightsHub(); else if (F.tab === "tags") tagManager();
   else if (F.tab === "folders" && window.FoldersUI) window.FoldersUI.mount($("#lib-folders", el));
   else if (F.tab === "review" && window.ReviewUI) window.ReviewUI.mount($("#lib-review", el));
   else if (F.tab === "discover" && window.DiscoverUI) { const box = $("#lib-discover", el); if (!box.dataset.mounted) { window.DiscoverUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
   else if (F.tab === "ask" && window.AskUI) { const box = $("#lib-ask", el); if (!box.dataset.mounted) { window.AskUI.init(ctx); window.AskUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
 }
+// ---------------------------------------------------------------- the Books tab: your PDF and EPUB books (books.py). They are library rows under the journal "Books", read in the same reader, and searched and asked about with your papers
+let BQ = "", BSORT = "title", BFT = false;
+const BOOK_SORTS = {title: ["Sort: title", (a, b) => a[0].title.localeCompare(b[0].title)], newest: ["Sort: newest", (a, b) => (b[0].year || "").localeCompare(a[0].year || "") || a[0].title.localeCompare(b[0].title)],
+  opened: ["Sort: last opened", (a, b) => ((b[0].state || {}).opened || "").localeCompare((a[0].state || {}).opened || "")], author: ["Sort: author", (a, b) => authors(a[0].authors).localeCompare(authors(b[0].authors))]};
+function booksTab() {
+  const box = $("#lib-books"); if (!box) return;
+  box.innerHTML = `<div class="card libtools"><div class="row lt-top"><input type="search" id="bk-q" placeholder="Search your books by title, author, publisher, ISBN…" autocomplete="off" value="${esc(BQ)}" aria-label="Search your books">
+      <button class="btn" id="bk-ft" title="Look for these words inside the books themselves (Shift+Enter)">${ico("search")} In the books</button>
+      <select id="bk-sort" aria-label="Sort">${Object.entries(BOOK_SORTS).map(([k, [t]]) => `<option value="${k}"${BSORT === k ? " selected" : ""}>${t}</option>`).join("")}</select>
+      <button class="btn primary" id="bk-add">＋ Add a book</button></div>
+    <p class="pmeta" style="margin:8px 0 0">PDF and EPUB. Press Add a book, or drop the files here: you check the details before anything is filed. An EPUB is turned into pages that the reader shows (the file itself is kept). Books are searched, highlighted and asked about like your papers.</p></div>
+    <div id="bk-out"></div><div id="bk-list"></div>`;
+  const draw = () => {
+    const q = BQ.trim().toLowerCase(), all = lib().map((r, i) => [r, i]).filter(([r]) => r.journal === "Books");
+    const hit = all.filter(([r]) => !q || [r.title, authors(r.authors), (r.book || {}).publisher, (r.book || {}).isbn, r.year].join(" ").toLowerCase().includes(q)).sort(BOOK_SORTS[BSORT][1]);
+    $("#bk-list", box).innerHTML = (all.length ? `<div class="reshead">${hit.length} book${hit.length === 1 ? "" : "s"}${q ? ` matching “${esc(BQ.trim())}”` : ` in your library`}</div>` : "") +
+      (hit.map(([r, i]) => row(r, i)).join("") || (all.length ? `<div class="card empty"><h2>No book matches</h2>Try other words.</div>` : `<div class="card empty"><h2>No books yet</h2>Press <b>＋ Add a book</b> or drop PDF and EPUB files onto this page. Nothing is filed until you have checked the details.</div>`));
+    bindRows($("#bk-list", box));
+  };
+  $("#bk-q", box).oninput = e => { BQ = e.target.value; BFT = false; $("#bk-out", box).innerHTML = ""; draw(); };
+  $("#bk-q", box).onkeydown = e => { if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); inBooks(box); } };
+  $("#bk-sort", box).onchange = e => { BSORT = e.target.value; draw(); };
+  $("#bk-ft", box).onclick = () => inBooks(box);
+  $("#bk-add", box).onclick = () => window.DropImport && window.DropImport.chooseBooks();
+  draw();
+}
+async function inBooks(box) {                       // the words inside the books: the same search as "In the PDFs", limited to the Books journal
+  const q = BQ.trim(), out = $("#bk-out", box); if (!q) return toast("Type the words to look for first.");
+  out.innerHTML = `<div class="reshead">Looking inside the books…</div>`; let res = null;
+  try {
+    const r = await fetch("/api/library/fulltext", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q, scope: {journal: "BOOK"}})});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
+      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") out.innerHTML = `<div class="reshead">${esc(m.msg)}</div>`; else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
+  } catch (e) { out.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
+  const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
+  const hl = t => re ? t.split(re).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("") : esc(t);
+  out.innerHTML = `<div class="reshead">${res.n} passage${res.n === 1 ? "" : "s"} in ${res.papers} book${res.papers === 1 ? "" : "s"} (of ${res.searched} read) for “${esc(q)}” <button class="linkbtn" id="bk-ftx">close</button></div>` +
+    (res.items.map((it, i) => `<div class="card ft-i" data-ft="${i}" tabindex="0" role="button"><div class="ft-h"><b>${esc(it.cite)}</b> · ${esc(it.title)} · file page ${it.page}</div><div class="ft-s">${hl(it.snippet)}</div></div>`).join("") || `<div class="card empty"><h2>Not found in the books</h2>All the words have to be in one paragraph. Try fewer words, or put an exact phrase in “quotes”.</div>`);
+  $("#bk-ftx", out).onclick = () => { out.innerHTML = ""; };
+  const open = i => { const it = res.items[i], r2 = lib()[byFile(it.file)]; if (r2) ctx.readPaper(r2, {goto: {page: it.page, quote: it.quote}}); };
+  out.querySelectorAll("[data-ft]").forEach(c => { c.onclick = () => open(+c.dataset.ft); c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(+c.dataset.ft); } }; });
+}
+
 // ---------------------------------------------------------------- the words inside the PDFs (fulltext.py)
 let FT = null, FT_BUSY = false;                        // the words being searched for inside the PDFs; while they are the search box's text, a filter or a late keystroke repeats that search instead of the title search
 async function fulltext(opts) {
@@ -455,6 +502,6 @@ window.LibraryUI = {
   async refreshView() {                                                                         // re-draw what is on screen after papers were added from outside
     await loadFolders(); await ctx.reload();
     if ($("#libview:not(.hide) #fv-body")) return folderView(FV.box, FV.id);
-    const el = $("#libview"); if (el && $("#lf-folder")) fillControls(el); results();
+    const el = $("#libview"); if (el && $("#lf-folder")) fillControls(el); results(); if (F.tab === "books") booksTab();
   },
 };

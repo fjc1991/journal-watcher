@@ -407,6 +407,14 @@ def fake_imp_search(title, rows=4):                                             
     return [{'title': 'Alpha study of onboarding complementors in digital platform ecosystems and their governance', 'authors': ['Ada Alpha', 'Bo Beta'], 'container': 'Journal of Test Platforms', 'issn': [], 'doi': '10.9999/alpha.2021.1', 'pub_date': '2021-05-01', 'url': 'https://doi.org/10.9999/alpha.2021.1'},
             {'title': 'Beta ecosystems and the economics of fish', 'authors': ['C. Gamma'], 'container': 'Fish Quarterly', 'issn': [], 'doi': '10.9999/fish.2020.7', 'pub_date': '2020-01-01', 'url': 'https://doi.org/10.9999/fish.2020.7'}]
 imp.crossref_search = fake_imp_search
+import books as bks
+def fake_ol(title='', authors=None, isbn='', rows=4):                             # Open Library: two editions of the test book (the second with another ISBN), nothing for anything else
+    if isbn == '9780201835953' or 'platforms and their governance' in (title or '').lower():
+        return [bks._record('Platforms and Their Governance', ['Ada Lovelace'], 'Open Library Press', '2019', '9780201835953', '', 312, 'openlibrary', 'https://openlibrary.org/works/OL1W'),
+                bks._record('Platforms and Their Governance (revised edition)', ['Ada Lovelace'], 'Open Library Press', '2022', '9780306406157', '', 340, 'openlibrary', 'https://openlibrary.org/works/OL1W')]
+    return []
+bks.openlibrary_search = fake_ol
+bks.crossref_books = lambda title, rows=3: []
 """.replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1493,7 +1501,7 @@ imp.crossref_search = fake_imp_search
             shot(page, "22-drop-review")
             lookups = imp_log()
             check("dropping on the Folders page opens ONE dialog with a card per PDF; nothing is filed yet and the text file is skipped",
-                  n_lib() == n0 and page.locator("#ir-dlg .ir-card").count() == 1 and "notes.txt" in page.inner_text("#ir-dlg") and "not a PDF, skipped" in page.inner_text("#ir-dlg") and page.locator("#di-dlg").count() == 0 and "Alpha study of onboarding" in lookups)
+                  n_lib() == n0 and page.locator("#ir-dlg .ir-card").count() == 1 and "notes.txt" in page.inner_text("#ir-dlg") and "not a PDF or EPUB, skipped" in page.inner_text("#ir-dlg") and page.locator("#di-dlg").count() == 0 and "Alpha study of onboarding" in lookups)
             check("…the PDF was looked up by the title it carries, and the staged copy waits outside the library", sum(1 for l in lookups.splitlines() if l.startswith("Alpha study")) == 1 and staged() == 1 and n_lib() == n0)
             check("…it shows the records found (best first, the unrelated one marked), a 'None of these' choice and boxes filled from the first record",
                   page.locator("#ir-c0 .ir-cand").count() == 3 and page.eval_on_selector('input[name="ir-c0"]:checked', "e => e.value") == "0" and page.locator("#ir-c0 .ir-cand.mis").count() == 1 and "None of these" in page.inner_text("#ir-c0")
@@ -1600,6 +1608,80 @@ imp.crossref_search = fake_imp_search
             check("without the Mac's Keychain the API keys card says they are kept in the .env file", ".env" in page.inner_text("#st-body") and page.locator("#sy-keys").count() == 0)
             os.remove(os.path.join(devdir, "a" * 32 + ".json")); page.goto(base + "/"); page.wait_for_timeout(1200)
             check("when nothing needs saying the top bar says nothing", page.locator("#syncpill.hide").count() == 1)
+
+            print("books")
+            import io as _io, zipfile as _zf
+
+            def mk_epub(title, isbn, authors=("Lovelace, Ada",), chapters=3, drm=False):
+                b_ = _io.BytesIO()
+                with _zf.ZipFile(b_, "w") as z_:
+                    z_.writestr("mimetype", "application/epub+zip", compress_type=_zf.ZIP_STORED)
+                    z_.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+                    if drm:
+                        z_.writestr("META-INF/encryption.xml", '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><EncryptedData><EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/></EncryptedData></encryption>')
+                    z_.writestr("OEBPS/content.opf", '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:isbn:%s</dc:identifier><dc:title>%s</dc:title>%s<dc:publisher>Test University Press</dc:publisher><dc:date>2019-05-01</dc:date></metadata><manifest>%s<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine>%s</spine></package>'
+                                % (isbn, title, "".join("<dc:creator>%s</dc:creator>" % a for a in authors), "".join('<item id="c%d" href="c%d.xhtml" media-type="application/xhtml+xml"/>' % (i, i) for i in range(chapters)), "".join('<itemref idref="c%d"/>' % i for i in range(chapters))))
+                    z_.writestr("OEBPS/nav.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol>%s</ol></nav></body></html>' % "".join('<li><a href="c%d.xhtml">Chapter %d</a></li>' % (i, i + 1) for i in range(chapters)))
+                    for i in range(chapters):
+                        z_.writestr("OEBPS/c%d.xhtml" % i, '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter %d</h1>%s</body></html>' % (i + 1, "".join("<p>%s</p>" % ("Zymurgy ecosystems and complementors, paragraph %d of chapter %d. " % (j, i + 1) + "Open platforms need clear rules. " * 20) for j in range(20))))
+                return base64.b64encode(b_.getvalue()).decode()
+            EP = lambda b_, n_: [b_, n_, "application/epub+zip"]
+            book_b64 = mk_epub("Platforms and Their Governance", "978-0-201-83595-3")
+            n_all = lambda: len(api("/api/library")); n_before_books = n_all()
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
+            check("the Library has a Books tab next to Papers", [b_.inner_text().strip() for b_ in page.locator(".libtabs button").all()][:2] == ["Papers", "Books"])
+            page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-add")
+            check("it is empty at first and says how to add books", "No books yet" in page.inner_text("#lib-books") and page.locator("#lib-papers:not(.hide)").count() == 0)
+            ov = page.evaluate(JS_DROP, ["#lib-books", [EP(book_b64, "governance.epub")], True])
+            check("dragging files over the Books tab says they are added as books", bool(ov) and "books" in ov and "check the details" in ov, repr(ov))
+            page.evaluate(JS_DROP, ["#lib-books", [EP(book_b64, "governance.epub")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand", timeout=20000)
+            shot(page, "23-book-review")
+            check("dropping an EPUB opens the review dialog: it is a book (no paper/book choice for an EPUB), with the file's own details first", "Book" in page.inner_text("#ir-c0 .ir-kind") and page.locator("#ir-c0 [data-kind]").count() == 0 and "file’s own details" in page.inner_text("#ir-c0 .ir-cand >> nth=0") and "Check the details of 1 EPUB" in page.inner_text("#ir-h"), page.inner_text("#ir-c0")[:300])
+            check("…the boxes hold title, authors (as 'Ada Lovelace'), publisher, year and ISBN, and the dialog counts chapters", page.input_value('[data-k="title"]') == "Platforms and Their Governance" and page.input_value('[data-k="authors"]') == "Ada Lovelace" and page.input_value('[data-k="publisher"]') == "Test University Press"
+                  and page.input_value('[data-k="pub_date"]') == "2019" and page.input_value('[data-k="isbn"]') == "9780201835953" and "outline of 3 items" in page.inner_text("#ir-c0 .ir-h"), page.inner_text("#ir-c0 .ir-h"))
+            check("…and the other record found online (Open Library) is offered too; nothing is filed yet", page.locator("#ir-c0 .ir-cand").count() >= 2 and n_all() == n_before_books and "Add 1 book" == page.inner_text("#ir-go").strip())
+            page.fill('[data-k="isbn"]', "9780201835954"); page.click("#ir-go")
+            check("an ISBN with a wrong check digit is refused next to the book", "not valid" in page.inner_text("#ir-e0") and page.locator("#ir-dlg[open]").count() == 1 and n_all() == n_before_books)
+            page.fill('[data-k="isbn"]', "9780201835953"); page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 1 book')", timeout=30000)
+            bk_row = next((r_ for r_ in api("/api/library") if r_["journal"] == "Books"), {})
+            bk_full = os.path.join(TMP, bk_row.get("file", "x"))
+            check("the book is filed under the Books journal: the PDF the reader shows, the EPUB as given, and its details (ISBN, publisher, chapters)",
+                  bk_row.get("title") == "Platforms and Their Governance" and bk_row["file"].startswith("Papers/2019-01/Books/") and os.path.exists(bk_full) and os.path.exists(bk_full[:-4] + ".epub")
+                  and bk_row["book"]["isbn"] == "9780201835953" and bk_row["book"]["publisher"] == "Test University Press" and bk_row["book"]["source"] == "epub" and len(bk_row["book"]["toc"]) == 3 and n_all() == n_before_books + 1, str(bk_row)[:300])
+            page.wait_for_selector("#bk-list .librow", timeout=10000)
+            check("the Books tab lists it, with publisher, year, pages, format and chapters", all(x_ in page.inner_text("#bk-list .librow") for x_ in ("Test University Press", "2019", "EPUB", "pages", "outline of 3 items")), page.inner_text("#bk-list .librow")[:300])
+            page.fill("#bk-q", "nothing like this"); check("…and searching by title, author, publisher or ISBN narrows the list", "No book matches" in page.inner_text("#bk-list")); page.fill("#bk-q", "9780201835953")
+            check("…the ISBN finds it", page.locator("#bk-list .librow").count() == 1); page.fill("#bk-q", "")
+            page.click('.libtabs [data-tab="papers"]'); page.fill("#lf-q", "Platforms and Their Governance"); page.wait_for_selector("#lib-results .reshead, #lib-results .empty", timeout=10000)
+            check("a book is not listed among the papers (it has its own tab)", "Platforms and Their Governance" not in [t_.strip() for t_ in page.locator("#lib-results .ptitle").all_inner_texts()] and "Test University Press" not in page.inner_text("#lib-results"), page.inner_text("#lib-results")[:200])
+            check("…and 'Journal' in the paper filters does not offer Books", "Books" not in page.inner_text("#lf-journal")); page.fill("#lf-q", "")
+            page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow")
+            page.fill("#bk-q", "zymurgy ecosystems"); page.click("#bk-ft"); page.wait_for_selector("#bk-out .ft-i", timeout=60000)
+            check("'In the books' finds passages inside the converted book, with the page in the reading copy", page.locator("#bk-out .ft-i").count() >= 1 and "Platforms and Their Governance" in page.inner_text("#bk-out .ft-i >> nth=0") and "file page" in page.inner_text("#bk-out .ft-i >> nth=0"))
+            page.fill("#bk-q", ""); page.click("#bk-list [data-read]"); page.wait_for_selector(".rd-band .textLayer span", timeout=60000)
+            page.click('.rd-tabs button[data-tab="toc"]'); page.wait_for_selector("#toc-list, .toc-list, #rd-toc", timeout=10000)
+            check("the book opens in the reader, and its chapters are the outline", "Platforms and Their Governance" in page.inner_text("#rd-title") and "Chapter 2" in page.inner_text("body"), page.inner_text("#rd-title"))
+            page.click('.rd-bar [data-a="back"]'); page.wait_for_selector("#bk-add")
+            # the same book again; a PDF dropped on the Books tab is a book unless you say it is a paper; DRM is refused in plain words
+            page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-add")
+            page.evaluate(JS_DROP, ["#lib-books", [EP(mk_epub("Platforms and Their Governance, second printing", "978-0-201-83595-3"), "again.epub")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=20000)
+            check("the same book (same ISBN) is flagged as already in the library before anything happens", page.locator("#ir-x0:not(.hide)").count() == 1 and "already have this book" in page.inner_text("#ir-x0"))
+            page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('already in your library')", timeout=20000)
+            check("…and it is not filed twice", n_all() == n_before_books + 1 and len([r_ for r_ in api("/api/library") if r_["journal"] == "Books"]) == 1)
+            page.evaluate(JS_DROP, ["#lib-books", [EP(mk_epub("Locked Book", "978-0-306-40615-7", drm=True), "locked.epub")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-st.bad", timeout=20000)
+            check("a copy-protected EPUB is turned away in plain words and nothing is staged", "copy-protected" in page.inner_text("#ir-c0") and page.locator("#ir-go[disabled]").count() == 1 and staged() == 0)
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.evaluate(JS_DROP, ["#lib-books", [PDF(pb, "bravo-book.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=20000)
+            check("a PDF dropped on the Books tab starts as a book (publisher and ISBN boxes), and can be switched to a paper", page.locator('[data-k="publisher"]').count() == 1 and page.locator('[data-k="journal"]').count() == 0 and page.locator('#ir-c0 [data-kind][value="book"]:checked').count() == 1)
+            page.check('#ir-c0 [data-kind][value="paper"]'); page.wait_for_selector('[data-k="journal"]', timeout=20000)
+            check("…switching looks at it again as a paper (journal box, no publisher), nothing filed, nothing left staged but its own copy", page.locator('[data-k="publisher"]').count() == 0 and n_all() == n_before_books + 1 and staged() == 1)
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached"); page.wait_for_timeout(300)
+            check("cancelling forgets the staged copy", staged() == 0)
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile")
+            page.evaluate(JS_DROP, [".fp-path", [EP(mk_epub("A Second Book on Rules", "978-0-262-03384-8"), "rules.epub"), PDF(pb, "paper-on-the-side.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c1 .ir-f", timeout=30000)
+            check("dropped on the Folders page an EPUB is a book and a PDF stays a paper (default); one dialog, a destination to choose", page.locator("#ir-c0 [data-k='publisher']").count() == 1 and page.locator("#ir-c1 [data-k='journal']").count() == 1 and page.locator("#ir-to").count() == 1)
+            page.select_option("#ir-to", "f:lab"); n_lab = folder("lab")["count"]; page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 2')", timeout=30000)
+            check("both are filed and added to the folder", folder("lab")["count"] == n_lab + 2 and len([r_ for r_ in api("/api/library") if r_["journal"] == "Books"]) == 2)
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")
