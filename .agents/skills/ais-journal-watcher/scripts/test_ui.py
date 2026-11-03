@@ -806,6 +806,20 @@ pl._screen_batch = fake_screen
 
             page.click("#settingsbtn"); page.wait_for_selector("#st-body tr[data-p]")
             check("settings: providers, per-feature models and a key-free status", page.locator("tr[data-f]").count() >= 17 and page.locator("tr[data-f='ideas']").count() == 1 and "key found" in page.inner_text("tr[data-p='fake']"))
+            JS_TIDY = """(() => { const r = e => e.getBoundingClientRect(), mid = e => r(e).top + r(e).height / 2;
+              const rows = [...document.querySelectorAll('tr[data-p]')], keyRows = rows.filter(t => { const i = t.querySelector('input[type=password]'); return i && i.offsetParent !== null; });
+              const hs = rows.map(t => Math.round(r(t).height)), feat = [...document.querySelectorAll('tr[data-f]:not([data-f=emb])')];
+              const clipped = [...document.querySelectorAll('tr[data-f] select, tr[data-f] input.fm, tr[data-p] input.pm')].filter(e => e.scrollWidth > e.clientWidth + 1 && e.tagName === 'SELECT');
+              return {keyRows: keyRows.length, sameLine: keyRows.every(t => { const i = t.querySelector('input[type=password]'), b = t.querySelector('[data-savekey]'); return Math.abs(mid(i) - mid(b)) < 4 && r(i).right <= r(b).left + 1; }),
+                      keyW: Math.min(...keyRows.map(t => r(t.querySelector('input[type=password]')).width)), rowH: Math.max(...hs) - Math.min(...hs),
+                      selW: Math.min(...feat.map(t => r(t.querySelector('.fp')).width), ...feat.map(t => r(t.querySelector('.fe')).width)), modelW: Math.min(...feat.map(t => r(t.querySelector('.fm')).width)),
+                      clipped: clipped.length, head: [...document.querySelectorAll('.st-prov th')].map(x => x.textContent.trim()), pageX: document.documentElement.scrollWidth <= window.innerWidth}; })()"""
+            t_ = page.evaluate(JS_TIDY)
+            check("the model's name is not shown under the logo (only the app's name)", page.locator("#modelname").count() == 0 and page.inner_text(".brand-t").strip() == "Journal Watcher", page.inner_text(".brand-t"))
+            check("settings: the providers table is tidy: each key box and its Save key button are on one line, no dropdown is clipped, rows have the same height, the header is short", t_["keyRows"] >= 1 and t_["sameLine"] and t_["keyW"] >= 150 and t_["rowH"] <= 6 and t_["selW"] >= 80 and t_["modelW"] >= 180 and t_["clipped"] == 0 and t_["head"][4] == "Models you use", str(t_))
+            page.set_viewport_size({"width": 1000, "height": 900}); page.wait_for_timeout(200)
+            check("…and in a narrow window the tables scroll inside their card instead of the page scrolling sideways", page.evaluate(JS_TIDY)["pageX"] is True)
+            page.set_viewport_size({"width": 1400, "height": 950})
             check("settings: 'Screening new papers' has its own model row (the budget and the usage page now cover it), pointing at a provider that exists", page.locator("tr[data-f='screen']").count() == 1 and page.input_value("tr[data-f='screen'] .fm") != "" and page.input_value("tr[data-f='screen'] .fp") in api("/api/ai/config")["providers"] and "screen" in api("/api/ai/config")["features"])
             check("Settings has ONE 'AI' tab with three pages under it (AI & privacy, Usage & cost, Prompts); they are not tabs of their own", page.locator(".st-tabs button").count() == 7 and [b.inner_text() for b in page.locator(".st-sub button").all()] == ["AI & privacy", "Usage & cost", "Prompts"] and page.inner_text(".st-tabs .on").strip() == "AI" and page.locator(".st-tabs button[data-t='usage']").count() == 0)
             page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat"); page.click('.st-tabs button[data-t="reader"]'); page.wait_for_selector(".legend")

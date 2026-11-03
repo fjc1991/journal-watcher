@@ -56,11 +56,12 @@ function renderAI(body) {
   const mixed = "Now: " + tally("provider").map(([p, n]) => `${p} ×${n}`).join(", ") + ". Applies the provider and model to every feature below (not the effort, not embeddings), then press Save. Any row can still be changed on its own.";
   const used = [...new Set([...Object.values(A.features).map(f => f.model), A.embeddings.provider !== "local" ? A.embeddings.model : null].filter(Boolean))];
   body.innerHTML = `
-  <div class="card st-card"><h2>Providers</h2><p class="hint">Paste a key and it is saved in the <code>.env</code> file of your data folder (readable by you only); it is never shown again or sent anywhere but to its provider. No restart is needed.</p>
-    <table class="st-table"><tr><th>Provider</th><th>Key</th><th>On this computer</th><th>Web search</th><th>Models you use <small>(comma-separated; fills the pickers)</small></th><th></th></tr>
-    ${provs.map(([n, p]) => `<tr data-p="${esc(n)}"><td><b>${esc(n)}</b></td><td>${!p.key_env ? `<span class="ok">no key needed</span>` : `${p.configured ? `<span class="ok">✓ key found</span> <button class="btn small" data-keychange="${esc(n)}">Change</button>` : ""}<span class="keyform${p.configured ? " hide" : ""}"><input type="password" autocomplete="off" spellcheck="false" aria-label="${esc(n)} API key (${esc(p.key_env)})" placeholder="paste your ${esc(p.key_env)}"> <button class="btn small primary" data-savekey="${esc(n)}">Save key</button></span> <span class="tres keymsg"></span>`}</td>
-      <td>${p.local ? "✓" : "—"}</td><td>${p.web_search ? "✓" : "—"}</td><td><input type="text" class="pm" aria-label="Models of this provider, separated by commas" value="${esc((p.models || []).join(", "))}"></td>
-      <td><button class="btn small" data-test="${esc(n)}">Test</button> <span class="tres"></span></td></tr>`).join("")}</table></div>
+  <div class="card st-card"><h2>Providers</h2><p class="hint">Paste a key and it is saved in the <code>.env</code> file of your data folder (readable by you only); it is never shown again or sent anywhere but to its provider. No restart is needed. “Models you use” is a comma-separated list that fills the model pickers below; Test tries the first one.</p>
+    <div class="st-scroll"><table class="st-table st-prov"><colgroup><col class="c-prov"><col class="c-key"><col class="c-flag"><col class="c-flag"><col class="c-models"><col class="c-test"></colgroup>
+    <tr><th>Provider</th><th>Key</th><th class="c">On this computer</th><th class="c">Web search</th><th>Models you use</th><th></th></tr>
+    ${provs.map(([n, p]) => `<tr data-p="${esc(n)}"><td><b>${esc(n)}</b></td><td>${!p.key_env ? `<div class="keycell"><span class="ok">no key needed</span></div>` : `<div class="keycell">${p.configured ? `<span class="ok">✓ key found</span><button class="btn small" data-keychange="${esc(n)}">Change</button>` : ""}<span class="keyform${p.configured ? " hide" : ""}"><input type="password" autocomplete="off" spellcheck="false" aria-label="${esc(n)} API key (${esc(p.key_env)})" placeholder="paste your ${esc(p.key_env)}"><button class="btn small primary" data-savekey="${esc(n)}">Save key</button></span></div><div class="tres keymsg"></div>`}</td>
+      <td class="c">${p.local ? "✓" : "—"}</td><td class="c">${p.web_search ? "✓" : "—"}</td><td><input type="text" class="pm" aria-label="Models of ${esc(n)}, separated by commas" value="${esc((p.models || []).join(", "))}"></td>
+      <td class="c-test"><button class="btn small" data-test="${esc(n)}">Test</button><div class="tres"></div></td></tr>`).join("")}</table></div></div>
   <div class="card st-card"><h2>Which model does what</h2>
     <div class="st-main" id="st-main"><b>Use one for everything</b>
       <select id="mn-p" aria-label="Provider for all features">${pnames.map(n => `<option${mainP === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
@@ -68,14 +69,15 @@ function renderAI(body) {
       <button class="btn small" id="mn-test">Test</button><span class="tres"></span>
       <button class="btn" id="mn-apply">Apply to all features</button>
       <small id="mn-note" class="st-msg">${mixed}</small></div>
-    <table class="st-table"><tr><th>Feature</th><th>Provider</th><th>Model</th><th>Effort</th><th></th></tr>
+    <div class="st-scroll"><table class="st-table st-feat"><colgroup><col class="c-feat"><col class="c-fp"><col class="c-fm"><col class="c-fe"><col class="c-test"></colgroup>
+    <tr><th>Feature</th><th>Provider</th><th>Model</th><th>Effort</th><th></th></tr>
     ${FEATURES.map(([k, t, d]) => { const f = A.features[k] || A.features.ask; return `<tr data-f="${k}"><td><b>${t}</b><br><small>${d}</small></td>
       <td><select class="fp">${pnames.map(n => `<option${f.provider === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></td>
       <td><input type="text" class="fm" list="dl-${k}" aria-label="Model for ${esc(k)}" value="${esc(f.model)}"><datalist id="dl-${k}">${((A.providers[f.provider] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist></td>
       <td><select class="fe">${["low", "medium", "high"].map(e => `<option${(f.effort || "low") === e ? " selected" : ""}>${e}</option>`).join("")}</select></td>
-      <td><button class="btn small" data-testf="${k}">Test</button> <span class="tres"></span></td></tr>`; }).join("")}
+      <td class="c-test"><button class="btn small" data-testf="${k}">Test</button><div class="tres"></div></td></tr>`; }).join("")}
     <tr data-f="emb"><td><b>Embeddings</b><br><small>Used to find relevant passages</small></td><td><select class="fp">${["local", ...pnames].map(n => `<option${A.embeddings.provider === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></td>
-      <td><input type="text" class="fm" aria-label="Embedding model" value="${esc(A.embeddings.model)}"></td><td></td><td><small>“local” runs on this Mac, free</small></td></tr></table></div>
+      <td><input type="text" class="fm" aria-label="Embedding model" value="${esc(A.embeddings.model)}"></td><td></td><td><small>“local” runs on this Mac, free</small></td></tr></table></div></div>
   <div class="card st-card"><h2>Privacy and spending</h2>
     <label class="chk"><input type="checkbox" id="st-local"${A.privacy.local_only ? " checked" : ""}> <b>Local-only mode</b> — never send paper text to a provider outside this computer (only Ollama works; Ask and Explain need an Ollama model)</label>
     <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd ?? ""}" placeholder="no limit" style="width:110px"> <small>calls stop when the month's spend reaches it; a warning shows at 80%</small></label>

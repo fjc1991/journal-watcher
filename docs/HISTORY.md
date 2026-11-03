@@ -667,6 +667,18 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not changed, on purpose.** `release.yml` also uses `actions/upload-artifact@v4` and `softprops/action-gh-release@v2`, which are still Node 20 and will show the same warning in a release run. Newer Node 24 versions exist (`upload-artifact@v6`, `action-gh-release@v3`), but neither can be tested without running the release workflow (a dry run covers `upload-artifact` only; the publishing step runs on a tag). Change them together with the next dry run.
 
+### Item 18. The AI & privacy tables looked broken, and the model's name under the logo (2026-11-03, the author's screenshots)
+
+**Reported.** “The UI is very ugly”, with two screenshots: the key box and its Save key button stacked and cramped (placeholder clipped at the left), the header “MODELS YOU USE (COMMA-SEPARATED; FILLS THE PICKERS)” wrapping, rows of different heights, and in “Which model does what” the provider select showing “anth”, the effort select “lo” and the model box “claude-sonnet-5-5-” cut off. Then: remove the model's name under the logo.
+
+**Cause.** Both tables used the browser's automatic column widths with `select, input { width: 100% }`, so a column shrank to what the longest header or hint needed and the controls inside it were squeezed; `.keyform` had no rules at all (the input kept its default size and wrapped the button below it), and the password box was not covered by the table's input rule.
+
+**Changed.** `renderAI` (`settings.js`): both tables get `table-layout: fixed` with named columns (`.st-prov`, `.st-feat`, `settings.css`), the key box and its button are one flex row (`.keycell`, `.keyform`), the numbers and ticks are centred, the header is just “Models you use” (the hint is a sentence above the table: “comma-separated list that fills the model pickers below; Test tries the first one”), Test results are a block under the button, and each table sits in an `overflow-x: auto` wrapper so a narrow window scrolls the card, not the page. The model name under the app's name (`#modelname`, filled from `/api/config`) is gone.
+
+**Tests.** `test_ui.py`: a geometry check on the Providers and feature tables (every visible key box on the same line as its Save key button and at least 150 px wide, no more than 6 px between the tallest and the shortest provider row, provider and effort selects at least 80 px, model boxes at least 180 px, no clipped select, the short header) and one for a narrow window (no sideways scroll of the page); it fails on the old stylesheet (select 69 px, model box 133 px). A check that `#modelname` is gone.
+
+**Not verified.** How it looks with the Mac's fonts: the widths were chosen from the sandbox's, so the exact point at which the table starts to scroll may differ.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

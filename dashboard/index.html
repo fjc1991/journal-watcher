@@ -215,7 +215,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
 <div class="app" id="app">
 <aside class="sidebar" id="sidebar" aria-label="Navigation">
   <div class="sb-head">
-    <div class="brand" id="brand" title="Home"><span class="brand-mark"><svg class="ico"><use href="/static/icons.svg#i-library"/></svg></span><span class="brand-t">Journal Watcher<small id="modelname"></small></span></div>
+    <div class="brand" id="brand" title="Home"><span class="brand-mark"><svg class="ico"><use href="/static/icons.svg#i-library"/></svg></span><span class="brand-t">Journal Watcher</span></div>
     <button class="sb-x" id="sbclose" aria-label="Hide the sidebar" title="Hide the sidebar"><svg class="ico"><use href="/static/icons.svg#i-x"/></svg></button>
   </div>
   <button class="btn pal-btn" id="palettebtn" disabled title="Jump to a paper, folder, tool or setting (Ctrl or ⌘ K)" aria-label="Search and jump"><svg class="ico sm"><use href="/static/icons.svg#i-search"/></svg><span class="pt">Search</span><span class="pk"><kbd>⌘K</kbd></span></button>
@@ -596,7 +596,6 @@ function updateEst() {
 }
 async function init() {
   CFG = await api("/api/config");
-  $("#modelname").textContent = CFG.model;
   $("#weekname").textContent = CFG.this_week_label;
   for (const id of ["#y0", "#y1"]) {
     $(id).innerHTML = CFG.years.map(y => `<option>${y}</option>`).join("");
