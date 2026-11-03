@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -75,11 +76,22 @@ def crossref_search(title, rows=4):
 
 
 def journal_for(meta):
-    """(name, abbr) — one of the watched journals when the ISSN or DOI prefix matches, else the journal's own name."""
-    for j in dl.load_json(os.path.join(dl.BASE, "journals.json"), {"journals": []})["journals"]:
-        if (j.get("issn") and j["issn"] in meta.get("issn", [])) or (j.get("doi_prefix") and meta["doi"].startswith(j["doi_prefix"] + "/")):
+    """(name, abbr) — one of the watched journals, else the journal's own name. In order: the ISSN; the journal's name or abbreviation (what Crossref said, or what you
+    typed); and only when no journal name is known, a DOI prefix that belongs to ONE watched journal (a publisher's prefix such as 10.1287 is shared by several)."""
+    js = dl.load_json(os.path.join(dl.BASE, "journals.json"), {"journals": []})["journals"]
+    issns = {str(x).strip() for x in (meta.get("issn") or [])}
+    cont = re.sub(r"\s+", " ", meta.get("container") or "").strip()
+    for j in js:
+        if j.get("issn") and j["issn"] in issns:
             return j["name"], j["abbr"]
-    name = re.sub(r"[\\/:*?\"<>|]+", " ", meta.get("container") or "").strip() or "Other"
+    for j in js:
+        if cont and cont.lower() in (j["name"].lower(), j["abbr"].lower()):
+            return j["name"], j["abbr"]
+    if not cont:
+        hits = [j for j in js if j.get("doi_prefix") and (meta.get("doi") or "").startswith(j["doi_prefix"] + "/")]
+        if len(hits) == 1:
+            return hits[0]["name"], hits[0]["abbr"]
+    name = re.sub(r"[\\/:*?\"<>|]+", " ", cont).strip() or "Other"
     abbr = "".join(w[0] for w in re.findall(r"[A-Za-z][A-Za-z]+", name) if w[0].isupper() and w.lower() not in ("of", "the", "and"))[:6].upper()
     return name, abbr or "OTH"
 
@@ -93,31 +105,55 @@ def _paper(meta):
             "journal": name, "abbr": abbr, "pub_date": pd or datetime.now().strftime("%Y-%m-%d"), "topics": []}
 
 
+def _same(row, p):
+    """Is this index row the paper p? Two DOIs decide when both are known (different DOIs are different papers); otherwise the normalised title does
+    (a paper filed without a DOI is still recognised once Crossref supplies one, and the other way round)."""
+    d1, d2 = (row.get("doi") or "").strip().lower(), (p.get("doi") or "").strip().lower()
+    if d1 and d2:
+        return d1 == d2
+    t1, t2 = fx.norm_title(row.get("title") or ""), fx.norm_title(p.get("title") or "")
+    return bool(t1) and t1 == t2
+
+
 def _existing(p):
     """Relative file path if this paper is already in the library."""
-    key = dl.index_key({"doi": p.get("doi"), "title": p.get("title")})
     idx = os.path.join(dl.PAPERS, "_index.csv")
     if os.path.exists(idx):
         import csv
         with open(idx, newline="") as f:
             for r in csv.DictReader(f):
-                if r["status"] == "ok" and r["file"] and dl.index_key(r) == key and os.path.exists(os.path.join(dl.ROOT, r["file"])):
+                if r["status"] == "ok" and r["file"] and _same(r, p) and os.path.exists(os.path.join(dl.ROOT, r["file"])):
                     return r["file"]
     return None
 
 
+def check_existing(doi, title):
+    """Path of the paper in your library with this DOI / title, or "" (the review dialog asks again when you pick another record or edit the boxes)."""
+    return _existing({"doi": clean_doi(doi) if str(doi or "").strip() else "", "title": title}) or ""
+
+
+_LOCK = threading.Lock()      # one filing at a time: the check for a duplicate, the free file name and the index row belong together
+
+
 def _file(p, data, note):
-    ex = _existing(p)
-    if ex:
-        return {"file": ex, "title": p["title"], "existing": True, "note": "already in your library"}
-    dest = dl.out_path(p)
-    tmp = dest + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, dest)
-    rel = os.path.relpath(dest, dl.ROOT)
-    dl.save_index(p, rel, "ok", note)
-    return {"file": rel, "title": p["title"], "existing": False, "note": note}
+    with _LOCK:
+        ex = _existing(p)
+        if ex:
+            return {"file": ex, "title": p["title"], "existing": True, "note": "already in your library"}
+        dest = dl.out_path(p)
+        if os.path.exists(dest):                       # another paper with the same month, journal and first title words (no DOI to tell them apart): never overwrite it
+            stem, ext = os.path.splitext(dest)
+            n = 2
+            while os.path.exists("%s-%d%s" % (stem, n, ext)):
+                n += 1
+            dest = "%s-%d%s" % (stem, n, ext)
+        tmp = dest + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, dest)
+        rel = os.path.relpath(dest, dl.ROOT)
+        dl.save_index(p, rel, "ok", note)
+        return {"file": rel, "title": p["title"], "existing": False, "note": note}
 
 
 def _sniff(data):
@@ -206,16 +242,36 @@ def _staged_path(token):
     return os.path.join(STAGING, token + ".pdf") if isinstance(token, str) and TOKEN_RE.fullmatch(token) else None
 
 
-def _stage(data):
-    os.makedirs(STAGING, exist_ok=True)
+def sweep():
+    """Forget staged PDFs nobody confirmed or cancelled within STAGE_HOURS (the server does this when it starts and at every import call). Returns how many."""
+    n = 0
+    if not os.path.isdir(STAGING):
+        return 0
     cut = time.time() - STAGE_HOURS * 3600
-    for n in os.listdir(STAGING):                      # PDFs nobody confirmed or cancelled are forgotten after a day
-        p = os.path.join(STAGING, n)
+    for name in os.listdir(STAGING):
+        p = os.path.join(STAGING, name)
         try:
             if os.path.getmtime(p) < cut:
-                os.remove(p)
+                os.remove(p); n += 1
         except OSError:
             pass
+    return n
+
+
+def _waiting(token):
+    """Path of the staged PDF for this token if it is still waiting (it exists and is not older than STAGE_HOURS), else None."""
+    path = _staged_path(token)
+    try:
+        if path and os.path.getmtime(path) >= time.time() - STAGE_HOURS * 3600:
+            return path
+    except OSError:
+        pass
+    return None
+
+
+def _stage(data):
+    os.makedirs(STAGING, exist_ok=True)
+    sweep()
     token = uuid.uuid4().hex
     tmp = os.path.join(STAGING, token + ".tmp")
     with open(tmp, "wb") as f:
@@ -255,8 +311,15 @@ def _candidate(meta, source, data, printed):
     """One record, with what the PDF says about it."""
     verdict, reason, ev = identity.check({"title": meta["title"], "doi": "", "authors": meta.get("authors") or []}, data)
     pd = meta.get("pub_date") or ""
+    au = ev.get("authors")
     return {"title": meta["title"], "authors": meta.get("authors") or [], "journal": meta.get("container") or "", "pub_date": pd, "year": pd[:4], "doi": meta.get("doi") or "",
-            "url": meta.get("url") or "", "source": source, "doi_printed": printed, "verdict": verdict, "reason": reason, "title_score": ev.get("title") or 0.0}
+            "url": meta.get("url") or "", "source": source, "doi_printed": printed, "verdict": verdict, "reason": reason, "title_score": ev.get("title") or 0.0,
+            "authors_found": au is not None and au >= identity.AUTHORS_MIN}
+
+
+def _strong(c):
+    """A record the PDF backs up independently: its title is on the PDF AND its authors are (or the PDF itself prints the record's DOI). A title alone is not enough to call it confirmed."""
+    return c["verdict"] == "match" and (c["authors_found"] or c["doi_printed"])
 
 
 def analyse_pdf(data, filename="paper.pdf"):
@@ -278,7 +341,7 @@ def analyse_pdf(data, filename="paper.pdf"):
         m = crossref_meta(d)
         if m:
             add(m, "doi")
-    if not any(c["verdict"] == "match" for c in cands):         # no printed DOI led to this paper: search by the title
+    if not any(_strong(c) for c in cands):                      # no printed DOI led to a record the PDF backs up: search by the title
         for m in crossref_search(guess):
             add(m, "title")
     cands.sort(key=lambda c: (c["verdict"] == "match", c["verdict"] != "mismatch", c["doi_printed"], c["title_score"]), reverse=True)
@@ -287,34 +350,62 @@ def analyse_pdf(data, filename="paper.pdf"):
     top = cands[pick] if pick >= 0 else {"doi": "", "title": guess}
     ex = _existing({"doi": top.get("doi"), "title": top.get("title")})
     return {"token": _stage(data), "name": filename, "pdf": {"title": guess, "dois": info["dois"], "pages": info["pages"], "scan": info["scan"]}, "candidates": cands, "pick": pick,
-            "confidence": "none" if not cands else "high" if pick == 0 and cands[0]["verdict"] == "match" else "check", "existing": ex or ""}
+            "confidence": "none" if not cands else "high" if pick == 0 and _strong(cands[0]) else "check", "existing": ex or ""}
 
 
 def _clean_text(v, limit):
     return re.sub(r"\s+", " ", str(v or "")).strip()[:limit]
 
 
+def date_ok(s):
+    """A real calendar date written as YYYY, YYYY-MM or YYYY-MM-DD (not 2024-13, not 2024-02-31, nothing after it)."""
+    s = str(s or "")
+    if not re.fullmatch(r"\d{4}(-\d{2}(-\d{2})?)?", s):
+        return False
+    try:
+        datetime.strptime(s, {4: "%Y", 7: "%Y-%m", 10: "%Y-%m-%d"}[len(s)])
+    except ValueError:
+        return False
+    return int(s[:4]) >= 1000
+
+
 def confirm(token, fields):
-    """File a staged PDF with the details you confirmed or corrected. fields: title (required), authors (a list or "A; B"), journal, pub_date (YYYY, YYYY-MM or YYYY-MM-DD), doi,
-    source ("crossref" = a record taken as it is, "edited" = a record you changed, "hand" = typed by you). Raises ValueError with a message for the user."""
-    path = _staged_path(token)
-    if not path or not os.path.exists(path):
+    """File a staged PDF with the details you confirmed or corrected. fields: title (required), authors (a list or "A; B"), journal, pub_date (YYYY, YYYY-MM or YYYY-MM-DD, or empty),
+    doi, source ("crossref" = a record taken as it is, "edited" = a record you changed, "hand" = typed by you). Raises ValueError with a message for the user; a PDF refused for its
+    details stays staged so you can correct them. The token is claimed before filing, so two requests for it cannot both file the PDF."""
+    path = _waiting(token)
+    if not path:
         raise ValueError("That PDF is no longer waiting to be added: drop it again.")
     f = fields if isinstance(fields, dict) else {}
     title = _clean_text(f.get("title"), 500)
     if not title:
         raise ValueError("The title is empty: give the paper a title.")
+    date = re.sub(r"\s+", " ", str(f.get("pub_date") or "")).strip()
+    if date and not date_ok(date):
+        raise ValueError("The date must be a year (2024), a month (2024-05) or a day (2024-05-17), or empty.")
     authors = f.get("authors")
     authors = re.split(r"\s*;\s*", str(authors or "")) if not isinstance(authors, list) else authors
     authors = [a for a in (_clean_text(x, 120) for x in authors[:100]) if a]
     doi = clean_doi(f.get("doi")) if str(f.get("doi") or "").strip() else ""
-    date = _clean_text(f.get("pub_date"), 10)
-    if not re.fullmatch(r"\d{4}(-\d{2}(-\d{2})?)?", date):
-        date = ""
     meta = {"title": title, "authors": authors, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "container": _clean_text(f.get("journal"), 120), "issn": [], "pub_date": date}
     note = {"crossref": "added by you (metadata from Crossref, confirmed by you)", "edited": "added by you (metadata from Crossref, edited by you)"}.get(f.get("source"), "added by you (details typed by you)")
-    with open(path, "rb") as fh:
-        data = fh.read()
-    res = _file(_paper(meta), data, note)
-    discard([token])
+    claimed = path + ".claimed"
+    try:
+        os.replace(path, claimed)                        # atomic: of two requests for this token only one gets here
+    except OSError:
+        raise ValueError("That PDF is no longer waiting to be added: drop it again.")
+    try:
+        with open(claimed, "rb") as fh:
+            data = fh.read()
+        res = _file(_paper(meta), data, note)
+    except Exception:
+        try:
+            os.replace(claimed, path)                    # filing failed: the PDF waits again
+        except OSError:
+            pass
+        raise
+    try:
+        os.remove(claimed)
+    except OSError:
+        pass
     return res

@@ -400,6 +400,8 @@ pl._screen_batch = fake_screen
 import importer as imp
 def fake_imp_search(title, rows=4):                                               # Crossref's answer to a title search (and what was asked): two records for the "Alpha" PDF, none for anything else
     open(IMPLOG, 'a').write(title + '\n')
+    if 'delta' in title.lower():
+        return [{'title': 'Delta study of marketplace reputation systems and seller behaviour', 'authors': ['Dee Quill', 'Ed Fenwick'], 'container': 'Marketplace Letters', 'issn': [], 'doi': '10.9999/delta.2019.3', 'pub_date': '2019-09-01', 'url': 'https://doi.org/10.9999/delta.2019.3'}]
     if 'alpha' not in title.lower():
         return []
     return [{'title': 'Alpha study of onboarding complementors in digital platform ecosystems and their governance', 'authors': ['Ada Alpha', 'Bo Beta'], 'container': 'Journal of Test Platforms', 'issn': [], 'doi': '10.9999/alpha.2021.1', 'pub_date': '2021-05-01', 'url': 'https://doi.org/10.9999/alpha.2021.1'},
@@ -1473,9 +1475,12 @@ imp.crossref_search = fake_imp_search
             check("…and the page you were on is lit again", page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "folders")
 
             print("drag and drop PDFs you already have")
-            def mkpdf(text):
-                d = _pm.open(); pg = d.new_page(); pg.insert_textbox(_pm.Rect(60, 60, 535, 200), text, fontsize=12); d.embfile_add("padding", os.urandom(45000)); b = base64.b64encode(d.tobytes()).decode(); d.close(); return b
-            pa, pb, TXT = mkpdf("Alpha study of onboarding complementors in digital platform ecosystems and their governance."), mkpdf("Bravo analysis of algorithmic management among gig workers and their coping strategies."), base64.b64encode(b"just notes").decode()
+            def mkpdf(text, authors=None):
+                d = _pm.open(); pg = d.new_page(); pg.insert_textbox(_pm.Rect(60, 60, 535, 200), text, fontsize=16 if authors else 12)
+                if authors:
+                    pg.insert_textbox(_pm.Rect(60, 210, 535, 240), authors, fontsize=10)
+                d.embfile_add("padding", os.urandom(45000)); b = base64.b64encode(d.tobytes()).decode(); d.close(); return b
+            pa, pd, pb, TXT = mkpdf("Alpha study of onboarding complementors in digital platform ecosystems and their governance.", "Ada Alpha and Bo Beta"), mkpdf("Delta study of marketplace reputation systems and seller behaviour.", "Zed Unrelated and Yan Other"), mkpdf("Bravo analysis of algorithmic management among gig workers and their coping strategies."), base64.b64encode(b"just notes").decode()
             PDF = lambda b, n: [b, n, "application/pdf"]
             n_lib = lambda: len(api("/api/library")); folder = lambda i: next(f for f in api("/api/folders") if f["id"] == i)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); n0 = n_lib()
@@ -1493,7 +1498,7 @@ imp.crossref_search = fake_imp_search
             check("…it shows the records found (best first, the unrelated one marked), a 'None of these' choice and boxes filled from the first record",
                   page.locator("#ir-c0 .ir-cand").count() == 3 and page.eval_on_selector('input[name="ir-c0"]:checked', "e => e.value") == "0" and page.locator("#ir-c0 .ir-cand.mis").count() == 1 and "None of these" in page.inner_text("#ir-c0")
                   and page.input_value('[data-k="authors"]') == "Ada Alpha; Bo Beta" and page.input_value('[data-k="journal"]') == "Journal of Test Platforms" and page.input_value('[data-k="pub_date"]') == "2021-05-01" and page.input_value('[data-k="doi"]') == "10.9999/alpha.2021.1")
-            check("…and says whether the record matches what the PDF itself shows", "title and authors are on this PDF" in page.inner_text("#ir-c0 .ir-st") and "Title and authors are on the PDF’s first pages" in page.inner_text("#ir-c0") and "Does not look like this PDF" in page.inner_text("#ir-c0"))
+            check("…and says what backs the record up: its title AND authors are on this PDF, the unrelated record does not look like it", "backs up" in page.inner_text("#ir-c0 .ir-st") and "Title and authors are on the PDF’s first pages" in page.inner_text("#ir-c0") and "Does not look like this PDF" in page.inner_text("#ir-c0"))
             check("…the destination is a choice here (Library only, each folder, a new folder)", page.locator("#ir-to option").count() == 4 and page.locator("#ir-go:not([disabled])").count() == 1)
             page.select_option("#ir-to", "new"); page.fill("#ir-name", "Dropped batch"); page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 1 paper to')", timeout=15000); page.wait_for_selector(".fp-tile[data-id='dropped-batch']")
             filed = next((r for r in api("/api/library") if r.get("doi") == "10.9999/alpha.2021.1"), {})
@@ -1503,7 +1508,14 @@ imp.crossref_search = fake_imp_search
             page.click('.di-snack [data-di="undo"]'); page.wait_for_function("!document.querySelector(\".fp-tile[data-id='dropped-batch']\")")
             check("Undo takes the new folder away again; the paper stays in the library", not any(f["id"] == "dropped-batch" for f in api("/api/folders")) and n_lib() == n0 + 1)
             page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha-copy.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
-            check("a PDF you already have is flagged in its card before anything happens", "already have this paper" in page.inner_text("#ir-c0"))
+            check("a PDF you already have is flagged in its card before anything happens", page.locator("#ir-x0:not(.hide)").count() == 1 and "already have this paper" in page.inner_text("#ir-x0"))
+            page.check('input[name="ir-c0"][value="1"]'); page.wait_for_selector("#ir-x0.hide", state="attached", timeout=5000)
+            check("…the warning goes when you pick another record (a different paper), and returns when you pick the first again", page.locator("#ir-x0:not(.hide)").count() == 0)
+            page.check('input[name="ir-c0"][value="0"]'); page.wait_for_selector("#ir-x0:not(.hide)", timeout=5000)
+            check("…and it follows what you type: another title and DOI clears it, the paper's own DOI brings it back", page.locator("#ir-x0:not(.hide)").count() == 1)
+            page.fill('[data-k="doi"]', ""); page.fill('[data-k="title"]', "Something nobody has filed yet"); page.wait_for_selector("#ir-x0.hide", state="attached", timeout=5000)
+            page.fill('[data-k="doi"]', "10.9999/alpha.2021.1"); page.wait_for_selector("#ir-x0:not(.hide)", timeout=5000)
+            page.check('input[name="ir-c0"][value="1"]'); page.check('input[name="ir-c0"][value="0"]')
             page.select_option("#ir-to", "f:lab"); page.click("#ir-go")
             page.wait_for_selector(".di-snack:has-text('already in your library')", timeout=15000)
             check("…and it is not imported twice, only added to the folder", n_lib() == n0 + 1 and folder("lab")["count"] == 4 and "Added 1 paper to “Lab”" in page.inner_text(".di-snack") and staged() == 0)
@@ -1524,8 +1536,10 @@ imp.crossref_search = fake_imp_search
             check("inside an open folder the overlay says the PDFs go to that folder", ov == "Add to this folder", repr(ov))
             page.evaluate(JS_DROP, ["#fv-body", [PDF(pb, "bravo.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f")
             check("inside an open folder the dialog still opens for the details, but the destination is fixed to that folder (no list to pick from)", page.locator("#ir-to").count() == 0 and "“Gov”" in page.inner_text("#ir-dlg .ir-dest") and n_lib() == n0 + 1)
-            page.fill('[data-k="title"]', "Bravo checked by hand"); page.fill('[data-k="authors"]', "Dee Bravo; Eli Charlie"); page.fill('[data-k="pub_date"]', "March 2022"); page.click("#ir-go")
-            check("a date that is not a year, month or day is refused next to the paper and nothing is filed", "must be a year" in page.inner_text("#ir-e0") and page.locator("#ir-dlg[open]").count() == 1 and n_lib() == n0 + 1)
+            page.fill('[data-k="title"]', "Bravo checked by hand"); page.fill('[data-k="authors"]', "Dee Bravo; Eli Charlie"); bad_dates = []
+            for bd in ("March 2022", "2022-13", "2022-02-31", "2022-03-01x"):
+                page.fill('[data-k="pub_date"]', bd); page.click("#ir-go"); bad_dates.append("must be a year" in page.inner_text("#ir-e0") and page.locator("#ir-dlg[open]").count() == 1 and n_lib() == n0 + 1)
+            check("a date that is not a real year, month or day (March 2022, 2022-13, 2022-02-31, 2022-03-01x) is refused next to the paper and nothing is filed", all(bad_dates) and len(bad_dates) == 4, str(bad_dates))
             page.fill('[data-k="pub_date"]', "2022-03"); page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 1 paper to')", timeout=15000)
             page.wait_for_function("document.querySelectorAll('#fv-body .librow').length === %d" % (gov_rows + 1))
             hand = next((r for r in api("/api/library") if r.get("title") == "Bravo checked by hand"), {})
@@ -1542,6 +1556,9 @@ imp.crossref_search = fake_imp_search
             check("anywhere else in the Library the dialog opens with Library only preselected", page.input_value("#ir-to") == "lib")
             page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Nothing new to add')", timeout=15000)
             check("…and a PDF already in the library says so", "already in your library" in page.inner_text(".di-snack") and n_lib() == n0 + 2)
+            page.evaluate(JS_DROP, ["#lib-papers", [PDF(pd, "delta.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
+            check("a record whose title is on the PDF but whose authors are not is shown as 'please check', not as confirmed", "authors could not be confirmed" in page.inner_text("#ir-c0 .ir-st") and "authors not confirmed" in page.inner_text("#ir-c0 .ir-cand") and "backs up" not in page.inner_text("#ir-c0 .ir-st"), page.inner_text("#ir-c0")[:300])
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
             page.click("#lf-add"); page.wait_for_selector("#adddlg[open]")
             page.set_input_files("#ad-file", files=[{"name": "alpha.pdf", "mimeType": "application/pdf", "buffer": base64.b64decode(pa)}]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
             check("Add a paper → choosing a PDF opens the same review dialog (Library only), not a silent import", page.locator("#adddlg[open]").count() == 0 and page.input_value("#ir-to") == "lib" and n_lib() == n0 + 2)
