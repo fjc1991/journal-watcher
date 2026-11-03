@@ -445,6 +445,87 @@ def main():
         assert importer.clean_doi("https://doi.org/10.1287/isre.2024.0984.") == "10.1287/isre.2024.0984" and importer.clean_doi("see doi:10.1234/x") == "10.1234/x" and importer.clean_doi("nothing") == ""
     check("import a PDF: DOI sniffed, filed like the pipeline does, indexed, no duplicates", t_import)
 
+    def t_import_review():
+        """A dropped PDF is analysed before anything is filed: the records for the DOIs it prints and for its title, each checked against the PDF (a DOI of a CITED paper, or a
+        record of another paper, does not win); the PDF waits under a token; confirming files it with the details you gave; cancelling forgets it."""
+        import csv, pymupdf
+        right = {"title": "Governing Open Platforms Through Transparent Rules", "authors": ["Jane Doe", "Richard Roe"], "container": "Journal of Open Platforms", "issn": [], "doi": "10.5555/right",
+                 "pub_date": "2024-05", "url": "https://doi.org/10.5555/right", "volume": "", "issue": "", "pages": "", "publisher": "P", "type": "journal-article", "abstract": None, "keywords": []}
+        cited = dict(right, title="A Totally Different Study of Hotel Reviews", authors=["Zed Quinn"], doi="10.5555/cited", url="https://doi.org/10.5555/cited")
+        searched = []
+        saved = (importer.crossref_meta, importer.crossref_search)
+        importer.crossref_meta = lambda d: {"10.5555/right": right, "10.5555/cited": cited}.get(d.lower())
+        importer.crossref_search = lambda t, rows=4: searched.append(t) or ([cited, right] if "governing" in t.lower() else [])
+        def pdf(title, extra="", authors="Jane Doe and Richard Roe"):
+            d = pymupdf.open(); pg = d.new_page()
+            if title:
+                pg.insert_textbox(pymupdf.Rect(50, 50, 545, 120), title, fontsize=20); pg.insert_textbox(pymupdf.Rect(50, 125, 545, 150), authors, fontsize=11)
+            pg.insert_textbox(pymupdf.Rect(50, 160, 545, 780), (extra + " ") + "We study how platform owners govern complementors with transparent rules. " * 25, fontsize=10)
+            for _ in range(60):                                          # (a PDF under 40 kB is not taken for a complete one)
+                d.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 780), "\n".join(os.urandom(20).hex() for _ in range(60)), fontsize=8)
+            data = d.tobytes(); d.close(); return data
+        staged = lambda t: os.path.join(importer.STAGING, t + ".pdf")
+        try:
+            # a PDF that prints its own DOI and title: one record, found by the DOI, high confidence, nothing filed yet
+            n_idx = len(list(csv.DictReader(open(os.path.join(PAPERS, "_index.csv")))))
+            a = importer.analyse_pdf(pdf(right["title"], "doi: 10.5555/right"), "paper (1).pdf")
+            c0 = a["candidates"][0]
+            assert a["confidence"] == "high" and a["pick"] == 0 and c0["source"] == "doi" and c0["doi_printed"] and c0["verdict"] == "match" and c0["doi"] == "10.5555/right" and not a["existing"], a
+            assert a["pdf"]["dois"] == ["10.5555/right"] and a["pdf"]["title"].startswith("Governing Open Platforms") and os.path.exists(staged(a["token"])) and not searched
+            assert len(list(csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))))) == n_idx, "analysing files nothing"
+            # the right title and no DOI: found by the title; the other paper Crossref also returns first is ranked below it
+            b = importer.analyse_pdf(pdf(right["title"]), "x.pdf")
+            assert searched and b["candidates"][0]["doi"] == "10.5555/right" and b["candidates"][0]["source"] == "title" and b["confidence"] == "high" and len(b["candidates"]) == 2, b["candidates"]
+            assert b["candidates"][1]["doi"] == "10.5555/cited" and b["candidates"][1]["verdict"] != "match"
+            # a PDF that prints the DOI of a paper it only cites: that record does not win, the title search finds the real one
+            c = importer.analyse_pdf(pdf(right["title"], "as shown by Quinn, doi 10.5555/cited"), "y.pdf")
+            assert c["pdf"]["dois"] == ["10.5555/cited"] and c["candidates"][0]["doi"] == "10.5555/right" and c["confidence"] == "high", c["candidates"]
+            # nothing readable and nothing found: no candidate, nothing preselected, the file name is the title to start from
+            blank = pymupdf.open(); [blank.new_page().draw_rect(pymupdf.Rect(50, 50, 200, 200)) for _ in range(3)]; blank.embfile_add("scan", os.urandom(60000)); blank_data = blank.tobytes(); blank.close()      # pages with no text at all
+            e = importer.analyse_pdf(blank_data, "my scan (3).pdf")
+            assert e["confidence"] == "none" and e["pick"] == -1 and e["candidates"] == [] and e["pdf"]["title"] == "my scan", e
+            # a DOI Crossref does not know and a title it has nothing for: still staged, to be typed by hand
+            # confirming files it with the details you gave (here corrected), the way the pipeline files its papers, and forgets the staged copy
+            r = importer.confirm(a["token"], {"title": "Governing Open Platforms through Transparent Rules (corrected)", "authors": "Jane Doe; Richard Roe", "journal": "Journal of Open Platforms",
+                                               "pub_date": "2024-05", "doi": "https://doi.org/10.5555/right", "source": "edited"})
+            row = list(csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))))[-1]
+            assert r["file"].startswith("Papers/2024-05/Journal of Open Platforms/2024-05_") and os.path.exists(os.path.join(TMP, r["file"])) and not r["existing"], r
+            assert row["doi"] == "10.5555/right" and row["authors"] == "Jane Doe; Richard Roe" and "edited by you" in row["note"] and row["title"].endswith("(corrected)") and not os.path.exists(staged(a["token"]))
+            try:
+                importer.confirm(a["token"], {"title": "again"}); raise AssertionError("a token works once")
+            except ValueError as ex:
+                assert "no longer waiting" in str(ex)
+            # the same paper dropped again is recognised
+            again = importer.analyse_pdf(pdf(right["title"], "doi: 10.5555/right"), "copy.pdf")
+            assert again["existing"] == r["file"], again["existing"]
+            # typed by hand (no record), with a date that is not a date: still filed, today's date; a title is required; a token must be a token
+            h = importer.confirm(e["token"], {"title": "My own working paper", "authors": ["Me"], "journal": "", "pub_date": "sometime", "doi": "", "source": "hand"})
+            row = list(csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))))[-1]
+            assert h["file"].startswith("Papers/") and "typed by you" in row["note"] and row["doi"] == "" and row["authors"] == "Me", (h, row)
+            for bad in ({"title": "  "}, {}, None):
+                try:
+                    importer.confirm(b["token"], bad); raise AssertionError("accepted %r" % (bad,))
+                except ValueError as ex:
+                    assert "title" in str(ex)
+            for bad_t in ("../../etc/passwd", "", None, "A" * 32, b["token"][:-1], 12):
+                try:
+                    importer.confirm(bad_t, {"title": "x"}); raise AssertionError("accepted token %r" % (bad_t,))
+                except ValueError:
+                    pass
+            assert os.path.exists(staged(b["token"])), "a refused confirm keeps the staged PDF"
+            # cancelling forgets staged PDFs (and only those); old ones are forgotten by the next analysis
+            assert importer.discard([b["token"], c["token"], "../x", None, "z" * 32]) == 2 and not os.path.exists(staged(b["token"])) and not os.path.exists(staged(c["token"]))
+            old = staged("0" * 32); open(old, "wb").write(b"%PDF-old"); os.utime(old, (1, 1))
+            importer.analyse_pdf(pdf(right["title"]), "z.pdf"); assert not os.path.exists(old)
+            try:
+                importer.analyse_pdf(b"not a pdf", "x.pdf"); raise AssertionError("expected ValueError")
+            except ValueError:
+                pass
+        finally:
+            importer.crossref_meta, importer.crossref_search = saved
+            shutil.rmtree(importer.STAGING, ignore_errors=True)
+    check("drop a PDF: it is analysed before anything is filed (records by its printed DOI and by its title, each checked against the PDF; a cited paper's DOI does not win), confirm files it with your details, a token works once, cancel forgets it", t_import_review)
+
     def t_exports():
         es = exports.entries(rows[:2]); assert [e["key"] for e in es] == ["tian2025open", "fernandez2025governance"], [e["key"] for e in es]
         assert exports.split_name("Alan van Turing") == ("van Turing", "Alan") and exports.split_name("Lovelace, Ada") == ("Lovelace", "Ada")

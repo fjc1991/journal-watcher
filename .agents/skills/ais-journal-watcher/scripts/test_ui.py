@@ -397,7 +397,15 @@ def fake_screen(system, batch, usage):                                          
     open(SCREENLOG, 'a').write('%d\n' % len(batch))
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen
-""".replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log')))
+import importer as imp
+def fake_imp_search(title, rows=4):                                               # Crossref's answer to a title search (and what was asked): two records for the "Alpha" PDF, none for anything else
+    open(IMPLOG, 'a').write(title + '\n')
+    if 'alpha' not in title.lower():
+        return []
+    return [{'title': 'Alpha study of onboarding complementors in digital platform ecosystems and their governance', 'authors': ['Ada Alpha', 'Bo Beta'], 'container': 'Journal of Test Platforms', 'issn': [], 'doi': '10.9999/alpha.2021.1', 'pub_date': '2021-05-01', 'url': 'https://doi.org/10.9999/alpha.2021.1'},
+            {'title': 'Beta ecosystems and the economics of fish', 'authors': ['C. Gamma'], 'container': 'Fish Quarterly', 'issn': [], 'doi': '10.9999/fish.2020.7', 'pub_date': '2020-01-01', 'url': 'https://doi.org/10.9999/fish.2020.7'}]
+imp.crossref_search = fake_imp_search
+""".replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = "http://127.0.0.1:%d" % port
@@ -1405,6 +1413,9 @@ pl._screen_batch = fake_screen
             page.evaluate("""([b64, id]) => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
               const dt = new DataTransfer(); dt.items.add(new File([u], "dropped-paper.pdf", {type: "application/pdf"})); const t = document.querySelector(`[data-drop="${id}"]`);
               t.dispatchEvent(new DragEvent("dragover", {dataTransfer: dt, bubbles: true, cancelable: true})); t.dispatchEvent(new DragEvent("drop", {dataTransfer: dt, bubbles: true, cancelable: true})); }""", [drop_b64, "gov"])
+            page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f")
+            check("dropping a PDF from the desktop onto a folder tile first shows what was found, with the destination fixed to that folder; nothing is filed yet", "“Gov”" in page.inner_text("#ir-dlg .ir-dest") and page.locator("#ir-to").count() == 0 and len(api("/api/library")) == 3 and page.input_value('[data-k="title"]').startswith("A dropped paper"), page.inner_text("#ir-dlg")[:200])
+            page.click("#ir-go")
             try:
                 page.wait_for_function("document.querySelector(\".fp-tile[data-id='gov'] .fp-num\")?.textContent === '2'", timeout=15000)
             except Exception:  # noqa: BLE001
@@ -1468,31 +1479,57 @@ pl._screen_batch = fake_screen
             PDF = lambda b, n: [b, n, "application/pdf"]
             n_lib = lambda: len(api("/api/library")); folder = lambda i: next(f for f in api("/api/folders") if f["id"] == i)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); n0 = n_lib()
+            STAGING = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "staging")
+            staged = lambda: len([n for n in os.listdir(STAGING) if n.endswith(".pdf")]) if os.path.isdir(STAGING) else 0
+            imp_log = lambda: open(os.path.join(TMP, "imp.log")).read() if os.path.exists(os.path.join(TMP, "imp.log")) else ""
             ov = page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha.pdf")], True])
-            check("dragging files over the Folders page shows an overlay saying you will choose where they go", bool(ov) and "choose" in ov, repr(ov))
-            page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha.pdf"), [TXT, "notes.txt", "text/plain"]], False]); page.wait_for_selector("#di-dlg[open]")
-            shot(page, "22-drop-chooser")
-            check("dropping on the Folders page asks where they go; nothing is imported yet; the text file is skipped",
-                  n_lib() == n0 and "notes.txt" in page.inner_text("#di-dlg") and "skipped" in page.inner_text("#di-dlg") and page.locator('input[name="di-to"]').count() == 4 and page.eval_on_selector('input[name="di-to"]:checked', "e => e.value") == "f:gov")
-            page.fill("#di-name", "Dropped batch"); page.click("#di-go"); page.wait_for_selector(".di-snack:has-text('Added 1 paper to')", timeout=15000); page.wait_for_selector(".fp-tile[data-id='dropped-batch']")
-            check("choosing New folder makes it and files the PDF in it", folder("dropped-batch")["count"] == 1 and n_lib() == n0 + 1 and "“Dropped batch”" in page.inner_text(".di-snack"))
+            check("dragging files over the Folders page shows an overlay saying you will check the details and choose where they go", bool(ov) and "choose" in ov and "check the details" in ov, repr(ov))
+            page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha.pdf"), [TXT, "notes.txt", "text/plain"]], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
+            shot(page, "22-drop-review")
+            lookups = imp_log()
+            check("dropping on the Folders page opens ONE dialog with a card per PDF; nothing is filed yet and the text file is skipped",
+                  n_lib() == n0 and page.locator("#ir-dlg .ir-card").count() == 1 and "notes.txt" in page.inner_text("#ir-dlg") and "not a PDF, skipped" in page.inner_text("#ir-dlg") and page.locator("#di-dlg").count() == 0 and "Alpha study of onboarding" in lookups)
+            check("…the PDF was looked up by the title it carries, and the staged copy waits outside the library", sum(1 for l in lookups.splitlines() if l.startswith("Alpha study")) == 1 and staged() == 1 and n_lib() == n0)
+            check("…it shows the records found (best first, the unrelated one marked), a 'None of these' choice and boxes filled from the first record",
+                  page.locator("#ir-c0 .ir-cand").count() == 3 and page.eval_on_selector('input[name="ir-c0"]:checked', "e => e.value") == "0" and page.locator("#ir-c0 .ir-cand.mis").count() == 1 and "None of these" in page.inner_text("#ir-c0")
+                  and page.input_value('[data-k="authors"]') == "Ada Alpha; Bo Beta" and page.input_value('[data-k="journal"]') == "Journal of Test Platforms" and page.input_value('[data-k="pub_date"]') == "2021-05-01" and page.input_value('[data-k="doi"]') == "10.9999/alpha.2021.1")
+            check("…and says whether the record matches what the PDF itself shows", "title and authors are on this PDF" in page.inner_text("#ir-c0 .ir-st") and "Title and authors are on the PDF’s first pages" in page.inner_text("#ir-c0") and "Does not look like this PDF" in page.inner_text("#ir-c0"))
+            check("…the destination is a choice here (Library only, each folder, a new folder)", page.locator("#ir-to option").count() == 4 and page.locator("#ir-go:not([disabled])").count() == 1)
+            page.select_option("#ir-to", "new"); page.fill("#ir-name", "Dropped batch"); page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 1 paper to')", timeout=15000); page.wait_for_selector(".fp-tile[data-id='dropped-batch']")
+            filed = next((r for r in api("/api/library") if r.get("doi") == "10.9999/alpha.2021.1"), {})
+            check("choosing New folder makes it and files the PDF in it, with the details from the record you confirmed", folder("dropped-batch")["count"] == 1 and n_lib() == n0 + 1 and "“Dropped batch”" in page.inner_text(".di-snack")
+                  and filed.get("title", "").startswith("Alpha study") and "Ada Alpha" in str(filed.get("authors")) and filed.get("journal") == "Journal of Test Platforms" and filed.get("file", "").startswith("Papers/2021-05/") and "confirmed by you" in filed.get("note", ""), str(filed)[:300])
+            check("…and the staged copy is gone", staged() == 0)
             page.click('.di-snack [data-di="undo"]'); page.wait_for_function("!document.querySelector(\".fp-tile[data-id='dropped-batch']\")")
             check("Undo takes the new folder away again; the paper stays in the library", not any(f["id"] == "dropped-batch" for f in api("/api/folders")) and n_lib() == n0 + 1)
-            page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha-copy.pdf")], False]); page.wait_for_selector("#di-dlg[open]"); page.check('input[value="f:lab"]'); page.click("#di-go")
+            page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha-copy.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
+            check("a PDF you already have is flagged in its card before anything happens", "already have this paper" in page.inner_text("#ir-c0"))
+            page.select_option("#ir-to", "f:lab"); page.click("#ir-go")
             page.wait_for_selector(".di-snack:has-text('already in your library')", timeout=15000)
-            check("a PDF you already have is not imported twice, only added to the folder", n_lib() == n0 + 1 and folder("lab")["count"] == 4 and "Added 1 paper to “Lab”" in page.inner_text(".di-snack"))
-            page.evaluate(JS_DROP, [".fp-path", [PDF(pb, "bravo.pdf")], False]); page.wait_for_selector("#di-dlg[open]"); page.fill("#di-name", "gov"); page.click("#di-go")
-            check("a folder name that already exists is refused with a hint, and the dialog stays open", page.locator("#di-dlg[open]").count() == 1 and "already exists" in page.inner_text("#di-err") and n_lib() == n0 + 1)
-            page.keyboard.press("Escape"); page.wait_for_selector("#di-dlg", state="detached")
-            check("Escape cancels without importing anything", n_lib() == n0 + 1)
+            check("…and it is not imported twice, only added to the folder", n_lib() == n0 + 1 and folder("lab")["count"] == 4 and "Added 1 paper to “Lab”" in page.inner_text(".di-snack") and staged() == 0)
+            page.evaluate(JS_DROP, [".fp-path", [PDF(pb, "bravo.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f"); page.select_option("#ir-to", "new"); page.fill("#ir-name", "gov"); page.click("#ir-go")
+            check("a folder name that already exists is refused with a hint, and the dialog stays open", page.locator("#ir-dlg[open]").count() == 1 and "already exists" in page.inner_text("#ir-err") and n_lib() == n0 + 1)
+            check("a PDF nothing is known about says so, offers no records, and fills the title from the PDF for you to correct", page.locator("#ir-c0 .ir-cand").count() == 0 and "No record was found online" in page.inner_text("#ir-c0 .ir-st") and page.input_value('[data-k="title"]').startswith("Bravo analysis"))
+            page.keyboard.press("Escape"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.wait_for_timeout(300)
+            check("Escape cancels without importing anything, and the staged copy is thrown away", n_lib() == n0 + 1 and staged() == 0)
             page.evaluate(JS_DROP, [".fp-path", [[TXT, "notes.txt", "text/plain"]], False]); page.wait_for_selector("#toast:has-text('aren’t PDFs')", timeout=5000)
-            check("files that are not PDFs are turned away with a message, no dialog", page.locator("#di-dlg").count() == 0 and n_lib() == n0 + 1)
+            check("files that are not PDFs are turned away with a message, no dialog", page.locator("#ir-dlg").count() == 0 and n_lib() == n0 + 1)
+            page.evaluate(JS_DROP, [".fp-path", [PDF(pb, "bravo.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f"); page.uncheck("[data-inc='0']")
+            check("a PDF you untick is not added (the Add button is off) …", page.locator("#ir-go[disabled]").count() == 1 and n_lib() == n0 + 1)
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached"); page.wait_for_timeout(300)
+            check("… and cancelling leaves nothing behind", n_lib() == n0 + 1 and staged() == 0)
             page.click(".fp-tile[data-id='gov']"); page.wait_for_selector("#fv-body .librow"); gov_rows = page.locator("#fv-body .librow").count()
             ov = page.evaluate(JS_DROP, ["#fv-body", [PDF(pb, "bravo.pdf")], True])
             check("inside an open folder the overlay says the PDFs go to that folder", ov == "Add to this folder", repr(ov))
-            page.evaluate(JS_DROP, ["#fv-body", [PDF(pb, "bravo.pdf")], False]); page.wait_for_selector(".di-snack:has-text('Added 1 paper to')", timeout=15000)
+            page.evaluate(JS_DROP, ["#fv-body", [PDF(pb, "bravo.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f")
+            check("inside an open folder the dialog still opens for the details, but the destination is fixed to that folder (no list to pick from)", page.locator("#ir-to").count() == 0 and "“Gov”" in page.inner_text("#ir-dlg .ir-dest") and n_lib() == n0 + 1)
+            page.fill('[data-k="title"]', "Bravo checked by hand"); page.fill('[data-k="authors"]', "Dee Bravo; Eli Charlie"); page.fill('[data-k="pub_date"]', "March 2022"); page.click("#ir-go")
+            check("a date that is not a year, month or day is refused next to the paper and nothing is filed", "must be a year" in page.inner_text("#ir-e0") and page.locator("#ir-dlg[open]").count() == 1 and n_lib() == n0 + 1)
+            page.fill('[data-k="pub_date"]', "2022-03"); page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 1 paper to')", timeout=15000)
             page.wait_for_function("document.querySelectorAll('#fv-body .librow').length === %d" % (gov_rows + 1))
-            check("dropping inside an open folder adds the PDF to it without asking, and the list shows it", page.locator("#di-dlg").count() == 0 and n_lib() == n0 + 2 and folder("gov")["count"] == gov_rows + 1)
+            hand = next((r for r in api("/api/library") if r.get("title") == "Bravo checked by hand"), {})
+            check("what you typed is what is filed: title, authors, date (under Papers/2022-03) and a note saying you typed it", n_lib() == n0 + 2 and folder("gov")["count"] == gov_rows + 1 and "Dee Bravo" in str(hand.get("authors")) and hand.get("file", "").startswith("Papers/2022-03/") and "typed by you" in hand.get("note", ""), str(hand)[:300])
             page.click('.di-snack [data-di="undo"]'); page.wait_for_function("document.querySelectorAll('#fv-body .librow').length === %d" % gov_rows)
             check("Undo takes it back out of the folder", folder("gov")["count"] == gov_rows and n_lib() == n0 + 2)
             page.click("#fv-add"); page.click('#fv-addmenu [data-add="lib"]'); page.wait_for_selector("#di-pick[open] .di-opt")
@@ -1501,10 +1538,14 @@ pl._screen_batch = fake_screen
             page.wait_for_function("document.querySelectorAll('#fv-body .librow').length === %d" % (gov_rows + 1))
             check("＋ Add papers → papers already in my library lists the ones not in the folder, filters them and adds the ticked one", n_pick == n_lib() - gov_rows and no_hit == 0 and folder("gov")["count"] == gov_rows + 1, "%d / %d / %d" % (n_pick, n_lib(), gov_rows))
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
-            page.evaluate(JS_DROP, ["#lib-papers", [PDF(pa, "alpha.pdf")], False]); page.wait_for_selector("#di-dlg[open]")
-            check("anywhere else in the Library the chooser opens with Library only preselected", page.eval_on_selector('input[name="di-to"]:checked', "e => e.value") == "lib")
-            page.click("#di-go"); page.wait_for_selector(".di-snack:has-text('Nothing new to add')", timeout=15000)
+            page.evaluate(JS_DROP, ["#lib-papers", [PDF(pa, "alpha.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
+            check("anywhere else in the Library the dialog opens with Library only preselected", page.input_value("#ir-to") == "lib")
+            page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Nothing new to add')", timeout=15000)
             check("…and a PDF already in the library says so", "already in your library" in page.inner_text(".di-snack") and n_lib() == n0 + 2)
+            page.click("#lf-add"); page.wait_for_selector("#adddlg[open]")
+            page.set_input_files("#ad-file", files=[{"name": "alpha.pdf", "mimeType": "application/pdf", "buffer": base64.b64decode(pa)}]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-cand")
+            check("Add a paper → choosing a PDF opens the same review dialog (Library only), not a silent import", page.locator("#adddlg[open]").count() == 0 and page.input_value("#ir-to") == "lib" and n_lib() == n0 + 2)
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")

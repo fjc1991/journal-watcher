@@ -945,10 +945,27 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.finish_import(res, self.headers.get("X-Summarize") == "1")
+        if path == "/api/import/analyse":   # a dropped PDF to look at first: nothing is filed until /api/import/confirm
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= 150 * 1024 * 1024:
+                return self.send_json({"error": "the file is empty or larger than 150 MB"}, 400)
+            data = self.rfile.read(n)
+            try:
+                return self.send_json({"ok": True, **importer.analyse_pdf(data, urllib.parse.unquote(self.headers.get("X-Filename") or "paper.pdf"))})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         try:
             b = self.body()
         except ValueError:
             return self.send_json({"error": "bad json"}, 400)
+        if path == "/api/import/confirm":   # {token, fields: {title, authors, journal, pub_date, doi, source}, summarize}
+            try:
+                res = importer.confirm(b.get("token"), b.get("fields"))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.finish_import(res, bool(b.get("summarize")))
+        if path == "/api/import/discard":   # {tokens: [...]}: Cancel, or papers you unticked
+            return self.send_json({"ok": True, "removed": importer.discard(b.get("tokens") if isinstance(b.get("tokens"), list) else [])})
         if path == "/api/import/doi":
             try:
                 res = importer.add_doi(b.get("doi"))
