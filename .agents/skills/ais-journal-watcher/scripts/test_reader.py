@@ -25,6 +25,7 @@ _HOME = tempfile.mkdtemp(prefix="jw-reader-home-")
 os.environ["JW_HOME"] = _HOME
 atexit.register(shutil.rmtree, _HOME, ignore_errors=True)
 sys.path.insert(0, HERE)
+os.environ["JW_NO_KEYCHAIN"] = "1"      # the tests never touch the Keychain of whoever runs them; the Keychain tests start their own processes with a fake store or a temporary keychain
 import paths  # noqa: E402
 paths.seed_home()
 import ai  # noqa: E402

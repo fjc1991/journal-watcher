@@ -369,7 +369,7 @@ def main():
     srv_up = ThreadingHTTPServer(("127.0.0.1", 0), FakeFeed)
     threading.Thread(target=srv_up.serve_forever, daemon=True).start()
     feed["url"] = "http://127.0.0.1:%d/j.zip" % srv_up.server_address[1]
-    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_LOCAL": os.path.join(TMP, "local-state"), "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
+    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_NO_KEYCHAIN": "1", "JW_LOCAL": os.path.join(TMP, "local-state"), "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
     marker = os.path.join(TMP, "download-called.txt")
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
