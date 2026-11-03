@@ -964,6 +964,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.finish_import(res, bool(b.get("summarize")))
+        if path == "/api/import/check":     # {doi, title}: is this paper already in the library? (the review dialog asks again when you pick another record or edit the boxes)
+            return self.send_json({"ok": True, "existing": importer.check_existing(b.get("doi"), str(b.get("title") or ""))})
         if path == "/api/import/discard":   # {tokens: [...]}: Cancel, or papers you unticked
             return self.send_json({"ok": True, "removed": importer.discard(b.get("tokens") if isinstance(b.get("tokens"), list) else [])})
         if path == "/api/import/doi":
@@ -1713,6 +1715,7 @@ def start(port=8765, quiet=False):
     for canon, olds in pl.migrate_weekly():
         print("Merged %d weekly runs into %s" % (len(olds), canon))
     srv = Server(("127.0.0.1", port), Handler)
+    importer.sweep()           # dropped PDFs nobody confirmed or cancelled within a day are forgotten (a confirmation of an older one is refused anyway)
     updater.start_background()
     threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)
     if indexer:

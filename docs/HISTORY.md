@@ -695,6 +695,16 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Tests.** `test_reader.py` `t_import_review` (analysis, staging, confirmation, discard, bad tokens, date validation, the identity rule above). `test_ui.py`: the whole drop section rewritten for the dialog, with a fake Crossref title search in the test server (no real network): drop on the Folders page / a tile / an open folder / the Library / the Add-a-paper dialog, records and verdicts shown, boxes filled, nothing filed before Add, filed details (Papers/2021-05/…, journal, authors, note), invalid date refused, already-have flagged, name clash refused, cancel and untick leave no staged copy. Each rule was mutation-checked: removing it makes a test fail (see the PR).
 
+**Review follow-up (Copilot, eight findings, all real; each has a test that fails without its fix).**
+1. *A token could be used twice at once.* `confirm` now claims the staged PDF with an atomic rename before filing (the second request is refused), puts it back if filing fails, and `_file` runs under a lock so the duplicate check, the free file name and the index row are one step.
+2. *A title alone was shown as “title and authors”.* A record is “backed up” only when its title is on the PDF **and** its authors are (or the PDF prints the record's own DOI); a title alone is “please check: the title matches but the authors could not be confirmed”, and then the title search still runs.
+3. *Two papers with the same month, journal and first six title words overwrote each other's file* (no DOI to tell them apart). The second now gets `-2`, `-3`… and nothing is overwritten.
+4. *Staged PDFs only expired when another PDF was analysed.* A confirmation of one older than 24 h is refused, and the server forgets expired ones when it starts (`importer.sweep`).
+5. *Duplicates were missed when only one side had a DOI.* Two known DOIs decide; otherwise the normalised title does. Two different DOIs stay two papers.
+6. *The journal you confirmed was replaced by the DOI prefix* (`10.1287` is shared by four watched journals: “Management Science” was filed as “Information Systems Research”). Order is now: ISSN, then the journal name or abbreviation, then a prefix only if no journal name is known **and** it belongs to one watched journal.
+7. *Dates.* `2024-13`, `2024-02-31` and `2024-05-01garbage` were accepted or silently dropped. A real calendar date is required (browser and server); a refused date keeps the PDF staged.
+8. *The “already have this paper” warning was computed once.* It is asked again (`POST /api/import/check`) when you pick another record or edit the title or DOI.
+
 **Verified live.** One real `crossref_search` call (the title of a published paper) returned four well-formed records with authors, journal, date and DOI; the SSRN preprint and the journal version of the same paper both appear, as two separate choices (they have different DOIs).
 
 **Not verified.** Matching on real publisher PDFs end to end (the tests use small generated PDFs and a fake Crossref in the UI run), how the dialog looks with the Mac's fonts and a very long author list, and PDFs with no text layer beyond the “looks scanned” message.

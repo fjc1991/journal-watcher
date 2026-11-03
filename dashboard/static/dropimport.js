@@ -58,8 +58,14 @@ function mark(w) {      // highlight the tile / chip under the cursor
 // ---------------------------------------------------------------- the review: what each PDF says about itself and what the databases know, checked by you before anything is filed
 // One dialog right after the drop. Every PDF is sent to /api/import/analyse (it is read, looked up on Crossref and staged, nothing is filed), shown as a card with the records that
 // were found, and filed by /api/import/confirm with the details you left in the boxes. Cancelling, or unticking a card, throws the staged copy away.
-const DATE_RE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
-const VERDICT = {match: "Title and authors are on the PDF’s first pages", mismatch: "Does not look like this PDF", uncertain: "Could not be confirmed against the PDF"};
+const dateOk = s => {       // a real calendar date: YYYY, YYYY-MM or YYYY-MM-DD (not 2024-13, not 2024-02-31, nothing after it)
+  const m = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/.exec(s); if (!m) return false;
+  const y = +m[1], mo = m[2] ? +m[2] : 1, d = m[3] ? +m[3] : 1, t = new Date(Date.UTC(y, mo - 1, d));
+  return y >= 1000 && t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+};
+const why = k => k.verdict === "mismatch" ? "Does not look like this PDF"      // what backs the record up, in words that say no more than was found
+  : k.verdict === "match" ? (k.authors_found ? "Title and authors are on the PDF’s first pages" : k.doi_printed ? "This DOI is printed in the PDF" : "Title found on the PDF; authors not confirmed")
+  : "Could not be confirmed against the PDF";
 const fieldsOf = c => ({title: c.title || "", authors: (c.authors || []).join("; "), journal: c.journal || "", pub_date: c.pub_date || "", doi: c.doi || ""});
 
 async function analyse(file) {
@@ -75,14 +81,14 @@ function cardHtml(c) {
   if (c.state === "reading") return `${head}<div class="ir-st">Reading the PDF and looking it up…</div>`;
   if (c.state === "error") return `${head}<div class="ir-st bad">${esc(c.error)}</div>`;
   const a = c.a, cands = a.candidates;
-  const say = a.confidence === "high" ? ["ok", "✓ A record was found whose title and authors are on this PDF. Please check it."]
-    : a.confidence === "check" ? ["warn", "Please check: the record below could not be confirmed against the PDF."]
+  const say = a.confidence === "high" ? ["ok", "✓ A record was found that the PDF backs up (its title and authors, or its printed DOI). Please check it."]
+    : a.confidence === "check" ? ["warn", cands[0] && cands[0].verdict === "match" ? "Please check: the title matches, but the authors could not be confirmed." : "Please check: the record below could not be confirmed against the PDF."]
     : a.pdf.scan ? ["bad", "This PDF looks scanned (it has no text to read). Type the details yourself."] : ["bad", "No record was found online. Type the details; the PDF’s own title is filled in."];
   const opts = cands.map((k, n) => `<label class="ir-cand${k.verdict === "mismatch" ? " mis" : ""}"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="${n}"${c.sel === n ? " checked" : ""}>
       <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
-      <small class="ir-why">${esc(VERDICT[k.verdict] || "")}${k.doi_printed ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
+      <small class="ir-why">${esc(why(k))}${k.doi_printed && k.verdict === "match" && k.authors_found ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
   const f = c.fields, fld = (k, label, ph, wide) => `<label class="ir-f${wide ? " wide" : ""}"><span>${label}</span><input type="text" data-k="${k}" data-i="${c.i}" value="${esc(f[k])}" placeholder="${esc(ph || "")}" autocomplete="off" spellcheck="false"></label>`;
-  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${a.existing ? `<div class="ir-st warn">You already have this paper. It will not be added twice.</div>` : ""}
+  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div><div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this paper. It will not be added twice.</div>
     ${cands.length ? `<div class="ir-cands" role="radiogroup" aria-label="Records found for ${esc(c.file.name)}">${opts}<label class="ir-cand"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="-1"${c.sel === -1 ? " checked" : ""}><span><b>None of these</b><small>I will type the details myself</small></span></label></div>` : ""}
     <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors (separate with ;)", "Jane Doe; John Smith", true)}${fld("journal", "Journal", "")}${fld("pub_date", "Date", "YYYY or YYYY-MM-DD")}${fld("doi", "DOI", "10.…")}</div>
     <div class="ir-err" id="ir-e${c.i}" role="alert"></div>`;
@@ -94,7 +100,7 @@ async function review(files, w) {
   const fixed = w.kind === "folder" || w.kind === "open" ? w.id : null, fixedName = fixed ? (w.name || folderName(fs, fixed)) : "";
   const today = new Date().toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
   const last = fs.find(f => f.id === ls.get("jw-drop-last")), first = w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
-  const cards = pdfs.map((f, i) => ({i, file: f, state: "reading", include: true, sel: -1, a: null, fields: {title: "", authors: "", journal: "", pub_date: "", doi: ""}, error: ""}));
+  const cards = pdfs.map((f, i) => ({i, file: f, state: "reading", include: true, sel: -1, a: null, existing: "", fields: {title: "", authors: "", journal: "", pub_date: "", doi: ""}, error: ""}));
   return new Promise(resolve => {
     $("#ir-dlg") && $("#ir-dlg").remove();
     const d = document.createElement("dialog"); d.id = "ir-dlg"; d.className = "card ir-dlg"; d.setAttribute("aria-labelledby", "ir-h");
@@ -123,6 +129,18 @@ async function review(files, w) {
       c.fields = c.sel >= 0 ? fieldsOf(c.a.candidates[c.sel]) : {title: c.a.pdf.title, authors: "", journal: "", pub_date: "", doi: ""};
     };
     const sync = c => $$(`[data-k][data-i="${c.i}"]`, d).forEach(el => { el.value = c.fields[el.dataset.k]; });
+    const timers = {};         // "you already have this paper" follows the record you pick and what you type (the answer is for the title and DOI as they are now, not as they were)
+    const recheck = c => {
+      clearTimeout(timers[c.i]);
+      timers[c.i] = setTimeout(async () => {
+        const ask = {doi: c.fields.doi, title: c.fields.title};
+        try {
+          const r = await api("/api/import/check", ask);
+          if (closed || ask.doi !== c.fields.doi || ask.title !== c.fields.title) return;       // (they typed on: a newer answer is coming)
+          c.existing = r.existing || ""; const el = $("#ir-x" + c.i, d); if (el) el.classList.toggle("hide", !c.existing);
+        } catch (e) { /* filing refuses a second copy anyway */ }
+      }, 350);
+    };
     const source = c => {
       if (c.sel < 0) return "hand";
       const k = fieldsOf(c.a.candidates[c.sel]);
@@ -133,7 +151,7 @@ async function review(files, w) {
       for (const c of cards) {
         if (closed) break;
         try {
-          c.a = await analyse(c.file); c.state = "ok"; c.sel = c.a.pick;
+          c.a = await analyse(c.file); c.state = "ok"; c.sel = c.a.pick; c.existing = c.a.existing || "";
           if (closed) { discard([c.a.token]); break; }
           take(c);
         } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
@@ -143,18 +161,19 @@ async function review(files, w) {
     d.addEventListener("change", e => {
       const t = e.target, i = +(t.dataset.inc ?? t.dataset.sel ?? -1); if (i < 0) return; const c = cards[i];
       if (t.dataset.inc !== undefined) { c.include = t.checked; $("#ir-c" + i, d).classList.toggle("off", !c.include); }
-      else { c.sel = +t.value; take(c); sync(c); $("#ir-e" + i, d).textContent = ""; }
+      else { c.sel = +t.value; take(c); sync(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }
       status();
     });
     d.addEventListener("input", e => {
       const t = e.target; if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
       c.fields[t.dataset.k] = t.value; $("#ir-e" + c.i, d).textContent = ""; $("#ir-err", d).textContent = "";
+      if (t.dataset.k === "title" || t.dataset.k === "doi") recheck(c);
     });
     const finish = v => { if (closed) return; closed = true; resolve(v); d.close(); };
     const go = () => {
       const err = t => { $("#ir-err", d).textContent = t; }, use = ready();
       for (const c of use) {
-        const f = c.fields, bad = !norm(f.title) ? "Give this paper a title." : norm(f.pub_date) && !DATE_RE.test(norm(f.pub_date)) ? "The date must be a year (2024), a month (2024-05) or a day (2024-05-17), or empty." : "";
+        const f = c.fields, bad = !norm(f.title) ? "Give this paper a title." : norm(f.pub_date) && !dateOk(norm(f.pub_date)) ? "The date must be a year (2024), a month (2024-05) or a day (2024-05-17), or empty." : "";
         if (bad) { $("#ir-e" + c.i, d).textContent = bad; err("Fix the highlighted paper first."); const el = $(`[data-k="${!norm(f.title) ? "title" : "pub_date"}"][data-i="${c.i}"]`, d); el && el.focus(); return; }
       }
       let dest;

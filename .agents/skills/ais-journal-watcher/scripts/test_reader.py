@@ -498,8 +498,8 @@ def main():
             # the same paper dropped again is recognised
             again = importer.analyse_pdf(pdf(right["title"], "doi: 10.5555/right"), "copy.pdf")
             assert again["existing"] == r["file"], again["existing"]
-            # typed by hand (no record), with a date that is not a date: still filed, today's date; a title is required; a token must be a token
-            h = importer.confirm(e["token"], {"title": "My own working paper", "authors": ["Me"], "journal": "", "pub_date": "sometime", "doi": "", "source": "hand"})
+            # typed by hand (no record), no date: filed under today's month; a title is required; a token must be a token
+            h = importer.confirm(e["token"], {"title": "My own working paper", "authors": ["Me"], "journal": "", "pub_date": "", "doi": "", "source": "hand"})
             row = list(csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))))[-1]
             assert h["file"].startswith("Papers/") and "typed by you" in row["note"] and row["doi"] == "" and row["authors"] == "Me", (h, row)
             for bad in ({"title": "  "}, {}, None):
@@ -525,6 +525,132 @@ def main():
             importer.crossref_meta, importer.crossref_search = saved
             shutil.rmtree(importer.STAGING, ignore_errors=True)
     check("drop a PDF: it is analysed before anything is filed (records by its printed DOI and by its title, each checked against the PDF; a cited paper's DOI does not win), confirm files it with your details, a token works once, cancel forgets it", t_import_review)
+    def t_import_review_rules():
+        """The rules behind the review dialog that a reviewer found missing: a token is claimed atomically and expires, a name clash never overwrites, dates are real dates, a paper
+        is recognised with or without a DOI, the confirmed journal is kept, and 'confirmed' needs more than a title."""
+        import csv, threading, time, pymupdf
+        from datetime import datetime
+        right = {"title": "Governing Open Platforms Through Transparent Rules", "authors": ["Jane Doe", "Richard Roe"], "container": "Journal of Open Platforms", "issn": [], "doi": "10.5555/right",
+                 "pub_date": "2024-05", "url": "https://doi.org/10.5555/right", "volume": "", "issue": "", "pages": "", "publisher": "P", "type": "journal-article", "abstract": None, "keywords": []}
+        searched = []
+        saved = (importer.crossref_meta, importer.crossref_search)
+        importer.crossref_meta = lambda d: {"10.5555/right": right}.get(d.lower())
+        importer.crossref_search = lambda t, rows=4: searched.append(t) or ([right] if "governing" in t.lower() else [])
+
+        def pdf(title, extra="", authors="Jane Doe and Richard Roe", salt=""):
+            d = pymupdf.open(); pg = d.new_page()
+            if title:
+                pg.insert_textbox(pymupdf.Rect(50, 50, 545, 120), title, fontsize=20); pg.insert_textbox(pymupdf.Rect(50, 125, 545, 150), authors, fontsize=11)
+            pg.insert_textbox(pymupdf.Rect(50, 160, 545, 780), (extra + " " + salt + " ") + "We study how platform owners govern complementors with transparent rules. " * 25, fontsize=10)
+            for _ in range(60):
+                d.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 780), "\n".join(os.urandom(20).hex() for _ in range(60)), fontsize=8)
+            data = d.tobytes(); d.close(); return data
+        staged = lambda t: os.path.join(importer.STAGING, t + ".pdf")
+        orig_file = importer._file
+        rows = lambda: list(csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))))
+        try:
+            # --- a token is claimed atomically: two requests at once file the PDF once (the filing is slowed down so both would be inside it with the old code)
+            tok = importer.analyse_pdf(pdf("Concurrent Confirmation Of A Staged Paper"), "c.pdf")["token"]
+            calls, out = [], []
+
+            def slow(p, data, note):
+                calls.append(1); time.sleep(0.3); return orig_file(p, data, note)
+            importer._file = slow
+            go = threading.Barrier(2)
+
+            def worker():
+                go.wait()
+                try:
+                    out.append(("ok", importer.confirm(tok, {"title": "Concurrent Confirmation Of A Staged Paper", "source": "hand"})["file"]))
+                except ValueError as ex:
+                    out.append(("refused", str(ex)))
+            ts = [threading.Thread(target=worker) for _ in range(2)]
+            [t.start() for t in ts]; [t.join() for t in ts]
+            importer._file = orig_file
+            assert len(calls) == 1 and sorted(o[0] for o in out) == ["ok", "refused"], (calls, out)
+            assert "no longer waiting" in [o for o in out if o[0] == "refused"][0][1] and not os.path.exists(staged(tok)) and not os.path.exists(staged(tok) + ".claimed")
+            # a filing that fails puts the PDF back, so it can be tried again
+            tok2 = importer.analyse_pdf(pdf("A Paper Whose Filing Fails Once"), "f.pdf")["token"]
+
+            def boom(p, data, note):
+                raise OSError("disk full")
+            importer._file = boom
+            try:
+                importer.confirm(tok2, {"title": "A Paper Whose Filing Fails Once"}); raise AssertionError("expected OSError")
+            except OSError:
+                pass
+            importer._file = orig_file
+            assert os.path.exists(staged(tok2)) and not os.path.exists(staged(tok2) + ".claimed")
+            assert importer.confirm(tok2, {"title": "A Paper Whose Filing Fails Once", "source": "hand"})["existing"] is False
+
+            # --- two different papers that would get the same file name (same month, journal and first six title words, no DOI) are both kept
+            a1, a2 = pdf("Platform Alpha One", salt="first"), pdf("Platform Alpha Two", salt="second")
+            same = dict(journal="Journal of Collisions", pub_date="2023-04", source="hand")
+            r1 = importer.confirm(importer.analyse_pdf(a1, "1.pdf")["token"], dict(same, title="Platform governance rules for open ecosystems and more alpha"))
+            r2 = importer.confirm(importer.analyse_pdf(a2, "2.pdf")["token"], dict(same, title="Platform governance rules for open ecosystems and more beta"))
+            assert r1["file"] != r2["file"] and not r2["existing"], (r1, r2)
+            assert open(os.path.join(TMP, r1["file"]), "rb").read() == a1 and open(os.path.join(TMP, r2["file"]), "rb").read() == a2, "the first PDF was overwritten"
+
+            # --- a staged PDF older than a day is not accepted, and sweep() forgets it without waiting for another analysis
+            tok3 = importer.analyse_pdf(pdf("Left Waiting For Two Days"), "w.pdf")["token"]
+            os.utime(staged(tok3), (time.time() - 48 * 3600,) * 2)
+            try:
+                importer.confirm(tok3, {"title": "Left Waiting For Two Days"}); raise AssertionError("an expired token was accepted")
+            except ValueError as ex:
+                assert "no longer waiting" in str(ex)
+            assert importer.sweep() == 1 and not os.path.exists(staged(tok3)) and importer.sweep() == 0
+
+            # --- dates are real calendar dates; a bad one is refused (not silently dropped) and the PDF stays staged
+            for bad in ("2024-13", "2024-02-31", "2023-02-29", "2024-05-01garbage", "2024-5", "0000", "May 2024", "2024-00"):
+                assert not importer.date_ok(bad), bad
+            for good in ("2024", "2024-05", "2024-02-29", "1999-12-31"):
+                assert importer.date_ok(good), good
+            tok4 = importer.analyse_pdf(pdf("Dated Wrongly On Purpose"), "d.pdf")["token"]
+            for bad in ("2024-13", "2024-05-01garbage", "sometime"):
+                try:
+                    importer.confirm(tok4, {"title": "Dated Wrongly On Purpose", "pub_date": bad}); raise AssertionError("accepted date %r" % bad)
+                except ValueError as ex:
+                    assert "date must be" in str(ex)
+                assert os.path.exists(staged(tok4)), "a refused date keeps the staged PDF"
+            ok4 = importer.confirm(tok4, {"title": "Dated Wrongly On Purpose", "pub_date": "", "source": "hand"})
+            assert ok4["file"].startswith("Papers/%s/" % datetime.now().strftime("%Y-%m")), ok4          # (no date: today's month, as before)
+
+            # --- recognised with or without a DOI, but two different DOIs stay two papers
+            t_doi = "Recognising The Same Paper Twice"
+            importer.confirm(importer.analyse_pdf(pdf(t_doi, salt="d1"), "a.pdf")["token"], {"title": t_doi, "doi": "10.5555/dd1", "source": "hand"})
+            t_nodoi = "Recognising A Paper Filed Without A DOI"
+            importer.confirm(importer.analyse_pdf(pdf(t_nodoi, salt="d2"), "b.pdf")["token"], {"title": t_nodoi, "source": "hand"})
+            assert importer.check_existing("", t_doi), "a paper with a DOI is found by its title when the new record has none"
+            assert importer.check_existing("10.5555/dd1", "something else entirely") != "" and importer.check_existing("10.5555/DD1 ", t_doi) != ""
+            assert importer.check_existing("10.5555/new-doi", t_nodoi), "a paper filed without a DOI is found once Crossref supplies one"
+            assert importer.check_existing("10.5555/other", t_doi) == "", "a different DOI is a different paper"
+            assert importer.check_existing("", "No Such Paper In The Library At All") == ""
+
+            # --- the journal you confirmed is kept; a publisher's shared DOI prefix does not change it
+            jf = lambda doi, cont, issn=(): importer.journal_for({"doi": doi, "container": cont, "issn": list(issn)})
+            assert jf("10.1287/mnsc.2024.1", "Management Science")[0] == "Management Science"
+            assert jf("10.1287/isre.2024.1", "Information Systems Research")[0] == "Information Systems Research"
+            assert jf("10.1287/zzz.1", "Some Other Journal") == ("Some Other Journal", "SOJ")
+            assert jf("10.1287/zzz.1", "")[0] == "Other", "a shared prefix alone says nothing about which journal"
+            assert jf("10.25300/misq.2024.1", "")[0] == "MIS Quarterly", "a prefix that belongs to one watched journal is still used when no journal is known"
+            assert jf("10.9999/x", "Odd Name", ["0025-1909"])[0] == "Management Science", "the ISSN decides first"
+            rm = importer.confirm(importer.analyse_pdf(pdf("Journal Kept As Confirmed", salt="jj"), "j.pdf")["token"], {"title": "Journal Kept As Confirmed", "doi": "10.1287/mnsc.2024.77", "journal": "Management Science", "pub_date": "2024-02", "source": "hand"})
+            assert "/Management Science/" in rm["file"] and [r for r in rows() if r["title"] == "Journal Kept As Confirmed"][0]["journal"] == "Management Science", rm
+
+            # --- 'confirmed' needs more than a title: the title alone on the PDF is a record to check, the printed DOI or the authors make it a record the PDF backs up
+            searched.clear()
+            weak = importer.analyse_pdf(pdf(right["title"], authors="Quentin Zzz"), "weak.pdf")
+            assert weak["candidates"][0]["verdict"] == "match" and weak["candidates"][0]["authors_found"] is False and weak["confidence"] == "check", weak["candidates"][0]
+            strong = importer.analyse_pdf(pdf(right["title"], salt="s1"), "strong.pdf")
+            assert strong["candidates"][0]["authors_found"] is True and strong["confidence"] == "high"
+            printed = importer.analyse_pdf(pdf(right["title"], "doi: 10.5555/right", authors="Quentin Zzz", salt="s2"), "printed.pdf")
+            assert printed["candidates"][0]["doi_printed"] and printed["confidence"] == "high", printed["candidates"][0]
+            assert searched, "no record the PDF backs up: the title was searched"
+        finally:
+            importer.crossref_meta, importer.crossref_search = saved
+            importer._file = orig_file
+            shutil.rmtree(importer.STAGING, ignore_errors=True)
+    check("review rules: a token is claimed once (and restored if filing fails), a name clash never overwrites a PDF, expired staged PDFs are refused and swept, dates must be real, a paper is recognised with or without a DOI, the confirmed journal is kept, and a title alone is not 'confirmed'", t_import_review_rules)
 
     def t_exports():
         es = exports.entries(rows[:2]); assert [e["key"] for e in es] == ["tian2025open", "fernandez2025governance"], [e["key"] for e in es]
