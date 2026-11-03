@@ -3,7 +3,8 @@
 //   · anywhere inside an open folder                                           -> they go into that folder
 //   · on the Folders page, away from the tiles                                 -> a small chooser: new folder / an existing folder / library only
 //   · anywhere else in the Library                                             -> the same chooser, "library only" preselected
-// Each file is posted to /api/import/pdf (the server files it under Papers/YYYY-MM/<Journal>/ and says whether you already had it), then added
+// Right after the drop ONE dialog shows every PDF as a card: the records found online (Crossref) for what the PDF says about itself, with the details in boxes you can correct, and
+// where it will go (fixed when you dropped on a folder, a choice otherwise). Only after you press Add is each PDF filed under Papers/YYYY-MM/<Journal>/ (/api/import/confirm) and added
 // to the folder. A paper you already have is not imported twice, only added. The result appears as a snackbar with Open folder / Undo.
 import {notifyError, $, $$, esc, api, toast} from "./state.js";
 
@@ -45,7 +46,7 @@ function hint(w) {
   if (!w) return "Drop PDFs on the Library, Folders page or inside a folder to add them";
   if (w.kind === "folder") return w.name ? "Add to “" + w.name + "”" : "Add to this folder";
   if (w.kind === "open") return "Add to this folder";
-  return "Drop PDFs to add them — you’ll choose where they go";
+  return "Drop PDFs to add them — you’ll check the details and choose where they go";
 }
 function mark(w) {      // highlight the tile / chip under the cursor
   const el = w && w.kind === "folder" ? $(`[data-drop="${CSS.escape(w.id)}"], [data-dropfolder="${CSS.escape(w.id)}"]`) : null;
@@ -54,48 +55,126 @@ function mark(w) {      // highlight the tile / chip under the cursor
   if ((overFolder = el)) el.classList.add(el.hasAttribute("data-drop") ? "fp-over" : "over");
 }
 
-// ---------------------------------------------------------------- the chooser
-async function choose(files, w) {
-  const fs = (await folders()).slice().sort((a, b) => (b.id === ls.get("jw-drop-last")) - (a.id === ls.get("jw-drop-last")) || (b.updated || "").localeCompare(a.updated || ""));
+// ---------------------------------------------------------------- the review: what each PDF says about itself and what the databases know, checked by you before anything is filed
+// One dialog right after the drop. Every PDF is sent to /api/import/analyse (it is read, looked up on Crossref and staged, nothing is filed), shown as a card with the records that
+// were found, and filed by /api/import/confirm with the details you left in the boxes. Cancelling, or unticking a card, throws the staged copy away.
+const DATE_RE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
+const VERDICT = {match: "Title and authors are on the PDF’s first pages", mismatch: "Does not look like this PDF", uncertain: "Could not be confirmed against the PDF"};
+const fieldsOf = c => ({title: c.title || "", authors: (c.authors || []).join("; "), journal: c.journal || "", pub_date: c.pub_date || "", doi: c.doi || ""});
+
+async function analyse(file) {
+  const x = await fetch("/api/import/analyse", {method: "POST", headers: {"Content-Type": "application/pdf", "X-Filename": encodeURIComponent(file.name)}, body: file});
+  const j = await x.json().catch(() => ({}));
+  if (!x.ok) throw new Error(j.error || x.statusText);
+  return j;
+}
+const discard = tokens => tokens.length ? fetch("/api/import/discard", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({tokens})}).catch(() => {}) : null;
+
+function cardHtml(c) {
+  const head = `<div class="ir-h"><label class="ir-inc"><input type="checkbox" data-inc="${c.i}"${c.include ? " checked" : ""} aria-label="Add ${esc(c.file.name)}"><b>${esc(c.file.name)}</b></label><small>${size(c.file.size)}${c.a ? " · " + plural(c.a.pdf.pages, "page") : ""}</small></div>`;
+  if (c.state === "reading") return `${head}<div class="ir-st">Reading the PDF and looking it up…</div>`;
+  if (c.state === "error") return `${head}<div class="ir-st bad">${esc(c.error)}</div>`;
+  const a = c.a, cands = a.candidates;
+  const say = a.confidence === "high" ? ["ok", "✓ A record was found whose title and authors are on this PDF. Please check it."]
+    : a.confidence === "check" ? ["warn", "Please check: the record below could not be confirmed against the PDF."]
+    : a.pdf.scan ? ["bad", "This PDF looks scanned (it has no text to read). Type the details yourself."] : ["bad", "No record was found online. Type the details; the PDF’s own title is filled in."];
+  const opts = cands.map((k, n) => `<label class="ir-cand${k.verdict === "mismatch" ? " mis" : ""}"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="${n}"${c.sel === n ? " checked" : ""}>
+      <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
+      <small class="ir-why">${esc(VERDICT[k.verdict] || "")}${k.doi_printed ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
+  const f = c.fields, fld = (k, label, ph, wide) => `<label class="ir-f${wide ? " wide" : ""}"><span>${label}</span><input type="text" data-k="${k}" data-i="${c.i}" value="${esc(f[k])}" placeholder="${esc(ph || "")}" autocomplete="off" spellcheck="false"></label>`;
+  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${a.existing ? `<div class="ir-st warn">You already have this paper. It will not be added twice.</div>` : ""}
+    ${cands.length ? `<div class="ir-cands" role="radiogroup" aria-label="Records found for ${esc(c.file.name)}">${opts}<label class="ir-cand"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="-1"${c.sel === -1 ? " checked" : ""}><span><b>None of these</b><small>I will type the details myself</small></span></label></div>` : ""}
+    <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors (separate with ;)", "Jane Doe; John Smith", true)}${fld("journal", "Journal", "")}${fld("pub_date", "Date", "YYYY or YYYY-MM-DD")}${fld("doi", "DOI", "10.…")}</div>
+    <div class="ir-err" id="ir-e${c.i}" role="alert"></div>`;
+}
+
+async function review(files, w) {
   const pdfs = files.filter(isPdf), skipped = files.filter(f => !isPdf(f));
+  const fs = (await folders()).slice().sort((a, b) => (b.id === ls.get("jw-drop-last")) - (a.id === ls.get("jw-drop-last")) || (b.updated || "").localeCompare(a.updated || ""));
+  const fixed = w.kind === "folder" || w.kind === "open" ? w.id : null, fixedName = fixed ? (w.name || folderName(fs, fixed)) : "";
   const today = new Date().toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
-  const last = fs.find(f => f.id === ls.get("jw-drop-last"));
-  const first = !fs.length ? "new" : w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
+  const last = fs.find(f => f.id === ls.get("jw-drop-last")), first = w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
+  const cards = pdfs.map((f, i) => ({i, file: f, state: "reading", include: true, sel: -1, a: null, fields: {title: "", authors: "", journal: "", pub_date: "", doi: ""}, error: ""}));
   return new Promise(resolve => {
-    $("#di-dlg") && $("#di-dlg").remove();
-    const d = document.createElement("dialog"); d.id = "di-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "di-h");
-    const li = f => `<li><span>${esc(f.name)}</span><small>${size(f.size)}</small></li>`;
-    d.innerHTML = `<h2 id="di-h">Add ${plural(pdfs.length, "PDF")}</h2>
-      <ul class="di-files">${pdfs.slice(0, 5).map(li).join("")}${pdfs.length > 5 ? `<li class="more">+ ${pdfs.length - 5} more</li>` : ""}${skipped.slice(0, 3).map(f => `<li class="skip"><span>${esc(f.name)}</span><small>not a PDF — skipped</small></li>`).join("")}</ul>
-      <div class="lbl">Where should ${pdfs.length === 1 ? "it" : "they"} go?</div>
-      <div class="di-opts" role="radiogroup" aria-label="Destination">
-        <label class="di-opt"><input type="radio" name="di-to" value="new"><span class="di-ic">＋</span><span class="di-t">New folder</span><input type="text" id="di-name" maxlength="60" value="${esc(pdfs.length === 1 ? norm(pdfs[0].name.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ")).slice(0, 60) : "Added " + today)}" aria-label="New folder name"></label>
-        ${fs.length > 7 ? `<input type="search" id="di-find" placeholder="Find a folder…" aria-label="Find a folder">` : ""}
-        <div class="di-list">${fs.map(f => `<label class="di-opt" data-n="${esc(f.name.toLowerCase())}"><input type="radio" name="di-to" value="f:${esc(f.id)}"><span class="di-ic">📁</span><span class="di-t">${esc(f.name)}</span><small>${plural(f.count, "paper")}</small></label>`).join("")}</div>
-        <label class="di-opt"><input type="radio" name="di-to" value="lib"><span class="di-ic">▤</span><span class="di-t">Library only</span><small>no folder</small></label>
-      </div>
-      <label class="chk"><input type="checkbox" id="di-sum"> Also write a summary for new papers (uses AI, about 1–2 cents each)</label>
-      <div class="di-err" id="di-err" role="alert"></div>
-      <div class="row di-btns"><button class="btn" id="di-cancel">Cancel</button><button class="btn primary" id="di-go">Add ${plural(pdfs.length, "paper")}</button></div>`;
+    $("#ir-dlg") && $("#ir-dlg").remove();
+    const d = document.createElement("dialog"); d.id = "ir-dlg"; d.className = "card ir-dlg"; d.setAttribute("aria-labelledby", "ir-h");
+    d.innerHTML = `<h2 id="ir-h">Check the details of ${plural(pdfs.length, "PDF")}</h2>
+      <p class="pmeta">Nothing is filed until you press Add. Each PDF is read and looked up online (Crossref); fix anything that is wrong.</p>
+      <div class="ir-list">${cards.map(c => `<section class="ir-card" id="ir-c${c.i}"></section>`).join("")}${skipped.slice(0, 3).map(f => `<div class="ir-skip">${esc(f.name)} — not a PDF, skipped</div>`).join("")}</div>
+      <div class="ir-foot">
+        ${fixed ? `<div class="ir-dest">Adding to the folder <b>“${esc(fixedName)}”</b></div>` : `<div class="ir-dest"><label for="ir-to">Add to</label><select id="ir-to"><option value="lib">Library only (no folder)</option>${fs.map(f => `<option value="f:${esc(f.id)}">Folder: ${esc(f.name)} (${plural(f.count, "paper")})</option>`).join("")}<option value="new">A new folder…</option></select>
+          <input type="text" id="ir-name" class="hide" maxlength="60" value="Added ${esc(today)}" aria-label="New folder name"></div>`}
+        <label class="chk"><input type="checkbox" id="ir-sum"> Also write a summary for new papers (uses AI, about 1–2 cents each)</label>
+        <div class="ir-err" id="ir-err" role="alert"></div>
+        <div class="row di-btns"><button class="btn" id="ir-cancel">Cancel</button><button class="btn primary" id="ir-go" disabled>Add</button></div>
+      </div>`;
     document.body.append(d); d.showModal();
-    const pick = v => { const r = $(`input[name="di-to"][value="${CSS.escape(v)}"]`, d); if (r) r.checked = true; };
-    pick(first); const nm = $("#di-name", d);
-    const go = () => {
-      const v = ($('input[name="di-to"]:checked', d) || {}).value, err = t => { $("#di-err", d).textContent = t; };
-      if (v === "new") {
-        const n = norm(nm.value); if (!n) { err("Give the new folder a name."); return nm.focus(); }
-        const dup = fs.find(f => f.name.toLowerCase() === n.toLowerCase()); if (dup) { err(`A folder called “${dup.name}” already exists — choose it from the list.`); pick("f:" + dup.id); return; }
-        resolve({files: pdfs, dest: {mode: "new", name: n}, summarize: $("#di-sum", d).checked});
-      } else resolve({files: pdfs, dest: v === "lib" ? {mode: "lib"} : {mode: "folder", id: v.slice(2)}, summarize: $("#di-sum", d).checked});
-      d.close();
+    let closed = false;
+    const draw = c => { $("#ir-c" + c.i, d).innerHTML = cardHtml(c); $("#ir-c" + c.i, d).classList.toggle("off", !c.include); };
+    const ready = () => cards.filter(c => c.include && c.state === "ok");
+    const status = () => {
+      const busy = cards.some(c => c.include && c.state === "reading"), n = ready().length;
+      $("#ir-go", d).disabled = busy || !n; $("#ir-go", d).textContent = busy ? "Reading…" : n ? "Add " + plural(n, "paper") : "Add";
     };
-    $("#di-go", d).onclick = go; $("#di-cancel", d).onclick = () => d.close();
-    nm.onfocus = () => pick("new"); nm.oninput = () => { $("#di-err", d).textContent = ""; };
-    d.onkeydown = e => { if (e.key === "Enter" && !e.target.matches("button, textarea")) { e.preventDefault(); go(); } };
-    const find = $("#di-find", d); if (find) find.oninput = () => { const q = find.value.toLowerCase(); $$(".di-list .di-opt", d).forEach(l => l.classList.toggle("hide", !!q && !l.dataset.n.includes(q))); };
-    d.addEventListener("close", () => { resolve(null); d.remove(); }, {once: true});
-    d.addEventListener("click", e => { if (e.target === d) d.close(); });
-    (first === "new" ? nm : $('input[name="di-to"]:checked', d)).focus(); if (first === "new") nm.select();
+    const to = $("#ir-to", d), nm = $("#ir-name", d);
+    if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
+    cards.forEach(draw); status();
+    const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the PDF's own title
+      c.fields = c.sel >= 0 ? fieldsOf(c.a.candidates[c.sel]) : {title: c.a.pdf.title, authors: "", journal: "", pub_date: "", doi: ""};
+    };
+    const sync = c => $$(`[data-k][data-i="${c.i}"]`, d).forEach(el => { el.value = c.fields[el.dataset.k]; });
+    const source = c => {
+      if (c.sel < 0) return "hand";
+      const k = fieldsOf(c.a.candidates[c.sel]);
+      return Object.keys(k).every(x => norm(k[x]) === norm(c.fields[x])) ? "crossref" : "edited";
+    };
+    // analyse the PDFs one after the other (each one waits on Crossref), the cards fill in as they come
+    (async () => {
+      for (const c of cards) {
+        if (closed) break;
+        try {
+          c.a = await analyse(c.file); c.state = "ok"; c.sel = c.a.pick;
+          if (closed) { discard([c.a.token]); break; }
+          take(c);
+        } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
+        if (!closed) { draw(c); status(); }
+      }
+    })();
+    d.addEventListener("change", e => {
+      const t = e.target, i = +(t.dataset.inc ?? t.dataset.sel ?? -1); if (i < 0) return; const c = cards[i];
+      if (t.dataset.inc !== undefined) { c.include = t.checked; $("#ir-c" + i, d).classList.toggle("off", !c.include); }
+      else { c.sel = +t.value; take(c); sync(c); $("#ir-e" + i, d).textContent = ""; }
+      status();
+    });
+    d.addEventListener("input", e => {
+      const t = e.target; if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
+      c.fields[t.dataset.k] = t.value; $("#ir-e" + c.i, d).textContent = ""; $("#ir-err", d).textContent = "";
+    });
+    const finish = v => { if (closed) return; closed = true; resolve(v); d.close(); };
+    const go = () => {
+      const err = t => { $("#ir-err", d).textContent = t; }, use = ready();
+      for (const c of use) {
+        const f = c.fields, bad = !norm(f.title) ? "Give this paper a title." : norm(f.pub_date) && !DATE_RE.test(norm(f.pub_date)) ? "The date must be a year (2024), a month (2024-05) or a day (2024-05-17), or empty." : "";
+        if (bad) { $("#ir-e" + c.i, d).textContent = bad; err("Fix the highlighted paper first."); const el = $(`[data-k="${!norm(f.title) ? "title" : "pub_date"}"][data-i="${c.i}"]`, d); el && el.focus(); return; }
+      }
+      let dest;
+      if (fixed) dest = {mode: "folder", id: fixed};
+      else if (to.value === "lib") dest = {mode: "lib"};
+      else if (to.value === "new") {
+        const n = norm(nm.value); if (!n) { err("Give the new folder a name."); return nm.focus(); }
+        const dup = fs.find(f => f.name.toLowerCase() === n.toLowerCase()); if (dup) { err(`A folder called “${dup.name}” already exists — choose it from the list.`); to.value = "f:" + dup.id; nm.classList.add("hide"); return; }
+        dest = {mode: "new", name: n};
+      } else dest = {mode: "folder", id: to.value.slice(2)};
+      discard(cards.filter(c => c.state === "ok" && !c.include).map(c => c.a.token));
+      finish({items: use.map(c => ({name: c.file.name, token: c.a.token, fields: {...c.fields, source: source(c)}})), dest, summarize: $("#ir-sum", d).checked});
+    };
+    $("#ir-go", d).onclick = go;
+    $("#ir-cancel", d).onclick = () => d.close();
+    d.onkeydown = e => { if (e.key === "Enter" && e.target.matches("input[type=text]") && !$("#ir-go", d).disabled) { e.preventDefault(); go(); } };
+    d.addEventListener("close", () => {
+      if (!closed) { closed = true; discard(cards.filter(c => c.a).map(c => c.a.token)); resolve(null); }
+      d.remove();
+    }, {once: true});
   });
 }
 
@@ -107,14 +186,8 @@ function snack() {
 }
 function bye(s, ms) { clearTimeout(D.timer); if (ms) D.timer = setTimeout(() => { s.classList.add("gone"); setTimeout(() => s.remove(), 300); }, ms); }
 
-async function post(file, summarize) {
-  const x = await fetch("/api/import/pdf", {method: "POST", headers: {"Content-Type": "application/pdf", "X-Filename": encodeURIComponent(file.name), "X-Summarize": summarize ? "1" : "0"}, body: file});
-  const j = await x.json().catch(() => ({}));
-  if (!x.ok) throw new Error(j.error || x.statusText);
-  return j;
-}
-async function run({files, dest, summarize}) {
-  const s = snack(), res = [], total = files.length; let stop = false, folderId = dest.id || null, fname = "", created = false;
+async function run({items, dest, summarize}) {
+  const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false;
   const paint = (n, msg) => { s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div><div class="di-bar"><i style="width:${Math.round(100 * n / total)}%"></i></div><div class="row"><button class="btn small" data-di="stop">Stop</button></div>`; };
   s.onclick = e => { if (e.target.closest("[data-di=stop]")) stop = true; };
   paint(0, "Adding " + plural(total, "paper") + "…");
@@ -126,14 +199,15 @@ async function run({files, dest, summarize}) {
     } else if (folderId) fname = folderName(await folders(), folderId);
   } catch (e) { s.innerHTML = `<div class="di-msg"><b>${esc(e.message)}</b></div><div class="row"><button class="btn small" data-di="x">Close</button></div>`; s.onclick = () => s.remove(); return; }
   for (let i = 0; i < total && !stop; i++) {
-    const f = files[i]; paint(i, `Adding ${i + 1} of ${total}: ${f.name.length > 46 ? f.name.slice(0, 44) + "…" : f.name}`);
+    const f = items[i]; paint(i, `Adding ${i + 1} of ${total}: ${f.name.length > 46 ? f.name.slice(0, 44) + "…" : f.name}`);
     try {
-      const r = await post(f, summarize);
+      const r = await api("/api/import/confirm", {token: f.token, fields: f.fields, summarize});
       if (folderId) await api("/api/folders", {action: "add", id: folderId, files: [r.file]});
       res.push({name: f.name, file: r.file, title: r.title, existing: !!r.existing});
     } catch (e) { res.push({name: f.name, error: e.message}); }
   }
   if (folderId) ls.set("jw-drop-last", folderId);
+  if (stop) discard(items.slice(res.length).map(x => x.token));          // the ones not reached are forgotten
   const ok = res.filter(r => r.file), isNew = ok.filter(r => !r.existing), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
   const msg = (folderId ? (ok.length ? `Added ${plural(ok.length, "paper")} to “${fname}”` : "Nothing was added") : (isNew.length ? `Added ${plural(isNew.length, "paper")} to your library` : "Nothing new to add")) +
     (had.length ? ` · ${had.length} already in your library` : "") + (bad.length ? ` · ${bad.length} failed` : "") + (left ? ` · stopped, ${left} left` : "");
@@ -178,11 +252,8 @@ export async function handle(fileList, w) {
   if (!files.some(isPdf)) return toast("Those aren’t PDFs — drop PDF files to add papers.");
   w = w || where(document.body);
   if (!w) return toast("Open the Library or a folder first, then drop the PDFs there.");
-  let job;
-  if (w.kind === "folder" || w.kind === "open") job = {files: files.filter(isPdf), dest: {mode: "folder", id: w.id}, summarize: false};
-  else job = await choose(files, w);
+  const job = await review(files, w);
   if (!job) return;
-  const skipped = files.length - job.files.length; if (skipped) toast(`${plural(skipped, "file")} skipped: not a PDF.`);
   chain = chain.then(() => run(job)).catch(e => notifyError(e));
 }
 

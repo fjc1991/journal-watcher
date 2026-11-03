@@ -363,22 +363,14 @@ function exportMenu(menu, scope) {
 }
 
 // ---------------------------------------------------------------- add papers
-async function upload(file, summarize) {
-  toast(`Adding “${file.name}”…`);
-  try {
-    const r = await (await fetch("/api/import/pdf", {method: "POST", headers: {"Content-Type": "application/pdf", "X-Filename": encodeURIComponent(file.name), "X-Summarize": summarize ? "1" : "0"}, body: file}).then(async x => { if (!x.ok) throw new Error((await x.json().catch(() => ({}))).error || x.statusText); return x; })).json();
-    toast(r.existing ? `Already in your library: ${r.title.slice(0, 60)}` : `Added: ${r.title.slice(0, 70)}${summarize ? " — summary coming" : ""}`);
-    await ctx.reload(); results(); return r;
-  } catch (e) { notifyError(e); }
-}
 function addDialog() {
   let d = $("#adddlg"); if (d) d.remove();
   d = document.createElement("dialog"); d.id = "adddlg"; d.className = "card adddlg";
   d.innerHTML = `<h2>Add a paper</h2><p class="pmeta">It is filed like every other paper: <code>Papers/YYYY-MM/&lt;Journal&gt;/</code>, with an entry in the index.</p>
     <label class="lbl">From a DOI (needs a free copy: open access, arXiv, SSRN…)</label><div class="row"><input type="text" id="ad-doi" placeholder="10.1287/isre.2024.0984  or  https://doi.org/…"><button class="btn primary" id="ad-doibtn">Add</button></div>
-    <label class="lbl">Or a PDF from your computer</label><div class="dropzone" id="ad-drop">Drop a PDF here or <a href="#" id="ad-pick">choose a file</a><input type="file" id="ad-file" accept="application/pdf" multiple class="hide"></div>
+    <label class="lbl">Or a PDF from your computer (you check its details before it is added)</label><div class="dropzone" id="ad-drop">Drop a PDF here or <a href="#" id="ad-pick">choose a file</a><input type="file" id="ad-file" accept="application/pdf" multiple class="hide"></div>
     <div class="pmeta" style="margin-top:8px">Have a reference list from EndNote, Mendeley or Zotero? <a href="#" id="ad-bib">Import a bibliography (.ris / .bib)…</a></div>
-    <label class="chk"><input type="checkbox" id="ad-sum"> Write a summary after adding (uses Claude, about 1–2 cents)</label>
+    <label class="chk"><input type="checkbox" id="ad-sum"> Write a summary after adding a DOI (uses Claude, about 1–2 cents)</label>
     <div class="pmeta" id="ad-msg" style="min-height:20px;margin-top:8px"></div><div class="row" style="justify-content:flex-end"><button class="btn" id="ad-close">Close</button></div>`;
   document.body.append(d); d.showModal();
   const msg = t => { $("#ad-msg").textContent = t; };
@@ -389,11 +381,15 @@ function addDialog() {
     try { const r = await api("/api/import/doi", {doi: $("#ad-doi").value, summarize: $("#ad-sum").checked}); msg(r.existing ? "Already in your library." : "Added: " + r.title); await ctx.reload(); results(); }
     catch (e) { msg(e.message); }
   };
-  const files = async fs => { for (const f of fs) { msg("Adding " + f.name + "…"); const r = await upload(f, $("#ad-sum").checked); if (r) msg((r.existing ? "Already in your library: " : "Added: ") + r.title); } };
+  const files = fs => {       // the same review dialog as a drop on the Library: the details are checked before anything is filed
+    if (!fs.length) return;
+    if (!fs.some(f => /\.pdf$/i.test(f.name) || f.type === "application/pdf")) return msg("Those aren’t PDFs.");
+    d.close(); window.DropImport.handle(fs, {kind: "library"});
+  };
   $("#ad-pick").onclick = e => { e.preventDefault(); $("#ad-file").click(); };
   $("#ad-file").onchange = e => files([...e.target.files]);
   const dz = $("#ad-drop"); dz.ondragover = e => { e.preventDefault(); dz.classList.add("over"); }; dz.ondragleave = () => dz.classList.remove("over");
-  dz.ondrop = e => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("over"); files([...e.dataTransfer.files].filter(f => /\.pdf$/i.test(f.name))); };
+  dz.ondrop = e => { e.preventDefault(); e.stopPropagation(); dz.classList.remove("over"); files([...e.dataTransfer.files]); };
 }
 
 // ---------------------------------------------------------------- highlights hub

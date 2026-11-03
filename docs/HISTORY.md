@@ -681,6 +681,24 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** How it looks with the Mac's fonts: the widths were chosen from the sandbox's, so the exact point at which the table starts to scroll may differ.
 
+### Item 19. Dropped PDFs are checked by you before they are filed (2026-11-03, the author's idea)
+
+**Asked.** “Can I drag and drop my own PDFs, have the app find the metadata (or search online by the title and PDF details), and then show me a confirmation so I can make sure the details are right?” Answers to my questions: the confirmation is shown **every time**, as **a dialog right after the drop**; it must work for the Library and for the Folders section and individual folders (for example one called DID).
+
+**Before.** A drop went straight to `importer.add_pdf`: the first DOI found in the first two pages (any DOI: a paper cites others) was looked up on Crossref, and if there was none the title came from the PDF's metadata or its largest type, with journal “Other” and no authors. Nothing was shown, so a wrong DOI filed a different paper's record under this PDF without anyone seeing it.
+
+**Changed.**
+- `importer.analyse_pdf` (new) reads the PDF (DOIs from the text before the reference list and from its metadata; title from the metadata or the headline; page count; whether it is a scan), looks the DOIs up and, when none of them leads to a record that matches, searches Crossref by title (`crossref_search`, `query.bibliographic`). Each record is checked against the PDF with `identity.check` **by title and authors, never by the DOI it was found with** (that DOI came from the PDF, so it would prove nothing). Up to three records are returned best first with a verdict; `confidence` is `high` only when the best one matches. The PDF waits in `state/staging/` under a random 128-bit token (forgotten after 24 hours); nothing is filed.
+- `importer.confirm(token, fields)` files it with the details you left in the boxes (title required; date must be a year, month or day, otherwise empty; DOI cleaned). The note records whether the record was taken as it is, edited, or typed by you. `importer.discard` removes staged PDFs.
+- Server: `POST /api/import/analyse` (raw PDF), `/api/import/confirm`, `/api/import/discard`. The old `/api/import/pdf` stays (used by tests and the command line); the app no longer uses it.
+- `dropimport.js`: the destination chooser is replaced by one review dialog (`#ir-dlg`): a card per PDF (checkbox, record choices, boxes), the destination (a list for the Library and the Folders page, fixed text for a folder tile, a folder chip or an open folder), the optional summary, Add. Destination logic (`where`) is unchanged. `library.js` “＋ Add paper → choose a file / drop” opens the same dialog instead of importing silently.
+
+**Tests.** `test_reader.py` `t_import_review` (analysis, staging, confirmation, discard, bad tokens, date validation, the identity rule above). `test_ui.py`: the whole drop section rewritten for the dialog, with a fake Crossref title search in the test server (no real network): drop on the Folders page / a tile / an open folder / the Library / the Add-a-paper dialog, records and verdicts shown, boxes filled, nothing filed before Add, filed details (Papers/2021-05/…, journal, authors, note), invalid date refused, already-have flagged, name clash refused, cancel and untick leave no staged copy. Each rule was mutation-checked: removing it makes a test fail (see the PR).
+
+**Verified live.** One real `crossref_search` call (the title of a published paper) returned four well-formed records with authors, journal, date and DOI; the SSRN preprint and the journal version of the same paper both appear, as two separate choices (they have different DOIs).
+
+**Not verified.** Matching on real publisher PDFs end to end (the tests use small generated PDFs and a fake Crossref in the UI run), how the dialog looks with the Mac's fonts and a very long author list, and PDFs with no text layer beyond the “looks scanned” message.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
