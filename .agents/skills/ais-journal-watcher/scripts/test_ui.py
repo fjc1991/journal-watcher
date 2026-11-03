@@ -1480,6 +1480,12 @@ pl._screen_batch = fake_screen
             check("from inside the reader it closes the reader and opens that folder's tab", page.url.endswith("#/folder/lab/matrix") and page.evaluate("!document.body.classList.contains('reading')"), page.url)
             page.keyboard.press("Control+k"); page.keyboard.type("settings usage"); page.keyboard.press("Enter"); page.wait_for_selector("#st-body .st-stat")
             check("Settings › Usage & cost opens that tab", "usage" in page.inner_text(".st-tabs .on").lower())
+            JS_TABROW = "(() => { const b = [...document.querySelectorAll('.st-tabs button')]; const tops = new Set(b.map(x => Math.round(x.getBoundingClientRect().top))); return [b.length, tops.size]; })()"
+            rows_ = {}
+            for w_ in (1000, 1200, 1500, 2000):
+                page.set_viewport_size({"width": w_, "height": 900}); page.wait_for_timeout(150); rows_[w_] = page.evaluate(JS_TABROW)
+            page.set_viewport_size({"width": 1400, "height": 950})
+            check("the nine Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 9 and r == 1 for n, r in rows_.values()), str(rows_))
             page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)"); page.keyboard.press("Escape")
             check("Esc closes the palette", page.locator("#pal.hide").count() == 1)
             page.click("#settingsbtn"); page.wait_for_selector("#settings.hide", state="attached")

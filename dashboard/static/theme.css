@@ -235,7 +235,7 @@ body.sb-open .sb-scrim { display: block; }
 .st-head { background: none; border-bottom: 1px solid var(--line); padding: 14px max(40px, calc((100% - var(--stw)) / 2 + 40px)) 0; gap: 18px; align-items: flex-end; max-width: none; }      /* the heading starts where the cards do, whatever the window */
 .st-head h1 { font: 700 28px/1.2 var(--sans); letter-spacing: -.015em; margin: 0 0 8px; }
 .st-tabs { margin-left: 0; gap: 2px; align-self: flex-end; }
-.st-tabs button { border-radius: 8px 8px 0 0; color: var(--ink-3); padding: 9px 12px 11px; }
+.st-tabs button { border-radius: 8px 8px 0 0; color: var(--ink-3); padding: 9px 10px 11px; }
 .st-tabs button:hover { background: var(--hover); color: var(--ink); }
 .st-tabs button.on { background: none; color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--ink); }
 .st-body { padding: 24px 40px 80px; max-width: var(--stw); }

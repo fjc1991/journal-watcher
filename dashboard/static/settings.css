@@ -4,8 +4,8 @@ body.settings-open { overflow: hidden; }
 .st.hide { display: none; }
 .st-head { display: flex; gap: 16px; align-items: center; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .st-head h1 { margin: 0; font: 600 20px var(--serif); }
-.st-tabs { display: flex; gap: 4px; margin-left: 12px; flex-wrap: wrap; }
-.st-tabs button { border: 0; background: none; padding: 7px 12px; border-radius: 8px; cursor: pointer; color: var(--ink-2); font-weight: 500; }
+.st-tabs { display: flex; gap: 4px; margin-left: 12px; flex-wrap: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }      /* one row, never a tab alone on a second one; when the window is too narrow for all nine the row scrolls */
+.st-tabs button { border: 0; background: none; padding: 7px 12px; border-radius: 8px; cursor: pointer; color: var(--ink-2); font-weight: 500; flex: none; white-space: nowrap; }
 .st-tabs button.on { background: var(--accent-soft); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
 .st-body { flex: 1; overflow: auto; padding: 18px 20px 60px; max-width: 1180px; width: 100%; margin: 0 auto; }
 .st-card { padding: 16px 18px; margin-bottom: 14px; }

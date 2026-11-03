@@ -33,6 +33,7 @@ export async function open(t) {
 function render() {
   if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
   $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+  const on = $(".st-tabs button.on", root); if (on && on.scrollIntoView) on.scrollIntoView({block: "nearest", inline: "nearest"});      // a narrow window scrolls the row: keep the open tab in view
   const body = $("#st-body", root);
   ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, about: renderAbout})[tab](body);
 }
