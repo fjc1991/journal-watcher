@@ -807,6 +807,22 @@ pl._screen_batch = fake_screen
             page.click("#settingsbtn"); page.wait_for_selector("#st-body tr[data-p]")
             check("settings: providers, per-feature models and a key-free status", page.locator("tr[data-f]").count() >= 17 and page.locator("tr[data-f='ideas']").count() == 1 and "key found" in page.inner_text("tr[data-p='fake']"))
             check("settings: 'Screening new papers' has its own model row (the budget and the usage page now cover it), pointing at a provider that exists", page.locator("tr[data-f='screen']").count() == 1 and page.input_value("tr[data-f='screen'] .fm") != "" and page.input_value("tr[data-f='screen'] .fp") in api("/api/ai/config")["providers"] and "screen" in api("/api/ai/config")["features"])
+            check("Settings has ONE 'AI' tab with three pages under it (AI & privacy, Usage & cost, Prompts); they are not tabs of their own", page.locator(".st-tabs button").count() == 7 and [b.inner_text() for b in page.locator(".st-sub button").all()] == ["AI & privacy", "Usage & cost", "Prompts"] and page.inner_text(".st-tabs .on").strip() == "AI" and page.locator(".st-tabs button[data-t='usage']").count() == 0)
+            page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat"); page.click('.st-tabs button[data-t="reader"]'); page.wait_for_selector(".legend")
+            check("the pages under AI show only on the AI tab", page.locator("#st-sub:not(.hide)").count() == 0)
+            page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector(".st-stat")
+            check("coming back to the AI tab returns to the page you were on there (Usage & cost)", page.locator(".st-sub button.on").inner_text() == "Usage & cost" and page.locator(".st-stat").count() > 0)
+            page.click('.st-sub button[data-t="ai"]'); page.wait_for_selector("#st-main")
+            before_ = api("/api/ai/config")["features"]; emb_before = api("/api/ai/config")["embeddings"]
+            page.select_option("#mn-p", "websearch"); page.fill("#mn-m", "m2"); page.click("#mn-apply")
+            rows_f = [(tr.get_attribute("data-f"), tr.locator(".fp").input_value(), tr.locator(".fm").input_value(), tr.locator(".fe").input_value()) for tr in page.locator("tr[data-f]").all() if tr.get_attribute("data-f") != "emb"]
+            check("'Use one for everything' sets the provider and model of every feature row (not their effort); nothing is saved until Save", all(p_ == "websearch" and m_ == "m2" for _, p_, m_, _e in rows_f) and [e_ for *_, e_ in rows_f] == [(before_.get(k_) or before_["ask"]).get("effort", "low") for k_, *_r in rows_f] and api("/api/ai/config")["features"] == before_, str(rows_f[:3]))
+            page.select_option("#mn-p", "fake"); page.fill("#mn-m", "m1"); page.click("#mn-apply")
+            check("…a provider that cannot search the web leaves the Ideas Lab's current events alone and says so", page.locator("tr[data-f='events'] .fp").input_value() == "websearch" and "current events" in page.inner_text("#mn-note").lower() and page.locator("tr[data-f='ask'] .fp").input_value() == "fake", page.inner_text("#mn-note"))
+            page.select_option("#mn-p", "websearch"); page.fill("#mn-m", "m2"); page.click("#mn-apply"); page.click("#st-save"); page.wait_for_selector("#st-msg:not(:empty)", timeout=5000)
+            feats_ = api("/api/ai/config")["features"]
+            check("…and Save keeps it: every feature now uses that provider and model (embeddings untouched)", all(f_["provider"] == "websearch" and f_["model"] == "m2" for f_ in feats_.values()) and api("/api/ai/config")["embeddings"] == emb_before, str({k_: (v_["provider"], v_["model"]) for k_, v_ in feats_.items() if (v_["provider"], v_["model"]) != ("websearch", "m2")}))
+            page.select_option("#mn-p", "fake"); page.fill("#mn-m", "m1"); page.click("#mn-apply"); page.click("#st-save"); page.wait_for_timeout(600)
             page.fill("#st-budget", "5"); page.click("#st-save"); page.wait_for_timeout(600)
             check("settings: the monthly budget is saved", api("/api/ai/config")["budget"]["monthly_usd"] == 5)
             check("settings: 'reuse earlier screening verdicts for N days' shows its default (90) and is saved", page.input_value("#st-reuse") == "90" and api("/api/ai/config")["screening"]["reuse_days"] == 90)
@@ -815,11 +831,11 @@ pl._screen_batch = fake_screen
             page.fill("#st-reuse", "99999"); page.click("#st-save"); page.wait_for_function("document.querySelector('#st-msg.bad')", timeout=5000)
             check("…(refused: 0 to 3650 days)", api("/api/ai/config")["screening"]["reuse_days"] == 30 and "3650" in page.inner_text("#st-msg"), page.inner_text("#st-msg"))
             page.fill("#st-reuse", "90"); page.click("#st-save"); page.wait_for_timeout(600)
-            page.click('.st-tabs button[data-t="usage"]'); page.wait_for_selector(".st-stat")
+            page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat")
             check("usage panel shows spend, cached answers and what was sent", "cache" in page.inner_text("#st-body").lower() and page.locator(".st-table.log tr").count() > 3)
             check("the usage chart always shows the last 30 days, not just the days with spend", page.locator(".st-chart > div").count() == 30)
             shot(page, "6-usage"); page.click('.st-tabs button[data-t="reader"]'); page.fill('.legend input[data-c="yellow"]', "Claim"); page.click("#st-save"); page.wait_for_timeout(600)
-            page.click('.st-tabs button[data-t="prompts"]'); page.click("#pa"); page.locator(".st-item .pn").last.fill("Summarise in one line"); page.click("#st-save"); page.wait_for_timeout(600)
+            page.click('.st-tabs button[data-t="ai"]'); page.click('.st-sub button[data-t="prompts"]'); page.click("#pa"); page.locator(".st-item .pn").last.fill("Summarise in one line"); page.click("#st-save"); page.wait_for_timeout(600)
             check("prompts: a new prompt is saved to prompts.json", "Summarise in one line" in open(os.path.join(TMP, ".agents/skills/ais-journal-watcher/prompts.json")).read())
             page.click("#st-back")
             page.locator('.librow:has-text("Citations and Links") [data-read]').click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
@@ -1479,13 +1495,13 @@ pl._screen_batch = fake_screen
             page.keyboard.press("Enter"); page.wait_for_selector("table.mx", timeout=20000)
             check("from inside the reader it closes the reader and opens that folder's tab", page.url.endswith("#/folder/lab/matrix") and page.evaluate("!document.body.classList.contains('reading')"), page.url)
             page.keyboard.press("Control+k"); page.keyboard.type("settings usage"); page.keyboard.press("Enter"); page.wait_for_selector("#st-body .st-stat")
-            check("Settings › Usage & cost opens that tab", "usage" in page.inner_text(".st-tabs .on").lower())
+            check("Settings › Usage & cost opens that tab", "usage" in page.inner_text(".st-sub .on").lower() and page.inner_text(".st-tabs .on").strip() == "AI")
             JS_TABROW = "(() => { const b = [...document.querySelectorAll('.st-tabs button')]; const tops = new Set(b.map(x => Math.round(x.getBoundingClientRect().top))); return [b.length, tops.size]; })()"
             rows_ = {}
             for w_ in (1000, 1200, 1500, 2000):
                 page.set_viewport_size({"width": w_, "height": 900}); page.wait_for_timeout(150); rows_[w_] = page.evaluate(JS_TABROW)
             page.set_viewport_size({"width": 1400, "height": 950})
-            check("the nine Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 9 and r == 1 for n, r in rows_.values()), str(rows_))
+            check("the seven Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 7 and r == 1 for n, r in rows_.values()), str(rows_))
             page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)"); page.keyboard.press("Escape")
             check("Esc closes the palette", page.locator("#pal.hide").count() == 1)
             page.click("#settingsbtn"); page.wait_for_selector("#settings.hide", state="attached")
@@ -1520,7 +1536,7 @@ pl._screen_batch = fake_screen
             check("an AI problem is a box that says what to do: here the monthly budget is used up, with buttons to the usage and the AI settings, and Try again", "budget" in page.inner_text(".ask-turn >> nth=-1 >> .errbox").lower() and page.locator(".ask-turn >> nth=-1 >> .errbox [data-eb=settings]").count() == 1 and page.locator(".ask-turn >> nth=-1 >> .errbox [data-eb=usage]").count() == 1 and page.locator(".ask-turn >> nth=-1 >> .errbox [data-t=regen]").count() == 1, page.inner_text(".ask-turn >> nth=-1 >> .errbox"))
             shot(page, "25-error-box")
             page.click(".ask-turn >> nth=-1 >> .errbox [data-eb=settings]"); page.wait_for_selector("#st-body tr[data-p]")
-            check("…and the button opens Settings → AI & privacy", "ai" in page.inner_text(".st-tabs .on").lower())
+            check("…and the button opens Settings → AI & privacy", "ai & privacy" in page.inner_text(".st-sub .on").lower())
             gem = page.locator('tr[data-p="vault"]'); had_key = "key found" in gem.inner_text()
             check("a provider without a key offers a field to paste one (and no text that says to edit .env by hand)", not had_key and gem.locator('.keyform input[type=password]').count() == 1 and gem.locator('[data-savekey]').count() == 1)
             gem.locator('.keyform input').fill("AIza-test-key-123"); gem.locator("[data-savekey]").click(); page.wait_for_selector('tr[data-p="vault"] :text("key found")', timeout=10000)
@@ -2137,7 +2153,7 @@ pl._screen_batch = fake_screen
                     bad_con += [(scheme, url, x) for x in page.evaluate(JS_CONTRAST, scheme)]
                 page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#settingsbtn"); page.click("#settingsbtn"); page.wait_for_selector("#st-body")
                 for t in ("ai", "usage", "prompts", "reader", "files", "library", "look", "about"):
-                    page.click('.st-tabs button[data-t="%s"]' % t); page.wait_for_timeout(300)
+                    page.click('.st-%s button[data-t="%s"]' % ("sub" if t in ("ai", "usage", "prompts") else "tabs", t) if t != "ai" else '.st-tabs button[data-t="ai"]'); page.wait_for_timeout(300)
                     r = page.evaluate(JS_A11Y); bad_names += [("settings " + t, x) for x in r["noname"]]; bad_ids += [("settings " + t, x) for x in r["dupid"]]
                     bad_con += [(scheme, "settings " + t, x) for x in page.evaluate(JS_CONTRAST, scheme)]
             page.evaluate("window.setTheme('light')")

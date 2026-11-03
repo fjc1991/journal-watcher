@@ -2,6 +2,14 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.2
+
+- Settings → AI & privacy has a **“Use one for everything”** row: pick a provider and a model once, press “Apply to all features”, then Save, instead of changing every feature one by one. It starts from what most features use now, shows how they are split, leaves the effort and the embeddings alone, and leaves the Ideas Lab’s current events as it is when the provider you picked cannot search the web. Any row can still be changed on its own, and the row has its own Test button.
+- The AI settings are now one **AI** tab with three pages under it: AI & privacy, Usage & cost and Prompts. That leaves seven tabs in Settings, which fit in one row at ordinary window sizes (a narrower window scrolls the row sideways instead of dropping the last tab onto a second line). Opening Settings → Usage & cost, from a link or the command palette, works as before, and coming back to the AI tab returns to the page you were on.
+- Pasting an API key is more forgiving: the `NAME=` of a whole `.env` line (for example `OPENROUTER_API_KEY=sk-or-…`), a leading “Bearer”, quotes and invisible characters are removed, and the page says what was tidied. A key that does not start the way that provider’s keys usually do (OpenRouter: `sk-or-`) gets a note, not a refusal. Before, a pasted `NAME=key` line was saved as it was and the provider answered 401 “User not found”.
+- A provider that refuses the key now says what to do (“press Change on its row and paste the key again”) next to its own message, for 401 and 403 answers.
+- A key you change takes effect at once. The app used to go on using the Anthropic key it had started with until it was restarted.
+
 ## 1.2.1
 
 - In a search by terms every match is a download. “Screen with AI” no longer skips a paper that contains your term. It adds topics, the method and a relevance order, and the card says “AI said skip” when the AI would have left it out. Terms searches you already screened are shown this way too.
