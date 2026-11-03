@@ -35,13 +35,13 @@ import paths  # noqa: E402
 import identity  # noqa: E402
 import signins  # noqa: E402
 
-BASE, ROOT, STATE, PAPERS = paths.BASE, paths.ROOT, paths.STATE, paths.PAPERS       # see paths.py: the project folder, or the app's data home
+BASE, ROOT, STATE, PAPERS, LOCAL = paths.BASE, paths.ROOT, paths.STATE, paths.PAPERS, paths.LOCAL       # see paths.py: the project folder, or the app's data home
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
-def load_env():
-    """Project-root .env, then the skill-folder .env (older layout)."""
+def read_dotenv():
+    """Only the .env files: project-root .env, then the skill-folder .env (older layout)."""
     env = {}
     for p in (os.path.join(BASE, ".env"), os.path.join(ROOT, ".env")):
         if os.path.exists(p):
@@ -50,6 +50,27 @@ def load_env():
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def key_names():
+    """The names of the API keys the AI providers use (from ai.json), for looking them up in the Keychain."""
+    names = {"ANTHROPIC_API_KEY"}
+    for ai_json in (os.path.join(BASE, "ai.json"),):
+        for p in ((load_json(ai_json, {}) or {}).get("providers") or {}).values():
+            if isinstance(p, dict) and p.get("key_env"):
+                names.add(str(p["key_env"]))
+    return sorted(names)
+
+
+def load_env():
+    """The .env files, with the API keys that are in this Mac's Keychain on top (a key you moved there wins over an old line left in a file)."""
+    env = read_dotenv()
+    try:
+        import keychain
+        env.update(keychain.values(key_names()))
+    except Exception:  # noqa: BLE001      (no Keychain, or it did not answer: the files are what there is)
+        pass
     return env
 
 

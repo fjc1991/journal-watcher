@@ -22,7 +22,7 @@ import ai  # noqa: E402
 import download as dl  # noqa: E402
 import folders as fo  # noqa: E402
 
-CACHE = os.path.join(dl.STATE, "personal_vecs.json")
+CACHE = os.path.join(dl.LOCAL, "personal_vecs.json")
 MIN_POS = 3                   # papers needed before a profile means anything
 FOLDER_Z = 1.8                # a paper is suggested for a folder only when it is this many standard deviations closer to it than the library's other papers
 _lock = threading.RLock()

@@ -11,7 +11,7 @@ const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's 
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
   ["skim", "Skim layer", "Finds the key sentences of a paper by lens (question, finding, limitation…)"]];
 const money = v => v == null ? "—" : v < 0.01 && v > 0 ? "$" + v.toFixed(4) : "$" + v.toFixed(2);
-const TABS = [["ai", "AI"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["about", "About & updates"]];
+const TABS = [["ai", "AI"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["sync", "Computers & sync"], ["about", "About & updates"]];
 const AI_SUBS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"]];      // three pages under the one main tab "AI" (their keys are unchanged: Settings.open("usage") still opens Usage & cost)
 const groupOf = t => AI_SUBS.some(([k]) => k === t) ? "ai" : t;
 let lastAI = "ai";      // the AI page you were on, for when you come back to the AI tab
@@ -42,7 +42,7 @@ function render() {
   $$(".st-sub button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   const on = $(".st-tabs button.on", root); if (on && on.scrollIntoView) on.scrollIntoView({block: "nearest", inline: "nearest"});      // a narrow window scrolls the row: keep the open tab in view
   const body = $("#st-body", root);
-  ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, about: renderAbout})[tab](body);
+  ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, sync: renderSync, about: renderAbout})[tab](body);
 }
 const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); };
 
@@ -56,10 +56,10 @@ function renderAI(body) {
   const mixed = "Now: " + tally("provider").map(([p, n]) => `${p} ×${n}`).join(", ") + ". Applies the provider and model to every feature below (not the effort, not embeddings), then press Save. Any row can still be changed on its own.";
   const used = [...new Set([...Object.values(A.features).map(f => f.model), A.embeddings.provider !== "local" ? A.embeddings.model : null].filter(Boolean))];
   body.innerHTML = `
-  <div class="card st-card"><h2>Providers</h2><p class="hint">Paste a key and it is saved in the <code>.env</code> file of your data folder (readable by you only); it is never shown again or sent anywhere but to its provider. No restart is needed. “Models you use” is a comma-separated list that fills the model pickers below; Test tries the first one.</p>
+  <div class="card st-card"><h2>Providers</h2><p class="hint">Paste a key and it is saved ${A.keychain ? "in this Mac’s Keychain (not in your data folder, so a synced folder never carries it to another computer)" : "in the <code>.env</code> file of your data folder (readable by you only)"}; it is never shown again or sent anywhere but to its provider. No restart is needed. “Models you use” is a comma-separated list that fills the model pickers below; Test tries the first one.</p>
     <div class="st-scroll"><table class="st-table st-prov"><colgroup><col class="c-prov"><col class="c-key"><col class="c-flag"><col class="c-flag"><col class="c-models"><col class="c-test"></colgroup>
     <tr><th>Provider</th><th>Key</th><th class="c">On this computer</th><th class="c">Web search</th><th>Models you use</th><th></th></tr>
-    ${provs.map(([n, p]) => `<tr data-p="${esc(n)}"><td><b>${esc(n)}</b></td><td>${!p.key_env ? `<div class="keycell"><span class="ok">no key needed</span></div>` : `<div class="keycell">${p.configured ? `<span class="ok keyok">✓ key found</span><button class="btn small" data-keychange="${esc(n)}">Change</button>` : ""}<span class="keyform${p.configured ? " hide" : ""}"><input type="password" autocomplete="off" spellcheck="false" aria-label="${esc(n)} API key (${esc(p.key_env)})" placeholder="paste your ${esc(p.key_env)}"><button class="btn small primary" data-savekey="${esc(n)}">Save key</button></span></div><div class="tres keymsg"></div>`}</td>
+    ${provs.map(([n, p]) => `<tr data-p="${esc(n)}"><td><b>${esc(n)}</b></td><td>${!p.key_env ? `<div class="keycell"><span class="ok">no key needed</span></div>` : `<div class="keycell">${p.configured ? `<span class="ok keyok">✓ key found${p.key_where ? ` <small class="kw">· ${esc(p.key_where)}</small>` : ""}</span><button class="btn small" data-keychange="${esc(n)}">Change</button>` : ""}<span class="keyform${p.configured ? " hide" : ""}"><input type="password" autocomplete="off" spellcheck="false" aria-label="${esc(n)} API key (${esc(p.key_env)})" placeholder="paste your ${esc(p.key_env)}"><button class="btn small primary" data-savekey="${esc(n)}">Save key</button></span></div><div class="tres keymsg"></div>`}</td>
       <td class="c">${p.local ? "✓" : "—"}</td><td class="c">${p.web_search ? "✓" : "—"}</td><td><input type="text" class="pm" aria-label="Models of ${esc(n)}, separated by commas" value="${esc((p.models || []).join(", "))}"></td>
       <td class="c-test"><button class="btn small" data-test="${esc(n)}">Test</button><div class="tres"></div></td></tr>`).join("")}</table></div></div>
   <div class="card st-card"><h2>Which model does what</h2>
@@ -250,6 +250,45 @@ async function renderFiles(body) {
       try { const r = await api("/api/aifiles/restore", {name: rs.dataset.restore}); R.kinds = r.kinds; R.trash = r.trash; draw(); toast(`Put back ${r.restored} file${r.restored === 1 ? "" : "s"}${r.skipped ? `; ${r.skipped} already existed again and were left alone` : ""}.`); window.dispatchEvent(new Event("jw-library-changed")); }
       catch (er) { notifyError(er); }
     }
+  };
+}
+// ---------------------------------------------------------------- Computers & sync (one data folder used from more than one computer, e.g. in Dropbox)
+const ago = s => s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + " minutes ago" : s < 129600 ? Math.round(s / 3600) + " hours ago" : Math.round(s / 86400) + " days ago";
+async function renderSync(body) {
+  body.innerHTML = `<div class="card st-card"><span class="ask-status">Looking…</span></div>`;
+  let R, AI = D.ai; try { R = await api("/api/sync"); AI = await api("/api/ai/config"); D.ai = AI; } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
+  const inEnv = Object.values(AI.providers).filter(p => p.key_env && p.key_where === ".env file").length;
+  const draw = () => {
+    body.innerHTML = `
+    <div class="card st-card"><h2>This computer</h2>
+      <p class="hint">Use the same data folder on every computer (put it in Dropbox) and each one starts where the other stopped. The name below is what the other computers call this one.</p>
+      <div class="row" style="gap:8px;align-items:center"><label for="sy-name">Name</label><input type="text" id="sy-name" maxlength="40" value="${esc(R.me.name)}" style="max-width:240px"><button class="btn small" id="sy-save">Save name</button><span class="st-msg" id="sy-msg"></span></div>
+      <p class="hint" style="margin-top:10px">Your data folder, shared between computers: <code>${esc(R.data_folder)}</code></p>
+      <p class="hint">${R.separate ? `Kept on this computer only (it does not travel with the folder): the browser used for library sign-ins, the search index, the language model, caches and the update state, in <code>${esc(R.local_folder)}</code>.` : "Everything, including the sign-in browser and the search index, is inside the data folder (the app was started from a project folder, not as the Mac app)."}</p></div>
+    <div class="card st-card"><h2>Other computers</h2>
+      ${R.computers.length ? `<table class="st-table" id="sy-comps"><tr><th>Computer</th><th>Last seen</th><th></th></tr>${R.computers.map(c => `<tr><td><b>${esc(c.name)}</b>${c.version ? ` <small>version ${esc(c.version)}</small>` : ""}</td><td>${ago(c.age_s)}</td><td>${c.open ? `<span class="pill">open now</span>` : ""}</td></tr>`).join("")}</table>
+      ${R.open_elsewhere.length ? `<p class="hint warn">The folder is open on ${R.open_elsewhere.map(c => esc(c.name)).join(" and ")} right now. Changes you make on both at once can collide (the same file changed twice): Dropbox then keeps two copies and they show up below. Working on one computer at a time avoids it.</p>` : `<p class="hint">None is open at the moment.</p>`}`
+      : `<p class="hint">No other computer has used this folder yet. Install the app on the other computer and choose this same folder when it asks.</p>`}</div>
+    <div class="card st-card" id="sy-conf"><h2>Copies Dropbox had to make ${R.conflicts.length ? `<small>${R.conflicts.length}</small>` : ""}</h2>
+      ${R.conflicts.length ? `<p class="hint">When two computers change the same file before Dropbox has copied the first change, Dropbox keeps both and renames one “… conflicted copy …”. Nothing is deleted by the buttons here: a copy you set aside goes to <code>Papers/_conflicts/</code>.</p>
+      <table class="st-table"><tr><th>File</th><th>Changed</th><th></th></tr>${R.conflicts.map(c => `<tr data-p="${esc(c.path)}"><td><code>${esc(c.path)}</code><div class="pmeta">copy of <code>${esc(c.original)}</code>${c.original_exists ? "" : " (that file is gone)"}</div></td><td>${esc(c.modified.slice(0, 10))}</td>
+        <td>${c.kind === "index" && c.original_exists ? `<button class="btn small primary" data-merge="${esc(c.path)}" title="Keeps every paper from both lists">Join the two lists</button> ` : ""}<button class="btn small" data-aside="${esc(c.path)}">Set aside</button></td></tr>`).join("")}</table>`
+      : `<p class="hint ok">✓ None. Dropbox has not had to duplicate any of your files.</p>`}</div>
+    <div class="card st-card"><h2>API keys</h2>
+      ${AI.keychain ? `<p class="hint">API keys can live in this Mac’s Keychain instead of the <code>.env</code> file in your data folder, so a synced folder never carries them to another computer. You paste each key once on each computer. A key you paste in Settings is saved there from now on.</p>
+      ${inEnv ? `<p class="hint warn">${inEnv} key${inEnv === 1 ? " is" : "s are"} still in the <code>.env</code> file inside the data folder (readable in Dropbox).</p><div class="row" style="gap:8px"><button class="btn primary" id="sy-keys">Move ${inEnv === 1 ? "it" : "them"} to the Keychain</button><span class="st-msg" id="sy-kmsg"></span></div>
+      <p class="hint">Each key is read back from the Keychain before its line is removed from the file. Dropbox keeps earlier versions of files, so after moving, create new keys at your AI providers and delete the old ones.</p>` : `<p class="hint ok">✓ No key is stored in a file in your data folder.</p>`}`
+      : `<p class="hint">Keys are saved in the <code>.env</code> file of your data folder. The Keychain is only available in the Mac app.</p>`}</div>`;
+  };
+  draw();
+  body.onclick = async e => {
+    const msg = $("#sy-msg", body), b = e.target.closest("button"); if (!b) return;
+    try {
+      if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); draw(); toast("Name saved."); }
+      else if (b.dataset.merge) { const r = await api("/api/sync", {action: "merge", path: b.dataset.merge}); R = r; draw(); toast(`Joined: ${r.papers} papers in the list (${r.added} from the other copy). The copy was set aside.`); window.dispatchEvent(new Event("jw-library-changed")); }
+      else if (b.dataset.aside) { if (!confirm("Set this copy aside?\n\n" + b.dataset.aside + "\n\nIt moves to Papers/_conflicts/ and is not deleted.")) return; R = await api("/api/sync", {action: "set_aside", path: b.dataset.aside}); draw(); toast("Set aside."); }
+      else if (b.id === "sy-keys") { const r = await api("/api/ai/keys/move", {}); D.ai = r.config; AI = r.config; R = await api("/api/sync"); draw(); toast(r.moved.length ? `Moved ${r.moved.length} key${r.moved.length === 1 ? "" : "s"} to the Keychain.` : "Nothing was moved."); if (Object.keys(r.kept).length) { const m = $("#sy-kmsg", body); if (m) m.textContent = "Not moved: " + Object.entries(r.kept).map(([k, v]) => k + " (" + v + ")").join("; "); } }
+    } catch (er) { if (msg) note(msg, er.message, true); else notifyError(er); }
   };
 }
 function renderLook(body) {

@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 
-CACHE = os.path.join(dl.STATE, "authors_cache.json")
+CACHE = os.path.join(dl.LOCAL, "authors_cache.json")
 RETRY_AFTER = 3 * 86400
 _mem = {}
 
@@ -68,7 +68,7 @@ def backfill(rows, lookup=None):
             continue
         c[doi.lower()] = {"authors": names, "ts": now}
         n += 1 if names else 0
-    os.makedirs(dl.STATE, exist_ok=True)
+    os.makedirs(dl.LOCAL, exist_ok=True)
     tmp = CACHE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(c, f, ensure_ascii=False)

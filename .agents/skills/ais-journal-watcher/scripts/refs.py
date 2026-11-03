@@ -111,7 +111,7 @@ def match_library(refs, rows):
 
 def cite_info(doi):
     """Title, venue, citation count and TL;DR from Semantic Scholar's public API; cached; {} if it can't be reached."""
-    path = os.path.join(dl.STATE, "cite_cache.json")
+    path = os.path.join(dl.LOCAL, "cite_cache.json")
     cache = dl.load_json(path, {}) if os.path.exists(path) else {}
     key = doi.lower()
     if key in cache:
@@ -126,7 +126,7 @@ def cite_info(doi):
     except Exception:  # noqa: BLE001
         return {}
     cache[key] = info
-    os.makedirs(dl.STATE, exist_ok=True)
+    os.makedirs(dl.LOCAL, exist_ok=True)
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False)
     os.replace(path + ".tmp", path)

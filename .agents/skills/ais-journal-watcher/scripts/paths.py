@@ -14,6 +14,7 @@ the environment variable JW_HOME names it (the app sets it), and it has the same
     STATIC the dashboard's html/css/js (always code)    DEFAULTS  the settings a new home starts from
     cmd(script, *args)  the command line that runs one of the scripts in its own process (the app re-runs itself for it)
 """
+import hashlib
 import os
 import sys
 
@@ -35,6 +36,45 @@ else:
     ROOT = os.path.abspath(os.path.join(BASE, "..", "..", ".."))
 STATE = os.path.join(BASE, "state")
 PAPERS = os.path.join(ROOT, "Papers")
+
+
+def _local_dir():
+    """Where the files that belong to THIS computer live. The data folder may be synced between computers (Dropbox): what must not travel (the sign-in browser's profile and
+    cookies, the search index, the embedding model, the caches, the lock that says a dashboard runs here) lives outside it. JW_LOCAL names the folder (tests, scripts); the Mac app
+    uses ~/Library/Application Support/Journal Watcher/local/<one folder per data folder>; a run from a checkout keeps everything in state/ as before."""
+    env = os.environ.get("JW_LOCAL")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    if FROZEN:
+        h = hashlib.sha1(os.path.realpath(ROOT).encode("utf-8")).hexdigest()[:10]
+        return os.path.join(os.path.expanduser("~/Library/Application Support/Journal Watcher/local"), h)
+    return STATE
+
+
+LOCAL = _local_dir()
+# the entries of state/ that belong to one computer (everything else in state/ is shared with the data folder: run history, what was screened and seen, the AI spending ledger, backups)
+LOCAL_ITEMS = ("browser-profile", "session-cookies.json", "signins.json", "update_state.json", "models", "ai_cache", "index", "staging", "fetched",
+               "crossref_cache.json", "authors_cache.json", "openalex_cache.json", "cite_cache.json", "personal_vecs.json")
+
+
+def migrate_local(say=None):
+    """Move per-computer entries that an earlier version left in state/ (inside the data folder) to LOCAL, once. Returns the names moved. An entry that is already in LOCAL stays; one that
+    cannot be moved is left where it is (it works from there)."""
+    import shutil
+    moved = []
+    if os.path.realpath(LOCAL) == os.path.realpath(STATE) or not os.path.isdir(STATE):
+        return moved
+    os.makedirs(LOCAL, exist_ok=True)
+    for name in LOCAL_ITEMS:
+        src, dst = os.path.join(STATE, name), os.path.join(LOCAL, name)
+        if os.path.lexists(src) and not os.path.lexists(dst):
+            try:
+                shutil.move(src, dst)
+                moved.append(name)
+            except OSError as e:
+                if say:
+                    say("Could not move %s out of the data folder: %s" % (name, e))
+    return moved
 
 if FROZEN:
     DASHBOARD = os.path.join(RES, "dashboard")
@@ -62,6 +102,8 @@ def seed_home():
     import shutil
     os.makedirs(PAPERS, exist_ok=True)
     os.makedirs(STATE, exist_ok=True)
+    os.makedirs(LOCAL, exist_ok=True)
+    migrate_local()
     if os.path.abspath(DEFAULTS) == os.path.abspath(BASE):
         return
     os.makedirs(BASE, exist_ok=True)

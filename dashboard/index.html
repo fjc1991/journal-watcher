@@ -243,6 +243,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
   <button class="btn icon sb-toggle" id="sbtoggle" aria-label="Show or hide the sidebar" title="Show or hide the sidebar"><svg class="ico"><use href="/static/icons.svg#i-menu"/></svg></button>
   <div class="tb-title" id="tbtitle"></div>
   <div class="spacer"></div>
+  <button class="btn sync-pill hide" id="syncpill" aria-label="Data folder shared with another computer"><svg class="ico sm"><use href="/static/icons.svg#i-redo"/></svg><span></span></button>
   <button class="btn upd-pill hide" id="updatepill" aria-haspopup="dialog" title="A new version is ready"><svg class="ico sm"><use href="/static/icons.svg#i-download"/></svg><span>Update</span></button>
   <button class="btn at-btn" id="aibtn" disabled aria-haspopup="dialog" aria-expanded="false" title="AI activity: what ran, what it cost, cancel"><svg class="ico sm at-ico"><use href="/static/icons.svg#i-sparkle"/></svg><span class="at-t">AI</span></button>
   <span class="pill" id="status"><span class="dot"></span><span id="statustext">Idle</span></span>
@@ -1304,6 +1305,7 @@ init().catch(e => { $("#runtitle").textContent = "Can’t reach the dashboard se
 <script type="module" src="/static/listen.js"></script>
 <script type="module" src="/static/twin.js"></script>
 <script type="module" src="/static/update.js"></script>
+<script type="module" src="/static/syncbar.js"></script>
 <script type="module" src="/static/welcome.js"></script>
 <script type="module" src="/static/activity.js"></script>
 <script type="module" src="/static/settings.js"></script>

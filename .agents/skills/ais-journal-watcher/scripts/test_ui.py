@@ -369,7 +369,7 @@ def main():
     srv_up = ThreadingHTTPServer(("127.0.0.1", 0), FakeFeed)
     threading.Thread(target=srv_up.serve_forever, daemon=True).start()
     feed["url"] = "http://127.0.0.1:%d/j.zip" % srv_up.server_address[1]
-    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
+    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_NO_KEYCHAIN": "1", "JW_LOCAL": os.path.join(TMP, "local-state"), "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
     marker = os.path.join(TMP, "download-called.txt")
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
@@ -836,7 +836,7 @@ imp.crossref_search = fake_imp_search
             check("…and even then the 'Models you use' box keeps room for a model name (the table scrolls before it collapses)", pm_w >= 140, str(pm_w))
             page.set_viewport_size({"width": 1400, "height": 950})
             check("settings: 'Screening new papers' has its own model row (the budget and the usage page now cover it), pointing at a provider that exists", page.locator("tr[data-f='screen']").count() == 1 and page.input_value("tr[data-f='screen'] .fm") != "" and page.input_value("tr[data-f='screen'] .fp") in api("/api/ai/config")["providers"] and "screen" in api("/api/ai/config")["features"])
-            check("Settings has ONE 'AI' tab with three pages under it (AI & privacy, Usage & cost, Prompts); they are not tabs of their own", page.locator(".st-tabs button").count() == 7 and [b.inner_text() for b in page.locator(".st-sub button").all()] == ["AI & privacy", "Usage & cost", "Prompts"] and page.inner_text(".st-tabs .on").strip() == "AI" and page.locator(".st-tabs button[data-t='usage']").count() == 0)
+            check("Settings has ONE 'AI' tab with three pages under it (AI & privacy, Usage & cost, Prompts); they are not tabs of their own", page.locator(".st-tabs button").count() == 8 and [b.inner_text() for b in page.locator(".st-sub button").all()] == ["AI & privacy", "Usage & cost", "Prompts"] and page.inner_text(".st-tabs .on").strip() == "AI" and page.locator(".st-tabs button[data-t='usage']").count() == 0)
             page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat"); page.click('.st-tabs button[data-t="reader"]'); page.wait_for_selector(".legend")
             check("the pages under AI show only on the AI tab", page.locator("#st-sub:not(.hide)").count() == 0)
             page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector(".st-stat")
@@ -1484,7 +1484,7 @@ imp.crossref_search = fake_imp_search
             PDF = lambda b, n: [b, n, "application/pdf"]
             n_lib = lambda: len(api("/api/library")); folder = lambda i: next(f for f in api("/api/folders") if f["id"] == i)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); n0 = n_lib()
-            STAGING = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "staging")
+            STAGING = os.path.join(TMP, "local-state", "staging")       # (the server runs with JW_LOCAL: staged PDFs are per-computer files)
             staged = lambda: len([n for n in os.listdir(STAGING) if n.endswith(".pdf")]) if os.path.isdir(STAGING) else 0
             imp_log = lambda: open(os.path.join(TMP, "imp.log")).read() if os.path.exists(os.path.join(TMP, "imp.log")) else ""
             ov = page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha.pdf")], True])
@@ -1564,6 +1564,43 @@ imp.crossref_search = fake_imp_search
             check("Add a paper → choosing a PDF opens the same review dialog (Library only), not a silent import", page.locator("#adddlg[open]").count() == 0 and page.input_value("#ir-to") == "lib" and n_lib() == n0 + 2)
             page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
 
+            print("computers and sync")
+            import datetime as _dt
+            base_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher"); devdir = os.path.join(base_, "devices"); os.makedirs(devdir, exist_ok=True)
+            seen_now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+            json.dump({"id": "a" * 32, "name": "Work Mac", "seen": seen_now, "pid": 1, "version": "1.2.2"}, open(os.path.join(devdir, "a" * 32 + ".json"), "w"))
+            json.dump({"id": "b" * 32, "name": "Old desk", "seen": (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=3)).isoformat(timespec="seconds"), "pid": 2, "version": "1.2.1"}, open(os.path.join(devdir, "b" * 32 + ".json"), "w"))
+            idx_path = os.path.join(TMP, "Papers", "_index.csv"); idx_rows = list(csv.DictReader(open(idx_path, newline="")))
+            extra = dict(idx_rows[0], title="A paper only the other computer knew", doi="10.7777/other.1", file="", status="failed")
+            with open(os.path.join(TMP, "Papers", "_index (Work Mac's conflicted copy 2026-11-03).csv"), "w", newline="") as f:
+                w_ = csv.DictWriter(f, list(idx_rows[0].keys())); w_.writeheader(); w_.writerows(idx_rows + [extra])
+            api("/api/sync")          # (the status call below uses the scan of the last 20 seconds: this one makes a fresh one)
+            st_ = api("/api/sync/status")
+            check("the server knows which other computer has the folder open and how many conflicted copies there are", st_["open"] == ["Work Mac"] and st_["conflicts"] == 1, str(st_))
+            page.goto(base + "/"); page.wait_for_selector("#syncpill:not(.hide)", timeout=10000)
+            check("the top bar says so, in words: 'Also open on Work Mac · 1 conflicting copy'", "Also open on Work Mac" in page.inner_text("#syncpill") and "1 conflicting copy" in page.inner_text("#syncpill"), page.inner_text("#syncpill"))
+            page.click("#syncpill"); page.wait_for_selector("#sy-comps", timeout=10000)
+            check("pressing it opens Settings → Computers & sync", page.inner_text(".st-tabs .on").strip() == "Computers & sync" and page.locator(".st-tabs button").count() == 8)
+            check("…which lists the other computers (open now / last seen), warns that both open at once can collide, and says what stays on this computer", "open now" in page.inner_text("#sy-comps") and "Old desk" in page.inner_text("#sy-comps") and "3 days ago" in page.inner_text("#sy-comps") and "Work Mac right now" in page.inner_text("#st-body") and "Kept on this computer only" in page.inner_text("#st-body"))
+            check("…and shows the conflicted copy with what it is a copy of", "_index (Work Mac" in page.inner_text("#sy-conf") and "Papers/_index.csv" in page.inner_text("#sy-conf") and page.locator("[data-merge]").count() == 1)
+            page.fill("#sy-name", "Home laptop"); page.click("#sy-save"); page.wait_for_function("document.querySelector('#sy-name') && document.querySelector('#sy-name').value === 'Home laptop'")
+            me_ = api("/api/sync")["me"]
+            mine_ = [json.load(open(os.path.join(devdir, n)))["name"] for n in os.listdir(devdir) if n.startswith(me_["id"])]
+            check("this computer can be renamed, and the other computers see the new name at once", me_["name"] == "Home laptop" and mine_ == ["Home laptop"], str((me_, mine_)))
+            n_before = len(list(csv.DictReader(open(idx_path, newline=""))))
+            page.click("[data-merge]"); page.wait_for_selector("#sy-conf .hint.ok", timeout=10000)
+            after_ = list(csv.DictReader(open(idx_path, newline="")))
+            check("'Join the two lists' keeps every paper of both copies, and sets the copy aside instead of deleting it", len(after_) == n_before + 1 and any(r["doi"] == "10.7777/other.1" for r in after_) and not os.path.exists(os.path.join(TMP, "Papers", "_index (Work Mac's conflicted copy 2026-11-03).csv"))
+                  and any("conflicted copy" in n for _, _, fs_ in os.walk(os.path.join(TMP, "Papers", "_conflicts")) for n in fs_))
+            open(os.path.join(base_, "interests (Work Mac's conflicted copy 2026-11-03).json"), "w").write("{}")
+            page.click('.st-tabs button[data-t="look"]'); page.click('.st-tabs button[data-t="sync"]'); page.wait_for_selector("[data-aside]", timeout=10000)
+            check("another kind of file (settings) can only be set aside, not 'joined'", page.locator("[data-merge]").count() == 0 and page.locator("[data-aside]").count() == 1)
+            page.click("[data-aside]"); page.wait_for_selector("#sy-conf .hint.ok", timeout=10000)
+            check("setting it aside moves it to Papers/_conflicts and leaves the real file alone", not os.path.exists(os.path.join(base_, "interests (Work Mac's conflicted copy 2026-11-03).json")) and os.path.exists(os.path.join(base_, "interests.json")) and api("/api/sync/status")["conflicts"] == 0)
+            check("without the Mac's Keychain the API keys card says they are kept in the .env file", ".env" in page.inner_text("#st-body") and page.locator("#sy-keys").count() == 0)
+            os.remove(os.path.join(devdir, "a" * 32 + ".json")); page.goto(base + "/"); page.wait_for_timeout(1200)
+            check("when nothing needs saying the top bar says nothing", page.locator("#syncpill.hide").count() == 1)
+
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")
             page.wait_for_selector("#sbfolders .sbf")      # the palette lists the folders the page has loaded by then
@@ -1586,7 +1623,7 @@ imp.crossref_search = fake_imp_search
             for w_ in (1000, 1200, 1500, 2000):
                 page.set_viewport_size({"width": w_, "height": 900}); page.wait_for_timeout(150); rows_[w_] = page.evaluate(JS_TABROW)
             page.set_viewport_size({"width": 1400, "height": 950})
-            check("the seven Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 7 and r == 1 for n, r in rows_.values()), str(rows_))
+            check("the eight Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 8 and r == 1 for n, r in rows_.values()), str(rows_))
             page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)"); page.keyboard.press("Escape")
             check("Esc closes the palette", page.locator("#pal.hide").count() == 1)
             page.click("#settingsbtn"); page.wait_for_selector("#settings.hide", state="attached")
@@ -2069,7 +2106,8 @@ imp.crossref_search = fake_imp_search
             print("one dashboard per project")
             second = subprocess.run([sys.executable, os.path.join(TMP, "dashboard", "server.py"), "--port", str(port + 1), "--no-open"], cwd=TMP, env=env, capture_output=True, text=True, timeout=60)
             check("a second dashboard on the same project does not start; it says where the first one runs", second.returncode == 0 and "already running" in second.stdout and ":%d" % port in second.stdout, second.stdout[:300] + second.stderr[-200:])
-            lock = json.load(open(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "server.lock")))
+            lock = json.load(open(os.path.join(TMP, "local-state", "server.lock")))
+            check("the lock that says a dashboard runs here is a per-computer file: it is not in the data folder (a synced folder must not carry it to another computer)", not os.path.exists(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "server.lock")))
             check("the lock file names the running one, and it is unharmed", lock["port"] == port and lock["pid"] == srv.pid and api("/api/config")["model"])
 
             print("your library as an MCP server (read-only)")

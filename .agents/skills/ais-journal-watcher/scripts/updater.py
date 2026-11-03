@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402
 
 SETTINGS = os.path.join(paths.BASE, "update.json")
-STATE_FILE = os.path.join(paths.STATE, "update_state.json")
+STATE_FILE = os.path.join(paths.LOCAL, "update_state.json")
 SUPPORT = os.environ.get("JW_UPDATE_DIR") or os.path.expanduser("~/Library/Application Support/Journal Watcher/updates")        # downloads and the swap script (JW_UPDATE_DIR: tests)
 CHECK_EVERY = 6 * 3600
 MAX_FEED = 262144

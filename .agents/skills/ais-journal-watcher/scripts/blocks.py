@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import notes_store as ns  # noqa: E402
 
-INDEX = os.path.join(dl.STATE, "index")
+INDEX = os.path.join(dl.LOCAL, "index")
 LIG = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl", "­": "", " ": " "}
 MAX_CHARS = 1400      # longer paragraphs are split
 MIN_CHARS = 25        # shorter ones (page numbers, stray labels) are dropped

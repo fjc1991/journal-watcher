@@ -25,6 +25,7 @@ _HOME = tempfile.mkdtemp(prefix="jw-reader-home-")
 os.environ["JW_HOME"] = _HOME
 atexit.register(shutil.rmtree, _HOME, ignore_errors=True)
 sys.path.insert(0, HERE)
+os.environ["JW_NO_KEYCHAIN"] = "1"      # the tests never touch the Keychain of whoever runs them; the Keychain tests start their own processes with a fake store or a temporary keychain
 import paths  # noqa: E402
 paths.seed_home()
 import ai  # noqa: E402
@@ -651,6 +652,243 @@ def main():
             importer._file = orig_file
             shutil.rmtree(importer.STAGING, ignore_errors=True)
     check("review rules: a token is claimed once (and restored if filing fails), a name clash never overwrites a PDF, expired staged PDFs are refused and swept, dates must be real, a paper is recognised with or without a DOI, the confirmed journal is kept, and a title alone is not 'confirmed'", t_import_review_rules)
+    def t_local_state():
+        """The data folder can be synced between computers, so what belongs to one computer lives outside it (paths.LOCAL) and what you want on both stays inside (state/)."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            probe = r'''
+import json, os, sys
+sys.path.insert(0, %r)
+import paths
+st = os.path.join(paths.BASE, "state")
+for n, body in (("browser-profile/Default/x", "p"), ("index/a.json", "{}"), ("models/m.bin", "m"), ("verdicts.json", "{}"), ("ai_usage.jsonl", ""), ("signins.json", "{}"), ("runs/r.json", "{}")):
+    os.makedirs(os.path.dirname(os.path.join(st, n)), exist_ok=True); open(os.path.join(st, n), "w").write(body)
+os.makedirs(os.path.join(paths.LOCAL, "index"), exist_ok=True); open(os.path.join(paths.LOCAL, "index", "b.json"), "w").write("{}")   # (already there: the old copy must stay)
+moved = paths.migrate_local(); again = paths.migrate_local()
+import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard
+out = {"local": paths.LOCAL, "state": paths.STATE, "moved": moved, "again": again,
+       "where": {"models": ai.MODELS, "ai_cache": ai.CACHE, "index": blocks.INDEX, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
+                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED},
+       "shared": {"ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
+       "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL))}
+print("JSON" + json.dumps(out))
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", probe], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0, r.stderr[-800:]
+            o = json.loads(r.stdout.split("JSON", 1)[1])
+            under = lambda p, d: os.path.realpath(p).startswith(os.path.realpath(d) + os.sep)
+            for k, p in o["where"].items():
+                assert under(p, o["local"]) and not under(p, o["state"]), (k, p)
+            for k, p in o["shared"].items():
+                assert under(p, o["state"]) and not under(p, o["local"]), (k, p)
+            assert sorted(o["moved"]) == ["browser-profile", "models", "signins.json"] and o["again"] == [], o["moved"]       # (index was already in LOCAL: its old copy stays)
+            assert "verdicts.json" in o["left_in_state"] and "ai_usage.jsonl" in o["left_in_state"] and "runs" in o["left_in_state"] and "index" in o["left_in_state"], o["left_in_state"]
+            assert "browser-profile" in o["in_local"] and "models" in o["in_local"] and "verdicts.json" not in o["in_local"], o["in_local"]
+            # without JW_LOCAL, from a checkout, nothing changes: everything stays in state/
+            r2 = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); import paths; print(paths.LOCAL == paths.STATE, paths.migrate_local())" % HERE], env=dict(env, JW_HOME=home), capture_output=True, text=True, timeout=60)
+            assert r2.stdout.strip() == "True []", r2.stdout + r2.stderr
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("sync: per-computer files (sign-in browser profile, cookies, search index, models, caches, update state, staged PDFs) live outside the data folder, shared ones stay in it, an old copy is moved once, a checkout is unchanged", t_local_state)
+    def t_sync_info():
+        """Two computers share one data folder: each says when it is here, Dropbox's conflicted copies are found, the library index copies can be joined without losing a paper, and any copy can be set aside (never deleted)."""
+        import subprocess
+        real_home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        home = real_home + "-link"
+        os.symlink(real_home, home)           # the data folder is reached through a link (~/Dropbox, or /var on a Mac): the paths shown and used must still be relative to the folder itself
+        try:
+            child = r'''
+import csv, json, os, sys, time
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import download as dl, syncinfo as sy
+P = paths.PAPERS
+iso = lambda dt: dt.isoformat(timespec="seconds")
+now = datetime.now(timezone.utc)
+
+# -- who is here
+a = sy.me(); assert a == sy.me() and len(a["id"]) == 32 and a["name"], a                        # (made once, kept in LOCAL)
+assert os.path.exists(os.path.join(paths.LOCAL, "device.json")) and not os.path.exists(os.path.join(paths.BASE, "devices", "device.json"))
+assert sy.rename("  Home   laptop ")["name"] == "Home laptop" and sy.me()["name"] == "Home laptop"
+for bad in ("", "   ", None):
+    try:
+        sy.rename(bad); raise AssertionError("empty name accepted")
+    except ValueError:
+        pass
+sy.beat(); mine = os.path.join(paths.BASE, "devices", a["id"] + ".json")
+assert json.load(open(mine))["name"] == "Home laptop" and sy.computers() == [] and sy.others() == [], "this computer is not listed among the others"
+D = os.path.join(paths.BASE, "devices"); put = lambda i, **k: json.dump({"id": i, "name": "Work Mac", "seen": iso(now), "pid": 1, "version": "1.2.2", **k}, open(os.path.join(D, i + ".json"), "w"))
+put("1" * 32); put("2" * 32, name="Old desk", seen=iso(now - timedelta(minutes=10))); put("3" * 32, name="Ancient", seen=iso(now - timedelta(days=90))); put("4" * 32, seen="yesterday"); put("zz")
+open(os.path.join(D, "junk.json"), "w").write("{not json")
+c = sy.computers()
+assert [x["name"] for x in c] == ["Work Mac", "Old desk"] and [x["open"] for x in c] == [True, False], c      # (open first; 10 minutes ago is not 'open'; ancient and broken files are not shown)
+assert [x["name"] for x in sy.others()] == ["Work Mac"] and not os.path.exists(os.path.join(D, "3" * 32 + ".json")), "a computer not seen for 60 days is forgotten"
+assert sy.others(now + timedelta(minutes=5)) == [], "three minutes later it is no longer open"
+sy.leave(); assert not os.path.exists(mine)
+
+# -- Dropbox conflicts: found, described, left alone when they only look similar
+os.makedirs(os.path.join(P, "2024-05", "Journal"), exist_ok=True); os.makedirs(os.path.join(P, "_conflicts", "x"), exist_ok=True); os.makedirs(os.path.join(P, "_removed", "y"), exist_ok=True)
+cols = dl.INDEX_COLS
+def write_csv(p, rows):
+    with open(p, "w", newline="") as f:
+        w = csv.DictWriter(f, cols); w.writeheader(); w.writerows(rows)
+def row(title, doi, status="ok", file="", date="2026-11-01"):
+    return dict(zip(cols, [date, "J", "J", title, "A B", doi, "", "", "", file, status, ""]))
+open(os.path.join(P, "2024-05", "Journal", "kept.pdf"), "wb").write(b"%%PDF")
+write_csv(os.path.join(P, "_index.csv"), [row("Alpha", "10.1/a", file="Papers/2024-05/Journal/kept.pdf", date="2026-10-01"), row("Beta", "10.1/b", status="failed", date="2026-10-02")])
+cp = os.path.join(P, "_index (Joe's MacBook's conflicted copy 2026-11-03).csv")
+write_csv(cp, [row("Beta", "10.1/b", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02"), row("Gamma", "10.1/c", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02"),
+              row("Alpha", "10.1/a", status="failed", date="2026-11-02")])         # (the other computer failed to download Alpha later: the copy that HAS the PDF still wins)
+open(os.path.join(paths.BASE, "ai (conflicted copy).json"), "w").write("{}")
+open(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)"), "w").write("X=1")
+for decoy in (os.path.join(P, "paper (1).pdf"), os.path.join(P, "_conflicts", "x", "old (conflicted copy).csv"), os.path.join(P, "_removed", "y", "z (conflicted copy).pdf"), os.path.join(paths.LOCAL, "q (conflicted copy).json")):
+    open(decoy, "wb").write(b"x")
+found = {x["path"]: x for x in sy.conflicts(fresh=True)}
+assert sorted(found) == sorted(["Papers/_index (Joe's MacBook's conflicted copy 2026-11-03).csv", ".agents/skills/ais-journal-watcher/ai (conflicted copy).json", ".env (Work Mac's conflicted copy 2026-11-03)"]), sorted(found)
+ix = found["Papers/_index (Joe's MacBook's conflicted copy 2026-11-03).csv"]
+assert ix["kind"] == "index" and ix["original"] == "Papers/_index.csv" and ix["original_exists"] and found[".agents/skills/ais-journal-watcher/ai (conflicted copy).json"]["kind"] == "json"
+
+# -- joining the two library indexes loses no paper; the same paper keeps its better row
+r = sy.merge_index(ix["path"])
+rows = {x["doi"]: x for x in csv.DictReader(open(os.path.join(P, "_index.csv"), newline=""))}
+assert sorted(rows) == ["10.1/a", "10.1/b", "10.1/c"] and r["papers"] == 3 and r["added"] == 1, (sorted(rows), r)
+assert rows["10.1/b"]["status"] == "ok" and rows["10.1/b"]["file"], "the downloaded row beats the failed one (when it is in the copy)"
+assert rows["10.1/a"]["status"] == "ok" and rows["10.1/a"]["file"], "…and when it is in the original, even though the failed row is newer"
+assert rows["10.1/a"]["file"] and not os.path.exists(cp) and os.path.exists(os.path.join(paths.ROOT, r["set_aside"])) and r["set_aside"].startswith("Papers/_conflicts/"), r
+assert len([x for x in sy.conflicts(fresh=True) if x["kind"] == "index"]) == 0
+# only the library index can be joined; anything else, or a path that is not a conflicted copy, is refused
+for bad, fns in ((".agents/skills/ais-journal-watcher/ai (conflicted copy).json", (sy.merge_index,)), ("Papers/_index.csv", (sy.merge_index, sy.set_aside)), ("../outside", (sy.merge_index, sy.set_aside)),
+                 ("", (sy.merge_index, sy.set_aside)), (None, (sy.merge_index, sy.set_aside)), ("Papers/2024-05", (sy.merge_index, sy.set_aside)), ("Papers/paper (1).pdf", (sy.merge_index, sy.set_aside)),
+                 ("/etc/passwd", (sy.merge_index, sy.set_aside))):
+    for fn in fns:
+        try:
+            fn(bad); raise AssertionError("%%s accepted %%r" %% (fn.__name__, bad))
+        except ValueError:
+            pass
+assert os.path.exists(os.path.join(paths.BASE, "ai (conflicted copy).json")), "a refused request moves nothing"
+# setting aside moves (never deletes) and keeps the place it came from
+w = sy.set_aside(".env (Work Mac's conflicted copy 2026-11-03)")
+assert os.path.exists(os.path.join(paths.ROOT, w)) and w.startswith("Papers/_conflicts/") and not os.path.exists(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)")) and open(os.path.join(paths.ROOT, w)).read() == "X=1"
+i = sy.info(); assert i["separate"] and i["me"]["name"] == "Home laptop" and len(i["conflicts"]) == 1 and i["data_folder"] == paths.ROOT
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            os.remove(home); shutil.rmtree(real_home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("sync: each computer says it is here (and is forgotten when it stops), Dropbox's conflicted copies are found, the library index copies join without losing a paper, copies are set aside and never deleted, bad paths are refused", t_sync_info)
+    def t_keychain_keys():
+        """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain
+        key wins over an old line; what cannot be held there stays in the file."""
+        import subprocess
+        home, loc, fake = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-"), os.path.join(tempfile.mkdtemp(prefix="jw-kc-"), "kc.json")
+        try:
+            child = r'''
+import json, os, sys
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import download as dl, ai, keychain
+env_path = os.path.join(paths.ROOT, ".env")
+open(env_path, "w").write("# my keys\nANTHROPIC_API_KEY=sk-ant-old-in-file\nOPENAI_API_KEY=sk-in-file-too\nUNPAYWALL_EMAIL=me@example.org\nOPENROUTER_API_KEY=sk-or-has$dollar\n")
+assert keychain.available() and keychain.get("ANTHROPIC_API_KEY") == ""
+# a pasted key goes to the Keychain and its old line leaves the file; the other lines stay
+ai.set_key("anthropic", "  ANTHROPIC_API_KEY=sk-ant-new-key-123  ")
+assert keychain.get("ANTHROPIC_API_KEY") == "sk-ant-new-key-123"
+txt = open(env_path).read()
+assert "sk-ant" not in txt and "UNPAYWALL_EMAIL=me@example.org" in txt and "# my keys" in txt and "OPENAI_API_KEY=sk-in-file-too" in txt, txt
+assert dl.load_env()["ANTHROPIC_API_KEY"] == "sk-ant-new-key-123" and ai._key("ANTHROPIC_API_KEY")
+c = ai.config()
+assert c["keychain"] is True and c["providers"]["anthropic"]["key_where"] == "Keychain" and c["providers"]["anthropic"]["configured"], c["providers"]["anthropic"]
+assert "Keychain" in ai.set_key("anthropic", "sk-ant-second-key-456").get("key_note", "") and keychain.get("ANTHROPIC_API_KEY") == "sk-ant-second-key-456"       # (replaced, not added)
+# a Keychain key wins over a line left in the file
+open(env_path, "a").write("ANTHROPIC_API_KEY=sk-ant-stale-line\n")
+assert dl.load_env()["ANTHROPIC_API_KEY"] == "sk-ant-second-key-456"
+# a key with a character the helper cannot take safely stays in the file, as before
+ai.set_key("openrouter", "sk-or-abc$def")
+assert keychain.get("OPENROUTER_API_KEY") == "" and "OPENROUTER_API_KEY=sk-or-abc$def" in open(env_path).read() and ai.config()["providers"]["openrouter"]["key_where"] == ".env file"
+# moving the keys in the file: copied, read back, then their lines are removed; the one that cannot be held stays and says why
+r = ai.move_keys_to_keychain()
+assert r["moved"] == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] and list(r["kept"]) == ["OPENROUTER_API_KEY"], r
+txt = open(env_path).read()
+assert "OPENAI_API_KEY" not in txt and "ANTHROPIC_API_KEY" not in txt and "OPENROUTER_API_KEY=sk-or-abc$def" in txt and "UNPAYWALL_EMAIL=me@example.org" in txt and "# my keys" in txt, txt
+assert keychain.get("OPENAI_API_KEY") == "sk-in-file-too" and ai.config()["providers"]["openai"]["key_where"] == "Keychain"
+assert ai.move_keys_to_keychain() == {"moved": [], "kept": {"OPENROUTER_API_KEY": r["kept"]["OPENROUTER_API_KEY"]}}
+# names and values the helper refuses
+for bad in ("lower", "", "A B", None, "A" * 80):
+    try:
+        keychain.get(bad); raise AssertionError("name %%r accepted" %% (bad,))
+    except ValueError:
+        pass
+for bad in ("a b", "", "x" * 500, 'q"uote', "back\\slash"):
+    try:
+        keychain.set("ANTHROPIC_API_KEY", bad); raise AssertionError("value %%r accepted" %% (bad,))
+    except ValueError:
+        pass
+keychain.delete("OPENAI_API_KEY"); assert keychain.get("OPENAI_API_KEY") == ""
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "JW_NO_KEYCHAIN", "JW_KEYCHAIN")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_FAKE_KEYCHAIN=fake), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+            # without a Keychain (JW_NO_KEYCHAIN) nothing changes: the key is written to the .env file
+            child2 = r'''
+import os, sys
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import ai, keychain
+assert not keychain.available()
+ai.set_key("anthropic", "sk-ant-plain-file-key")
+assert "ANTHROPIC_API_KEY=sk-ant-plain-file-key" in open(os.path.join(paths.ROOT, ".env")).read() and ai.config()["providers"]["anthropic"]["key_where"] == ".env file" and ai.config()["keychain"] is False
+try:
+    ai.move_keys_to_keychain(); raise AssertionError("moved without a Keychain")
+except ValueError:
+    pass
+print("OK")
+''' % HERE
+            home2 = tempfile.mkdtemp(prefix="jw-home-")
+            r = subprocess.run([sys.executable, "-c", child2], env=dict(env, JW_HOME=home2, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=120)
+            shutil.rmtree(home2, ignore_errors=True)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True); shutil.rmtree(os.path.dirname(fake), ignore_errors=True)
+    check("keys: a pasted key goes to this Mac's Keychain and leaves the file, keys in the file can be moved there (read back first), a Keychain key wins over an old line, a key it cannot hold stays in the file, no Keychain = as before", t_keychain_keys)
+
+    def t_real_keychain():
+        """The real macOS `security` tool, in a temporary keychain: the key goes in on standard input, comes back, is replaced, and is deleted."""
+        import subprocess
+        d = tempfile.mkdtemp(prefix="jw-kc-")
+        kc = os.path.join(d, "test.keychain-db")
+        try:
+            subprocess.run(["security", "create-keychain", "-p", "pw", kc], check=True, capture_output=True, timeout=30)
+            subprocess.run(["security", "unlock-keychain", "-p", "pw", kc], check=True, capture_output=True, timeout=30)
+            child = r'''
+import os, sys
+sys.path.insert(0, %r)
+import keychain
+assert keychain.available() and keychain.get("JW_TEST_KEY") == ""
+keychain.set("JW_TEST_KEY", "sk-test-abc123_XYZ-789")
+assert keychain.get("JW_TEST_KEY") == "sk-test-abc123_XYZ-789"
+keychain.set("JW_TEST_KEY", "sk-test-second-key")
+assert keychain.get("JW_TEST_KEY") == "sk-test-second-key" and keychain.values(["JW_TEST_KEY", "NOPE"]) == {"JW_TEST_KEY": "sk-test-second-key"}
+keychain.delete("JW_TEST_KEY")
+assert keychain.get("JW_TEST_KEY") == "" and keychain.values(["JW_TEST_KEY"]) == {}
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_FAKE_KEYCHAIN", "JW_NO_KEYCHAIN")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_KEYCHAIN=kc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            subprocess.run(["security", "delete-keychain", kc], capture_output=True, timeout=30)
+            shutil.rmtree(d, ignore_errors=True)
+    if sys.platform == "darwin":
+        check("keys: the real macOS Keychain (a temporary keychain): set, read back, replace, delete", t_real_keychain)
 
     def t_exports():
         es = exports.entries(rows[:2]); assert [e["key"] for e in es] == ["tian2025open", "fernandez2025governance"], [e["key"] for e in es]

@@ -322,7 +322,7 @@ def launch(window, home):
         if srv is None:                                # another copy holds this folder: say so (never show it silently: it may be another version, or broken)
             other = {}
             try:
-                with open(os.path.join(server.pl.dl.STATE, "server.lock"), encoding="utf-8") as f:
+                with open(os.path.join(server.paths.LOCAL, "server.lock"), encoding="utf-8") as f:
                     other = json.load(f)
             except (OSError, ValueError):
                 pass

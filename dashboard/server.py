@@ -48,6 +48,7 @@ import prefs  # noqa: E402
 import signins  # noqa: E402
 import identity  # noqa: E402
 import support  # noqa: E402
+import syncinfo  # noqa: E402
 import updater  # noqa: E402
 import smart  # noqa: E402
 import readstate as rs  # noqa: E402
@@ -890,6 +891,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "no such folder"}, 404)
             dr = relatedwork.load(f["id"]) if relatedwork else None
             return self.send_json({"doc": claims.load(f["id"]), "papers": len(rows), "library": len(pl.library()), "draft": relatedwork.render(dr)["text"] if dr else "", "review": reviewer.load(f["id"]) if reviewer else None})
+        if path == "/api/sync":         # Settings → Computers & sync: which computers use this data folder, which are open now, what Dropbox had to duplicate
+            return self.send_json(syncinfo.info())
+        if path == "/api/sync/status":  # the small version for the banner: names of the other computers that have the folder open, and how many conflicted copies there are
+            return self.send_json({"open": [c["name"] for c in syncinfo.others()], "conflicts": len(syncinfo.conflicts())})
         if path == "/api/aifiles":      # Settings → AI files: what the AI wrote or cached, how big it is, what was cleared lately, how big a backup is
             return self.send_json({"kinds": aifiles.scan(), "trash": aifiles.trash_list(), "backup": aifiles.backup_size(), "export_dir": prefs.get_settings().get("export_dir") or "",
                                    "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
@@ -964,6 +969,21 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.finish_import(res, bool(b.get("summarize")))
+        if path == "/api/sync":             # {action: "rename", name} | {action: "merge", path} (join the library index copies) | {action: "set_aside", path}
+            try:
+                act = b.get("action")
+                if act == "rename":
+                    syncinfo.rename(b.get("name"))
+                    return self.send_json({"ok": True, **syncinfo.info()})
+                if act == "merge":
+                    res = syncinfo.merge_index(b.get("path"))
+                elif act == "set_aside":
+                    res = {"set_aside": syncinfo.set_aside(b.get("path"))}
+                else:
+                    return self.send_json({"error": "unknown action"}, 400)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"ok": True, **res, **syncinfo.info()})
         if path == "/api/import/check":     # {doi, title}: is this paper already in the library? (the review dialog asks again when you pick another record or edit the boxes)
             return self.send_json({"ok": True, "existing": importer.check_existing(b.get("doi"), str(b.get("title") or ""))})
         if path == "/api/import/discard":   # {tokens: [...]}: Cancel, or papers you unticked
@@ -1311,6 +1331,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(ai.set_key(str(b.get("provider") or ""), b.get("key")))
                 except ValueError as e:
                     return self.send_json({"error": str(e)[:160]}, 400)
+            if path == "/api/ai/keys/move":     # the API keys in the .env file go to this Mac's Keychain (each is read back before its line is removed)
+                try:
+                    res = ai.move_keys_to_keychain()
+                except ValueError as e:
+                    return self.send_json({"error": str(e)[:160]}, 400)
+                with ai._lock:
+                    ai._clients.clear()
+                return self.send_json({"ok": True, **res, "config": ai.config()})
             if path == "/api/ai/test":      # one tiny real call: does this provider + key + model work?
                 return self.send_json(ai.test(str(b.get("provider") or ""), str(b.get("model") or "")))
             if path == "/api/ai/cache/clear":
@@ -1671,7 +1699,7 @@ def take_lock(port):
     """One dashboard per project: two of them write the same files (notes, folders, indexes) and would overwrite each other.
     Returns None when this process now holds the lock, or the details ({pid, port, url}) of the dashboard that already runs."""
     global _LOCK
-    path = os.path.join(pl.dl.STATE, "server.lock")
+    path = os.path.join(paths.LOCAL, "server.lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     f = open(path, "a+")
     try:
@@ -1715,6 +1743,7 @@ def start(port=8765, quiet=False):
     for canon, olds in pl.migrate_weekly():
         print("Merged %d weekly runs into %s" % (len(olds), canon))
     srv = Server(("127.0.0.1", port), Handler)
+    syncinfo.start()           # tell the other computers that use this data folder that this one has it open (devices/<id>.json, refreshed every 30 s)
     importer.sweep()           # dropped PDFs nobody confirmed or cancelled within a day are forgotten (a confirmation of an older one is refused anyway)
     updater.start_background()
     threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)
