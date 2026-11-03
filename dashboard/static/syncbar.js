@@ -2,7 +2,7 @@
 // It asks the server every 45 seconds (/api/sync/status) and opens Settings → Computers & sync when pressed. It says nothing when there is nothing to say.
 import {$, api} from "./state.js";
 
-const EVERY = 45000;
+const EVERY = 45000, FIRST = 4000;
 let timer = 0;
 
 export async function refresh() {
@@ -19,7 +19,7 @@ export async function refresh() {
 function start() {
   const pill = $("#syncpill"); if (!pill) return;
   pill.onclick = () => window.Settings && window.Settings.open("sync");
-  refresh(); timer = setInterval(refresh, EVERY);
+  setTimeout(refresh, FIRST); timer = setInterval(refresh, EVERY);          // (not at once: the page is still loading its library, folders and tags)
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 }
 start();
