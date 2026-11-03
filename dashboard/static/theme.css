@@ -469,6 +469,8 @@ details.logbox[open] summary { padding: 10px 14px; }
 .runhead .meta { font-size: 13.5px; }
 
 /* ---- updates: the pill in the top bar and its dialog */
+.sync-pill { background: var(--bl-soft); color: var(--ink); border-color: var(--bl); border-radius: 99px; padding: 4px 12px; font-weight: 500; gap: 6px; max-width: 46vw; } .sync-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-pill.hide { display: none; }
 .upd-pill { background: var(--btn); color: var(--btn-ink); border-color: var(--btn); border-radius: 99px; padding: 4px 12px; font-weight: 600; gap: 6px; }
 .upd-pill:hover { background: var(--btn); filter: brightness(1.15); }
 dialog.upd { width: min(520px, 94vw); padding: 22px 24px 18px; border: 1px solid var(--line); color: var(--ink); }
