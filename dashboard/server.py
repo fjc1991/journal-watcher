@@ -1331,6 +1331,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(ai.set_key(str(b.get("provider") or ""), b.get("key")))
                 except ValueError as e:
                     return self.send_json({"error": str(e)[:160]}, 400)
+            if path == "/api/ai/keys/move":     # the API keys in the .env file go to this Mac's Keychain (each is read back before its line is removed)
+                try:
+                    res = ai.move_keys_to_keychain()
+                except ValueError as e:
+                    return self.send_json({"error": str(e)[:160]}, 400)
+                with ai._lock:
+                    ai._clients.clear()
+                return self.send_json({"ok": True, **res, "config": ai.config()})
             if path == "/api/ai/test":      # one tiny real call: does this provider + key + model work?
                 return self.send_json(ai.test(str(b.get("provider") or ""), str(b.get("model") or "")))
             if path == "/api/ai/cache/clear":

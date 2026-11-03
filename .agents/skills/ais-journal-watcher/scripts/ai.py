@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import activity as act  # noqa: E402
 import download as dl  # noqa: E402
+import keychain  # noqa: E402
 
 BASE, STATE = dl.BASE, dl.STATE
 CONFIG = os.path.join(BASE, "ai.json")
@@ -94,7 +95,7 @@ def config_data():
 
 
 def _key(name):
-    """API key from the environment or .env (re-read, so adding a key doesn't need a restart); '' if none."""
+    """API key from the environment, this Mac's Keychain or .env (re-read, so adding a key doesn't need a restart); '' if none."""
     if not name:
         return ""
     return os.environ.get(name) or dl.load_env().get(name, "")
@@ -130,19 +131,23 @@ def set_key(provider, key):
     key, removed = clean_key(key)
     if not key or len(key) > 400 or not re.fullmatch(r"[\x21-\x7e]+", key) or re.search(r"[\"'\\]", key):
         raise ValueError("That doesn’t look like an API key: paste just the key (no spaces or quotes, and only plain letters, digits and - _ . : / + =).")
-    path = os.path.join(dl.ROOT, ".env")
-    lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
-    lines = [l for l in lines if not re.match(r"\s*%s\s*=" % re.escape(name), l)] + ["%s=%s" % (name, key)]
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    os.replace(tmp, path)
+    where = ".env file"
+    if keychain.available():                     # on a Mac the key goes to the Keychain of THIS computer, not into a file in a folder that may be synced to other computers
+        try:
+            keychain.set(name, key)
+            _drop_from_env_file(name)
+            where = "Keychain"
+        except ValueError:
+            where = ".env file"                  # (a key with characters the Keychain helper cannot take safely: the file, as before)
+    if where == ".env file":
+        _write_env_file(name, key)
     os.environ[name] = key
     with _lock:
         _clients.clear()                  # a client made with the old key would go on using it: "no restart is needed" has to be true
     cfg = config()
     notes = []
+    if where == "Keychain":
+        notes.append("Saved in this Mac's Keychain (not in your data folder).")
     if removed:
         notes.append("Tidied the pasted key: removed %s." % ", ".join(removed))
     start = KEY_START.get(provider)
@@ -151,6 +156,73 @@ def set_key(provider, key):
     if notes:
         cfg["key_note"] = " ".join(notes)
     return cfg
+
+
+def _env_path():
+    return os.path.join(dl.ROOT, ".env")
+
+
+def _write_env_file(name, key):
+    path = _env_path()
+    lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
+    lines = [l for l in lines if not re.match(r"\s*%s\s*=" % re.escape(name), l)] + ["%s=%s" % (name, key)]
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+
+
+def _drop_from_env_file(name):
+    """Remove the line for `name` from the data home's .env (a key now lives in the Keychain). Other lines stay as they are. True if a line was removed."""
+    path = _env_path()
+    if not os.path.exists(path):
+        return False
+    lines = open(path, encoding="utf-8").read().splitlines()
+    kept = [l for l in lines if not re.match(r"\s*(export\s+)?%s\s*=" % re.escape(name), l)]
+    if len(kept) == len(lines):
+        return False
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(kept) + ("\n" if kept else ""))
+    os.replace(tmp, path)
+    return True
+
+
+def key_where(name):
+    """Where a provider's key is kept: "Keychain", ".env file", "environment" (set outside the app) or ""."""
+    if not name:
+        return ""
+    if keychain.values([name]).get(name):
+        return "Keychain"
+    if dl.read_dotenv().get(name):
+        return ".env file"
+    return "environment" if os.environ.get(name) else ""
+
+
+def move_keys_to_keychain():
+    """Copy every API key that is in the .env file into this Mac's Keychain, check each one reads back, and only then remove its line from the file.
+    Returns {"moved": [names], "kept": {name: why}} (a key that could not be moved stays in the file). Raises ValueError where there is no Keychain."""
+    if not keychain.available():
+        raise ValueError("This computer has no Keychain the app can use.")
+    names = set(dl.key_names())
+    env = dl.read_dotenv()
+    moved, kept = [], {}
+    for name in sorted(names):
+        val = env.get(name)
+        if not val:
+            continue
+        try:
+            keychain.set(name, val)
+            if keychain.get(name) != val:
+                raise ValueError("it did not read back the same")
+        except ValueError as e:
+            kept[name] = str(e)[:120]
+            continue
+        _drop_from_env_file(name)
+        moved.append(name)
+    return {"moved": moved, "kept": kept}
 
 
 def is_local(p):
@@ -181,9 +253,9 @@ def config():
     """What the UI needs: providers (and whether a key is set), feature routing, embeddings, privacy, budget. Never any key."""
     c = config_data()
     provs = {n: {"type": p.get("type"), "base_url": p.get("base_url", ""), "models": p.get("models", []), "key_env": p.get("key_env", ""),
-                 "configured": not p.get("key_env") or bool(_key(p["key_env"])), "local": is_local(p),
+                 "configured": not p.get("key_env") or bool(_key(p["key_env"])), "key_where": key_where(p.get("key_env")), "local": is_local(p),
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
-    return {"providers": provs, "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
+    return {"providers": provs, "keychain": keychain.available(), "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
             "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
 
 

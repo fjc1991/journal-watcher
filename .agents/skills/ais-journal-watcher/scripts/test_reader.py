@@ -777,6 +777,113 @@ print("OK")
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("sync: each computer says it is here (and is forgotten when it stops), Dropbox's conflicted copies are found, the library index copies join without losing a paper, copies are set aside and never deleted, bad paths are refused", t_sync_info)
+    def t_keychain_keys():
+        """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain
+        key wins over an old line; what cannot be held there stays in the file."""
+        import subprocess
+        home, loc, fake = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-"), os.path.join(tempfile.mkdtemp(prefix="jw-kc-"), "kc.json")
+        try:
+            child = r'''
+import json, os, sys
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import download as dl, ai, keychain
+env_path = os.path.join(paths.ROOT, ".env")
+open(env_path, "w").write("# my keys\nANTHROPIC_API_KEY=sk-ant-old-in-file\nOPENAI_API_KEY=sk-in-file-too\nUNPAYWALL_EMAIL=me@example.org\nOPENROUTER_API_KEY=sk-or-has$dollar\n")
+assert keychain.available() and keychain.get("ANTHROPIC_API_KEY") == ""
+# a pasted key goes to the Keychain and its old line leaves the file; the other lines stay
+ai.set_key("anthropic", "  ANTHROPIC_API_KEY=sk-ant-new-key-123  ")
+assert keychain.get("ANTHROPIC_API_KEY") == "sk-ant-new-key-123"
+txt = open(env_path).read()
+assert "sk-ant" not in txt and "UNPAYWALL_EMAIL=me@example.org" in txt and "# my keys" in txt and "OPENAI_API_KEY=sk-in-file-too" in txt, txt
+assert dl.load_env()["ANTHROPIC_API_KEY"] == "sk-ant-new-key-123" and ai._key("ANTHROPIC_API_KEY")
+c = ai.config()
+assert c["keychain"] is True and c["providers"]["anthropic"]["key_where"] == "Keychain" and c["providers"]["anthropic"]["configured"], c["providers"]["anthropic"]
+assert "Keychain" in ai.set_key("anthropic", "sk-ant-second-key-456").get("key_note", "") and keychain.get("ANTHROPIC_API_KEY") == "sk-ant-second-key-456"       # (replaced, not added)
+# a Keychain key wins over a line left in the file
+open(env_path, "a").write("ANTHROPIC_API_KEY=sk-ant-stale-line\n")
+assert dl.load_env()["ANTHROPIC_API_KEY"] == "sk-ant-second-key-456"
+# a key with a character the helper cannot take safely stays in the file, as before
+ai.set_key("openrouter", "sk-or-abc$def")
+assert keychain.get("OPENROUTER_API_KEY") == "" and "OPENROUTER_API_KEY=sk-or-abc$def" in open(env_path).read() and ai.config()["providers"]["openrouter"]["key_where"] == ".env file"
+# moving the keys in the file: copied, read back, then their lines are removed; the one that cannot be held stays and says why
+r = ai.move_keys_to_keychain()
+assert r["moved"] == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] and list(r["kept"]) == ["OPENROUTER_API_KEY"], r
+txt = open(env_path).read()
+assert "OPENAI_API_KEY" not in txt and "ANTHROPIC_API_KEY" not in txt and "OPENROUTER_API_KEY=sk-or-abc$def" in txt and "UNPAYWALL_EMAIL=me@example.org" in txt and "# my keys" in txt, txt
+assert keychain.get("OPENAI_API_KEY") == "sk-in-file-too" and ai.config()["providers"]["openai"]["key_where"] == "Keychain"
+assert ai.move_keys_to_keychain() == {"moved": [], "kept": {"OPENROUTER_API_KEY": r["kept"]["OPENROUTER_API_KEY"]}}
+# names and values the helper refuses
+for bad in ("lower", "", "A B", None, "A" * 80):
+    try:
+        keychain.get(bad); raise AssertionError("name %%r accepted" %% (bad,))
+    except ValueError:
+        pass
+for bad in ("a b", "", "x" * 500, 'q"uote', "back\\slash"):
+    try:
+        keychain.set("ANTHROPIC_API_KEY", bad); raise AssertionError("value %%r accepted" %% (bad,))
+    except ValueError:
+        pass
+keychain.delete("OPENAI_API_KEY"); assert keychain.get("OPENAI_API_KEY") == ""
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "JW_NO_KEYCHAIN", "JW_KEYCHAIN")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_FAKE_KEYCHAIN=fake), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+            # without a Keychain (JW_NO_KEYCHAIN) nothing changes: the key is written to the .env file
+            child2 = r'''
+import os, sys
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import ai, keychain
+assert not keychain.available()
+ai.set_key("anthropic", "sk-ant-plain-file-key")
+assert "ANTHROPIC_API_KEY=sk-ant-plain-file-key" in open(os.path.join(paths.ROOT, ".env")).read() and ai.config()["providers"]["anthropic"]["key_where"] == ".env file" and ai.config()["keychain"] is False
+try:
+    ai.move_keys_to_keychain(); raise AssertionError("moved without a Keychain")
+except ValueError:
+    pass
+print("OK")
+''' % HERE
+            home2 = tempfile.mkdtemp(prefix="jw-home-")
+            r = subprocess.run([sys.executable, "-c", child2], env=dict(env, JW_HOME=home2, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=120)
+            shutil.rmtree(home2, ignore_errors=True)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True); shutil.rmtree(os.path.dirname(fake), ignore_errors=True)
+    check("keys: a pasted key goes to this Mac's Keychain and leaves the file, keys in the file can be moved there (read back first), a Keychain key wins over an old line, a key it cannot hold stays in the file, no Keychain = as before", t_keychain_keys)
+
+    def t_real_keychain():
+        """The real macOS `security` tool, in a temporary keychain: the key goes in on standard input, comes back, is replaced, and is deleted."""
+        import subprocess
+        d = tempfile.mkdtemp(prefix="jw-kc-")
+        kc = os.path.join(d, "test.keychain-db")
+        try:
+            subprocess.run(["security", "create-keychain", "-p", "pw", kc], check=True, capture_output=True, timeout=30)
+            subprocess.run(["security", "unlock-keychain", "-p", "pw", kc], check=True, capture_output=True, timeout=30)
+            child = r'''
+import os, sys
+sys.path.insert(0, %r)
+import keychain
+assert keychain.available() and keychain.get("JW_TEST_KEY") == ""
+keychain.set("JW_TEST_KEY", "sk-test-abc123_XYZ-789")
+assert keychain.get("JW_TEST_KEY") == "sk-test-abc123_XYZ-789"
+keychain.set("JW_TEST_KEY", "sk-test-second-key")
+assert keychain.get("JW_TEST_KEY") == "sk-test-second-key" and keychain.values(["JW_TEST_KEY", "NOPE"]) == {"JW_TEST_KEY": "sk-test-second-key"}
+keychain.delete("JW_TEST_KEY")
+assert keychain.get("JW_TEST_KEY") == "" and keychain.values(["JW_TEST_KEY"]) == {}
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_FAKE_KEYCHAIN", "JW_NO_KEYCHAIN")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_KEYCHAIN=kc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            subprocess.run(["security", "delete-keychain", kc], capture_output=True, timeout=30)
+            shutil.rmtree(d, ignore_errors=True)
+    if sys.platform == "darwin":
+        check("keys: the real macOS Keychain (a temporary keychain): set, read back, replace, delete", t_real_keychain)
 
     def t_exports():
         es = exports.entries(rows[:2]); assert [e["key"] for e in es] == ["tian2025open", "fernandez2025governance"], [e["key"] for e in es]
