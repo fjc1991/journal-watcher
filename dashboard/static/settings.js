@@ -51,8 +51,8 @@ function renderAI(body) {
   const A = D.ai; if (!A) { body.innerHTML = `<div class="card st-card">AI features aren’t installed. Run <code>pip install -r requirements.txt</code>.</div>`; return; }
   const provs = Object.entries(A.providers), pnames = provs.map(([n]) => n);
   const price = m => (A.prices || {})[m] || {};
-  const feats = FEATURES.map(([k]) => A.features[k] || A.features.ask), tally = key => { const c = {}; feats.forEach(f => { c[f[key]] = (c[f[key]] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]); };
-  const mainP = (tally("provider")[0] || [])[0], mainM = (tally("model")[0] || [])[0];      // what most features use now: the one-for-everything row starts there
+  const feats = FEATURES.map(([k]) => A.features[k] || A.features.ask), tally = (key, only) => { const c = {}; feats.filter(f => !only || only(f)).forEach(f => { c[f[key]] = (c[f[key]] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]); };
+  const mainP = (tally("provider")[0] || [])[0], mainM = (tally("model", f => f.provider === mainP)[0] || [])[0];      // what most features use now: the one-for-everything row starts there (the model counted only among the features of that provider: another provider's model is no choice for it)
   const mixed = "Now: " + tally("provider").map(([p, n]) => `${p} ×${n}`).join(", ") + ". Applies the provider and model to every feature below (not the effort, not embeddings), then press Save. Any row can still be changed on its own.";
   const used = [...new Set([...Object.values(A.features).map(f => f.model), A.embeddings.provider !== "local" ? A.embeddings.model : null].filter(Boolean))];
   body.innerHTML = `

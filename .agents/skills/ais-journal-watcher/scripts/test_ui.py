@@ -823,6 +823,14 @@ pl._screen_batch = fake_screen
             feats_ = api("/api/ai/config")["features"]
             check("…and Save keeps it: every feature now uses that provider and model (embeddings untouched)", all(f_["provider"] == "websearch" and f_["model"] == "m2" for f_ in feats_.values()) and api("/api/ai/config")["embeddings"] == emb_before, str({k_: (v_["provider"], v_["model"]) for k_, v_ in feats_.items() if (v_["provider"], v_["model"]) != ("websearch", "m2")}))
             page.select_option("#mn-p", "fake"); page.fill("#mn-m", "m1"); page.click("#mn-apply"); page.click("#st-save"); page.wait_for_timeout(600)
+            # the row starts at what most features use: the provider most use, and the model most of THAT provider's features use (never another provider's model)
+            keys_ = [tr.get_attribute("data-f") for tr in page.locator("tr[data-f]").all() if tr.get_attribute("data-f") != "emb"]
+            split_ = {k_: {"provider": "fake", "model": "m1" if i_ < 5 else "m3"} if i_ < 10 else {"provider": "websearch", "model": "m2"} for i_, k_ in enumerate(keys_)}
+            saved_feats_ = api("/api/ai/config")["features"]
+            api("/api/ai/config", {"features": split_})
+            page.click('.st-tabs button[data-t="reader"]'); page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector("#st-main")
+            check("'Use one for everything' starts at a provider and a model that belong together (10 features on fake split over m1 and m3, 8 on websearch sharing m2: it starts at fake and m1 or m3, never fake with m2)", page.input_value("#mn-p") == "fake" and page.input_value("#mn-m") in ("m1", "m3"), page.input_value("#mn-p") + " / " + page.input_value("#mn-m"))
+            api("/api/ai/config", {"features": {k_: {"provider": v_["provider"], "model": v_["model"]} for k_, v_ in saved_feats_.items()}})
             page.fill("#st-budget", "5"); page.click("#st-save"); page.wait_for_timeout(600)
             check("settings: the monthly budget is saved", api("/api/ai/config")["budget"]["monthly_usd"] == 5)
             check("settings: 'reuse earlier screening verdicts for N days' shows its default (90) and is saved", page.input_value("#st-reuse") == "90" and api("/api/ai/config")["screening"]["reuse_days"] == 90)

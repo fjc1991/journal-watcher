@@ -276,6 +276,24 @@ def main():
                 except ValueError as e:
                     assert "API key" in str(e)
             ai._clients["a"] = object(); ai.set_key("ortest", "sk-or-v1-again"); assert "a" not in ai._clients                          # a client made with the old key is not kept
+            # ...and a key saved while a request is being prepared does not break that request (the cache was read twice, the second time after it had been cleared)
+            import types as _t
+            class _M:
+                stop_reason, content = "end_turn", [_t.SimpleNamespace(type="text", text="ok")]
+                usage = _t.SimpleNamespace(input_tokens=1, output_tokens=1, cache_creation_input_tokens=0, cache_read_input_tokens=0, server_tool_use=None)
+            class _S:
+                text_stream = iter(["ok"])
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def get_final_message(self): return _M()
+            ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _S())))
+            real_to = ai._to_anthropic
+            ai._to_anthropic = lambda m: (ai._clients.clear(), real_to(m))[1]                                                           # the cache is cleared while the request is being prepared
+            c2 = json.loads(json.dumps(c)); c2["providers"]["anth"] = {"type": "anthropic", "key_env": "OR_TEST_KEY", "models": ["m1"]}; write_cfg(c2)
+            try:
+                assert ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "anth", "model": "m1"}).text == "ok"
+            finally:
+                ai._to_anthropic = real_to; ai._clients.pop("a", None); write_cfg(c)
             os.environ["BAD_KEY"] = "bad"; c["features"]["y"] = {"provider": "bad", "model": "m"}; write_cfg(c)
             try:
                 ai.chat("y", [{"role": "user", "content": "x"}]); raise AssertionError("expected AIError")

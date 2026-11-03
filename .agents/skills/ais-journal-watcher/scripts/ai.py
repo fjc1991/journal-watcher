@@ -522,8 +522,10 @@ def test(provider, model):
 
 def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     import anthropic
-    if "a" not in _clients:
-        _clients["a"] = anthropic.Anthropic(api_key=_key(p["key_env"]))
+    with _lock:                           # get or make the client in one step, and keep our own reference: saving a key clears the cache (set_key) and must not break a request already preparing
+        client = _clients.get("a")
+        if client is None:
+            client = _clients["a"] = anthropic.Anthropic(api_key=_key(p["key_env"]))
     oc = {"effort": f.get("effort", "low")}
     if schema:
         oc["format"] = {"type": "json_schema", "schema": schema}
@@ -536,7 +538,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     if web:
         kw["tools"] = [{"type": "web_search_20260318", "name": "web_search", "max_uses": int(p.get("web_max_uses", 5))}]
     try:
-        with _clients["a"].beta.messages.stream(**kw) as s:
+        with client.beta.messages.stream(**kw) as s:
             for t in s.text_stream:
                 yield "text", t
             msg = s.get_final_message()
