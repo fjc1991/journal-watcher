@@ -1969,7 +1969,6 @@ pl._screen_batch = fake_screen
             page.wait_for_function("(() => { const b = document.querySelector('#pc-go'); return b && !b.dataset.old && !b.disabled && /PDFs? checked/.test(document.querySelector('#pc-res').innerText); })()", timeout=30000)
             check("'It is the right paper' hides it, and it stays hidden when you check again (counted as 'you marked as right')", page.locator('.pc-row[data-f$="wrong2.pdf"]').count() == 0 and page.locator('.pc-row[data-f$="wrong1.pdf"]').count() == 1 and "you marked as right" in page.inner_text("#pc-res"), page.inner_text("#pc-res")[:400])
             if os.path.exists(marker): os.remove(marker)
-            page.once("dialog", lambda d_: d_.accept())
             page.click('[data-pc-rm$="wrong1.pdf"]'); page.wait_for_function("!document.querySelector('.pc-row[data-f$=\"wrong1.pdf\"]')", timeout=15000)
             for _ in range(40):
                 if os.path.exists(marker): break

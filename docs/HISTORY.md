@@ -657,11 +657,13 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** **The cause of the author's 401 was not reproduced**: it needs the real OpenRouter and the author's key. A stray `NAME=`, a quote or an invisible character in the saved key fits the answer, but a wrong, revoked or other-account key gives the same one. After this change, pressing Change and pasting the key again either works or the page says why not. How the tabs look with the Mac's fonts, and the models OpenRouter accepts (`scaledown/summarize` in the author's list is unlike the usual `vendor/model` names: Test uses the first model of the row).
 
-### Item 17. "Node.js 20 is deprecated" in the CI logs (2026-11-03)
+### Item 17. Two bits of noise in the CI logs: "Node.js 20 is deprecated" and a Playwright dialog exception (2026-11-03)
 
 **Seen.** Every CI run printed: "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5". A warning, not a failure: GitHub already runs those actions on Node 24 and the runs were green.
 
 **Changed.** `tests.yml` and `release.yml` use `actions/checkout@v5` and `actions/setup-python@v6` (their `action.yml` says `using: node24`; same inputs as before, only `python-version` is used). The pull request's own `tests` run is the check (both jobs use both actions).
+
+**The second one.** The UI run printed `Exception in callback … Dialog.accept: Cannot accept dialog which is already handled!` (from `test_ui.py`, "Check my PDFs"). `page.on("dialog", …)` at the top of `main()` already accepts every dialog of the run (and records its message); the check also registered `page.once("dialog", lambda d: d.accept())` before pressing "Remove and download again", so whichever of the two ran second found the dialog answered and raised. Harmless (the run went on and passed) and redundant: the line is removed. Zero occurrences in a full local run afterwards (one before), and "Remove and download again" still passes.
 
 **Not changed, on purpose.** `release.yml` also uses `actions/upload-artifact@v4` and `softprops/action-gh-release@v2`, which are still Node 20 and will show the same warning in a release run. Newer Node 24 versions exist (`upload-artifact@v6`, `action-gh-release@v3`), but neither can be tested without running the release workflow (a dry run covers `upload-artifact` only; the publishing step runs on a tag). Change them together with the next dry run.
 
