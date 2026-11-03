@@ -21,7 +21,7 @@ import importer  # noqa: E402
 import library_search as ls  # noqa: E402
 import notes_store as ns  # noqa: E402
 
-CACHE = os.path.join(dl.STATE, "crossref_cache.json")
+CACHE = os.path.join(dl.LOCAL, "crossref_cache.json")
 COLOR = {"yellow": "#ffe066", "green": "#8ce99a", "blue": "#74c0fc", "pink": "#faa2c1", "orange": "#ffc078",
          "purple": "#d0bfff", "red": "#ff8787", "gray": "#ced4da"}
 PARTICLES = {"van", "von", "der", "den", "de", "del", "della", "di", "da", "dos", "du", "la", "le", "ten", "ter"}
@@ -37,7 +37,7 @@ def _crossref(rows):
             for doi, meta in zip(todo, ex.map(importer.crossref_meta, todo)):
                 if meta:
                     cache[doi] = {k: meta.get(k, "") for k in ("volume", "issue", "pages", "publisher", "container", "pub_date")}
-        os.makedirs(dl.STATE, exist_ok=True)
+        os.makedirs(dl.LOCAL, exist_ok=True)
         with open(CACHE + ".tmp", "w") as f:
             json.dump(cache, f)
         os.replace(CACHE + ".tmp", CACHE)

@@ -20,7 +20,7 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 
-ROOT, PAPERS, STATE, BASE = dl.ROOT, dl.PAPERS, dl.STATE, dl.BASE
+ROOT, PAPERS, STATE, BASE, LOCAL = dl.ROOT, dl.PAPERS, dl.STATE, dl.BASE, dl.LOCAL
 TRASH = os.path.join(STATE, "trash")
 KEEP_TRASH = 12
 
@@ -42,9 +42,9 @@ def kinds():
         {"id": "chats", "name": "Conversations about one paper", "what": "The Ask tab's history for each paper (<name>.chat.json).", "human": True, "files": _papers_files(".chat.json")},
         {"id": "folders", "name": "Folder conversations, matrices, idea boards, drafts, claim checks and syntheses", "what": "Ask history, comparison matrices (with the cells you wrote), Ideas Lab boards (with your stars and notes), related-work drafts, claim checks and syntheses, kept in Papers/_folders. The folders themselves stay.", "human": True, "files": folders},
         {"id": "old", "name": "Earlier versions of cards and summaries", "what": "The previous card or summary, kept whenever one is written again.", "human": False, "files": [p for d in ("card_backups", "summary_backups") for p in _g(STATE, d, "*")]},
-        {"id": "cache", "name": "Saved answers", "what": "Every AI answer is kept, so asking exactly the same thing again is free and instant. Clearing it only makes repeats cost again.", "human": False, "regen": True, "files": _g(STATE, "ai_cache", "*")},
-        {"id": "index", "name": "Search index for Ask", "what": "The paper text split into passages, and their vectors. It is read again in the background (free with the local model).", "human": False, "regen": True, "files": _g(STATE, "index", "*")},
-        {"id": "lookups", "name": "OpenAlex and author lookups", "what": "What was fetched about citations, related work and authors, so the same lookup is not repeated.", "human": False, "regen": True, "files": [p for n in ("openalex_cache.json", "authors_cache.json", "crossref_cache.json") for p in _g(STATE, n)]},
+        {"id": "cache", "name": "Saved answers", "what": "Every AI answer is kept, so asking exactly the same thing again is free and instant. Clearing it only makes repeats cost again.", "human": False, "regen": True, "files": _g(LOCAL, "ai_cache", "*")},
+        {"id": "index", "name": "Search index for Ask", "what": "The paper text split into passages, and their vectors. It is read again in the background (free with the local model).", "human": False, "regen": True, "files": _g(LOCAL, "index", "*")},
+        {"id": "lookups", "name": "OpenAlex and author lookups", "what": "What was fetched about citations, related work and authors, so the same lookup is not repeated.", "human": False, "regen": True, "files": [p for n in ("openalex_cache.json", "authors_cache.json", "crossref_cache.json") for p in _g(LOCAL, n)]},
     ]
 
 
@@ -120,7 +120,7 @@ def restore(name):
     with zipfile.ZipFile(path) as z:
         for m in z.namelist():
             dest = os.path.realpath(os.path.join(ROOT, m))
-            if not (dest.startswith(os.path.realpath(PAPERS) + os.sep) or dest.startswith(os.path.realpath(STATE) + os.sep)):
+            if not (dest.startswith(os.path.realpath(PAPERS) + os.sep) or dest.startswith(os.path.realpath(STATE) + os.sep) or dest.startswith(os.path.realpath(LOCAL) + os.sep)):
                 continue                           # only ever back into Papers/ or state/
             if os.path.exists(dest):
                 skipped += 1

@@ -495,7 +495,7 @@ def fetch_weekly(run, emit, stop):
     emit("progress", {"stage": "fetching", "label": "Fetched", "done": len(js), "total": len(js)})
 
 
-FETCHED = os.path.join(STATE, "fetched")       # what a journal's year range returned, abstracts included (a saved copy: asking Crossref again takes minutes)
+FETCHED = os.path.join(dl.LOCAL, "fetched")       # what a journal's year range returned, abstracts included (a saved copy: asking Crossref again takes minutes)
 FETCH_KEEP_DAYS = 7        # a past year's articles hardly change ...
 FETCH_KEEP_DAYS_NOW = 1    # ... but the current year's list grows every week
 

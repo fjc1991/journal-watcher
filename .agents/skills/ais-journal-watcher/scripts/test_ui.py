@@ -369,7 +369,7 @@ def main():
     srv_up = ThreadingHTTPServer(("127.0.0.1", 0), FakeFeed)
     threading.Thread(target=srv_up.serve_forever, daemon=True).start()
     feed["url"] = "http://127.0.0.1:%d/j.zip" % srv_up.server_address[1]
-    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
+    env = {**os.environ, "FAKE_KEY": "good", "JW_UPDATE_FEED": "http://127.0.0.1:%d%s" % (srv_up.server_address[1], FEED_PATH), "JW_VERSION": "1.0.0", "JW_NO_UPDATE_CHECK": "1", "JW_SUPPORT_DELAY": "1", "JW_FAKE_SIGNIN_GATE": os.path.join(TMP, "signin-gate"), "JW_FAKE_LIBTEST": os.path.join(TMP, "libtest.json"), "JW_UPDATE_DIR": os.path.join(TMP, "updates"), "JW_OFFLINE": "1", "JW_LOCAL": os.path.join(TMP, "local-state"), "JW_RELATED_SIM": "-1", "JW_OPENALEX_URL": "http://127.0.0.1:%d/" % srv_oa.server_address[1]}
     marker = os.path.join(TMP, "download-called.txt")
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
@@ -1484,7 +1484,7 @@ imp.crossref_search = fake_imp_search
             PDF = lambda b, n: [b, n, "application/pdf"]
             n_lib = lambda: len(api("/api/library")); folder = lambda i: next(f for f in api("/api/folders") if f["id"] == i)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); n0 = n_lib()
-            STAGING = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "staging")
+            STAGING = os.path.join(TMP, "local-state", "staging")       # (the server runs with JW_LOCAL: staged PDFs are per-computer files)
             staged = lambda: len([n for n in os.listdir(STAGING) if n.endswith(".pdf")]) if os.path.isdir(STAGING) else 0
             imp_log = lambda: open(os.path.join(TMP, "imp.log")).read() if os.path.exists(os.path.join(TMP, "imp.log")) else ""
             ov = page.evaluate(JS_DROP, [".fp-path", [PDF(pa, "alpha.pdf")], True])
@@ -2069,7 +2069,8 @@ imp.crossref_search = fake_imp_search
             print("one dashboard per project")
             second = subprocess.run([sys.executable, os.path.join(TMP, "dashboard", "server.py"), "--port", str(port + 1), "--no-open"], cwd=TMP, env=env, capture_output=True, text=True, timeout=60)
             check("a second dashboard on the same project does not start; it says where the first one runs", second.returncode == 0 and "already running" in second.stdout and ":%d" % port in second.stdout, second.stdout[:300] + second.stderr[-200:])
-            lock = json.load(open(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "server.lock")))
+            lock = json.load(open(os.path.join(TMP, "local-state", "server.lock")))
+            check("the lock that says a dashboard runs here is a per-computer file: it is not in the data folder (a synced folder must not carry it to another computer)", not os.path.exists(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "server.lock")))
             check("the lock file names the running one, and it is unharmed", lock["port"] == port and lock["pid"] == srv.pid and api("/api/config")["model"])
 
             print("your library as an MCP server (read-only)")

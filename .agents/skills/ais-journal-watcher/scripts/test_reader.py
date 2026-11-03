@@ -651,6 +651,46 @@ def main():
             importer._file = orig_file
             shutil.rmtree(importer.STAGING, ignore_errors=True)
     check("review rules: a token is claimed once (and restored if filing fails), a name clash never overwrites a PDF, expired staged PDFs are refused and swept, dates must be real, a paper is recognised with or without a DOI, the confirmed journal is kept, and a title alone is not 'confirmed'", t_import_review_rules)
+    def t_local_state():
+        """The data folder can be synced between computers, so what belongs to one computer lives outside it (paths.LOCAL) and what you want on both stays inside (state/)."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            probe = r'''
+import json, os, sys
+sys.path.insert(0, %r)
+import paths
+st = os.path.join(paths.BASE, "state")
+for n, body in (("browser-profile/Default/x", "p"), ("index/a.json", "{}"), ("models/m.bin", "m"), ("verdicts.json", "{}"), ("ai_usage.jsonl", ""), ("signins.json", "{}"), ("runs/r.json", "{}")):
+    os.makedirs(os.path.dirname(os.path.join(st, n)), exist_ok=True); open(os.path.join(st, n), "w").write(body)
+os.makedirs(os.path.join(paths.LOCAL, "index"), exist_ok=True); open(os.path.join(paths.LOCAL, "index", "b.json"), "w").write("{}")   # (already there: the old copy must stay)
+moved = paths.migrate_local(); again = paths.migrate_local()
+import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard
+out = {"local": paths.LOCAL, "state": paths.STATE, "moved": moved, "again": again,
+       "where": {"models": ai.MODELS, "ai_cache": ai.CACHE, "index": blocks.INDEX, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
+                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED},
+       "shared": {"ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
+       "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL))}
+print("JSON" + json.dumps(out))
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", probe], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0, r.stderr[-800:]
+            o = json.loads(r.stdout.split("JSON", 1)[1])
+            under = lambda p, d: os.path.realpath(p).startswith(os.path.realpath(d) + os.sep)
+            for k, p in o["where"].items():
+                assert under(p, o["local"]) and not under(p, o["state"]), (k, p)
+            for k, p in o["shared"].items():
+                assert under(p, o["state"]) and not under(p, o["local"]), (k, p)
+            assert sorted(o["moved"]) == ["browser-profile", "models", "signins.json"] and o["again"] == [], o["moved"]       # (index was already in LOCAL: its old copy stays)
+            assert "verdicts.json" in o["left_in_state"] and "ai_usage.jsonl" in o["left_in_state"] and "runs" in o["left_in_state"] and "index" in o["left_in_state"], o["left_in_state"]
+            assert "browser-profile" in o["in_local"] and "models" in o["in_local"] and "verdicts.json" not in o["in_local"], o["in_local"]
+            # without JW_LOCAL, from a checkout, nothing changes: everything stays in state/
+            r2 = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); import paths; print(paths.LOCAL == paths.STATE, paths.migrate_local())" % HERE], env=dict(env, JW_HOME=home), capture_output=True, text=True, timeout=60)
+            assert r2.stdout.strip() == "True []", r2.stdout + r2.stderr
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("sync: per-computer files (sign-in browser profile, cookies, search index, models, caches, update state, staged PDFs) live outside the data folder, shared ones stay in it, an old copy is moved once, a checkout is unchanged", t_local_state)
 
     def t_exports():
         es = exports.entries(rows[:2]); assert [e["key"] for e in es] == ["tian2025open", "fernandez2025governance"], [e["key"] for e in es]

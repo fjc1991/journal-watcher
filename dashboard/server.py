@@ -1671,7 +1671,7 @@ def take_lock(port):
     """One dashboard per project: two of them write the same files (notes, folders, indexes) and would overwrite each other.
     Returns None when this process now holds the lock, or the details ({pid, port, url}) of the dashboard that already runs."""
     global _LOCK
-    path = os.path.join(pl.dl.STATE, "server.lock")
+    path = os.path.join(paths.LOCAL, "server.lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     f = open(path, "a+")
     try:

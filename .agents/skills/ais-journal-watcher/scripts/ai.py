@@ -37,8 +37,8 @@ import download as dl  # noqa: E402
 BASE, STATE = dl.BASE, dl.STATE
 CONFIG = os.path.join(BASE, "ai.json")
 LEDGER = os.path.join(STATE, "ai_usage.jsonl")
-MODELS = os.path.join(STATE, "models")       # local embedding models are cached here (survives reboots)
-CACHE = os.path.join(STATE, "ai_cache")      # answers to identical requests (regenerable)
+MODELS = os.path.join(dl.LOCAL, "models")       # local embedding models are cached here (survives reboots)
+CACHE = os.path.join(dl.LOCAL, "ai_cache")      # answers to identical requests (regenerable)
 FULL_TEXT_LIMIT = 450_000                    # characters of a paper sent as text to providers without native PDF input
 
 _lock = threading.Lock()

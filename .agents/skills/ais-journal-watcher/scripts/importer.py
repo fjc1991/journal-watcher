@@ -233,7 +233,7 @@ def add_doi(doi):
 # A dropped PDF is first ANALYSED: what the PDF says about itself (the DOIs printed in its text and metadata, its title), the records Crossref has for those DOIs and for that
 # title, and each record checked against the PDF (identity.check by title and authors, never by the DOI the record was found with: that DOI came from the PDF itself and
 # would prove nothing). Nothing is filed. The PDF waits in state/staging/ under a random token; you check or correct the details, and CONFIRM files it.
-STAGING = os.path.join(dl.STATE, "staging")
+STAGING = os.path.join(dl.LOCAL, "staging")
 STAGE_HOURS = 24
 TOKEN_RE = re.compile(r"[0-9a-f]{32}")
 

@@ -27,7 +27,7 @@ import download as dl  # noqa: E402
 import evidence as evd  # noqa: E402
 import notes_store as ns  # noqa: E402
 
-CACHE = os.path.join(dl.STATE, "openalex_cache.json")
+CACHE = os.path.join(dl.LOCAL, "openalex_cache.json")
 IGNORED = os.path.join(dl.PAPERS, "_related.json")
 TTL = 7 * 86400
 REL_SIM = float(os.environ.get("JW_RELATED_SIM", 0.74))      # OpenAlex's own "related works" are noisy (a "Janus" paper for a "Janus effect" one): keep those whose title is this close to the paper that points at them
@@ -56,7 +56,7 @@ def _cache():
 
 
 def _save_cache(c):
-    os.makedirs(dl.STATE, exist_ok=True)
+    os.makedirs(dl.LOCAL, exist_ok=True)
     tmp = CACHE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(c, f, ensure_ascii=False)

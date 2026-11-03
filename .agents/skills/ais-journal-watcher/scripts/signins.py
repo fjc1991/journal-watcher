@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402
 
 PROFILE_FILE = os.path.join(paths.BASE, "library.json")
-STATUS_FILE = os.path.join(paths.STATE, "signins.json")
+STATUS_FILE = os.path.join(paths.LOCAL, "signins.json")
 MODES = ("openathens", "ezproxy", "institutional", "vpn", "none")
 PACES = ("careful", "normal", "fast")          # how far apart a publisher's papers are fetched (pipeline.PACES has the seconds)
 OA_REDIRECTOR = re.compile(r"go\.openathens\.net/redirector/([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)", re.I)

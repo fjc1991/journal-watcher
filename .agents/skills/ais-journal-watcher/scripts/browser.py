@@ -33,10 +33,10 @@ import paths  # noqa: E402
 import signins as si  # noqa: E402
 
 BASE = paths.BASE
-PROFILE = os.path.join(BASE, "state", "browser-profile")
+PROFILE = os.path.join(paths.LOCAL, "browser-profile")
 # Chromium drops session cookies (OpenAthens, Microsoft sign-in) when it closes;
 # keep them here between launches so one library sign-in lasts its full session
-SESSION_COOKIES = os.path.join(BASE, "state", "session-cookies.json")
+SESSION_COOKIES = os.path.join(paths.LOCAL, "session-cookies.json")
 SESSION_MAX_AGE = 12 * 3600
 
 PUBLISHER_LOGINS = [
