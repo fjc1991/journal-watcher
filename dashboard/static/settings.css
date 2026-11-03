@@ -29,6 +29,24 @@ body.settings-open { overflow: hidden; }
 .st-table.log td { font-size: 12px; }
 .st .ok { color: var(--dl); font-weight: 600; } .st .bad, .st-msg.bad, .tres.bad { color: var(--err); }
 .tres { font-size: 12px; color: var(--ink-2); margin-left: 6px; }
+/* the provider and feature tables: fixed column widths, so nothing is clipped ("anth", "lo", half a model name) and every row has the same shape */
+.st-scroll { overflow-x: auto; }
+.st-prov, .st-feat { table-layout: fixed; min-width: 800px; }
+.st-prov th, .st-prov td, .st-feat th, .st-feat td { padding: 11px 10px; vertical-align: top; }
+.st-prov th.c, .st-prov td.c { text-align: center; }
+.st-prov td > b, .st-prov td.c, .st-feat td > b:first-child { line-height: 32px; }
+.st-prov col.c-prov { width: 116px; } .st-prov col.c-key { width: 34%; } .st-prov col.c-flag { width: 96px; } .st-prov col.c-test { width: 150px; }
+.st-feat col.c-fp { width: 150px; } .st-feat col.c-fm { width: 28%; } .st-feat col.c-fe { width: 104px; } .st-feat col.c-test { width: 150px; }
+.keycell { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+.keyform { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.keyform.hide { display: none; }
+.keyform input { flex: 1; min-width: 0; width: auto; }
+.keyform .btn, .keycell .btn { flex: none; white-space: nowrap; }
+.st-prov td.c-test, .st-feat td.c-test { text-align: left; }
+.st-prov .tres, .st-feat .tres { display: block; margin: 6px 0 0; line-height: 1.4; overflow-wrap: anywhere; }
+.st-prov .tres:empty, .st-feat .tres:empty { display: none; }
+.st-prov .keymsg { margin-top: 4px; }
+.st-prov input[type=password] { width: 100%; }
 .chk { display: flex; gap: 8px; align-items: center; margin: 9px 0; flex-wrap: wrap; color: var(--ink-2); }
 .st-actions { display: flex; gap: 12px; align-items: center; margin: 8px 0 20px; }
 .st-msg { font-size: 13px; color: var(--dl); }
