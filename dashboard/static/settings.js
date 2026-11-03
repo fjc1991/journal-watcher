@@ -11,15 +11,19 @@ const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's 
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
   ["skim", "Skim layer", "Finds the key sentences of a paper by lens (question, finding, limitation…)"]];
 const money = v => v == null ? "—" : v < 0.01 && v > 0 ? "$" + v.toFixed(4) : "$" + v.toFixed(2);
-const TABS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["about", "About & updates"]];
+const TABS = [["ai", "AI"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["about", "About & updates"]];
+const AI_SUBS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"]];      // three pages under the one main tab "AI" (their keys are unchanged: Settings.open("usage") still opens Usage & cost)
+const groupOf = t => AI_SUBS.some(([k]) => k === t) ? "ai" : t;
+let lastAI = "ai";      // the AI page you were on, for when you come back to the AI tab
 
 function build() {
   if (root) return;
   root = document.createElement("div"); root.id = "settings"; root.className = "st hide";
-  root.innerHTML = `<div class="st-head"><button class="btn back" id="st-back">← Back</button><h1>Settings</h1><div class="st-tabs">${TABS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div></div><div class="st-body" id="st-body"></div>`;
+  root.innerHTML = `<div class="st-head"><button class="btn back" id="st-back">← Back</button><h1>Settings</h1><div class="st-tabs">${TABS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div></div><div class="st-sub hide" id="st-sub" aria-label="AI settings">${AI_SUBS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div><div class="st-body" id="st-body"></div>`;
   document.body.append(root);
   $("#st-back", root).onclick = close;
-  $$(".st-tabs button", root).forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
+  $$(".st-tabs button", root).forEach(b => b.onclick = () => { tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
+  $$(".st-sub button", root).forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select")) close(); });
 }
 export function close() { root?.classList.add("hide"); document.body.classList.remove("settings-open"); }
@@ -32,7 +36,10 @@ export async function open(t) {
 }
 function render() {
   if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
-  $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+  if (groupOf(tab) === "ai") lastAI = tab;
+  $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === groupOf(tab)));
+  $("#st-sub", root).classList.toggle("hide", groupOf(tab) !== "ai");
+  $$(".st-sub button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   const on = $(".st-tabs button.on", root); if (on && on.scrollIntoView) on.scrollIntoView({block: "nearest", inline: "nearest"});      // a narrow window scrolls the row: keep the open tab in view
   const body = $("#st-body", root);
   ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, about: renderAbout})[tab](body);
@@ -44,6 +51,9 @@ function renderAI(body) {
   const A = D.ai; if (!A) { body.innerHTML = `<div class="card st-card">AI features aren’t installed. Run <code>pip install -r requirements.txt</code>.</div>`; return; }
   const provs = Object.entries(A.providers), pnames = provs.map(([n]) => n);
   const price = m => (A.prices || {})[m] || {};
+  const feats = FEATURES.map(([k]) => A.features[k] || A.features.ask), tally = (key, only) => { const c = {}; feats.filter(f => !only || only(f)).forEach(f => { c[f[key]] = (c[f[key]] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]); };
+  const mainP = (tally("provider")[0] || [])[0], mainM = (tally("model", f => f.provider === mainP)[0] || [])[0];      // what most features use now: the one-for-everything row starts there (the model counted only among the features of that provider: another provider's model is no choice for it)
+  const mixed = "Now: " + tally("provider").map(([p, n]) => `${p} ×${n}`).join(", ") + ". Applies the provider and model to every feature below (not the effort, not embeddings), then press Save. Any row can still be changed on its own.";
   const used = [...new Set([...Object.values(A.features).map(f => f.model), A.embeddings.provider !== "local" ? A.embeddings.model : null].filter(Boolean))];
   body.innerHTML = `
   <div class="card st-card"><h2>Providers</h2><p class="hint">Paste a key and it is saved in the <code>.env</code> file of your data folder (readable by you only); it is never shown again or sent anywhere but to its provider. No restart is needed.</p>
@@ -52,6 +62,12 @@ function renderAI(body) {
       <td>${p.local ? "✓" : "—"}</td><td>${p.web_search ? "✓" : "—"}</td><td><input type="text" class="pm" aria-label="Models of this provider, separated by commas" value="${esc((p.models || []).join(", "))}"></td>
       <td><button class="btn small" data-test="${esc(n)}">Test</button> <span class="tres"></span></td></tr>`).join("")}</table></div>
   <div class="card st-card"><h2>Which model does what</h2>
+    <div class="st-main" id="st-main"><b>Use one for everything</b>
+      <select id="mn-p" aria-label="Provider for all features">${pnames.map(n => `<option${mainP === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
+      <input type="text" id="mn-m" list="dl-main" aria-label="Model for all features" value="${esc(mainM || "")}"><datalist id="dl-main">${((A.providers[mainP] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist>
+      <button class="btn small" id="mn-test">Test</button><span class="tres"></span>
+      <button class="btn" id="mn-apply">Apply to all features</button>
+      <small id="mn-note" class="st-msg">${mixed}</small></div>
     <table class="st-table"><tr><th>Feature</th><th>Provider</th><th>Model</th><th>Effort</th><th></th></tr>
     ${FEATURES.map(([k, t, d]) => { const f = A.features[k] || A.features.ask; return `<tr data-f="${k}"><td><b>${t}</b><br><small>${d}</small></td>
       <td><select class="fp">${pnames.map(n => `<option${f.provider === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></td>
@@ -70,13 +86,25 @@ function renderAI(body) {
     <p class="hint">Without a price a model's calls show “—” and don't count towards the budget. Look the numbers up on the provider's pricing page.</p></div>
   <div class="st-actions"><button class="btn primary" id="st-save">Save</button> <span id="st-msg" class="st-msg"></span></div>`;
   const msg = $("#st-msg", body);
+  const WEB_ONLY = ["events"];          // the Ideas Lab's current events searches the web: only some providers can, so "everything" leaves it alone on one that cannot
   $$("tr[data-f] .fp", body).forEach(sel => sel.onchange = () => { const tr = sel.closest("tr"), dl = $("datalist", tr); if (dl) dl.innerHTML = ((A.providers[sel.value] || {}).models || []).map(m => `<option value="${esc(m)}">`).join(""); });
   const test = async (btn, provider, model) => { const out = btn.parentElement.querySelector(".tres"); note(out, "…"); btn.disabled = true;
     const r = await api("/api/ai/test", {provider, model}).catch(e => ({ok: false, error: e.message})); btn.disabled = false;
     note(out, r.ok ? `✓ ${r.ms} ms${r.cost != null ? " · " + money(r.cost) : ""}` : r.error, !r.ok); };
+  const mp = $("#mn-p", body), mm = $("#mn-m", body), mnote = $("#mn-note", body);
+  mp.onchange = () => { const ms = (A.providers[mp.value] || {}).models || []; $("#dl-main", body).innerHTML = ms.map(m => `<option value="${esc(m)}">`).join(""); if (ms.length && !ms.includes(mm.value)) mm.value = ms[0]; };
+  $("#mn-test", body).onclick = e => { if (!mm.value.trim()) return note(mnote, "Type a model first.", true); test(e.currentTarget, mp.value, mm.value.trim()); };
+  $("#mn-apply", body).onclick = () => {
+    const p = mp.value, m = mm.value.trim(); if (!m) return note(mnote, "Type a model first.", true);
+    let n = 0; const left = [];
+    $$("tr[data-f]", body).forEach(tr => { const k = tr.dataset.f; if (k === "emb") return;
+      if (WEB_ONLY.includes(k) && !(A.providers[p] || {}).web_search) { left.push($("b", tr).textContent); return; }
+      const fp = $(".fp", tr); fp.value = p; fp.dispatchEvent(new Event("change")); $(".fm", tr).value = m; n++; });
+    note(mnote, `Set ${n} features to ${p} · ${m}. Press Save to keep it.` + (left.length ? ` Left alone: ${left.join(", ")} (it needs a provider that can search the web).` : ""));
+  };
   $$("[data-keychange]", body).forEach(b => b.onclick = () => { const f = $(".keyform", b.closest("td")); f.classList.remove("hide"); $("input", f).focus(); b.classList.add("hide"); });
   $$("[data-savekey]", body).forEach(b => b.onclick = async () => { const td = b.closest("td"), inp = $("input", td), out = $(".keymsg", td); if (!inp.value.trim()) return;
-    try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast("Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
+    try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast(D.ai.key_note ? "Key saved. " + D.ai.key_note : "Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
   $$("[data-test]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"), first = $(".pm", tr).value.split(",")[0].trim(); const m = first || prompt("Model name to test on " + b.dataset.test + ":"); if (m) test(b, b.dataset.test, m); });
   $$("[data-testf]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"); test(b, $(".fp", tr).value, $(".fm", tr).value.trim()); });
   $("#st-save", body).onclick = async () => {

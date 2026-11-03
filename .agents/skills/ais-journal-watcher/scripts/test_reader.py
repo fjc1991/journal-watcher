@@ -252,6 +252,62 @@ def main():
         write_cfg(CFG)
     check("missing key and HTTP errors are readable", t_errors)
 
+    def t_key_paste():
+        """A pasted key is tidied (the NAME= of a whole .env line, "Bearer", quotes, invisible characters), what is sent is the tidied key, a key that cannot be one is refused, a changed key replaces the old client,
+        and a provider that refuses the key says what to do (OpenRouter's "User not found" 401 was shown bare)."""
+        assert ai.clean_key("OPENROUTER_API_KEY=sk-or-v1-abc") == ("sk-or-v1-abc", ["the name before the = sign"])
+        assert ai.clean_key("export OPENROUTER_API_KEY = \"sk-or-v1-abc\"") == ("sk-or-v1-abc", ["the name before the = sign", "the quotes"])
+        assert ai.clean_key("Bearer sk-or-v1-abc")[0] == "sk-or-v1-abc" and ai.clean_key("\u200bsk-or-v1-abc\ufeff\u00a0")[0] == "sk-or-v1-abc" and ai.clean_key("“sk-or-v1-abc”")[0] == "sk-or-v1-abc"
+        assert ai.clean_key("AbC123==") == ("AbC123==", []) and ai.clean_key("sk-or-v1-abc") == ("sk-or-v1-abc", [])                  # a key that ends in = is not a NAME=value line
+        envp = os.path.join(dl.ROOT, ".env"); saved_env = open(envp, encoding="utf-8").read() if os.path.exists(envp) else None
+        c = json.loads(json.dumps(CFG)); c["providers"]["ortest"] = {"type": "openai_compat", "base_url": URL, "key_env": "OR_TEST_KEY", "models": ["m1"]}; c["providers"]["openrouter"] = {"type": "openai_compat", "base_url": URL, "key_env": "OR_TEST_KEY2", "models": []}
+        write_cfg(c)
+        try:
+            out = ai.set_key("ortest", "OR_TEST_KEY=Bearer 'sk-or-v1-zzz'\u200b")
+            assert "OR_TEST_KEY=sk-or-v1-zzz\n" in open(envp, encoding="utf-8").read() and "OR_TEST_KEY=OR_TEST_KEY" not in open(envp, encoding="utf-8").read() and "Tidied" in out["key_note"], out.get("key_note")
+            r = ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "ortest", "model": "m1"})                   # what is sent is the tidied key
+            assert SEEN[-1][2] == "Bearer sk-or-v1-zzz", SEEN[-1][2]
+            assert "key_note" not in ai.set_key("ortest", "sk-or-v1-clean"), "a clean key of an unknown kind gets no note"
+            note = ai.set_key("openrouter", "sk-ant-api03-wrongprovider").get("key_note", "")
+            assert "sk-or-" in note and "Openrouter" in note, note                                                                  # a key of another provider is said, not refused
+            for bad in ("has space", "kéy", "a\"b", "", "   ", "x" * 401):
+                try:
+                    ai.set_key("ortest", bad); raise AssertionError("accepted %r" % bad)
+                except ValueError as e:
+                    assert "API key" in str(e)
+            ai._clients["a"] = object(); ai.set_key("ortest", "sk-or-v1-again"); assert "a" not in ai._clients                          # a client made with the old key is not kept
+            # ...and a key saved while a request is being prepared does not break that request (the cache was read twice, the second time after it had been cleared)
+            import types as _t
+            class _M:
+                stop_reason, content = "end_turn", [_t.SimpleNamespace(type="text", text="ok")]
+                usage = _t.SimpleNamespace(input_tokens=1, output_tokens=1, cache_creation_input_tokens=0, cache_read_input_tokens=0, server_tool_use=None)
+            class _S:
+                text_stream = iter(["ok"])
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def get_final_message(self): return _M()
+            ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _S())))
+            real_to = ai._to_anthropic
+            ai._to_anthropic = lambda m: (ai._clients.clear(), real_to(m))[1]                                                           # the cache is cleared while the request is being prepared
+            c2 = json.loads(json.dumps(c)); c2["providers"]["anth"] = {"type": "anthropic", "key_env": "OR_TEST_KEY", "models": ["m1"]}; write_cfg(c2)
+            try:
+                assert ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "anth", "model": "m1"}).text == "ok"
+            finally:
+                ai._to_anthropic = real_to; ai._clients.pop("a", None); write_cfg(c)
+            os.environ["BAD_KEY"] = "bad"; c["features"]["y"] = {"provider": "bad", "model": "m"}; write_cfg(c)
+            try:
+                ai.chat("y", [{"role": "user", "content": "x"}]); raise AssertionError("expected AIError")
+            except ai.AIError as e:
+                assert "401" in str(e) and "press Change" in str(e) and "Incorrect API key" in str(e), str(e)
+            assert "press Change" in str(ai._http_error("p", type("E", (), {"code": 403, "reason": "x"})(), "{}")) and "press Change" not in str(ai._http_error("p", type("E", (), {"code": 500, "reason": "x"})(), "{}"))
+        finally:
+            write_cfg(CFG); os.environ.pop("OR_TEST_KEY", None); os.environ.pop("OR_TEST_KEY2", None)
+            if saved_env is None:
+                os.path.exists(envp) and os.remove(envp)
+            else:
+                open(envp, "w", encoding="utf-8").write(saved_env)
+    check("pasting a key: the NAME=, Bearer, quotes and invisible characters are removed (what is sent is the tidied key), keys that cannot be keys are refused, a changed key replaces the old client, and a refused key says what to do", t_key_paste)
+
     def t_config():
         c = ai.config()
         assert c["providers"]["fake"]["configured"] and not c["providers"]["nokey"]["configured"]

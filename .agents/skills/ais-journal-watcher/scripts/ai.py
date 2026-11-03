@@ -100,16 +100,36 @@ def _key(name):
     return os.environ.get(name) or dl.load_env().get(name, "")
 
 
+_INVISIBLE = {ord(c): None for c in "\u200b\u200c\u200d\u2060\ufeff\u00a0"}          # zero-width characters, the byte-order mark and the no-break space come along with a copied key
+KEY_START = {"anthropic": "sk-ant-", "openrouter": "sk-or-", "openai": "sk-"}                  # how a provider's keys usually begin (a hint only: formats change)
+
+
+def clean_key(raw):
+    """(key, what_was_removed) for what was pasted into a key box. Removes what comes along when a key is copied: invisible characters, a surrounding pair of quotes,
+    a leading "Bearer ", and the NAME= of a whole .env line (pasting OPENROUTER_API_KEY=sk-or-… saved the name as part of the key, and the provider answered 401)."""
+    k, out = str(raw or "").translate(_INVISIBLE).strip(), []
+    if k != str(raw or "").strip():
+        out.append("invisible characters")
+    m = re.match(r"^(?:export\s+)?[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*(.+)$", k, re.S)
+    if m:
+        k = m.group(1).strip(); out.append("the name before the = sign")
+    if k[:7].lower() == "bearer ":
+        k = k[7:].strip(); out.append("“Bearer”")
+    if len(k) >= 2 and k[0] in "\"'“‘`" and k[-1] in "\"'”’`":
+        k = k[1:-1].strip(); out.append("the quotes")
+    return k, out
+
+
 def set_key(provider, key):
     """Save a provider's API key in the .env file of the data home (readable by you only); it is never sent back to the page.
-    Returns the fresh config. Raises ValueError for an unknown provider or a key that cannot be one."""
+    Returns the fresh config (with "key_note" when something was tidied or the key does not look like this provider's). Raises ValueError for an unknown provider or a key that cannot be one."""
     p = (config_data().get("providers") or {}).get(provider)
     name = (p or {}).get("key_env")
     if not name:
         raise ValueError("%s needs no key" % provider)
-    key = str(key or "").strip()
-    if not key or len(key) > 400 or re.search(r"[\s\"'\\]", key):
-        raise ValueError("That doesn’t look like an API key (no spaces or quotes; paste just the key).")
+    key, removed = clean_key(key)
+    if not key or len(key) > 400 or not re.fullmatch(r"[\x21-\x7e]+", key) or re.search(r"[\"'\\]", key):
+        raise ValueError("That doesn’t look like an API key: paste just the key (no spaces or quotes, and only plain letters, digits and - _ . : / + =).")
     path = os.path.join(dl.ROOT, ".env")
     lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
     lines = [l for l in lines if not re.match(r"\s*%s\s*=" % re.escape(name), l)] + ["%s=%s" % (name, key)]
@@ -119,7 +139,18 @@ def set_key(provider, key):
         f.write("\n".join(lines) + "\n")
     os.replace(tmp, path)
     os.environ[name] = key
-    return config()
+    with _lock:
+        _clients.clear()                  # a client made with the old key would go on using it: "no restart is needed" has to be true
+    cfg = config()
+    notes = []
+    if removed:
+        notes.append("Tidied the pasted key: removed %s." % ", ".join(removed))
+    start = KEY_START.get(provider)
+    if start and not key.startswith(start):
+        notes.append("%s keys usually start with “%s”: check that this is a %s key." % (provider.capitalize(), start, provider.capitalize()))
+    if notes:
+        cfg["key_note"] = " ".join(notes)
+    return cfg
 
 
 def is_local(p):
@@ -491,8 +522,10 @@ def test(provider, model):
 
 def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     import anthropic
-    if "a" not in _clients:
-        _clients["a"] = anthropic.Anthropic(api_key=_key(p["key_env"]))
+    with _lock:                           # get or make the client in one step, and keep our own reference: saving a key clears the cache (set_key) and must not break a request already preparing
+        client = _clients.get("a")
+        if client is None:
+            client = _clients["a"] = anthropic.Anthropic(api_key=_key(p["key_env"]))
     oc = {"effort": f.get("effort", "low")}
     if schema:
         oc["format"] = {"type": "json_schema", "schema": schema}
@@ -505,7 +538,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     if web:
         kw["tools"] = [{"type": "web_search_20260318", "name": "web_search", "max_uses": int(p.get("web_max_uses", 5))}]
     try:
-        with _clients["a"].beta.messages.stream(**kw) as s:
+        with client.beta.messages.stream(**kw) as s:
             for t in s.text_stream:
                 yield "text", t
             msg = s.get_final_message()
@@ -545,7 +578,8 @@ def _http_error(name, e, raw=None):
         msg = body["error"].get("message") if isinstance(body.get("error"), dict) else body.get("error") or body
     except Exception:
         msg = raw[:200] or e.reason
-    return AIError("%s: %s (HTTP %s)" % (name, str(msg)[:300], e.code))
+    hint = ". The provider did not accept the key: press Change on its row in Settings → AI & privacy and paste the key again (a wrong, revoked or another provider’s key looks like this)." if e.code in (401, 403) else ""
+    return AIError("%s: %s (HTTP %s)%s" % (name, str(msg)[:300], e.code, hint))
 
 
 def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
