@@ -738,7 +738,8 @@ def row(title, doi, status="ok", file="", date="2026-11-01"):
 open(os.path.join(P, "2024-05", "Journal", "kept.pdf"), "wb").write(b"%%PDF")
 write_csv(os.path.join(P, "_index.csv"), [row("Alpha", "10.1/a", file="Papers/2024-05/Journal/kept.pdf", date="2026-10-01"), row("Beta", "10.1/b", status="failed", date="2026-10-02")])
 cp = os.path.join(P, "_index (Joe's MacBook's conflicted copy 2026-11-03).csv")
-write_csv(cp, [row("Beta", "10.1/b", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02"), row("Gamma", "10.1/c", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02")])
+write_csv(cp, [row("Beta", "10.1/b", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02"), row("Gamma", "10.1/c", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02"),
+              row("Alpha", "10.1/a", status="failed", date="2026-11-02")])         # (the other computer failed to download Alpha later: the copy that HAS the PDF still wins)
 open(os.path.join(paths.BASE, "ai (conflicted copy).json"), "w").write("{}")
 open(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)"), "w").write("X=1")
 for decoy in (os.path.join(P, "paper (1).pdf"), os.path.join(P, "_conflicts", "x", "old (conflicted copy).csv"), os.path.join(P, "_removed", "y", "z (conflicted copy).pdf"), os.path.join(paths.LOCAL, "q (conflicted copy).json")):
@@ -752,7 +753,8 @@ assert ix["kind"] == "index" and ix["original"] == "Papers/_index.csv" and ix["o
 r = sy.merge_index(ix["path"])
 rows = {x["doi"]: x for x in csv.DictReader(open(os.path.join(P, "_index.csv"), newline=""))}
 assert sorted(rows) == ["10.1/a", "10.1/b", "10.1/c"] and r["papers"] == 3 and r["added"] == 1, (sorted(rows), r)
-assert rows["10.1/b"]["status"] == "ok" and rows["10.1/b"]["file"], "the downloaded row beats the failed one"
+assert rows["10.1/b"]["status"] == "ok" and rows["10.1/b"]["file"], "the downloaded row beats the failed one (when it is in the copy)"
+assert rows["10.1/a"]["status"] == "ok" and rows["10.1/a"]["file"], "…and when it is in the original, even though the failed row is newer"
 assert rows["10.1/a"]["file"] and not os.path.exists(cp) and os.path.exists(os.path.join(paths.ROOT, r["set_aside"])) and r["set_aside"].startswith("Papers/_conflicts/"), r
 assert len([x for x in sy.conflicts(fresh=True) if x["kind"] == "index"]) == 0
 # only the library index can be joined; anything else, or a path that is not a conflicted copy, is refused
