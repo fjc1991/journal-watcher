@@ -677,6 +677,8 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Tests.** `test_ui.py`: a geometry check on the Providers and feature tables (every visible key box on the same line as its Save key button and at least 150 px wide, no more than 6 px between the tallest and the shortest provider row, provider and effort selects at least 80 px, model boxes at least 180 px, no clipped select, the short header) and one for a narrow window (no sideways scroll of the page); it fails on the old stylesheet (select 69 px, model box 133 px). A check that `#modelname` is gone.
 
+**Review follow-up (Copilot, both real).** (1) The providers table's 800 px minimum left the models column 70 px (800 − 116 − 34 % − 2 × 96 − 150), so its box was ~50 px wide before the card started to scroll; the minimum is now 980 px (box ≈ 176 px). (2) Pressing Change left “✓ key found” in the same flex row as the new key box and took its space; the status is now hidden while the box is open. Tests: the models box must stay ≥ 140 px in a 1000 px window, and the key box after Change must be as wide as an empty one with the status hidden; each fails when its fix is reverted (50 px, and 136 px against 227).
+
 **Not verified.** How it looks with the Mac's fonts: the widths were chosen from the sandbox's, so the exact point at which the table starts to scroll may differ.
 
 ## 2. How it runs now (CLI agent)

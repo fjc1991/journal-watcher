@@ -32,6 +32,7 @@ body.settings-open { overflow: hidden; }
 /* the provider and feature tables: fixed column widths, so nothing is clipped ("anth", "lo", half a model name) and every row has the same shape */
 .st-scroll { overflow-x: auto; }
 .st-prov, .st-feat { table-layout: fixed; min-width: 800px; }
+.st-prov { min-width: 980px; }      /* 116 + 34% key + 2 x 96 flags + 150 test leave the models column ~196 px (176 after padding) at this width; at 800 it got 70 px and the field collapsed to ~50 */
 .st-prov th, .st-prov td, .st-feat th, .st-feat td { padding: 11px 10px; vertical-align: top; }
 .st-prov th.c, .st-prov td.c { text-align: center; }
 .st-prov td > b, .st-prov td.c, .st-feat td > b:first-child { line-height: 32px; }
