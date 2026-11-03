@@ -132,10 +132,21 @@ def check_existing(doi, title):
     return _existing({"doi": clean_doi(doi) if str(doi or "").strip() else "", "title": title}) or ""
 
 
-_LOCK = threading.Lock()      # one filing at a time: the check for a duplicate, the free file name and the index row belong together
+_LOCK = threading.RLock()      # one filing at a time (re-entrant: books.confirm holds it around its own checks and then files): the check for a duplicate, the free file name and the index row belong together
 
 
-def _file(p, data, note):
+def library_rows():
+    """The rows of Papers/_index.csv that are in the library (status ok)."""
+    import csv
+    idx = os.path.join(dl.PAPERS, "_index.csv")
+    if not os.path.exists(idx):
+        return []
+    with open(idx, newline="", encoding="utf-8") as f:
+        return [r for r in csv.DictReader(f) if r.get("status") == "ok" and r.get("file")]
+
+
+def _file(p, data, note, after=None):
+    """File a PDF like the pipeline does. after(dest): called once the PDF is written and before the index row (books write their files beside it there)."""
     with _LOCK:
         ex = _existing(p)
         if ex:
@@ -151,6 +162,8 @@ def _file(p, data, note):
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, dest)
+        if after:
+            after(dest)
         rel = os.path.relpath(dest, dl.ROOT)
         dl.save_index(p, rel, "ok", note)
         return {"file": rel, "title": p["title"], "existing": False, "note": note}
@@ -285,6 +298,12 @@ def discard(tokens):
     n = 0
     for t in tokens or []:
         p = _staged_path(t)
+        if p:
+            for extra in (p + ".conv", p[:-4] + ".conv", p + ".claimed"):          # (a book staged with its converted copy)
+                try:
+                    os.remove(extra)
+                except OSError:
+                    pass
         if p and os.path.exists(p):
             try:
                 os.remove(p); n += 1
@@ -373,10 +392,13 @@ def confirm(token, fields):
     """File a staged PDF with the details you confirmed or corrected. fields: title (required), authors (a list or "A; B"), journal, pub_date (YYYY, YYYY-MM or YYYY-MM-DD, or empty),
     doi, source ("crossref" = a record taken as it is, "edited" = a record you changed, "hand" = typed by you). Raises ValueError with a message for the user; a PDF refused for its
     details stays staged so you can correct them. The token is claimed before filing, so two requests for it cannot both file the PDF."""
+    f = fields if isinstance(fields, dict) else {}
+    if f.get("kind") == "book":                         # a book (PDF or EPUB): books.py files it
+        import books
+        return books.confirm(token, f)
     path = _waiting(token)
     if not path:
         raise ValueError("That PDF is no longer waiting to be added: drop it again.")
-    f = fields if isinstance(fields, dict) else {}
     title = _clean_text(f.get("title"), 500)
     if not title:
         raise ValueError("The title is empty: give the paper a title.")

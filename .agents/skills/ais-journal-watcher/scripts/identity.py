@@ -284,6 +284,7 @@ def audit(progress=None, use_kept=False):
             rows = [r for r in csv.DictReader(f) if r.get("status") == "ok" and r.get("file")]
     out = []
     ok = kept() if use_kept else {}
+    rows = [r for r in rows if r.get("journal") != "Books"]       # a book is not a paper with a DOI to look for on its first pages (books.py checks a book when it is added)
     for n, r in enumerate(rows, 1):
         f = os.path.join(paths.ROOT, r["file"])
         item = {"file": r["file"], "title": r.get("title", ""), "doi": r.get("doi", ""), "journal": r.get("journal", ""), "note": r.get("note", "")}
