@@ -695,7 +695,9 @@ print("JSON" + json.dumps(out))
     def t_sync_info():
         """Two computers share one data folder: each says when it is here, Dropbox's conflicted copies are found, the library index copies can be joined without losing a paper, and any copy can be set aside (never deleted)."""
         import subprocess
-        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        real_home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        home = real_home + "-link"
+        os.symlink(real_home, home)           # the data folder is reached through a link (~/Dropbox, or /var on a Mac): the paths shown and used must still be relative to the folder itself
         try:
             child = r'''
 import csv, json, os, sys, time
@@ -778,7 +780,7 @@ print("OK")
             r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=120)
             assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
         finally:
-            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+            os.remove(home); shutil.rmtree(real_home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("sync: each computer says it is here (and is forgotten when it stops), Dropbox's conflicted copies are found, the library index copies join without losing a paper, copies are set aside and never deleted, bad paths are refused", t_sync_info)
     def t_keychain_keys():
         """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain

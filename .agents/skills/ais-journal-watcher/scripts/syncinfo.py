@@ -180,6 +180,7 @@ def conflicts(fresh=False):
     root = os.path.realpath(paths.ROOT)
     skip = {os.path.realpath(os.path.join(paths.PAPERS, "_conflicts")), os.path.realpath(os.path.join(paths.PAPERS, "_removed")), os.path.realpath(paths.LOCAL)}
     for top, deep in _scan_dirs():
+        top = os.path.realpath(top)            # (all paths below are real ones: a data folder reached through a link, such as ~/Dropbox or /var on a Mac, still gives paths relative to itself)
         if not os.path.isdir(top):
             continue
         for dirpath, dirnames, filenames in os.walk(top):
@@ -219,7 +220,7 @@ def _inside(rel):
 def set_aside(rel):
     """Move a conflicted copy to Papers/_conflicts/<time>/<same place> (never delete it). Returns where it went, relative to the data folder."""
     full, root = _inside(rel)
-    dest = os.path.join(paths.PAPERS, "_conflicts", time.strftime("%Y%m%d-%H%M%S"), os.path.relpath(full, root))
+    dest = os.path.join(os.path.realpath(paths.PAPERS), "_conflicts", time.strftime("%Y%m%d-%H%M%S"), os.path.relpath(full, root))
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     shutil.move(full, dest)
     _cache["at"] = 0.0
