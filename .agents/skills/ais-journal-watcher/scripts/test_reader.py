@@ -691,6 +691,92 @@ print("JSON" + json.dumps(out))
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("sync: per-computer files (sign-in browser profile, cookies, search index, models, caches, update state, staged PDFs) live outside the data folder, shared ones stay in it, an old copy is moved once, a checkout is unchanged", t_local_state)
+    def t_sync_info():
+        """Two computers share one data folder: each says when it is here, Dropbox's conflicted copies are found, the library index copies can be joined without losing a paper, and any copy can be set aside (never deleted)."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            child = r'''
+import csv, json, os, sys, time
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import download as dl, syncinfo as sy
+P = paths.PAPERS
+iso = lambda dt: dt.isoformat(timespec="seconds")
+now = datetime.now(timezone.utc)
+
+# -- who is here
+a = sy.me(); assert a == sy.me() and len(a["id"]) == 32 and a["name"], a                        # (made once, kept in LOCAL)
+assert os.path.exists(os.path.join(paths.LOCAL, "device.json")) and not os.path.exists(os.path.join(paths.BASE, "devices", "device.json"))
+assert sy.rename("  Home   laptop ")["name"] == "Home laptop" and sy.me()["name"] == "Home laptop"
+for bad in ("", "   ", None):
+    try:
+        sy.rename(bad); raise AssertionError("empty name accepted")
+    except ValueError:
+        pass
+sy.beat(); mine = os.path.join(paths.BASE, "devices", a["id"] + ".json")
+assert json.load(open(mine))["name"] == "Home laptop" and sy.computers() == [] and sy.others() == [], "this computer is not listed among the others"
+D = os.path.join(paths.BASE, "devices"); put = lambda i, **k: json.dump({"id": i, "name": "Work Mac", "seen": iso(now), "pid": 1, "version": "1.2.2", **k}, open(os.path.join(D, i + ".json"), "w"))
+put("1" * 32); put("2" * 32, name="Old desk", seen=iso(now - timedelta(minutes=10))); put("3" * 32, name="Ancient", seen=iso(now - timedelta(days=90))); put("4" * 32, seen="yesterday"); put("zz")
+open(os.path.join(D, "junk.json"), "w").write("{not json")
+c = sy.computers()
+assert [x["name"] for x in c] == ["Work Mac", "Old desk"] and [x["open"] for x in c] == [True, False], c      # (open first; 10 minutes ago is not 'open'; ancient and broken files are not shown)
+assert [x["name"] for x in sy.others()] == ["Work Mac"] and not os.path.exists(os.path.join(D, "3" * 32 + ".json")), "a computer not seen for 60 days is forgotten"
+assert sy.others(now + timedelta(minutes=5)) == [], "three minutes later it is no longer open"
+sy.leave(); assert not os.path.exists(mine)
+
+# -- Dropbox conflicts: found, described, left alone when they only look similar
+os.makedirs(os.path.join(P, "2024-05", "Journal"), exist_ok=True); os.makedirs(os.path.join(P, "_conflicts", "x"), exist_ok=True); os.makedirs(os.path.join(P, "_removed", "y"), exist_ok=True)
+cols = dl.INDEX_COLS
+def write_csv(p, rows):
+    with open(p, "w", newline="") as f:
+        w = csv.DictWriter(f, cols); w.writeheader(); w.writerows(rows)
+def row(title, doi, status="ok", file="", date="2026-11-01"):
+    return dict(zip(cols, [date, "J", "J", title, "A B", doi, "", "", "", file, status, ""]))
+open(os.path.join(P, "2024-05", "Journal", "kept.pdf"), "wb").write(b"%%PDF")
+write_csv(os.path.join(P, "_index.csv"), [row("Alpha", "10.1/a", file="Papers/2024-05/Journal/kept.pdf", date="2026-10-01"), row("Beta", "10.1/b", status="failed", date="2026-10-02")])
+cp = os.path.join(P, "_index (Joe's MacBook's conflicted copy 2026-11-03).csv")
+write_csv(cp, [row("Beta", "10.1/b", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02"), row("Gamma", "10.1/c", file="Papers/2024-05/Journal/kept.pdf", date="2026-11-02")])
+open(os.path.join(paths.BASE, "ai (conflicted copy).json"), "w").write("{}")
+open(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)"), "w").write("X=1")
+for decoy in (os.path.join(P, "paper (1).pdf"), os.path.join(P, "_conflicts", "x", "old (conflicted copy).csv"), os.path.join(P, "_removed", "y", "z (conflicted copy).pdf"), os.path.join(paths.LOCAL, "q (conflicted copy).json")):
+    open(decoy, "wb").write(b"x")
+found = {x["path"]: x for x in sy.conflicts(fresh=True)}
+assert sorted(found) == sorted(["Papers/_index (Joe's MacBook's conflicted copy 2026-11-03).csv", ".agents/skills/ais-journal-watcher/ai (conflicted copy).json", ".env (Work Mac's conflicted copy 2026-11-03)"]), sorted(found)
+ix = found["Papers/_index (Joe's MacBook's conflicted copy 2026-11-03).csv"]
+assert ix["kind"] == "index" and ix["original"] == "Papers/_index.csv" and ix["original_exists"] and found[".agents/skills/ais-journal-watcher/ai (conflicted copy).json"]["kind"] == "json"
+
+# -- joining the two library indexes loses no paper; the same paper keeps its better row
+r = sy.merge_index(ix["path"])
+rows = {x["doi"]: x for x in csv.DictReader(open(os.path.join(P, "_index.csv"), newline=""))}
+assert sorted(rows) == ["10.1/a", "10.1/b", "10.1/c"] and r["papers"] == 3 and r["added"] == 1, (sorted(rows), r)
+assert rows["10.1/b"]["status"] == "ok" and rows["10.1/b"]["file"], "the downloaded row beats the failed one"
+assert rows["10.1/a"]["file"] and not os.path.exists(cp) and os.path.exists(os.path.join(paths.ROOT, r["set_aside"])) and r["set_aside"].startswith("Papers/_conflicts/"), r
+assert len([x for x in sy.conflicts(fresh=True) if x["kind"] == "index"]) == 0
+# only the library index can be joined; anything else, or a path that is not a conflicted copy, is refused
+for bad, fns in ((".agents/skills/ais-journal-watcher/ai (conflicted copy).json", (sy.merge_index,)), ("Papers/_index.csv", (sy.merge_index, sy.set_aside)), ("../outside", (sy.merge_index, sy.set_aside)),
+                 ("", (sy.merge_index, sy.set_aside)), (None, (sy.merge_index, sy.set_aside)), ("Papers/2024-05", (sy.merge_index, sy.set_aside)), ("Papers/paper (1).pdf", (sy.merge_index, sy.set_aside)),
+                 ("/etc/passwd", (sy.merge_index, sy.set_aside))):
+    for fn in fns:
+        try:
+            fn(bad); raise AssertionError("%%s accepted %%r" %% (fn.__name__, bad))
+        except ValueError:
+            pass
+assert os.path.exists(os.path.join(paths.BASE, "ai (conflicted copy).json")), "a refused request moves nothing"
+# setting aside moves (never deletes) and keeps the place it came from
+w = sy.set_aside(".env (Work Mac's conflicted copy 2026-11-03)")
+assert os.path.exists(os.path.join(paths.ROOT, w)) and w.startswith("Papers/_conflicts/") and not os.path.exists(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)")) and open(os.path.join(paths.ROOT, w)).read() == "X=1"
+i = sy.info(); assert i["separate"] and i["me"]["name"] == "Home laptop" and len(i["conflicts"]) == 1 and i["data_folder"] == paths.ROOT
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("sync: each computer says it is here (and is forgotten when it stops), Dropbox's conflicted copies are found, the library index copies join without losing a paper, copies are set aside and never deleted, bad paths are refused", t_sync_info)
 
     def t_exports():
         es = exports.entries(rows[:2]); assert [e["key"] for e in es] == ["tian2025open", "fernandez2025governance"], [e["key"] for e in es]
