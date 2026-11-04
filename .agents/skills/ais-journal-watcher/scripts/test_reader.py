@@ -447,6 +447,196 @@ def main():
                 except OSError:
                     pass
     check("books: Ask can be limited to one chapter (only its pages; a book's passages say where they are), and a chapter summary is estimated for free, asked for through the budgeted layer, worded with your pages, kept, and not asked twice", t_chapter_ai)
+    def t_parallel_embeddings():
+        """The local model embeds several small pieces of text at once (about one per core): the vectors come out in the same order and equal to one-at-a-time, progress and Cancel work across pieces,
+        and a model that cannot be used from several threads falls back to one piece at a time."""
+        import random, threading, time
+        import numpy as np
+
+        class M:            # a stand-in for the fastembed model: slow by a random amount, and it remembers how many calls ran at the same moment
+            active = peak = calls = 0
+            lock = threading.Lock()
+            unsafe = False
+
+            def passage_embed(self, texts):
+                with M.lock:
+                    M.active += 1; M.peak = max(M.peak, M.active); M.calls += 1
+                    clash = M.unsafe and M.active > 1
+                try:
+                    time.sleep(random.random() * 0.02)
+                    if clash:
+                        raise RuntimeError("Already borrowed")
+                    return [np.array([float(len(t)), float(sum(map(ord, t)) % 97), 1.0]) for t in texts]
+                finally:
+                    with M.lock:
+                        M.active -= 1
+            query_embed = passage_embed
+
+            @classmethod
+            def reset(cls, unsafe=False):
+                cls.active = cls.peak = cls.calls = 0; cls.unsafe = unsafe
+
+        texts = ["x" * (i + 1) + str(i) for i in range(100)]
+        saved_env, had = os.environ.get("JW_EMBED_WORKERS"), "stand-in" in ai._local
+        ai._local["stand-in"] = M()
+        try:
+            os.environ["JW_EMBED_WORKERS"] = "1"; M.reset()
+            one_by_one = ai._embed_local(texts, "passage", "stand-in")
+            assert M.peak == 1 and ai.embed_workers() == 1, M.peak
+            os.environ["JW_EMBED_WORKERS"] = "4"; M.reset()
+            seen = []
+            several = ai._embed_local(texts, "passage", "stand-in", lambda a, b: seen.append((a, b)))
+            assert M.peak > 1 and ai.embed_workers() == 4, "pieces really ran at the same time"
+            assert np.array_equal(one_by_one, several) and [int(v[0]) for v in several] == [len(t) for t in texts], "same vectors, same order"
+            assert seen[-1] == (100, 100) and [a for a, _ in seen] == sorted(a for a, _ in seen) and len(seen) == 7, seen        # (7 pieces of 16)
+            # Cancel: the pieces not started are dropped
+            many = ["y" * (i + 1) for i in range(400)]
+            os.environ["JW_EMBED_WORKERS"] = "2"; M.reset()
+
+            def stop(a, b):
+                raise ai.Cancelled("Cancelled.")
+            try:
+                ai._embed_local(many, "passage", "stand-in", stop); raise AssertionError("Cancel was ignored")
+            except ai.Cancelled:
+                pass
+            assert M.calls < 25, M.calls
+            # a model that fails when used from several threads: the answer is still right
+            os.environ["JW_EMBED_WORKERS"] = "4"; M.reset(unsafe=True)
+            safe = ai._embed_local(texts, "passage", "stand-in")
+            assert np.array_equal(safe, one_by_one), "fell back to one piece at a time"
+            # through ai.embed(): normalised, and the worker count is automatic without the override
+            M.reset(); del os.environ["JW_EMBED_WORKERS"]
+            saved_cfg = dict(CFG)
+            write_cfg(dict(CFG, embeddings={"provider": "local", "model": "stand-in"}))
+            try:
+                arr = ai.embed(texts[:20])
+            finally:
+                write_cfg(saved_cfg)
+            assert arr.shape == (20, 3) and np.allclose(np.linalg.norm(arr, axis=1), 1.0, atol=1e-5)
+            assert 1 <= ai.embed_workers() <= 12 and ai.embed_workers() == max(1, min(os.cpu_count() or 1, 12))
+        finally:
+            if saved_env is None:
+                os.environ.pop("JW_EMBED_WORKERS", None)
+            else:
+                os.environ["JW_EMBED_WORKERS"] = saved_env
+            if not had:
+                ai._local.pop("stand-in", None)
+    check("indexing: the local model embeds pieces of text several at a time (one per core), in order and with the same vectors, Cancel stops the rest, and a model that is not thread-safe falls back to one at a time", t_parallel_embeddings)
+    def t_index_validity():
+        """Vectors that arrive from another computer through the shared folder are used only if they fit this paper and this model: a wrong shape, a cut-off file or another model's vectors are made again.
+        Work that was done reports how long it took."""
+        import numpy as np
+        saved_cfg = dict(CFG)
+        write_cfg(dict(CFG, embeddings={"provider": "fake", "model": "emb"}))
+        try:
+            vec, meta = embed._paths(pdf)
+            for f in (vec, meta):
+                if os.path.exists(f):
+                    os.remove(f)
+            r1 = embed.index_paper(pdf)
+            assert r1["cached"] is False and r1["n"] > 0 and r1["embed_s"] >= 0 and r1["extract_s"] >= 0 and r1["workers"] == 1, r1       # (a remote service: no local workers)
+            assert embed.index_paper(pdf)["cached"] is True
+            assert not [x for x in os.listdir(bl.INDEX) if x.endswith(".tmp")], "no temporary file is left behind"
+            n = r1["n"]
+            good = np.load(vec)
+            for label, damage in (("more rows than passages (another version of the paper)", lambda: np.save(open(vec, "wb"), np.zeros((n + 3, good.shape[1]), dtype="float32"))),
+                                  ("another width (another model)", lambda: np.save(open(vec, "wb"), np.zeros((n, good.shape[1] + 5), dtype="float32"))),
+                                  ("cut off in the middle (still arriving)", lambda: open(vec, "wb").write(open(vec, "rb").read()[:20])),
+                                  ("not an array at all", lambda: open(vec, "wb").write(b"junk"))):
+                np.save(open(vec, "wb"), good)
+                damage()
+                assert embed._valid(vec, meta, n) is False, label
+                again = embed.index_paper(pdf)
+                assert again["cached"] is False and np.load(vec).shape == good.shape, label
+                assert embed.index_paper(pdf)["cached"] is True, label
+            m = json.load(open(meta)); m["model"] = "fake:other"; json.dump(m, open(meta, "w"))
+            assert embed.index_paper(pdf)["cached"] is False, "vectors made by another model are made again"
+            # the search still works on what was rebuilt
+            assert embed.search(pdf, "How many firms are in the sample?", k=3)
+        finally:
+            write_cfg(saved_cfg)
+    check("indexing: shared vectors are used only if they fit this paper and model (wrong shape, cut-off or other-model files are made again), nothing temporary is left, and the work reports its timing", t_index_validity)
+    def t_shared_caches():
+        """The search index and the saved AI answers live in the shared state/ folder: copies Dropbox makes there are removed (never shown as conflicts), old temporary files too; a real conflict is still reported."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            probe = r'''
+import json, os, sys, time
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import ai, blocks, syncinfo
+st = paths.STATE
+def put(rel, body="x", age=0):
+    p = os.path.join(st, rel) if not rel.startswith("Papers") else os.path.join(paths.ROOT, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "w").write(body)
+    if age: os.utime(p, (time.time() - age, time.time() - age))
+put("index/x.vec", "a" * 100); put("index/x (Work Mac's conflicted copy 2026-11-03).vec"); put("index/x.blocks.json", "{}")
+put("ai_cache/k.json", "{}"); put("ai_cache/k (Home laptop's conflicted copy).json")
+put("index/old.vec.1.2.tmp", age=3 * 86400); put("index/new.vec.1.2.tmp")
+put("Papers/_index (Work Mac's conflicted copy 2026-11-03).csv", "a,b\n")
+before = sorted(c["path"] for c in syncinfo.conflicts(fresh=True))
+removed = syncinfo.tidy_caches()
+left = sorted(os.listdir(os.path.join(st, "index"))) + sorted(os.listdir(os.path.join(st, "ai_cache")))
+after = sorted(c["path"] for c in syncinfo.conflicts(fresh=True))
+print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st, "before": before, "removed": removed, "left": left, "after": after, "size": syncinfo.cache_size(), "info": syncinfo.info()["shared_cache"]}))
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", probe], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0, r.stderr[-800:]
+            o = json.loads(r.stdout.split("JSON", 1)[1])
+            assert o["index"] == os.path.join(o["state"], "index") and o["cache"] == os.path.join(o["state"], "ai_cache"), "both are in the shared state/"
+            assert o["before"] == ["Papers/_index (Work Mac's conflicted copy 2026-11-03).csv"], o["before"]        # (the cache copies are not shown as conflicts)
+            assert o["removed"] == 3, o["removed"]                                                                    # (two conflicted copies and the old temporary file)
+            assert o["left"] == ["new.vec.1.2.tmp", "x.blocks.json", "x.vec", "k.json"] or sorted(o["left"]) == sorted(["new.vec.1.2.tmp", "x.blocks.json", "x.vec", "k.json"]), o["left"]
+            assert o["after"] == o["before"], "a real conflict (the library list) is untouched"
+            assert o["size"] == o["info"] and o["size"]["files"] == 4 and o["size"]["bytes"] >= 100, o["size"]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("sync: the search index and saved AI answers are shared through state/; Dropbox copies and stale temporary files there are removed (not shown as conflicts), a real conflict is still reported, and their size is known", t_shared_caches)
+    def t_ui_prefs():
+        """Page choices kept in the data folder: only the named keys travel, changes merge a key at a time, an unchanged value writes nothing, an unreadable file is kept aside, and old reading positions are pruned."""
+        import time
+        import uiprefs as up_
+        saved = (up_.FILE, up_.MAX_POS)
+        up_.FILE = os.path.join(TMP, "ui_prefs.json")
+        try:
+            if os.path.exists(up_.FILE):
+                os.remove(up_.FILE)
+            g = up_.get()
+            assert g["prefs"] == {} and "jw-theme" in g["rules"]["exact"] and "jw-pos:" in g["rules"]["prefix"], g
+            pos = "jw-pos:Papers/Management Science/Jørgensen – Équilibre 2020.pdf"
+            assert up_.update({"jw-theme": "dark", "jw-sb": "folded", "jw-rd-side": "300", "other": "x", pos: '{"n":3,"y":0.2}', "jw-bad\x01": "x"}, []) == 2
+            assert up_.get()["prefs"] == {"jw-theme": "dark", pos: '{"n":3,"y":0.2}'}, "the sidebar and the panel width stay on one computer"
+            assert up_.update({"jw-theme": "light"}, []) == 1 and up_.get()["prefs"][pos] == '{"n":3,"y":0.2}', "another key is not undone"
+            t0 = os.stat(up_.FILE).st_mtime_ns
+            time.sleep(0.02)
+            assert up_.update({"jw-theme": "light"}, []) == 0 and os.stat(up_.FILE).st_mtime_ns == t0, "an unchanged value writes nothing"
+            assert up_.update({"jw-theme": "x" * 5000, "jw-fp-view": 3}, []) == 0, "too long, or not text: refused"
+            assert up_.update({}, ["jw-theme", "jw-nothing"]) == 1 and "jw-theme" not in up_.get()["prefs"]
+            assert up_.update("junk", "junk") == 0
+            # old reading positions are pruned, the newest kept
+            up_.MAX_POS = 3
+            up_.update({"jw-pos:p%d" % i: "1" for i in range(6)}, [])
+            keys = sorted(k for k in up_.get()["prefs"] if k.startswith("jw-pos:p"))
+            assert keys == ["jw-pos:p3", "jw-pos:p4", "jw-pos:p5"], keys
+            # a file that cannot be read is kept, not overwritten
+            for junk in ("{not json", "[1, 2]"):
+                open(up_.FILE, "w").write(junk)
+                assert up_.get()["prefs"] == {}
+                assert up_.update({"jw-theme": "dark"}, []) == 1
+                assert open(up_.FILE + ".unreadable").read() == junk and up_.get()["prefs"] == {"jw-theme": "dark"}
+            # the server side of the rules
+            assert up_.is_shared("jw-skim-on:Papers/A/b.pdf") and up_.is_shared("jw-lsn-voice") and not up_.is_shared("jw-sb") and not up_.is_shared("theme") and not up_.is_shared(None)
+        finally:
+            up_.FILE, up_.MAX_POS = saved
+            for suffix in ("", ".unreadable"):
+                try:
+                    os.remove(os.path.join(TMP, "ui_prefs.json") + suffix)
+                except OSError:
+                    pass
+    check("settings follow you: the page's choices (theme, view modes, reading positions) are kept in the data folder, only the named keys travel, a key at a time, nothing is rewritten when nothing changed, an unreadable file is kept aside, old positions are pruned", t_ui_prefs)
 
 
     print("library: folders, status, search, import, exports")
@@ -755,16 +945,18 @@ import json, os, sys
 sys.path.insert(0, %r)
 import paths
 st = os.path.join(paths.BASE, "state")
-for n, body in (("browser-profile/Default/x", "p"), ("index/a.json", "{}"), ("models/m.bin", "m"), ("verdicts.json", "{}"), ("ai_usage.jsonl", ""), ("signins.json", "{}"), ("runs/r.json", "{}")):
+for n, body in (("browser-profile/Default/x", "p"), ("index/a.json", "{}"), ("ai_cache/c.json", "1"), ("models/m.bin", "m"), ("verdicts.json", "{}"), ("ai_usage.jsonl", ""), ("signins.json", "{}"), ("runs/r.json", "{}")):
     os.makedirs(os.path.dirname(os.path.join(st, n)), exist_ok=True); open(os.path.join(st, n), "w").write(body)
-os.makedirs(os.path.join(paths.LOCAL, "index"), exist_ok=True); open(os.path.join(paths.LOCAL, "index", "b.json"), "w").write("{}")   # (already there: the old copy must stay)
+for n, body in (("index/b.json", "{}"), ("ai_cache/d.json", "2"), ("ai_cache/c.json", "1")):          # (an earlier development version kept the index and the saved answers here: they belong in state/, shared)
+    os.makedirs(os.path.dirname(os.path.join(paths.LOCAL, n)), exist_ok=True); open(os.path.join(paths.LOCAL, n), "w").write(body)
 moved = paths.migrate_local(); again = paths.migrate_local()
 import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard
 out = {"local": paths.LOCAL, "state": paths.STATE, "moved": moved, "again": again,
-       "where": {"models": ai.MODELS, "ai_cache": ai.CACHE, "index": blocks.INDEX, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
+       "where": {"models": ai.MODELS, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
                  "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED},
-       "shared": {"ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
-       "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL))}
+       "shared": {"ai_cache": ai.CACHE, "index": blocks.INDEX, "ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
+       "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL)),
+       "index_files": sorted(os.listdir(os.path.join(st, "index"))), "cache_files": sorted(os.listdir(os.path.join(st, "ai_cache")))}
 print("JSON" + json.dumps(out))
 ''' % HERE
             env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
@@ -776,15 +968,16 @@ print("JSON" + json.dumps(out))
                 assert under(p, o["local"]) and not under(p, o["state"]), (k, p)
             for k, p in o["shared"].items():
                 assert under(p, o["state"]) and not under(p, o["local"]), (k, p)
-            assert sorted(o["moved"]) == ["browser-profile", "models", "signins.json"] and o["again"] == [], o["moved"]       # (index was already in LOCAL: its old copy stays)
-            assert "verdicts.json" in o["left_in_state"] and "ai_usage.jsonl" in o["left_in_state"] and "runs" in o["left_in_state"] and "index" in o["left_in_state"], o["left_in_state"]
-            assert "browser-profile" in o["in_local"] and "models" in o["in_local"] and "verdicts.json" not in o["in_local"], o["in_local"]
+            assert sorted(o["moved"]) == ["ai_cache", "browser-profile", "index", "models", "signins.json"] and o["again"] == [], o["moved"]       # (the index and saved answers came BACK into state/)
+            assert "verdicts.json" in o["left_in_state"] and "ai_usage.jsonl" in o["left_in_state"] and "runs" in o["left_in_state"] and "index" in o["left_in_state"] and "ai_cache" in o["left_in_state"], o["left_in_state"]
+            assert "browser-profile" in o["in_local"] and "models" in o["in_local"] and "verdicts.json" not in o["in_local"] and "index" not in o["in_local"] and "ai_cache" not in o["in_local"], o["in_local"]
+            assert o["index_files"] == ["a.json", "b.json"] and o["cache_files"] == ["c.json", "d.json"], (o["index_files"], o["cache_files"])        # (both copies kept; the duplicate c.json is not doubled)
             # without JW_LOCAL, from a checkout, nothing changes: everything stays in state/
             r2 = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); import paths; print(paths.LOCAL == paths.STATE, paths.migrate_local())" % HERE], env=dict(env, JW_HOME=home), capture_output=True, text=True, timeout=60)
             assert r2.stdout.strip() == "True []", r2.stdout + r2.stderr
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
-    check("sync: per-computer files (sign-in browser profile, cookies, search index, models, caches, update state, staged PDFs) live outside the data folder, shared ones stay in it, an old copy is moved once, a checkout is unchanged", t_local_state)
+    check("sync: per-computer files (sign-in browser profile, cookies, models, lookup caches, update state, staged PDFs) live outside the data folder; the shared ones (runs, ledger, search index, saved AI answers) stay in it, a per-computer copy of the shared caches is merged back once, a checkout is unchanged", t_local_state)
     def t_sync_info():
         """Two computers share one data folder: each says when it is here, Dropbox's conflicted copies are found, the library index copies can be joined without losing a paper, and any copy can be set aside (never deleted)."""
         import subprocess

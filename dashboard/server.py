@@ -50,6 +50,7 @@ import signins  # noqa: E402
 import identity  # noqa: E402
 import support  # noqa: E402
 import syncinfo  # noqa: E402
+import uiprefs  # noqa: E402
 import updater  # noqa: E402
 import smart  # noqa: E402
 import readstate as rs  # noqa: E402
@@ -900,6 +901,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "that is not a book in your library"}, 404)
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
                                    "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)]})
+        if path == "/api/uiprefs":      # the page's own choices (theme, view modes, where you stopped reading…) kept in the data folder; static/prefsync.js asks for them before anything else
+            return self.send_json(uiprefs.get())
         if path == "/api/sync":         # Settings → Computers & sync: which computers use this data folder, which are open now, what Dropbox had to duplicate
             return self.send_json(syncinfo.info())
         if path == "/api/sync/status":  # the small version for the banner: names of the other computers that have the folder open, and how many conflicted copies there are
@@ -999,6 +1002,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.send_json({"ok": True, "offset": info.get("offset") or 0})
+        if path == "/api/uiprefs":          # {set: {key: value}, remove: [key]}: only the keys uiprefs shares are kept; the rest are ignored
+            return self.send_json({"ok": True, "changed": uiprefs.update(b.get("set"), b.get("remove"))})
         if path == "/api/sync":             # {action: "rename", name} | {action: "merge", path} (join the library index copies) | {action: "set_aside", path}
             try:
                 act = b.get("action")
@@ -1792,6 +1797,10 @@ def start(port=8765, quiet=False):
         print("Merged %d weekly runs into %s" % (len(olds), canon))
     srv = Server(("127.0.0.1", port), Handler)
     syncinfo.start()           # tell the other computers that use this data folder that this one has it open (devices/<id>.json, refreshed every 30 s)
+    try:
+        syncinfo.tidy_caches() # copies Dropbox made of search-index or saved-answer files when two computers wrote the same one at once: they are regenerable, so they are simply removed
+    except Exception:  # noqa: BLE001
+        pass
     importer.sweep()           # dropped PDFs nobody confirmed or cancelled within a day are forgotten (a confirmation of an older one is refused anyway)
     updater.start_background()
     threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)

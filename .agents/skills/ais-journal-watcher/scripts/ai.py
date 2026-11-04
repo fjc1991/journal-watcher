@@ -39,7 +39,7 @@ BASE, STATE = dl.BASE, dl.STATE
 CONFIG = os.path.join(BASE, "ai.json")
 LEDGER = os.path.join(STATE, "ai_usage.jsonl")
 MODELS = os.path.join(dl.LOCAL, "models")       # local embedding models are cached here (survives reboots)
-CACHE = os.path.join(dl.LOCAL, "ai_cache")      # answers to identical requests (regenerable)
+CACHE = os.path.join(dl.STATE, "ai_cache")      # answers to identical requests (regenerable; shared with the other computers that use the data folder, so an answer paid for once is free on all of them)
 FULL_TEXT_LIMIT = 450_000                    # characters of a paper sent as text to providers without native PDF input
 
 _lock = threading.Lock()
@@ -562,7 +562,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
                 _log(feature, v, sent)
                 if key and (cache_if is None or cache_if(v.text)):
                     os.makedirs(CACHE, exist_ok=True)
-                    tmp = os.path.join(CACHE, key + ".tmp")
+                    tmp = dl.tmp_path(os.path.join(CACHE, key + ".json"))
                     with open(tmp, "w", encoding="utf-8") as fh:
                         json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
                     os.replace(tmp, os.path.join(CACHE, key + ".json"))
@@ -718,19 +718,83 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
 
 # ---------------------------------------------------------------- embeddings
 
-def embed(texts, kind="passage"):
-    """float32 array (n, d) of L2-normalised vectors. kind="query" for a question, "passage" for document text.
-    Default is a local ONNX model (fastembed): free, offline; first use downloads it into state/models/."""
+EMBED_PIECE = 16          # passages handed to one worker at a time (small pieces keep every core busy and make Cancel quick)
+_LOCAL_LOCK = threading.Lock()
+
+
+def embed_workers():
+    """How many pieces of text the local model embeds at the same time: one per core (at most 12), so indexing uses the whole computer. JW_EMBED_WORKERS=n overrides it (1 = one at a time).
+    Measured on 4 cores with the same 128 passages: one call using all cores' threads 4.8 passages/s and 1.8 cores busy; four pieces at once with one thread each 17.4 passages/s and 3.8
+    cores busy, and exactly the same vectors (a small model does not spread over many threads; many small jobs do)."""
+    try:
+        n = int(os.environ.get("JW_EMBED_WORKERS") or 0)
+    except ValueError:
+        n = 0
+    return min(n, 32) if n > 0 else max(1, min(os.cpu_count() or 1, 12))
+
+
+def _local_model(name):
+    with _LOCAL_LOCK:                                       # (two threads asking at once must not load the model twice)
+        if name not in _local:
+            from fastembed import TextEmbedding
+            os.makedirs(MODELS, exist_ok=True)
+            _local[name] = TextEmbedding(model_name=name, cache_dir=MODELS, threads=1)       # one thread per piece: the parallelism is across pieces
+        return _local[name]
+
+
+def _embed_local(texts, kind, name, progress=None):
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    m = _local_model(name)
+    fn = m.query_embed if kind == "query" else m.passage_embed
+
+    def one(piece):
+        return np.array(list(fn(piece)), dtype="float32")
+
+    pieces = [texts[i:i + EMBED_PIECE] for i in range(0, len(texts), EMBED_PIECE)]
+    if not pieces:
+        return np.zeros((0, 1), dtype="float32")
+    workers = min(embed_workers(), len(pieces))
+    parts = [None] * len(pieces)
+
+    def sequential():
+        done = 0
+        for i, pc in enumerate(pieces):
+            parts[i] = one(pc); done += len(pc)
+            if progress:
+                progress(done, len(texts))
+
+    if workers <= 1:
+        sequential()
+    else:
+        ex = ThreadPoolExecutor(workers)
+        try:
+            futs = {ex.submit(one, pc): i for i, pc in enumerate(pieces)}
+            done = 0
+            for f in as_completed(futs):
+                parts[futs[f]] = f.result()
+                done += len(pieces[futs[f]])
+                if progress:
+                    progress(done, len(texts))            # (it may raise Cancelled: the pieces not started yet are dropped below)
+        except AIError:
+            raise
+        except Exception:  # noqa: BLE001      (the model or its tokenizer did not like being used from several threads: do it one piece at a time instead, slower but the same result)
+            parts = [None] * len(pieces)
+            ex.shutdown(wait=True, cancel_futures=True)
+            sequential()
+        finally:
+            ex.shutdown(wait=True, cancel_futures=True)
+    return np.concatenate(parts)
+
+
+def embed(texts, kind="passage", progress=None):
+    """float32 array (n, d) of L2-normalised vectors. kind="query" for a question, "passage" for document text. progress(done, total) is called as pieces finish and may raise Cancelled.
+    Default is a local ONNX model (fastembed): free, offline; first use downloads it into state/models/. Pieces are embedded several at a time (embed_workers())."""
     import numpy as np
     cfg = config_data()
     c = cfg["embeddings"]
     if c["provider"] == "local":
-        from fastembed import TextEmbedding
-        if c["model"] not in _local:
-            os.makedirs(MODELS, exist_ok=True)
-            _local[c["model"]] = TextEmbedding(model_name=c["model"], cache_dir=MODELS)
-        m = _local[c["model"]]
-        arr = np.array(list(m.query_embed(texts) if kind == "query" else m.passage_embed(texts)), dtype="float32")
+        arr = _embed_local(texts, kind, c["model"], progress)
     else:
         p = cfg["providers"][c["provider"]]
         if cfg["privacy"].get("local_only") and not is_local(p):
@@ -748,6 +812,8 @@ def embed(texts, kind="passage"):
                 raise _http_error(c["provider"], e)
             except urllib.error.URLError as e:
                 raise AIError("Can’t reach %s (%s)." % (c["provider"], e.reason))
+            if progress:
+                progress(min(i + 64, len(texts)), len(texts))
         arr = np.array(rows, dtype="float32")
     arr /= np.maximum(np.linalg.norm(arr, axis=1, keepdims=True), 1e-9)
     return arr

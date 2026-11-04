@@ -7,6 +7,7 @@ It runs when the server starts, after papers are downloaded or added, and when y
 local embedding model (free, on this computer); with an embedding service that costs money it waits until you ask. Indexing is one job in the tray and can be cancelled;
 a paper that is half done is simply done next time.
 """
+import json
 import os
 import sys
 import threading
@@ -15,10 +16,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import activity as act  # noqa: E402
 import ai  # noqa: E402
+import download as dl  # noqa: E402
 import embed  # noqa: E402
 import notes_store as ns  # noqa: E402
 import pipeline as pl  # noqa: E402
 import prefs  # noqa: E402
+import syncinfo  # noqa: E402
 
 _lock = threading.Lock()
 _running = False
@@ -44,6 +47,25 @@ def pending():
     return out
 
 
+TIMING = os.path.join(dl.LOCAL, "index_timing.jsonl")          # one line per paper read into the index on THIS computer: how long, with how many workers (for understanding a slow one)
+TIMING_KEEP = 400
+
+
+def _log_timing(title, res):
+    """Append one line to the timing log, and keep only the last TIMING_KEEP lines."""
+    try:
+        os.makedirs(os.path.dirname(TIMING), exist_ok=True)
+        with open(TIMING, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "paper": str(title or "")[:80], **res}) + "\n")
+        if os.path.getsize(TIMING) > 200_000:
+            with open(TIMING, encoding="utf-8") as f:
+                lines = f.readlines()[-TIMING_KEEP:]
+            with open(TIMING, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+    except OSError:
+        pass
+
+
 def status():
     return {"enabled": enabled(), "local": local(), "running": _running}
 
@@ -64,6 +86,10 @@ def _run(delay):
     try:
         if delay:
             time.sleep(delay)
+        try:
+            syncinfo.tidy_caches()          # copies Dropbox made of index / answer files when two computers wrote at once
+        except Exception:  # noqa: BLE001
+            pass
         todo = pending()
         if not todo:
             return
@@ -78,7 +104,11 @@ def _run(delay):
                     if job.cancelled:
                         raise ai.Cancelled("Cancelled.")
                 try:
-                    embed.index_paper(pdf, stop)
+                    res = embed.index_paper(pdf, stop)
+                    if not res.get("cached"):
+                        _log_timing(r.get("title"), res)
+                        if res.get("embed_s"):
+                            job.update(msg="%s · %d passages/s on %d workers" % (str(r.get("title") or "")[:60], res["n"] / res["embed_s"], res["workers"]))
                 except ai.Cancelled:
                     break
                 except ai.AIError as e:        # a problem with the embedding model itself: stop, and say why
