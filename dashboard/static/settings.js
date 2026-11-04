@@ -4,7 +4,7 @@ import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, 
 
 let root, D = null, tab = "ai", LOG = [];
 const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's passages"], ["explain", "Explain selection", "The one-click prompts on selected text and figures"],
-  ["suggest", "Suggested questions", "Ideas for what to ask next"], ["screen", "Screening new papers", "Judges each new paper from its title and abstract (weekly check and archive search). The monthly budget stops it; what is left unscreened is picked up by the next search"],
+  ["suggest", "Suggested questions", "Ideas for what to ask next"], ["screen", "Screening new papers", "Judges each new paper from its title and abstract (weekly check and archive search). Needs a model that answers in structured JSON: Test checks that. The monthly budget stops it; what is left unscreened is picked up by Retry screening or the next search"],
   ["summarize", "Paper summaries", "The pipeline's summary for each downloaded paper"],
   ["card", "Paper cards", "The structured, cited card of each paper (needs long, reliable JSON output)"], ["events", "Ideas Lab: current events", "Searches the web: pick Claude, OpenAI or OpenRouter"],
   ["ideas", "Ideas Lab: ideas and outlines", "Writes the research ideas and develops them — your strongest model"], ["reviewer", "Reviewer 2: a critical read of your text", "Needs judgement and care — use your strongest model"], ["audio", "Spoken briefings", "Writes the two-minute script that your browser reads aloud — a cheap model is enough"], ["flashcards", "Flashcards", "Writes question-and-answer cards from your paper cards — a cheap model is enough"], ["synthesis", "Synthesis map and gaps", "Reads all the cards of a folder at once — a strong model finds more"], ["claims", "Claim check", "Judges whether your papers support what you wrote — a strong model checks more carefully"], ["draft", "Related-work drafter", "Writes the section from your paper cards — prose matters, so use a strong model"], ["critique", "Ideas Lab: the editor", "Scores each idea for novelty, feasibility, significance and fit"],
@@ -90,12 +90,18 @@ function renderAI(body) {
   const msg = $("#st-msg", body);
   const WEB_ONLY = ["events"];          // the Ideas Lab's current events searches the web: only some providers can, so "everything" leaves it alone on one that cannot
   $$("tr[data-f] .fp", body).forEach(sel => sel.onchange = () => { const tr = sel.closest("tr"), dl = $("datalist", tr); if (dl) dl.innerHTML = ((A.providers[sel.value] || {}).models || []).map(m => `<option value="${esc(m)}">`).join(""); });
-  const test = async (btn, provider, model) => { const out = btn.parentElement.querySelector(".tres"); note(out, "…"); btn.disabled = true;
-    const r = await api("/api/ai/test", {provider, model}).catch(e => ({ok: false, error: e.message})); btn.disabled = false;
-    note(out, r.ok ? `✓ ${r.ms} ms${r.cost != null ? " · " + money(r.cost) : ""}` : r.error, !r.ok); };
+  // feature "screen": the test is a small screening request with the real JSON schema (a model can answer questions and still be unable to screen: a summariser, say).
+  // both: the plain test, then the screening one, for "Use one for everything", whose model would also screen.
+  const test = async (btn, provider, model, feature, both) => { const out = btn.parentElement.querySelector(".tres"); note(out, "…"); btn.disabled = true;
+    const ask = f => api("/api/ai/test", {provider, model, ...(f ? {feature: f} : {})}).catch(e => ({ok: false, error: e.message}));
+    const r = await ask(feature), s = both && r.ok ? await ask("screen") : null; btn.disabled = false;
+    const ok = x => `✓ ${x.ms} ms${x.cost != null ? " · " + money(x.cost) : ""}`;
+    if (!r.ok) return note(out, r.error + (feature === "screen" ? " Choose another model for screening." : ""), true);
+    if (s && !s.ok) return note(out, `${ok(r)}, but it ${s.error.replace(/^Can’t/, "can’t")} Set “Screening new papers” to another model.`, true);
+    note(out, ok(r) + (feature === "screen" || s ? " · screens papers" : "")); };
   const mp = $("#mn-p", body), mm = $("#mn-m", body), mnote = $("#mn-note", body);
   mp.onchange = () => { const ms = (A.providers[mp.value] || {}).models || []; $("#dl-main", body).innerHTML = ms.map(m => `<option value="${esc(m)}">`).join(""); if (ms.length && !ms.includes(mm.value)) mm.value = ms[0]; };
-  $("#mn-test", body).onclick = e => { if (!mm.value.trim()) return note(mnote, "Type a model first.", true); test(e.currentTarget, mp.value, mm.value.trim()); };
+  $("#mn-test", body).onclick = e => { if (!mm.value.trim()) return note(mnote, "Type a model first.", true); test(e.currentTarget, mp.value, mm.value.trim(), null, true); };
   $("#mn-apply", body).onclick = () => {
     const p = mp.value, m = mm.value.trim(); if (!m) return note(mnote, "Type a model first.", true);
     let n = 0; const left = [];
@@ -108,7 +114,7 @@ function renderAI(body) {
   $$("[data-savekey]", body).forEach(b => b.onclick = async () => { const td = b.closest("td"), inp = $("input", td), out = $(".keymsg", td); if (!inp.value.trim()) return;
     try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast(D.ai.key_note ? "Key saved. " + D.ai.key_note : "Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
   $$("[data-test]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"), first = $(".pm", tr).value.split(",")[0].trim(); const m = first || prompt("Model name to test on " + b.dataset.test + ":"); if (m) test(b, b.dataset.test, m); });
-  $$("[data-testf]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"); test(b, $(".fp", tr).value, $(".fm", tr).value.trim()); });
+  $$("[data-testf]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"); test(b, $(".fp", tr).value, $(".fm", tr).value.trim(), tr.dataset.f === "screen" ? "screen" : null); });
   $("#st-save", body).onclick = async () => {
     const features = {}; $$("tr[data-f]", body).forEach(tr => { const k = tr.dataset.f; if (k === "emb") return; features[k] = {provider: $(".fp", tr).value, model: $(".fm", tr).value.trim(), effort: $(".fe", tr).value}; });
     const provider_models = {}; $$("tr[data-p]", body).forEach(tr => { provider_models[tr.dataset.p] = $(".pm", tr).value.split(",").map(s => s.trim()).filter(Boolean); });

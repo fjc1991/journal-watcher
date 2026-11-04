@@ -63,3 +63,7 @@
 .chap-ol .chap-t { font-weight: 500; } .chap-off { gap: 8px; align-items: center; margin-top: 6px; } .chap-off input { padding: 3px 6px; }
 .chap-sum { margin: 6px 0 8px 12px; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--panel-2); border-radius: 0 8px 8px 0; max-width: 78ch; } .chap-sum.hide { display: none; }
 .chap-sum .of-md { font-size: 14px; line-height: 1.55; } .chap-sum .bad { color: var(--err); } .chap-sum .sum-est p { margin: 0 0 8px; }
+
+/* Summarise N papers…: the estimate, the progress and what came of it (library.js sumBox) */
+.lf-sumbox { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-size: 14px; line-height: 1.5; }
+.lf-sumbox p { margin: 0 0 8px; } .lf-sumbox .bad { color: var(--err); } .lf-sumfail { margin: 0 0 8px 18px; padding: 0; font-size: 13px; overflow-wrap: anywhere; }

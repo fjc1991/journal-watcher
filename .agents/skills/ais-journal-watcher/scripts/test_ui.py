@@ -2524,6 +2524,81 @@ bks.crossref_books = lambda title, rows=3: []
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")
             page.evaluate("document.documentElement.dataset.theme = 'light'")
 
+            print("a failed screening says why and can be retried; the Library summarises the papers that have no summary")
+            runs_dir = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")
+            rid = "2025-W02_weekly"                     # a past week, so that no weekly check of this test merges into it
+            why404 = "openrouter: No endpoints found that can handle the requested parameters. (HTTP 404)"
+            abbr0 = api("/api/config")["journals"][0]["abbr"]
+            pp = [{"id": "rt-%d" % k, "title": t, "abbr": abbr0, "journal": "Test", "pub_date": "2025-01-01", "abstract": "We study platform governance.", "authors": ["A. Author"],
+                   **({"verdict": "error", "relevance": 0, "reason": "screening failed: " + why404, "topics": []} if k < 2 else {})}
+                  for k, t in enumerate(["Platform retry study A", "Platform retry study B", "Other retry study C"])]
+            json.dump({"id": rid, "kind": "weekly", "params": {"topics": [], "query": ""}, "created": "2025-01-06T10:00:00+00:00", "stage": "ready", "status": "done",
+                       "usage": {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}, "week": "2025-W02", "checks": ["2025-01-06T10:00:00+00:00"], "errors": [], "jstate": {},
+                       "screen_error": why404, "papers": pp}, open(os.path.join(runs_dir, rid + ".json"), "w"))
+            n_batches = len(batches())
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_timeout(400)
+            page.evaluate("openRun({id: %s})" % json.dumps(rid)); page.wait_for_selector("#screenbtn:not(.hide)", timeout=8000)
+            stats_t = page.inner_text("#stats")
+            check("a weekly run whose screening failed offers 'Retry screening' for the failed and the unscreened papers, with the cost", "Retry screening (3" in page.inner_text("#screenbtn") and "$" in page.inner_text("#screenbtn"), page.inner_text("#screenbtn"))
+            check("…the failed papers are counted ('Screening failed'), and the page says why the last screening stopped", re.search(r"2\s*SCREENING FAILED", stats_t.upper()) is not None and "No endpoints found" in page.inner_text("#screenerr") and page.locator("#screenerr:not(.hide)").count() == 1, stats_t)
+            page.evaluate("go({j: '*'})"); page.wait_for_selector("#papers .paper")
+            check("…and each failed card shows the provider's own words, not only 'screening failed'", "No endpoints found that can handle the requested parameters" in page.inner_text("#papers"), page.inner_text("#papers")[:300])
+            page.click("#screenbtn")
+            ok_ = False
+            for _ in range(80):
+                st_ = api("/api/state"); r_ = api("/api/runs/" + rid)
+                if not st_["busy"] and all(x.get("verdict") in ("download", "skip") for x in r_["papers"]):
+                    ok_ = True; break
+                time.sleep(0.25)
+            r_ = api("/api/runs/" + rid)
+            check("pressing it asks the model again about those three papers only (one batch), and they get their verdicts", ok_ and len(batches()) == n_batches + 1 and batches()[-1] == "3"
+                  and [x["verdict"] for x in r_["papers"]] == ["download", "download", "skip"] and r_["screen_error"] == "", str(([x.get("verdict") for x in r_["papers"]], batches()[n_batches:], r_.get("screen_error"))))
+            page.wait_for_function("document.querySelector('#screenbtn').classList.contains('hide') && document.querySelector('#screenerr').classList.contains('hide')", timeout=8000)
+            check("…then the button and the reason are gone, and 'Screening failed' is no longer counted", "SCREENING FAILED" not in page.inner_text("#stats").upper())
+            page.evaluate("go({j: null})")
+            # Settings → AI: the screening Test sends a real screening request (the fake model answers that one with other JSON: it cannot screen)
+            page.evaluate("window.Settings.open('ai')"); page.wait_for_selector('tr[data-f="screen"] [data-testf]')
+            page.click('tr[data-f="screen"] [data-testf]'); page.wait_for_function("(() => { const t = document.querySelector('tr[data-f=\"screen\"] .tres'); return t && t.textContent && t.textContent !== '…'; })()", timeout=15000)
+            check("Settings → AI: Test on 'Screening new papers' finds a model that answers but cannot give screening verdicts", "not with the structured verdicts" in page.inner_text('tr[data-f="screen"] .tres') and page.locator('tr[data-f="screen"] .tres.bad').count() == 1, page.inner_text('tr[data-f="screen"] .tres'))
+            page.click("#mn-test"); page.wait_for_function("(() => { const t = document.querySelector('#st-main .tres'); return t && t.textContent && t.textContent !== '…'; })()", timeout=15000)
+            check("…and 'Use one for everything' → Test says the model works but cannot screen, before it is applied to screening too", "can’t screen papers" in page.inner_text("#st-main .tres") and page.inner_text("#st-main .tres").startswith("✓"), page.inner_text("#st-main .tres"))
+            page.keyboard.press("Escape"); page.evaluate("window.Settings && window.Settings.close && window.Settings.close()")
+            # the Library: one more downloaded paper without a summary, so that there is always one to do
+            idxp = os.path.join(TMP, "Papers", "_index.csv"); saved_idx = open(idxp, newline="").read()
+            sumdir = os.path.join(TMP, "Papers", "2025-04", "SumTest"); os.makedirs(sumdir, exist_ok=True)
+            import pymupdf as _pm2
+            d2 = _pm2.open(); pg2 = d2.new_page(); pg2.insert_textbox(_pm2.Rect(60, 60, 540, 790), "Summaries for papers that have none. " * 60, fontsize=10); d2.save(os.path.join(sumdir, "sumtest.pdf")); d2.close()
+            with open(idxp, "a", newline="") as f_:
+                csv.writer(f_).writerow(["2026-10-29", "Test Journal", "TJ", "A paper waiting for its summary", "Jane Doe", "10.9999/sum.1", "", "", "", "Papers/2025-04/SumTest/sumtest.pdf", "ok", "browser"])
+            est_ = api("/api/summaries")
+            check("the server lists the downloaded papers without a summary (books left out), with the model and a cost guess that says what it rests on",
+                  est_["n"] >= 1 and "Papers/2025-04/SumTest/sumtest.pdf" in est_["files"] and est_["provider"] == "fake" and est_["model"] == "m1" and est_["basis"] in ("history", "prices") and est_["cost"] is not None
+                  and not any("/Books/" in f for f in est_["files"]), str({k: est_[k] for k in ("n", "basis", "cost", "provider", "model")}))
+            page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#lf-sum:not(.hide)", timeout=8000)
+            check("the Library shows 'Summarise N papers…' with that count", ("Summarise %d paper" % est_["n"]) in page.inner_text("#lf-sum"), page.inner_text("#lf-sum"))
+            page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo", timeout=8000)
+            box_t = page.inner_text("#lf-sumbox")
+            check("…pressing it first says how many, which provider and model, and what it may cost, and spends nothing", ("%d paper" % est_["n"]) in box_t and "fake · m1" in box_t and "Cost:" in box_t and "no summary yet" in box_t
+                  and not os.path.exists(os.path.join(sumdir, "sumtest.md")), box_t)
+            page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
+            check("…Cancel closes it and writes nothing", not os.path.exists(os.path.join(sumdir, "sumtest.md")))
+            page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo"); page.click("#lf-sumgo")
+            done_ = False
+            for _ in range(160):
+                if not api("/api/summaries")["status"]["running"] and os.path.exists(os.path.join(sumdir, "sumtest.md")):
+                    done_ = True; break
+                time.sleep(0.25)
+            check("'Write the summaries' writes each summary beside its PDF in the background (the fake model's summary)", done_ and "FAKE SUMMARY" in open(os.path.join(sumdir, "sumtest.md")).read(), str(api("/api/summaries")["status"]))
+            try:
+                page.wait_for_function("/Summaries finished/.test(document.querySelector('#lf-sumbox').innerText)", timeout=15000)
+            except Exception:  # noqa: BLE001  (the check below says what is wrong)
+                pass
+            check("…the Library says what came of it, and the button is gone once nothing is left", "Summaries finished" in page.inner_text("#lf-sumbox") and api("/api/summaries")["n"] == 0
+                  and page.locator("#lf-sum.hide").count() == 1, page.inner_text("#lf-sumbox"))
+            check("…and the job was listed in the AI activity tray", any(j["kind"] == "summary" for j in api("/api/activity")["jobs"]), str([j["kind"] for j in api("/api/activity")["jobs"]][:8]))
+            open(idxp, "w", newline="").write(saved_idx); shutil.rmtree(sumdir, ignore_errors=True)
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")
+
             print("exports and the library layout")
             bib = urllib.request.urlopen(base + "/api/export/bib?file=" + urllib.request.quote(rows[0][3])).read().decode()
             check("BibTeX export works", "@article{" in bib and "Open Platforms" in bib)

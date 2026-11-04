@@ -108,6 +108,11 @@ class Fake(BaseHTTPRequestHandler):
                 rows.append({"index": i, "embedding": v})
             data = json.dumps({"data": rows}).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+        fail = getattr(Fake, "http_error", None)
+        hit = fail(body) if fail else None           # (status, message): the provider refuses the request, as OpenRouter does for a model without the parameters asked for
+        if hit:
+            data = json.dumps({"error": {"message": hit[1], "code": hit[0]}}).encode()
+            self.send_response(hit[0]); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         # chat completions, streamed
         if "stream_options" in body and getattr(Fake, "reject_stream_options", False):
             data = json.dumps({"error": {"message": "unknown field stream_options"}}).encode()
@@ -4432,6 +4437,176 @@ print("OK")
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
     check("SSRN: searched by words through Crossref (prefix 10.2139: only SSRN's own, capped), a pseudo-journal that is never read weekly and not added twice, the papers marked as SSRN's, a saved copy per phrase, the paper's own page, and its download link followed only when it is that paper's", t_ssrn)
+
+    def t_screen_errors():
+        """A screening that fails says why, in the provider's words; an answer that asking again cannot change (a model without structured output, a refused key) stops the
+        screening at the first batch with the papers left unscreened (not marked as failed); a busy provider or an answer that is not the JSON asked for marks only that
+        batch, with the reason; failed papers are screened again by Retry screening; Settings' Test for screening finds a model that cannot screen."""
+        import pipeline as pl_
+        topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
+        saved_cfg = open(ai.CONFIG).read() if os.path.exists(ai.CONFIG) else None
+        real_sleep = pl_.time.sleep
+        events, stop = [], threading.Event()
+        emit = lambda ev, d=None: events.append((ev, d))
+        def verdicts(body):           # a model that screens: one result per paper it was shown
+            items = json.loads(body["messages"][-1]["content"])
+            return [json.dumps({"results": [{"n": it["n"], "verdict": "download", "relevance": 70, "topics": [topic], "method": "Field experiment", "reason": "fits"} for it in items]})]
+        def new_run(query, n=5):
+            r = pl_.Run("weekly", {"topics": [topic], "query": query})
+            for k in range(n):
+                r.add_paper({"id": "%s-%d" % (query, k), "title": "Paper %d about platforms" % k, "abbr": abbr, "pub_date": "2026-09-01", "abstract": "About platforms.", "keywords": ["x"]})
+            return r
+        def chat_calls():
+            return [b for (path, b, _) in SEEN if path.endswith("/chat/completions") and b.get("response_format")]
+        try:
+            pl_.time.sleep = lambda s: None
+            write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "fake", "model": "m1"}}})
+            if os.path.exists(pl_.VERDICTS): os.remove(pl_.VERDICTS)
+            # the HTTP status travels with the error, and decides what is worth asking again
+            assert [ai.retryable(ai.AIError("x", status=c)) for c in (400, 401, 402, 403, 404, 422, 429, 500, 503, None)] == [False] * 6 + [True] * 4
+            assert not ai.retryable(ai.Blocked("budget")) and not ai.retryable(ai.Declined("no")) and ai.AIError("plain").status is None
+            # 1. the model cannot do what screening asks (OpenRouter's answer for a model without structured output): one request, then the screening stops;
+            #    nothing is marked as failed, the reason is kept on the run (and survives saving it) and said in the log with what to check
+            Fake.http_error = lambda body: (404, "No endpoints found that can handle the requested parameters.") if body.get("response_format") else None
+            n0, rows0 = len(chat_calls()), len(ai.usage_log(100000))
+            r = new_run("hard"); pl_.screen(r, emit, stop, batch_size=2, workers=1)
+            assert len(chat_calls()) - n0 == 1, len(chat_calls()) - n0                                                        # not 3 batches x 3 tries
+            assert not any(r.papers[i].get("verdict") for i in r.order), [r.papers[i].get("verdict") for i in r.order]
+            assert "No endpoints found" in r.screen_error and "HTTP 404" in r.screen_error and "structured JSON" in r.screen_error, r.screen_error
+            assert any(e == "log" and d.get("level") == "warn" and "5 papers not screened" in d["msg"] and "Retry screening" in d["msg"] for e, d in events), events[-2:]
+            assert len(ai.usage_log(100000)) == rows0                                                                       # a refused request costs nothing and is not in the ledger
+            r.save(force=True); assert pl_.Run.load(r.id).screen_error == r.screen_error and pl_.Run.load(r.id).to_dict(full=False)["screen_error"] == r.screen_error
+            # 2. a key the provider refuses: the same, at once
+            Fake.http_error = lambda body: (401, "User not found.") if body.get("response_format") else None
+            n0 = len(chat_calls()); r2 = new_run("key"); pl_.screen(r2, emit, stop, batch_size=2, workers=1)
+            assert len(chat_calls()) - n0 == 1 and not any(r2.papers[i].get("verdict") for i in r2.order) and "HTTP 401" in r2.screen_error and "structured JSON" not in r2.screen_error, r2.screen_error
+            # 3. a busy provider every time: each batch is asked three times, then its papers are marked as failed with the provider's words
+            Fake.http_error = lambda body: (503, "upstream overloaded") if body.get("response_format") else None
+            n0, events[:] = len(chat_calls()), []
+            r3 = new_run("busy", n=3); pl_.screen(r3, emit, stop, batch_size=2, workers=1)
+            assert len(chat_calls()) - n0 == 6, len(chat_calls()) - n0                                                        # 2 batches x 3 tries
+            assert {r3.papers[i]["verdict"] for i in r3.order} == {"error"} and all("upstream overloaded" in r3.papers[i]["reason"] and "HTTP 503" in r3.papers[i]["reason"] for i in r3.order), [r3.papers[i]["reason"] for i in r3.order]
+            assert sum(1 for e, d in events if e == "log" and "Screening failed for" in d["msg"]) == 2 and r3.screen_error == ""
+            # 4. a summariser: it answers, in prose: every answer is paid for and in the ledger, and the reason says it was not the JSON (with how it began)
+            Fake.http_error = None; Fake.responder = lambda body: ["This paper studies how ", "platforms nudge users."]
+            n0, rows0 = len(chat_calls()), len(ai.usage_log(100000))
+            r4 = new_run("prose", n=2); pl_.screen(r4, emit, stop, batch_size=2, workers=1)
+            assert len(chat_calls()) - n0 == 3 and len(ai.usage_log(100000)) - rows0 == 3
+            assert {r4.papers[i]["verdict"] for i in r4.order} == {"error"} and all("not the JSON" in r4.papers[i]["reason"] and "This paper studies" in r4.papers[i]["reason"] for i in r4.order), r4.papers[r4.order[0]]["reason"]
+            # 5. an answer that leaves a paper out: only that paper fails, and says so
+            Fake.responder = lambda body: [json.dumps({"results": [{"n": 1, "verdict": "skip", "relevance": 5, "topics": [], "method": "Survey", "reason": "no"}]})]
+            r5 = new_run("partial", n=2); pl_.screen(r5, emit, stop, batch_size=2, workers=1)
+            assert r5.papers["partial-0"]["verdict"] == "skip" and r5.papers["partial-1"]["verdict"] == "error" and "no verdict for this paper" in r5.papers["partial-1"]["reason"]
+            # 6. Retry screening (what /api/rescreen does): the failed ones lose their "error" and are asked again with the papers never screened; a clean run clears the reason
+            Fake.responder = verdicts
+            for run in (r, r3, r4):
+                for p in run.papers.values():
+                    if p.get("verdict") == "error":
+                        p.pop("verdict")
+                pl_.screen(run, emit, stop, batch_size=2, workers=1)
+                assert all(run.papers[i]["verdict"] == "download" and run.papers[i]["reason"] == "fits" for i in run.order), [run.papers[i].get("verdict") for i in run.order]
+            assert r.screen_error == ""
+            # 7. Settings → AI → Screening new papers → Test: a small request with the real schema
+            ok = pl_.screen_test("fake", "m1"); assert ok["ok"] and "screens: download" in ok["text"], ok
+            Fake.responder = lambda body: ["A summary of the paper."]
+            bad = pl_.screen_test("fake", "m1"); assert not bad["ok"] and "not with the structured verdicts" in bad["error"] and "A summary of the paper" in bad["error"], bad
+            Fake.responder = None; Fake.http_error = lambda body: (404, "No endpoints found that can handle the requested parameters.") if body.get("response_format") else None
+            no = pl_.screen_test("fake", "m1"); assert not no["ok"] and no["error"].startswith("Can’t screen papers: the provider refused") and "HTTP 404" in no["error"], no
+            assert ai.test("fake", "m1")["ok"]                                                                             # …while the plain test says the model works: why the screening test exists
+        finally:
+            Fake.http_error = None; Fake.responder = None; pl_.time.sleep = real_sleep
+            if saved_cfg is None:
+                os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
+            else:
+                open(ai.CONFIG, "w").write(saved_cfg)
+
+    def t_summaries_job():
+        """Library → "Summarise N papers…": only downloaded papers without a summary (never a book, a missing PDF or a failed download); the cost guess rests on earlier
+        summaries with the same model when there are enough, else on the prices, else it is unknown; the job writes each summary beside its PDF, skips one written
+        meanwhile, stops at once on a refused key, stops after three failures in a row, never writes an empty summary, and runs one at a time."""
+        import csv, time as _t, pipeline as pl_, summaries as su
+        import activity as act_
+        root = os.path.join(TMP, "sum_home"); folder = os.path.join(root, "Papers", "2026-09", "MIS Quarterly"); os.makedirs(folder)
+        os.makedirs(os.path.join(root, "Papers", "2026-09", "Books"))
+        src = os.path.join(TMP, "sum_src.pdf"); make_pdf(src)
+        rel = lambda n, j="MIS Quarterly": "Papers/2026-09/%s/%s.pdf" % (j, n)
+        for n in ("a", "b", "f1", "f2", "f3", "f4"):
+            shutil.copy(src, os.path.join(root, rel(n)))
+        shutil.copy(src, os.path.join(root, rel("book", "Books")))
+        open(os.path.join(root, rel("b")[:-4] + ".md"), "w").write("# B\n\nAlready summarised.\n")
+        hdr = "date_checked journal abbr title authors doi url matched_topics score file status note".split()
+        def index(names):
+            with open(os.path.join(root, "Papers", "_index.csv"), "w", newline="") as f:
+                w = csv.writer(f); w.writerow(hdr)
+                for n in names:
+                    if n == "book":
+                        w.writerow(["2026-09-01", "Books", "BOOK", "A Book", "Ann Lee", "", "", "", "", rel("book", "Books"), "ok", ""])
+                    elif n == "missing":
+                        w.writerow(["2026-09-01", "MIS Quarterly", "MISQ", "Gone", "", "10.1/gone", "", "", "", rel("gone"), "ok", ""])
+                    elif n == "failed":
+                        w.writerow(["2026-09-01", "MIS Quarterly", "MISQ", "Never came", "", "10.1/fail", "", "", "", "", "failed", ""])
+                    else:
+                        w.writerow(["2026-09-01", "MIS Quarterly", "MISQ", "Paper " + n.upper(), "Jane Doe", "10.1/" + n, "", "", "", rel(n), "ok", ""])
+        saved = (pl_.PAPERS, pl_.ROOT, su.ROOT, ai.LEDGER, open(ai.CONFIG).read() if os.path.exists(ai.CONFIG) else None)
+        pl_.PAPERS, pl_.ROOT, su.ROOT, ai.LEDGER = os.path.join(root, "Papers"), root, root, os.path.join(root, "ledger.jsonl")
+        def wait():
+            t0 = _t.time()
+            while su.status()["running"] and _t.time() - t0 < 60:
+                _t.sleep(0.05)
+            assert not su.status()["running"], "the job did not end"
+            return su.status()
+        try:
+            write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
+            index(["a", "b", "book", "missing", "failed"])
+            assert [r["file"] for r in su.pending()] == [rel("a")], [r["file"] for r in su.pending()]                  # not b (summarised), not the book, not a missing PDF, not a failed download
+            e = su.estimate(); assert e["n"] == 1 and e["files"] == [rel("a")] and e["basis"] == "prices" and e["cost"] > 0 and e["provider"] == "fake" and e["model"] == "m1", e
+            for c in (0.002, 0.004, 0.003):                                                                                # three earlier summaries with this model: the guess rests on them
+                open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "fake", "model": "m1", "in": 1, "out": 1, "cost": c}) + "\n")
+            open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "fake", "model": "m1", "cost": 0.0, "cached": True}) + "\n")      # (free, from the cache: not counted)
+            open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "other", "model": "m1", "cost": 9.0}) + "\n")                    # (another provider: not counted)
+            e = su.estimate(); assert e["basis"] == "history" and e["calls"] == 3 and abs(e["per_paper"] - 0.003) < 1e-9 and abs(e["cost"] - 0.003) < 1e-9, e
+            write_cfg({**CFG, "prices": {}, "features": {"ask": {"provider": "fake", "model": "m2"}, "summarize": {"provider": "fake", "model": "m2"}}})
+            e = su.estimate(); assert e["basis"] == "unknown" and e["cost"] is None and e["model"] == "m2", e                # no price, no history: said, not invented
+            write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
+            # the job: one summary written beside its PDF, through the AI layer (the ledger), in the tray as one job
+            Fake.responder = lambda body: ["# Paper A\n\n", "**Authors**: Jane Doe\n\n## TL;DR\nA test summary."]
+            rows0 = len(ai.usage_log(100000))
+            assert su.start([rel("a")]) is True and su.start([rel("a")]) is False                                          # one job at a time
+            st = wait(); assert st["made"] == 1 and not st["failed"] and not st["stopped"] and st["done"] == st["total"] == 1, st
+            assert open(os.path.join(root, rel("a")[:-4] + ".md")).read().startswith("# Paper A") and len(ai.usage_log(100000)) - rows0 == 1
+            js = [j for j in act_.snapshot() if j["kind"] == "summary"]; assert js and js[0]["status"] == "done" and js[0]["scope"] == {"library": True, "ltab": "papers"}, js[:1]
+            assert su.pending() == [] and su.start() is False and su.estimate()["n"] == 0                                 # nothing left to do
+            # three failures in a row stop it (here: the model answers nothing), and an empty answer is never written as a summary
+            index(["f1", "f2", "f3", "f4"]); Fake.responder = lambda body: [""]
+            assert su.start() is True; st = wait()
+            assert st["made"] == 0 and len(st["failed"]) == 3 and "3 papers in a row failed" in st["stopped"] and "empty summary" in st["failed"][0]["error"], st
+            assert not any(os.path.exists(os.path.join(root, rel(n)[:-4] + ".md")) for n in ("f1", "f2", "f3", "f4"))
+            # a key the provider refuses stops it at the first paper
+            Fake.responder = None; Fake.http_error = lambda body: (401, "User not found.")
+            assert su.start() is True; st = wait()
+            assert st["made"] == 0 and len(st["failed"]) == 1 and "HTTP 401" in st["stopped"], st
+            # only the papers asked for, and one summarised meanwhile (by another computer, say) is skipped, not paid for twice
+            Fake.http_error = None; Fake.responder = lambda body: ["# F\n\nSummary."]
+            open(os.path.join(root, rel("f1")[:-4] + ".md"), "w").write("# F1\n\nWritten elsewhere.\n")
+            rows0 = len(ai.usage_log(100000))
+            assert su.start([rel("f1"), rel("f2")]) is True; st = wait()
+            assert st["made"] == 1 and st["total"] == 1 and len(ai.usage_log(100000)) - rows0 == 1 and open(os.path.join(root, rel("f1")[:-4] + ".md")).read().startswith("# F1\n\nWritten")
+            assert sorted(r["file"] for r in su.pending()) == sorted([rel("f3"), rel("f4")])
+            # the budget: nothing may be asked, so it stops at once and says why
+            ai.save_config({"budget": {"monthly_usd": 0.000001}})
+            assert su.start() is True; st = wait()
+            assert st["made"] == 0 and "budget" in st["stopped"] and len(st["failed"]) == 1, st
+        finally:
+            Fake.http_error = None; Fake.responder = None
+            pl_.PAPERS, pl_.ROOT, su.ROOT, ai.LEDGER = saved[:4]
+            if saved[4] is None:
+                os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
+            else:
+                open(ai.CONFIG, "w").write(saved[4])
+            shutil.rmtree(root, ignore_errors=True)
+
+    check("screening errors: the provider's own words on every failed paper; a refused request (a model without structured output, a refused key) stops at the first batch and leaves the papers unscreened with the reason on the run; a busy provider or prose marks only that batch; Retry screening asks again; the screening Test finds a model that cannot screen", t_screen_errors)
+    check("summarise the papers without a summary: only downloaded papers (no book, missing PDF or failed download), a cost guess that says what it rests on, one background job in the tray, a summary beside each PDF, skipped if written meanwhile, stopped by a refused key, the budget or three failures in a row, never an empty summary", t_summaries_job)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")

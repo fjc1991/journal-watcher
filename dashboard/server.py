@@ -75,10 +75,11 @@ try:   # the reader's AI features; the dashboard still runs without them
     import relatedwork  # noqa: E402
     import reviewer  # noqa: E402
     import skim  # noqa: E402
+    import summaries  # noqa: E402
     import synthesis  # noqa: E402
     import workspace  # noqa: E402
 except ImportError as _e:
-    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = synthesis = workspace = personal = None
+    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = summaries = synthesis = workspace = personal = None
     print("AI features unavailable (%s) — run: pip install -r requirements.txt" % _e)
 
 STATIC = os.path.join(HERE, "static")
@@ -715,6 +716,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(run.to_dict())
         if path == "/api/library":
             return self.send_json(pl.library())
+        if path == "/api/summaries":    # Library → "Summarise N papers…": the papers without a summary, the model, what it may cost (and on what that rests), and the job's state
+            if not summaries:          # ?status=1: only the job's state (cheap: the Library asks for it when it opens, so it must not read the whole library again)
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if urllib.parse.parse_qs(u.query).get("status"):
+                return self.send_json({"status": summaries.status()})
+            return self.send_json({**summaries.estimate(), "status": summaries.status()})
         if path == "/api/library/check":
             return self.send_json(PDFCHECK)
         if path.startswith("/files/"):
@@ -1384,7 +1391,9 @@ class Handler(BaseHTTPRequestHandler):
                 with ai._lock:
                     ai._clients.clear()
                 return self.send_json({"ok": True, **res, "config": ai.config()})
-            if path == "/api/ai/test":      # one tiny real call: does this provider + key + model work?
+            if path == "/api/ai/test":      # one tiny real call: does this provider + key + model work? {feature: "screen"}: can it also give the structured verdicts screening needs?
+                if b.get("feature") == "screen":
+                    return self.send_json(pl.screen_test(str(b.get("provider") or ""), str(b.get("model") or "")))
                 return self.send_json(ai.test(str(b.get("provider") or ""), str(b.get("model") or "")))
             if path == "/api/ai/cache/clear":
                 return self.send_json({"ok": True, "removed": ai.cache_clear()})
@@ -1617,10 +1626,20 @@ class Handler(BaseHTTPRequestHandler):
             if not run:
                 return self.send_json({"error": "no run"}, 400)
             JOBS.run = run
+            failed = 0
             for p in run.papers.values():
-                if p.get("verdict") == "error":
-                    p.pop("verdict")
-            ok = JOBS.start("fetch", lambda: pl.screen(run, emit_for(run), JOBS.stop), run)
+                if p.get("verdict") == "error":                 # a failed screening is asked again ("Retry screening"); a weekly check never would: its papers are already seen
+                    p.pop("verdict"); failed += 1
+            todo = [i for i in run.order if not run.papers[i].get("verdict")]
+
+            def job():
+                emit = emit_for(run)
+                emit("log", {"msg": "Screening %d papers again (%d had failed, %d had not been screened)" % (len(todo), failed, len(todo) - failed)})
+                pl.screen(run, emit, JOBS.stop)
+                left = sum(1 for i in todo if run.papers[i].get("verdict") in (None, "error"))
+                emit("log", {"msg": "Screening finished: %d of %d papers judged%s" % (len(todo) - left, len(todo), (", %d still without a verdict" % left) if left else ""),
+                             "level": "warn" if left else "ok"})
+            ok = JOBS.start("fetch", job, run)
             return self.started(ok, run)
         if path == "/api/stop":
             JOBS.stop.set()
@@ -1630,6 +1649,19 @@ class Handler(BaseHTTPRequestHandler):
             if which in ("library", "nova") and not signins.profile()["signs_in"]:
                 return self.send_json({"error": "Set up your library first (Settings → Library access): it has no sign-in of its own yet.", "setup": True}, 400)
             return self.started(start_login(which), None)
+        if path == "/api/summaries":             # {files}: summarise these papers (the list the estimate showed; one already summarised meanwhile is skipped) in the background
+            if not summaries:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            files = b.get("files")
+            if files is not None and not isinstance(files, list):
+                return self.send_json({"error": "files must be a list"}, 400)
+            if summaries.status()["running"]:
+                return self.send_json({"error": "Summaries are already being written: see the AI activity tray."}, 409)
+            if JOBS.busy() and JOBS.kind == "download":         # that job summarises what it downloads: two jobs on the same paper would pay for it twice
+                return self.send_json({"error": "A download is running and writes its papers’ summaries itself. Press this again when it has finished."}, 409)
+            if not summaries.start([str(f) for f in files] if files is not None else None):
+                return self.send_json({"error": "Every one of these papers has a summary already."}, 400)
+            return self.send_json({"ok": True, "status": summaries.status()})
         if path == "/api/library/check":         # start "Check my PDFs"
             return self.send_json({"ok": True, "started": start_pdfcheck(), **PDFCHECK})
         if path in ("/api/library/check/keep", "/api/library/check/remove"):

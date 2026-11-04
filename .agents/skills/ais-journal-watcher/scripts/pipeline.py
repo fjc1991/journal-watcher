@@ -202,6 +202,7 @@ class Run:
         self.week = week_of(self.created) if kind == "weekly" else None
         self.checks = []   # weekly: timestamps of every check merged into this week; a search: every time it was run again
         self.reused = 0    # verdicts taken from earlier screening instead of asked for again (see screen)
+        self.screen_error = ""     # why the last screening stopped early (budget, key, a model that cannot screen); "" once one finishes
         self._last_save = 0
 
     def slug(self):
@@ -249,7 +250,7 @@ class Run:
              "week": self.week, "checks": self.checks,
              "updated": max(self.checks) if self.checks else self.created,
              "n_papers": len(self.order), "errors": self.errors[-20:], "jstate": self.jstate,
-             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused,
+             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused, "screen_error": self.screen_error,
              "n_download": sum(1 for p in self.papers.values() if p.get("verdict") == "download"),
              "n_borderline": sum(1 for p in self.papers.values() if p.get("verdict") == "borderline")}
         if full:
@@ -281,6 +282,7 @@ class Run:
         r.week = d.get("week") or (week_of(r.created) if r.kind == "weekly" else None)
         r.checks = d.get("checks") or ([r.created] if r.kind == "weekly" else [])
         r.reused = int(d.get("reused") or 0)
+        r.screen_error = str(d.get("screen_error") or "")
         for p in d.get("papers", []):
             if p.get("dl_status") in ("downloading", "summarizing"):
                 # interrupted (dashboard closed mid-download): ready to retry
@@ -728,24 +730,63 @@ def screening_system(topics, query, method_names=None):
     return SCREEN_SYSTEM.format(criteria="\n".join(lines), method_rule=rule, focus=focus)
 
 
+SCREEN_TEST_PAPER = {"n": 1, "journal": "TEST", "year": "2026", "title": "Digital nudges and contributions on an online platform: a field experiment",
+                     "keywords": ["digital nudges", "platforms"], "abstract": "A randomised field experiment on a mobile feedback platform tests whether reminders increase user contributions."}
+
+
+def screen_test(provider, model):
+    """Settings → AI → "Screening new papers" → Test: one small screening request to this provider and model, with the same JSON schema as a real screening. A model that
+    answers ordinary questions but cannot return verdicts in that schema (a summariser, say) is refused or answers in prose; either way it fails here instead of in a weekly
+    check. {ok, ms, text, cost} or {ok: False, error}."""
+    t = time.time()
+    system = SCREEN_SYSTEM.format(criteria="Topic: any Information Systems / management topic qualifies.", method_rule="", focus="")
+    try:
+        res = ai.chat("screen", [{"role": "user", "content": json.dumps([SCREEN_TEST_PAPER], ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=1500,
+                      override={"provider": provider, "model": model})
+    except ai.AIError as e:
+        return {"ok": False, "error": "Can’t screen papers: the provider refused the request (%s)." % str(e).rstrip(".")}
+    try:
+        out = json.loads(res.text)["results"]
+        r = next(x for x in out if isinstance(x, dict) and x.get("n") == 1)
+        if r.get("verdict") not in ("download", "borderline", "skip"):
+            raise ValueError("verdict %r" % r.get("verdict"))
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return {"ok": False, "error": "Can’t screen papers: it answered, but not with the structured verdicts screening needs (%s)." % (
+            re.sub(r"\s+", " ", res.text or "").strip()[:80] or "an empty answer"), "cost": res.cost}
+    return {"ok": True, "ms": int((time.time() - t) * 1000), "text": "screens: %s, relevance %s" % (r["verdict"], r.get("relevance")), "cost": res.cost}
+
+
+class BatchFailed(Exception):
+    """One batch of papers could not be judged. `reason` is why, in the provider's own words where there are some: it is shown on each paper's card and in the log."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _screen_batch(system, batch, usage):
     """One batch of papers judged by the model of the "screen" feature (Settings → AI), through the AI layer: the monthly budget stops it, local-only mode applies, and
-    every call is in the usage ledger. Raises ai.Blocked when nothing more may be asked (the caller stops the whole screening); {} when the batch could not be judged."""
+    every call is in the usage ledger. Returns {n: result}. Raises ai.Blocked when nothing more may be asked, or the ai.AIError of an answer that asking again cannot change
+    (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either. Raises BatchFailed (with the reason) when this batch could not be judged."""
     items = []
     for n, p in enumerate(batch, 1):
         items.append({"n": n, "journal": p.get("abbr"), "year": (p.get("pub_date") or "")[:4],
                       "title": p.get("title"), "keywords": p.get("keywords"),
                       "abstract": (p.get("abstract") or "")[:1800] or None})
+    why = "no answer"
     for attempt in range(3):
         try:
             res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000)
         except ai.Declined as e:
             if e.result is not None:
                 usage.add_result(e.result)                     # a refusal is billed too
-            return {}                                          # a refusal is final: asking again would pay again for the same refusal
+            raise BatchFailed(str(e) or "the model declined to judge these papers")      # a refusal is final: asking again would pay again for the same refusal
         except ai.Blocked:
             raise
-        except ai.AIError:                                     # the provider was busy or unreachable: wait and ask again
+        except ai.AIError as e:
+            if not ai.retryable(e):                            # the same request would be refused the same way for every batch: stop the screening, say why
+                raise
+            why = str(e) or "the provider did not answer"      # the provider was busy or unreachable: wait and ask again
             if attempt < 2:
                 time.sleep(10 * (attempt + 1))
             continue
@@ -753,9 +794,10 @@ def _screen_batch(system, batch, usage):
         try:
             out = json.loads(res.text)["results"]
         except (ValueError, KeyError, TypeError):
+            why = "the model's answer was not the JSON that screening asks for (%s)" % (re.sub(r"\s+", " ", res.text or "").strip()[:80] or "it was empty")
             continue
         return {r["n"]: r for r in out if isinstance(r, dict) and isinstance(r.get("n"), int)}
-    return {}
+    raise BatchFailed(why)
 
 
 VERDICTS = os.path.join(STATE, "verdicts.json")      # {fingerprint: {paper id: {h, v, rel, topics, method, reason, at}}}: what the screening said, so a paper is not paid for twice
@@ -866,8 +908,20 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
     done, blocked = 0, None
     emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": len(todo)})
     valid = set(topic_labels())
+    halt = threading.Event()             # set by the worker whose batch met Blocked or a refused request: a batch that has not started yet is then not sent (the batches already
+                                         # on their way finish; cancelling the waiting futures from this thread alone would let a free worker start one more first)
+
+    def one(b):
+        if halt.is_set() or stop.is_set():
+            return None                  # never sent: the papers stay unscreened
+        try:
+            return _screen_batch(system, b, run.usage)
+        except ai.AIError:
+            halt.set()
+            raise
+
     with ThreadPoolExecutor(workers) as ex:
-        futs = {ex.submit(_screen_batch, system, b, run.usage): b for b in batches}
+        futs = {ex.submit(one, b): b for b in batches}
         for fut in as_completed(futs):
             if stop.is_set():
                 for f in futs:
@@ -876,18 +930,25 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             batch = futs[fut]
             if fut.cancelled():                                # cancelled below once nothing more may be asked: never started, not paid for
                 continue
+            why = ""
             try:
                 res = fut.result()
-            except ai.Blocked as e:                            # nothing more may be asked (budget, local-only, no key): the papers stay unscreened, to pick up later
-                for f in futs:
+            except ai.AIError as e:                            # Blocked (budget, local-only, no key) or a request the provider refuses for every batch alike (model, key, credit):
+                for f in futs:                                 # the papers stay unscreened, to pick up later ("Retry screening"), instead of each being marked as failed
                     f.cancel()
                 if blocked is None:
                     blocked = e
                 continue
+            except BatchFailed as e:
+                res, why = {}, e.reason
+                emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
+            if res is None:                                    # not sent (see one): left unscreened, to pick up later
+                continue
             for n, p in enumerate(batch, 1):
                 r = res.get(n)
                 if not r:
-                    p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, "screening failed", []
+                    reason = "screening failed: " + (why or ("the model's answer had no verdict for this paper" if res else "no answer"))
+                    p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, reason[:400], []
                     p["method"] = None
                 else:
                     p["verdict"], p["relevance"] = r["verdict"], r["relevance"]
@@ -908,8 +969,14 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             run.save()
     if blocked is not None:
         left = len([p for p in todo if not p.get("verdict")])
-        emit("log", {"msg": "Screening stopped with %d papers not screened: %s Search again once that is fixed: the papers already judged are kept, and only the others are screened." % (left, blocked), "level": "warn"})
+        hint = ""
+        if not isinstance(blocked, ai.Blocked) and getattr(blocked, "status", None) in (400, 404, 422):
+            hint = " The model chosen for screening (Settings → AI → Screening new papers) may not be able to answer in the structured JSON that screening asks for: its Test button there checks that."
+        run.screen_error = ("%s%s" % (blocked, hint))[:600]          # shown on the run's page until a screening finishes without stopping
+        emit("log", {"msg": "Screening stopped with %d papers not screened: %s%s Once that is fixed, press “Retry screening” (or search again): the papers already judged are kept, and only the others are screened." % (left, blocked, hint), "level": "warn"})
         run.save(force=True)
+    elif not stop.is_set():
+        run.screen_error = ""
     # remember weekly verdicts for agent.py
     if run.kind == "weekly":
         jpath = os.path.join(STATE, "judged.json")
@@ -965,6 +1032,8 @@ def summarize(p, pdf_path, usage, template=None):
         res = ai.chat("summarize", [{"role": "user", "content": [{"type": "pdf", "path": pdf_path}, {"type": "text", "text": prompt}]}], max_tokens=16000)
         usage.add_result(res)
         text = res.text.strip()
+        if not text:                    # an empty file would count as a summary for ever (the "Ready to read" bar, and nothing would ask again)
+            raise ai.AIError("%s · %s returned an empty summary" % (res.provider, res.model))
         with open(md_path, "w") as f:
             f.write(text + "\n")
         return text

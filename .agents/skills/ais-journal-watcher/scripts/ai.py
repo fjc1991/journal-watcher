@@ -48,7 +48,21 @@ _local = {}
 
 
 class AIError(Exception):
-    """A problem the user can act on (missing key, provider down...): shown as-is in the UI."""
+    """A problem the user can act on (missing key, provider down...): shown as-is in the UI. `status` is the provider's HTTP status when it answered with one (None otherwise)."""
+
+    def __init__(self, message="", status=None):
+        super().__init__(message)
+        self.status = status
+
+
+# HTTP answers that asking again cannot change: the request itself, the key, the account's credit or the model was refused (400 bad request, 401/403 key, 402 no credit,
+# 404 no such model or no endpoint for these parameters, 405, 413 too large, 415, 422 not processable). 408, 409, 425, 429 and every 5xx are worth asking again.
+NOT_RETRYABLE = frozenset({400, 401, 402, 403, 404, 405, 413, 415, 422})
+
+
+def retryable(e):
+    """Whether asking again later in the same job can help: not for Blocked (nothing was sent), Declined (a refusal is final) or an answer in NOT_RETRYABLE."""
+    return not isinstance(e, (Blocked, Declined)) and getattr(e, "status", None) not in NOT_RETRYABLE
 
 
 class Blocked(AIError):
@@ -615,7 +629,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
                 yield "text", t
             msg = s.get_final_message()
     except anthropic.APIStatusError as e:
-        raise AIError("Anthropic: %s" % str(e)[:300])
+        raise AIError("Anthropic: %s" % str(e)[:300], status=getattr(e, "status_code", None))
     except anthropic.APIConnectionError as e:
         raise AIError("Can’t reach Anthropic (%s)." % str(e)[:120])
     u = msg.usage
@@ -651,7 +665,7 @@ def _http_error(name, e, raw=None):
     except Exception:
         msg = raw[:200] or e.reason
     hint = ". The provider did not accept the key: press Change on its row in Settings → AI & privacy and paste the key again (a wrong, revoked or another provider’s key looks like this)." if e.code in (401, 403) else ""
-    return AIError("%s: %s (HTTP %s)%s" % (name, str(msg)[:300], e.code, hint))
+    return AIError("%s: %s (HTTP %s)%s" % (name, str(msg)[:300], e.code, hint), status=e.code)
 
 
 def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
@@ -691,7 +705,8 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
             except ValueError:
                 continue
             if isinstance(ev, dict) and ev.get("error"):
-                raise AIError("%s: %s" % (name, str(ev["error"])[:300]))
+                code = ev["error"].get("code") if isinstance(ev["error"], dict) else None          # (OpenRouter puts the HTTP-style code of a failure that came mid-answer here)
+                raise AIError("%s: %s" % (name, str(ev["error"])[:300]), status=code if isinstance(code, int) else None)
             for ch in ev.get("choices") or []:
                 d = ch.get("delta") or {}
                 if d.get("content"):

@@ -84,10 +84,12 @@ function top(el, opts) {
           <button class="btn" id="lf-star" title="Only starred papers">☆ Starred</button>
           <select id="lf-sort" aria-label="Sort"><option value="">Sort: best match / newest</option><option value="title">Sort: title</option><option value="journal">Sort: journal</option><option value="opened">Sort: last opened</option><option value="notes">Sort: most highlights</option></select>
           <button class="btn" id="lf-list" title="List every paper instead of browsing by journal">☰ List all</button>
+          <button class="btn hide" id="lf-sum" title="Write the AI summary of every downloaded paper that has none yet (you see what it costs first)">${ico("sum")} Summarise…</button>
           <button class="btn primary" id="lf-add">＋ Add paper</button>
           <span class="menuwrap"><button class="btn" id="lf-export">Export ▾</button><div class="menu card hide" id="lf-exportmenu"></div></span></div>
         <div class="lf-chips hide" id="lf-chips"></div>
         <div class="fstrip" id="lf-fstrip"></div>
+        <div class="lf-sumbox hide" id="lf-sumbox" role="region" aria-label="Summaries for papers without one" aria-live="polite"></div>
       </div>
       <div id="lib-shelf"></div>
       <div id="lib-upnext"></div>
@@ -105,6 +107,7 @@ function top(el, opts) {
   bind("lf-notes", "click", () => { F.notes = !F.notes; results(opts); });
   bind("lf-list", "click", () => { F.list = !F.list; results(opts); });
   bind("lf-add", "click", () => addDialog());
+  bind("lf-sum", "click", () => sumOpen());
   bind("lf-filters", "click", e => { e.stopPropagation(); const m = $("#lf-pop", el), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); });
   $("#lf-chips", el).addEventListener("click", async e => {
     if (e.target.closest("[data-savesearch]")) { const n = prompt("Name this search (it will be kept next to your folders):", F.q || ""); if (!n || !n.trim()) return; try { SMART = (await api("/api/smart", {action: "add", name: n.trim(), filters: pickFilters()})).searches; toast("Saved."); fillControls(el); } catch (er) { notifyError(er); } return; }
@@ -114,7 +117,60 @@ function top(el, opts) {
   Promise.all([loadFolders(), loadTags(), loadSmart()]).then(() => { fillControls(el); tabs(el, opts); });
   fillControls(el); tabs(el, opts);
   window.ReviewUI && window.ReviewUI.refreshBadge();
+  sumPaint(); clearTimeout(sumTimer); sumTimer = setTimeout(sumPoll, 1500);
 }
+// ---------------------------------------------------------------- "Summarise N papers…": every downloaded paper without an AI summary (books left out, as always)
+// The count on the button comes from the library list the page already has (no request when the Library opens: it is redrawn often). Pressing the button asks
+// GET /api/summaries for the exact list, the provider and model, and what it may cost and on what that guess rests; nothing is spent until "Write the summaries".
+// The job runs in the background (the AI activity tray shows it and can cancel it); the button follows it through the cheap ?status=1, and the Library is read
+// again when it ends.
+let SUM = null, SUM_ST = {}, SUM_OPEN = false, sumTimer = 0, SUM_WATCHED = false, SUM_SEEN = null, SUM_DONE = null;
+const usd = c => c == null ? "unknown" : c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "$" + c.toFixed(2);
+const sumCount = () => lib().filter(r => r.file && !r.summary && r.journal !== "Books" && !r.book).length;      // (as summaries.pending: a downloaded paper, not a book, no summary beside it)
+function sumPaint() {
+  const b = $("#lf-sum"); if (!b) return;
+  const st = SUM_ST, n = SUM && SUM.at_lib === lib() ? SUM.n : sumCount();     // the server's exact count while the list is the one it was counted for (it also checks each PDF is there)
+  b.classList.toggle("hide", !n && !st.running);
+  b.disabled = !!st.running;
+  b.innerHTML = st.running ? `${ico("sum")} Writing summaries… ${st.done} of ${st.total}` : `${ico("sum")} Summarise ${n} paper${n === 1 ? "" : "s"}…`;
+  sumBox();
+}
+async function sumPoll() {                                       // the job's state; again every 4 s while it runs
+  clearTimeout(sumTimer);
+  try { SUM_ST = (await api("/api/summaries?status=1")).status || {}; } catch (e) { return; }
+  if (SUM_ST.running) { SUM_WATCHED = true; sumTimer = setTimeout(sumPoll, 4000); }
+  sumPaint();
+}
+async function sumRefresh() {                                    // the exact list and the estimate (the button was pressed)
+  try { SUM = await api("/api/summaries"); SUM.at_lib = lib(); SUM_ST = SUM.status || {}; } catch (e) { notifyError(e); return; }
+  sumPaint();
+}
+const basisText = e => e.basis === "history" ? `from your ${e.calls} earlier summar${e.calls === 1 ? "y" : "ies"} with this model, about ${usd(e.per_paper)} each`
+  : e.basis === "prices" ? `a guess from the price in Settings → AI and the size of each PDF${e.provider === "anthropic" ? "; Claude also reads every page as an image, so expect more" : ""}`
+  : "this model has no price in Settings → AI, and there are too few earlier summaries with it to go by";
+function sumBox() {
+  const box = $("#lf-sumbox"); if (!box) return;
+  const e = SUM || {n: 0}, st = SUM_ST;
+  let html;
+  if (st.running) html = `<p><b>Writing summaries: ${st.done} of ${st.total}.</b> ${st.made} written so far${st.failed.length ? `, ${st.failed.length} failed` : ""}. The AI activity tray shows it and can cancel it.</p>`;
+  else if (SUM_OPEN && e.n) html = `<p><b>${e.n} paper${e.n === 1 ? "" : "s"} in your library ${e.n === 1 ? "has" : "have"} no summary yet.</b> Books are left out.</p>
+      <p>${e.n === 1 ? "It goes" : "They go"} to <b>${esc(e.provider)} · ${esc(e.model)}</b> (Settings → AI → Paper summaries), one at a time, with your summary template.
+      Cost: <b>${e.cost == null ? "unknown" : "about " + usd(e.cost)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
+      <div class="row" style="gap:8px"><button class="btn primary small" id="lf-sumgo">Write the summaries</button><button class="btn small" id="lf-sumno">Cancel</button></div>`;
+  else if (st.ended && SUM_WATCHED && SUM_SEEN !== st.ended) {
+    const fl = st.failed || [];
+    html = `<p><b>${st.stopped === "cancelled" ? "Stopped" : st.stopped ? "The summaries stopped" : "Summaries finished"}: ${st.made} written${fl.length ? `, ${fl.length} failed` : ""}.</b>${st.stopped && st.stopped !== "cancelled" ? " " + esc(st.stopped) : ""}</p>` +
+      (fl.length ? `<ul class="lf-sumfail">${fl.slice(0, 8).map(f => `<li>${esc(f.title)}: <span class="bad">${esc(f.error)}</span></li>`).join("")}${fl.length > 8 ? `<li>…and ${fl.length - 8} more</li>` : ""}</ul>` : "") +
+      `<div class="row" style="gap:8px"><button class="btn small" id="lf-sumok">OK</button></div>`;
+  } else { box.classList.add("hide"); box.innerHTML = ""; return; }
+  box.innerHTML = html; box.classList.remove("hide");
+  const go = $("#lf-sumgo", box), no = $("#lf-sumno", box), ok = $("#lf-sumok", box);
+  if (go) go.onclick = async () => { go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
+  if (no) no.onclick = () => { SUM_OPEN = false; sumBox(); };
+  if (ok) ok.onclick = () => { SUM_SEEN = st.ended; sumBox(); };
+  if (st.ended && SUM_WATCHED && SUM_DONE !== st.ended) { SUM_DONE = st.ended; ctx.reload().then(() => { if (ctx.rerender) ctx.rerender(); else results(TOP && TOP.opts); }).catch(() => {}); }      // the new summaries: green "Ready to read" bars
+}
+async function sumOpen() { SUM_OPEN = true; await sumRefresh(); if (SUM && !SUM.n) { SUM_OPEN = false; toast("Every downloaded paper has a summary."); } }
 function fillControls(el) {
   const L = lib(), opt = (v, t, cur) => `<option value="${esc(v)}"${cur === v ? " selected" : ""}>${esc(t)}</option>`;
   const P = L.filter(r => r.journal !== "Books");           // (books have their own tab: they are not a journal to filter papers by)

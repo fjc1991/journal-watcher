@@ -121,6 +121,8 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .v-borderline { background: var(--bl-soft); color: var(--bl); }
 .v-skip { background: var(--sk-soft); color: var(--sk); }
 .v-error { background: var(--err-soft); color: var(--err); }
+.screenerr { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--err-soft); color: var(--err); font-size: 13px; overflow-wrap: anywhere; }
+.stat.bad b { color: var(--err); }
 .v-pending { background: var(--sk-soft); color: var(--ink-3); animation: pulse 1.4s infinite; }
 .rel { width: 90px; height: 4px; background: var(--sk-soft); border-radius: 99px; overflow: hidden; }
 .rel i { display: block; height: 100%; background: var(--dl); }
@@ -322,6 +324,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <div class="bar"><i id="progbar"></i></div>
       </div>
       <div class="stats hide" id="stats"></div>
+      <div class="screenerr hide" id="screenerr" role="status"></div>
     </div>
 
     <div class="card hide" id="resume"><div class="list-h">Pick up where you left off</div><div class="runs" id="resumelist" style="padding-top:6px"></div></div>
@@ -709,14 +712,25 @@ $("#againbtn").onclick = () => {
   }
   fillSearch(RUN.params); toast("The search form is filled in with this search’s settings. Press “Search & screen”: it continues this saved search.");
 };
-// "Screen with AI" on a search by terms: the matches are listed without a verdict; this asks the model about those that have none (your interests, the monthly budget)
+// "Screen with AI" on a search by terms: the matches are listed without a verdict; this asks the model about those that have none (your interests, the monthly budget).
+// "Retry screening" on any other run: the papers whose screening failed (verdict "error") and those it never reached (stopped by the budget, a key, a model that cannot
+// screen) are asked again; /api/rescreen clears the failed verdicts first. A weekly check never asks about them again by itself: they are already "seen".
+function screenPending() {
+  if (!RUN || RUN.kind === "picks") return {failed: 0, waiting: 0, n: 0};
+  const ps = [...papers.values()], failed = ps.filter(p => p.verdict === "error").length, waiting = ps.filter(p => !p.verdict).length;
+  return {failed, waiting, n: failed + waiting};
+}
 function updateScreenBtn() {
   const b = $("#screenbtn"); if (!b) return;
-  const pending = RUN && RUN.params && RUN.params.terms ? [...papers.values()].filter(p => !p.verdict).length : 0;
-  b.classList.toggle("hide", !pending || BUSY);
-  b.textContent = `Screen with AI (${pending} · ≈ $${(pending * CFG.est_cost_per_paper).toFixed(2)})`;
+  const terms = !!(RUN && RUN.params && RUN.params.terms), {failed, waiting, n} = screenPending();
+  b.classList.toggle("hide", !n || BUSY);
+  const est = `≈ $${(n * CFG.est_cost_per_paper).toFixed(2)}`;
+  b.textContent = terms ? `Screen with AI (${n} · ${est})` : `Retry screening (${n} · ${est})`;
+  b.title = terms ? "Ask the AI to add topics, the method and a relevance order to the matches. Every match stays a download: the card says when the AI would have skipped it. Costs a little; stopped by your monthly budget."
+    : `Ask the AI again about ${[failed ? failed + " paper" + (failed === 1 ? "" : "s") + " whose screening failed" : "", waiting ? waiting + " not screened yet" : ""].filter(Boolean).join(" and ")}. Uses the model in Settings → AI → Screening new papers (its Test button checks it can screen). Papers already judged are not asked again; stopped by your monthly budget.`;
 }
-$("#screenbtn").onclick = async () => { if (!RUN) return; try { await api("/api/rescreen", {run_id: RUN.id}); toast("Ranking the matches against your interests…"); } catch (e) { toast(e.message); } };
+$("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.params && RUN.params.terms), {n} = screenPending();
+  try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { toast(e.message); } };
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
 let SI = null;
@@ -864,7 +878,11 @@ function renderMeta() {
   $("#stats").classList.remove("hide");
   $("#stats").innerHTML = (pr.terms ? [["Matches", ps.length], ["Not screened", pending], ["Download", c("download")], ["Borderline", c("borderline")], ["Skipped", c("skip")], ["Downloaded", got]]
     : [["Found", ps.length], ["Download", c("download")], ["Borderline", c("borderline")], ["Skipped", c("skip")], ["Awaiting verdict", pending], ["Downloaded", got]])
-    .map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
+    .concat(c("error") ? [["Screening failed", c("error")]] : [])
+    .map(([k, v]) => `<div class="stat${k === "Screening failed" ? " bad" : ""}"><b>${v}</b><span>${k}</span></div>`).join("");
+  const why = RUN.screen_error || "";
+  $("#screenerr").classList.toggle("hide", !why || !screenPending().n);
+  $("#screenerr").textContent = why ? "The last screening stopped: " + why : "";
   $("#vt-bl").textContent = ` (${c("borderline")})`;
   $("#selrec").textContent = pr.terms ? "Select all matches" : "Select all “download”";
   updateScreenBtn();
