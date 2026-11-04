@@ -271,11 +271,38 @@ def _rows(p):
         return list(csv.DictReader(f))
 
 
-def _better(a, b):
-    """Of two rows for the same paper, the one to keep: a downloaded one over a failed one, then the one checked later."""
+def _better(a, b, root=None):
+    """Of two rows for the same paper, the one to keep: a downloaded one (its PDF present under `root`, the data folder) over a failed one, then the one checked later."""
+    root = root or paths.ROOT
     def rank(r):
-        return (r.get("status") == "ok" and bool(r.get("file")) and os.path.exists(os.path.join(paths.ROOT, r.get("file") or "")), r.get("date_checked") or "")
+        return (r.get("status") == "ok" and bool(r.get("file")) and os.path.exists(os.path.join(root, r.get("file") or "")), r.get("date_checked") or "")
     return a if rank(a) >= rank(b) else b
+
+
+def join_rows(mine, theirs, root=None):
+    """The rows of two copies of Papers/_index.csv as one list: every paper of either copy stays once (by DOI, else title; _better picks the row), in the order first seen.
+    Also used when a data folder is copied into another one (movehome.py), with `root` the folder the joined list is written to."""
+    merged, order = {}, []
+    for r in list(mine) + list(theirs):
+        k = dl.index_key(r) or json.dumps(r, sort_keys=True)
+        if k not in merged:
+            merged[k] = r
+            order.append(k)
+        else:
+            merged[k] = _better(merged[k], r, root)
+    return [merged[k] for k in order]
+
+
+def write_index(path, rows):
+    """Write rows as Papers/_index.csv (the standard columns first, then any others), through a temporary file."""
+    cols = list(dl.INDEX_COLS) + [c for r in rows for c in r if c not in dl.INDEX_COLS and c is not None]
+    cols = list(dict.fromkeys(cols))
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, path)
 
 
 def merge_index(rel):
@@ -287,23 +314,8 @@ def merge_index(rel):
         raise ValueError("Only the library index (Papers/_index.csv) can be joined this way.")
     mine = _rows(orig) if os.path.exists(orig) else []
     theirs = _rows(full)
-    merged, order = {}, []
-    for r in mine + theirs:
-        k = dl.index_key(r) or json.dumps(r, sort_keys=True)
-        if k not in merged:
-            merged[k] = r
-            order.append(k)
-        else:
-            merged[k] = _better(merged[k], r)
-    rows = [merged[k] for k in order]
-    cols = list(dl.INDEX_COLS) + [c for r in rows for c in r if c not in dl.INDEX_COLS and c is not None]
-    cols = list(dict.fromkeys(cols))
-    tmp = orig + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, cols, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(rows)
-    os.replace(tmp, orig)
+    rows = join_rows(mine, theirs)
+    write_index(orig, rows)
     return {"papers": len(rows), "added": len(rows) - len(mine), "set_aside": set_aside(rel)}
 
 

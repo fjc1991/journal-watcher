@@ -313,8 +313,10 @@ document.addEventListener("jw:update", e => { const b = document.querySelector("
 async function renderAbout(body) {
   let U, C = null; try { [U, C] = await Promise.all([api("/api/update"), api("/api/config").catch(() => null)]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   if (tab !== "about") return;                       // (the person went to another tab while this was loading)
+  const canMove = !!(window.pywebview && window.pywebview.api && window.pywebview.api.change_home);          // the Mac app (app/jw_app.py): the same as its Data → Change data folder… menu
   body.innerHTML = `<div class="card st-card"><h2>Journal Watcher <small>version ${esc(U.current)}</small></h2>
       <p class="hint">${C && C.home ? `Your data lives in <code>${esc(C.home)}</code> (papers, notes, folders, settings and your API keys). ` : ""}${U.app ? "This is the Mac app." : "This copy runs from the project folder."}</p>
+      ${canMove ? `<div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-move">Change data folder…</button><span class="hint" style="margin:0">Use another folder from now on (a Dropbox or iCloud folder, say); you can take your papers and settings along. The old folder is left as it is.</span></div>` : ""}
       <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-welcome">Show the welcome guide</button><span class="hint" style="margin:0">What API keys are, how to get one, and how the publisher sign-ins work.</span></div>
       <div class="st-actions" style="margin:6px 0 0"><button class="btn" id="ab-author">About the author and support</button><span class="hint" style="margin:0">Who makes Journal Watcher, and how to chip in.</span></div></div>
     <div class="card st-card"><h2>Updates</h2>
@@ -327,6 +329,7 @@ async function renderAbout(body) {
       <div class="st-msg" id="ab-msg"></div></div>`;
   $("#ab-welcome", body).onclick = () => { close(); window.Welcome && window.Welcome.open(0); };
   $("#ab-author", body).onclick = () => { close(); window.About && window.About.open(); };
+  if ($("#ab-move", body)) $("#ab-move", body).onclick = async () => { try { const r = await window.pywebview.api.change_home(); if (r && r.error) toast(r.error); } catch (e) { toast(String(e && e.message || e)); } };
   body._abPaint = V => {                             // only this part of the card is drawn again: what you typed under Update address, the open Details and the focus stay
     const blk = $("#ab-updblock", body), go = $("#ab-go", body);
     if (tab !== "about" || !body.isConnected || !blk || !go) return;

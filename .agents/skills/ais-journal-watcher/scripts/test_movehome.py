@@ -1,0 +1,118 @@
+"""movehome.copy_into: destination wins, the library list is joined, per-computer items and the lock stay behind, nothing in the source changes.
+    python .agents/skills/ais-journal-watcher/scripts/test_movehome.py
+"""
+import csv
+import hashlib
+import os
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+T = tempfile.mkdtemp(prefix="jw-movehome-")
+os.environ["JW_HOME"] = os.path.join(T, "unused-home")        # paths.py reads it when first imported; the copy must not depend on it
+os.environ["JW_LOCAL"] = os.path.join(T, "unused-local")
+import movehome  # noqa: E402
+import paths  # noqa: E402
+
+fails = []
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
+def put(root, rel, text):
+    p = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
+
+def index(root, rows):
+    put(root, "Papers/_index.csv", "")
+    with open(os.path.join(root, "Papers/_index.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, ["date_checked", "journal", "abbr", "title", "authors", "doi", "url", "matched_topics", "score", "file", "status", "note"])
+        w.writeheader(); w.writerows(rows)
+
+def tree(root):
+    out = {}
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            p = os.path.join(d, f)
+            out[os.path.relpath(p, root)] = hashlib.sha1(open(p, "rb").read()).hexdigest()
+    return out
+
+SRC, DST = os.path.join(T, "old"), os.path.join(T, "Dropbox", "JW")
+skill = ".agents/skills/ais-journal-watcher"
+# the old folder: two papers, settings, keys, shared state, and the per-computer items an older version kept inside state/
+put(SRC, "Papers/2025-01/MISQ/a.pdf", "PDF A")
+put(SRC, "Papers/2025-01/MISQ/a.md", "summary of A")
+put(SRC, "Papers/2025-02/ISR/b.pdf", "PDF B")
+put(SRC, "Papers/notes.json", '{"from": "old"}')
+put(SRC, ".env", "ANTHROPIC_API_KEY=old")
+put(SRC, skill + "/ai.json", '{"from": "old"}')
+put(SRC, skill + "/journals.json", '{"from": "old"}')
+put(SRC, skill + "/state/seen.json", '{"shared": true}')
+put(SRC, skill + "/state/runs/2026-W40_weekly.json", "{}")
+put(SRC, skill + "/state/server.lock", '{"pid": 1}')
+put(SRC, skill + "/state/.DS_Store", "x")
+for name in paths.LOCAL_ITEMS:
+    if name.endswith(".json"):
+        put(SRC, skill + "/state/" + name, "{}")
+    else:
+        put(SRC, skill + "/state/" + name + "/x", "x")
+index(SRC, [{"date_checked": "2025-01-10", "title": "Paper A", "doi": "10.1/a", "file": "Papers/2025-01/MISQ/a.pdf", "status": "ok"},
+            {"date_checked": "2025-02-10", "title": "Paper B", "doi": "10.1/b", "file": "Papers/2025-02/ISR/b.pdf", "status": "ok"},
+            {"date_checked": "2025-03-01", "title": "Paper C failed here", "doi": "10.1/c", "file": "", "status": "failed"}])
+# the destination: synced from another computer, already has paper C (downloaded there), its own settings, and a newer B row without the file
+put(DST, "Papers/2025-03/JAIS/c.pdf", "PDF C")
+put(DST, ".env", "ANTHROPIC_API_KEY=dropbox")
+put(DST, skill + "/ai.json", '{"from": "dropbox"}')
+index(DST, [{"date_checked": "2025-03-05", "title": "Paper C", "doi": "10.1/c", "file": "Papers/2025-03/JAIS/c.pdf", "status": "ok"},
+            {"date_checked": "2025-04-01", "title": "Paper B", "doi": "10.1/b", "file": "", "status": "failed"}])
+
+before_src = tree(SRC)
+check("looks_like_home: data folder", movehome.looks_like_home(SRC))
+check("looks_like_home: empty folder", not movehome.looks_like_home(os.path.join(T, "Dropbox")))
+check("check: same folder refused", movehome.check(SRC, SRC) is not None)
+check("check: destination inside source refused", movehome.check(SRC, os.path.join(SRC, "Papers")) is not None)
+check("check: source inside destination refused", movehome.check(SRC, T) is not None)
+check("check: fine pair", movehome.check(SRC, DST) is None)
+p = movehome.plan(SRC)
+check("plan counts pdfs", p["pdfs"] == 2, p)
+check("plan leaves out local items and the lock", set(os.path.basename(s) for s in p["skipped"]) == set(paths.LOCAL_ITEMS) | {"server.lock"}, p["skipped"])
+
+seen = []
+res = movehome.copy_into(SRC, DST, say=lambda d, t, rel: seen.append((d, t)))
+print(res)
+print(movehome.describe(res, SRC))
+check("no errors", not res["errors"], res["errors"])
+check("source untouched", tree(SRC) == before_src)
+check("papers copied", open(os.path.join(DST, "Papers/2025-01/MISQ/a.pdf")).read() == "PDF A" and os.path.exists(os.path.join(DST, "Papers/2025-02/ISR/b.pdf")))
+check("summary copied", os.path.exists(os.path.join(DST, "Papers/2025-01/MISQ/a.md")))
+check("destination's .env kept", open(os.path.join(DST, ".env")).read() == "ANTHROPIC_API_KEY=dropbox")
+check("destination's ai.json kept", "dropbox" in open(os.path.join(DST, skill + "/ai.json")).read())
+check("missing settings file copied", os.path.exists(os.path.join(DST, skill + "/journals.json")))
+check("shared state copied", os.path.exists(os.path.join(DST, skill + "/state/seen.json")) and os.path.exists(os.path.join(DST, skill + "/state/runs/2026-W40_weekly.json")))
+check("lock not copied", not os.path.exists(os.path.join(DST, skill + "/state/server.lock")))
+check(".DS_Store not copied", not os.path.exists(os.path.join(DST, skill + "/state/.DS_Store")))
+check("local items not copied", not any(os.path.lexists(os.path.join(DST, skill, "state", n)) for n in paths.LOCAL_ITEMS))
+check("kept count (.env and ai.json were already there)", res["kept"] == 2, res["kept"])
+check("copied count", res["copied"] == 3 + 1 + 1 + 2, res["copied"])        # a.pdf a.md b.pdf notes.json | journals.json | seen.json runs
+with open(os.path.join(DST, "Papers/_index.csv"), newline="") as f:
+    rows = {r["doi"]: r for r in csv.DictReader(f)}
+check("index: every paper of either list", set(rows) == {"10.1/a", "10.1/b", "10.1/c"}, set(rows))
+check("index: C keeps the destination's downloaded row", rows["10.1/c"]["status"] == "ok" and rows["10.1/c"]["file"].endswith("c.pdf"))
+check("index: B keeps the row whose PDF is now in the destination", rows["10.1/b"]["status"] == "ok" and rows["10.1/b"]["file"].endswith("b.pdf"), rows["10.1/b"])
+check("index: order starts with the destination's rows", list(rows)[0] == "10.1/c")
+check("index result", res["index"] == {"papers": 3, "added": 1}, res["index"])
+check("progress reported to the end", seen and seen[-1][0] == seen[-1][1])
+# a second run changes nothing more (everything is already there)
+again = movehome.copy_into(SRC, DST)
+check("second copy copies nothing", again["copied"] == 0 and not again["errors"], again)
+check("second copy keeps the index", again["index"] == {"papers": 3, "added": 0}, again["index"])
+# a first-start copy into an empty folder: the list is simply copied
+EMPTY = os.path.join(T, "fresh")
+r2 = movehome.copy_into(SRC, EMPTY)
+check("empty destination: index copied whole", r2["index"] == {"papers": 3, "added": 3} and os.path.exists(os.path.join(EMPTY, ".env")), r2)
+print("\n%s" % ("ALL OK" if not fails else "FAILED: " + ", ".join(fails)))
+sys.exit(1 if fails else 0)

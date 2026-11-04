@@ -39,6 +39,16 @@ SUPPORT = os.path.expanduser("~/Library/Application Support/" + NAME)
 CONFIG = os.path.join(SUPPORT, "app.json")
 FROZEN = bool(getattr(sys, "frozen", False))
 RES = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # the bundle, or the project folder
+EXTERNAL_HOME = os.environ.get("JW_HOME")       # a folder named by whoever started the app (a test, a script) overrides the saved choice. launch() also puts the chosen folder in
+#                                                 JW_HOME for the dashboard modules, so this is read once, here, and boot() uses it rather than the environment.
+DOCS_HOME = os.path.join(os.path.expanduser("~/Documents"), NAME)       # where earlier versions started fresh, and the folder a first start looks for
+
+
+def code_on_path():
+    """The dashboard and the scripts importable (idempotent): inside the bundle they are the app's own modules; from a checkout they are two folders."""
+    for d in (os.path.join(RES, "dashboard"), os.path.join(RES, ".agents", "skills", "ais-journal-watcher", "scripts")):
+        if os.path.isdir(d) and d not in sys.path:
+            sys.path.insert(0, d)
 
 
 def bundle_path():
@@ -77,6 +87,25 @@ def is_home(p):
     return bool(p) and os.path.isdir(p)
 
 
+def has_data(p):
+    """Does `p` already hold Journal Watcher data (papers or settings)?"""
+    code_on_path()
+    import movehome
+    return movehome.looks_like_home(p)
+
+
+def detected_home():
+    """On a first start (nothing saved yet): the folder an earlier installation used, if there is one: the folder this build was made for, else ~/Documents/Journal Watcher."""
+    s = suggested_home()
+    if s:
+        return s
+    return DOCS_HOME if has_data(DOCS_HOME) else None
+
+
+def esc(x):
+    return str(x or "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+
+
 # ------------------------------------------------------------------------------------------------ pages shown by the app itself
 
 STYLE = """<style>
@@ -95,16 +124,52 @@ MARK = '<div class="mark"><svg width="24" height="24" viewBox="0 0 24 24" fill="
 SPLASH = "<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Opening %s…</h1><p>Starting up. This takes a few seconds.</p><div class=spin></div></main>" % (NAME, STYLE, MARK, NAME)
 
 
-def chooser_page(suggest, note=""):
+def chooser_page(found, note=""):
+    """The first start. `found`: a folder an earlier installation used (detected_home), offered as it is or moved somewhere else; None: start fresh or choose."""
     opts = []
-    if suggest:
-        opts.append('<button class="opt" data-k="existing"><b>Use my existing Journal Watcher folder</b><span>%s: your papers, notes and folders are already there</span></button>' % suggest)
-    opts.append('<button class="opt" data-k="new"><b>Start fresh in my Documents folder</b><span>%s</span></button>' % os.path.join(os.path.expanduser("~/Documents"), NAME))
+    if found:
+        opts.append('<button class="opt" data-k="existing"><b>Keep using my existing folder</b><span>%s: your papers, notes and folders are already there</span></button>' % esc(found))
+        opts.append('<button class="opt" data-k="move"><b>Move it to another folder…</b><span>Copy everything from %s to a folder you choose (a Dropbox or iCloud folder, say) and use that from now on. The old folder is left as it is.</span></button>' % esc(found))
+    if not found or os.path.realpath(found) != os.path.realpath(DOCS_HOME):
+        opts.append('<button class="opt" data-k="new"><b>Start fresh in my Documents folder</b><span>%s</span></button>' % esc(DOCS_HOME))
     opts.append('<button class="opt" data-k="pick"><b>Choose another folder…</b><span>Anywhere you like: a Dropbox or iCloud folder works too</span></button>')
-    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Where should Journal Watcher keep your papers?</h1>"
+    head = "Journal Watcher found the folder an earlier version used" if found else "Where should Journal Watcher keep your papers?"
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>%s</h1>"
             "<p>Your PDFs, highlights, notes, folders and settings live in one ordinary folder that you own. You can back it up or move it like any other folder.</p>%s<div class=err id=e>%s</div></main>"
             "<script>document.querySelectorAll('.opt').forEach(b => b.onclick = async () => { document.getElementById('e').textContent = ''; const r = await pywebview.api.use_home(b.dataset.k); if (r && r.error) document.getElementById('e').textContent = r.error; });</script>"
-            % (NAME, STYLE, MARK, "".join(opts), note))
+            % (NAME, STYLE, MARK, head, "".join(opts), esc(note)))
+
+
+def move_page(src, dst, dst_has_data):
+    """Change data folder: take the data along, or just switch. Nothing is ever removed from `src` (the author's rule: copy only, and say what was copied)."""
+    what = ("<p>%s already holds Journal Watcher data (from another computer, perhaps). Your papers, notes, folders and settings from %s can be added to it: "
+            "what is already there is kept as it is, and the two library lists are joined so that no paper is lost.</p>" % (esc(dst), esc(src))) if dst_has_data else \
+           ("<p>Your papers, notes, folders, settings and API keys can be copied from %s to %s first, so that you find everything where you left it.</p>" % (esc(src), esc(dst)))
+    copy_b = "Add my data to it" if dst_has_data else "Copy my data there, then switch"
+    switch_s = "Journal Watcher opens on what is already in %s" % esc(dst) if dst_has_data else "Journal Watcher starts empty in %s" % esc(dst)
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Use %s from now on?</h1>%s"
+            '<button class="opt" data-k="copy"><b>%s</b><span>Nothing is removed from %s: it stays as a copy until you delete it yourself</span></button>'
+            '<button class="opt" data-k="switch"><b>Switch without copying</b><span>%s; %s is left as it is</span></button>'
+            '<button class="opt" data-k="cancel"><b>Cancel</b><span>Keep using %s</span></button><div class=err id=e></div></main>'
+            "<script>document.querySelectorAll('.opt').forEach(b => b.onclick = async () => { document.getElementById('e').textContent = ''; document.querySelectorAll('.opt').forEach(x => x.disabled = true); "
+            "const r = await pywebview.api.move_choice(b.dataset.k); if (r && r.error) { document.getElementById('e').textContent = r.error; document.querySelectorAll('.opt').forEach(x => x.disabled = false); } });</script>"
+            % (NAME, STYLE, MARK, esc(dst), what, copy_b, esc(src), switch_s, esc(src), esc(src)))
+
+
+def progress_page(src, dst):
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Copying your data to %s…</h1><p>From %s. Leave this window open; large PDF collections take a while.</p>"
+            "<div class=spin></div><p id=p style='margin-top:16px'></p></main><script>window.JWMove = { progress(d, t, rel) { document.getElementById('p').textContent = d + ' of ' + t + ' files · ' + rel; } };</script>"
+            % (NAME, STYLE, MARK, esc(dst), esc(src)))
+
+
+def done_page(dst, text, errors):
+    errs = ("<details><summary class=err>Could not copy %d file%s</summary><div class=err>%s</div></details>" % (len(errors), "" if len(errors) == 1 else "s",
+            "\n".join("%s: %s" % (esc(a), esc(b)) for a, b in errors[:40]))) if errors else ""
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s<main>%s<h1>Copied</h1><p>%s</p>%s"
+            '<button class="opt" data-k="open"><b>Open Journal Watcher in %s</b><span>From now on this is your data folder</span></button>'
+            '<button class="opt" data-k="cancel"><b>Not yet: keep using the old folder</b><span>The copy stays in %s; you can switch to it later</span></button><div class=err id=e></div></main>'
+            "<script>document.querySelectorAll('.opt').forEach(b => b.onclick = async () => { const r = await pywebview.api.move_choice(b.dataset.k); if (r && r.error) document.getElementById('e').textContent = r.error; });</script>"
+            % (NAME, STYLE, MARK, esc(text), errs, esc(dst), esc(dst)))
 
 
 def busy_page(other, healthy):
@@ -152,19 +217,29 @@ class Api:
     def __init__(self):
         self.home = None
         self.url = None
+        self.move = None                                # a change of data folder under way: {"src", "dst", "busy"}
 
     # -- choosing the data folder
+    def _pick_folder(self, start=None):
+        r = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER, directory=start or os.path.expanduser("~/Documents"))
+        return r[0] if r else None
+
     def use_home(self, kind):
+        """The first start (chooser_page): keep the folder that was found, move it, start fresh, or choose."""
         try:
+            found = detected_home()
             if kind == "existing":
-                p = suggested_home()
+                p = found
             elif kind == "new":
-                p = os.path.join(os.path.expanduser("~/Documents"), NAME)
-            else:
-                r = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER, directory=os.path.expanduser("~/Documents"))
-                if not r:
+                p = DOCS_HOME
+            elif kind in ("move", "pick"):
+                p = self._pick_folder()
+                if not p:
                     return {"ok": False}
-                p = r[0]
+                if found:                                   # there is data to take along: ask, as Change data folder… does
+                    return self._offer(found, p)
+            else:
+                return {"error": "Unknown choice."}
             if not p:
                 return {"error": "That folder is not available."}
             os.makedirs(p, exist_ok=True)
@@ -173,6 +248,65 @@ class Api:
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             return {"error": str(e)[:200]}
+
+    def _offer(self, src, dst):
+        """`dst` was chosen while `src` holds data: show move_page (copy, switch, cancel). With no source to copy from, just switch."""
+        if not src or not os.path.isdir(src) or os.path.realpath(src) == os.path.realpath(dst):
+            if src and os.path.realpath(src) == os.path.realpath(dst):
+                return {"error": "That is the folder you already use."}
+            return self._finish(dst)
+        code_on_path()
+        import movehome
+        why = movehome.check(src, dst)
+        if why:
+            return {"error": why}
+        self.move = {"src": src, "dst": dst, "busy": False}
+        webview.windows[0].load_html(move_page(src, dst, movehome.looks_like_home(dst)))
+        return {"ok": True}
+
+    def move_choice(self, kind):
+        """The buttons of move_page and done_page."""
+        m = self.move
+        w = webview.windows[0]
+        if not m:
+            return {"error": "Nothing to do: choose a folder first."}
+        if m["busy"]:
+            return {"error": "Still copying."}
+        if kind == "cancel":
+            self.move = None
+            if self.url:
+                w.load_url(self.url)
+            else:
+                w.load_html(chooser_page(detected_home()))
+            return {"ok": True}
+        if kind in ("switch", "open"):
+            return self._finish(m["dst"])
+        if kind == "copy":
+            m["busy"] = True
+            w.load_html(progress_page(m["src"], m["dst"]))
+            threading.Thread(target=self._copy, args=(w, m), daemon=True).start()
+            return {"ok": True}
+        return {"error": "Unknown choice."}
+
+    def _copy(self, w, m):
+        code_on_path()
+        import movehome
+        try:
+            res = movehome.copy_into(m["src"], m["dst"], say=lambda d, t, rel: w.evaluate_js("window.JWMove && JWMove.progress(%d, %d, %s)" % (d, t, json.dumps(rel))))
+            text, errors = movehome.describe(res, m["src"]), res["errors"]
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            text, errors = "The copy did not finish: %s. Nothing was changed in %s; the destination may hold a partial copy." % (str(e)[:300], m["src"]), []
+        m["busy"] = False
+        w.load_html(done_page(m["dst"], text, errors))
+
+    def _finish(self, dst):
+        """Use `dst` from now on: remember it and start again as a fresh process (the running dashboard, its lock and its imported modules all belong to the old folder)."""
+        os.makedirs(dst, exist_ok=True)
+        save_config({"home": dst})
+        self.move = None
+        relaunch()
+        return {"ok": True}
 
     def busy_choice(self, kind):
         """The buttons of busy_page: show the other copy, try again, or choose another folder."""
@@ -184,19 +318,22 @@ class Api:
         if kind == "retry":
             if not BUSY.get("home"):
                 return {"error": "Nothing to try again."}
-            relaunch()                                             # a fresh process: the lock and the imported server start clean
+            relaunch(keep_home=True)                               # a fresh process: the lock and the imported server start clean (on the same folder, however it was named)
             return {"ok": True}
         if kind == "pick":
             return self.change_home()
         return {"error": "That copy is not answering any more. Press Try again."}
 
     def change_home(self):
-        r = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER, directory=self.home or os.path.expanduser("~/Documents"))
-        if not r:
-            return {"ok": False}
-        save_config({"home": r[0]})
-        relaunch()
-        return {"ok": True}
+        """Data → Change data folder…, and the button in Settings → About & updates: choose a folder, then (when there is data here) copy it along, or just switch."""
+        try:
+            p = self._pick_folder(self.home)
+            if not p:
+                return {"ok": False}
+            return self._offer(self.home, p)                 # from busy_page (no home yet) there is nothing to copy from: just switch
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            return {"error": str(e)[:200]}
 
     # -- saving what the page makes (downloads)
     def _ask_save(self, name):
@@ -281,12 +418,17 @@ API = Api()
 BUSY = {}                                      # set when another copy holds the data folder (busy_page): {home, url}
 
 
-def relaunch():
+def relaunch(keep_home=False):
+    """Start this app again as a fresh process, then leave. The new copy must read the saved folder (app.json), so JW_HOME, which launch() put in this process's
+    environment for the dashboard modules, is taken out of what the new process inherits: `open` and execv both hand the environment on, and until 1.2.4 the new copy
+    therefore went straight back to the old folder whatever had just been saved (Change data folder… seemed to do nothing, or ran into the old copy's lock).
+    keep_home: the folder is to stay as it is, including one named from outside (busy_page's Try again)."""
+    env = {k: v for k, v in os.environ.items() if k != "JW_HOME" or (keep_home and EXTERNAL_HOME)}
     b = bundle_path()
     if b:
-        subprocess.Popen(["/usr/bin/open", "-n", b])
+        subprocess.Popen(["/usr/bin/open", "-n", b], env=env)
         os._exit(0)
-    os.execv(sys.executable, [sys.executable] + sys.argv)       # run from the project folder: start this same script again
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)       # run from the project folder: start this same script again
 
 
 # ------------------------------------------------------------------------------------------------ start-up
@@ -314,7 +456,9 @@ def launch(window, home):
                 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
             except ImportError:
                 pass
-        sys.path.insert(0, os.path.join(RES, "dashboard"))
+        code_on_path()
+        for m in ("paths", "download", "syncinfo", "movehome"):
+            sys.modules.pop(m, None)                   # a copy made on the first start imported these before the folder was chosen: paths.py must read JW_HOME afresh
         import server                                  # noqa: E402  (after JW_HOME is set: paths.py reads it when it is first imported)
         import updater                                 # noqa: E402
         updater.EXIT = lambda: os._exit(0)             # "Update now": the new app is swapped in once this process has gone
@@ -342,11 +486,11 @@ def launch(window, home):
 
 
 def boot(window):
-    home = os.environ.get("JW_HOME")                 # named by whoever started the app (a test, a script): used as it is, made if it is not there yet
+    home = EXTERNAL_HOME                             # named by whoever started the app (a test, a script): used as it is, made if it is not there yet
     if not home:
         home = load_config().get("home")
         if not is_home(home):
-            window.load_html(chooser_page(suggested_home()))
+            window.load_html(chooser_page(detected_home()))     # nothing saved (a first start, or the folder is gone): keep or move the folder an earlier version used, or choose
             return
     launch(window, home)
 
