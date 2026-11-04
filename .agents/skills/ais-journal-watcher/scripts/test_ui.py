@@ -1358,8 +1358,9 @@ bks.crossref_books = lambda title, rows=3: []
             check("a lens can be switched off", "Sample & data 0" in page.inner_text("#rd-skim .sk-lenses").replace("\n", " "))
             page.click('.sk-chip[data-lens="sample"]'); page.wait_for_function("document.querySelector('#rd-skim .sk-sum').innerText.startsWith('3 shown')")
             box = page.locator('.rd-ov .skim-g.r1').first.bounding_box(); page.locator('.rd-ov .skim-g.r1').first.scroll_into_view_if_needed(); box = page.locator('.rd-ov .skim-g.r1').first.bounding_box()
-            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); page.wait_for_selector(".rd-skimpop:not(.hide)")
+            page.evaluate("document.querySelectorAll('#hv-ctx').forEach(e => e.remove())"); page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); page.wait_for_selector(".rd-skimpop:not(.hide)")
             check("clicking a marked sentence offers to highlight or dismiss it", "Highlight" in page.inner_text(".rd-skimpop") and "Not useful" in page.inner_text(".rd-skimpop") and "key point" in page.inner_text(".rd-skimpop"))
+            page.evaluate("document.querySelectorAll('#hv-ctx').forEach(e => e.remove())")          # (the 'Explain it' hover note from the Table 1 check may still be over the page: a click lands on it, not on the button)
             page.click('.rd-skimpop [data-p="yes"]')
             for _ in range(40):
                 if os.path.exists(sidecar(2, ".notes.json")) and any(h.get("skim") for h in json.load(open(sidecar(2, ".notes.json")))["highlights"]):
@@ -1370,7 +1371,7 @@ bks.crossref_books = lambda title, rows=3: []
             check("accepting makes a real highlight, coloured and tagged by lens", len(hs) == 1 and hs[0]["color"] in ("blue", "gray") and hs[0]["text"] and len(hs[0]["tags"]) == 1 and tg[hs[0]["tags"][0]]["category"] == "lens", hs)
             check("the accepted sentence is no longer a ghost, and the bar counts it", "1 highlighted" in page.inner_text("#rd-skim .sk-sum") and "2 shown" in page.inner_text("#rd-skim .sk-sum"))
             page.locator('.rd-ov .skim-g').first.scroll_into_view_if_needed(); box = page.locator('.rd-ov .skim-g').first.bounding_box()
-            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); page.wait_for_selector(".rd-skimpop:not(.hide)"); page.click('.rd-skimpop [data-p="no"]')
+            page.evaluate("document.querySelectorAll('#hv-ctx').forEach(e => e.remove())"); page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); page.wait_for_selector(".rd-skimpop:not(.hide)"); page.click('.rd-skimpop [data-p="no"]')
             for _ in range(20):
                 if json.load(open(sk_file))["dismissed"]:
                     break
@@ -1465,7 +1466,7 @@ bks.crossref_books = lambda title, rows=3: []
             check("Watch brings its side panel (weekly check, past runs) back", page.locator(".side").is_visible() and page.url.endswith("#/watch") and page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "watch")
             page.go_back(); page.wait_for_selector("#lib-review:not(.hide)"); page.go_back(); page.wait_for_selector('.libtabs [data-tab="ask"].on')
             check("the browser's Back button returns to the Library tab you were on", page.url.endswith("#/library/ask") and page.locator('.libtabs [data-tab="ask"].on').count() == 1, page.url)
-            page.click("#folditem"); page.wait_for_selector(".fp-tile"); page.reload(); page.wait_for_selector(".fp-tile")
+            page.click("#folditem"); page.wait_for_selector(".fp-tile"); page.reload(); page.wait_for_selector(".fp-tile"); page.wait_for_selector(".fp", state="visible"); page.wait_for_function("location.hash === '#/folders'")
             check("reloading the page keeps you on the Folders page", page.url.endswith("#/folders") and page.locator(".fp").is_visible())
             page.goto("about:blank"); page.goto(base + "/#/folder/lab/matrix"); page.wait_for_selector(".fvtabs")
             check("an address like #/folder/lab/matrix opens that folder on that tab", page.locator('.fvtabs [data-ft="matrix"].on').count() == 1 and "Lab" in page.inner_text(".pagehead h1"))
@@ -1593,7 +1594,7 @@ bks.crossref_books = lambda title, rows=3: []
             check("…and shows the conflicted copy with what it is a copy of", "_index (Work Mac" in page.inner_text("#sy-conf") and "Papers/_index.csv" in page.inner_text("#sy-conf") and page.locator("[data-merge]").count() == 1)
             page.fill("#sy-name", "Home laptop"); page.click("#sy-save"); page.wait_for_function("document.querySelector('#sy-name') && document.querySelector('#sy-name').value === 'Home laptop'")
             me_ = api("/api/sync")["me"]
-            mine_ = [json.load(open(os.path.join(devdir, n)))["name"] for n in os.listdir(devdir) if n.startswith(me_["id"])]
+            mine_ = [json.load(open(os.path.join(devdir, n)))["name"] for n in os.listdir(devdir) if n == me_["id"] + ".json"]          # (not the .tmp file the heartbeat writes first)
             check("this computer can be renamed, and the other computers see the new name at once", me_["name"] == "Home laptop" and mine_ == ["Home laptop"], str((me_, mine_)))
             n_before = len(list(csv.DictReader(open(idx_path, newline=""))))
             page.click("[data-merge]"); page.wait_for_selector("#sy-conf .hint.ok", timeout=10000)

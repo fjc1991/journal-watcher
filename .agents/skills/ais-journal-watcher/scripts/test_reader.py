@@ -857,8 +857,10 @@ print("OK")
         cr = {"message": {"items": [{"title": ["Platforms and Their Governance (2nd ed.)"], "author": [{"given": "Ada", "family": "Lovelace"}], "DOI": "10.5555/book.1", "publisher": "Crossref Press", "ISBN": ["9780201835953"], "published": {"date-parts": [[2021]]}, "type": "book", "URL": "https://doi.org/10.5555/book.1"},
                            {"title": ["A Quite Different Book About Platform Strategy"], "author": [{"given": "Zed", "family": "Quinn"}], "DOI": "10.5555/book.2", "publisher": "Other Press", "published": {"date-parts": [[2012]]}, "type": "book"}]}}
 
+        sent = []
+
         def fake_get(url, timeout=25, headers=None):
-            asked.append(url)
+            asked.append(url); sent.append((url, dict(headers or {})))
             return json.dumps(ol if "openlibrary" in url else cr).encode(), {}
         dl.http_get = fake_get
         os.environ.pop("JW_OFFLINE", None)
@@ -869,8 +871,14 @@ print("OK")
             r2 = bk.openlibrary_search(title="Platforms and Their Governance", authors=["Ada Lovelace"])
             assert "title=Platforms" in asked[-1] and "author=Ada" in asked[-1] and r2[0]["isbn"] == "9780201835953", (asked[-1], r2)
             assert bk.openlibrary_search(title="abc") == [] and bk.openlibrary_search() == [], "nothing is asked for a title that short"
+            ua = next(h["User-Agent"] for u, h in sent if "openlibrary" in u)
+            assert ua.startswith("JournalWatcher/") and "Mozilla" not in ua and "github.com/fjc1991/journal-watcher" in ua, ua          # (Open Library asks programs to say who they are: this one does)
             c = bk.crossref_books("Platforms and Their Governance")
             assert "filter=type:book" in asked[-1] and c[0]["doi"] == "10.5555/book.1" and c[0]["publisher"] == "Crossref Press" and c[0]["year"] == "2021" and c[0]["isbn"] == "9780201835953", c
+            cr_main = cr
+            cr = {"message": {"items": [{"title": ["An Edited Volume on Platform Research"], "editor": [{"given": "E.", "family": "Editor"}], "DOI": "10.5555/ed.1", "publisher": "P", "type": "edited-book"}]}}
+            assert bk.crossref_books("An Edited Volume on Platform Research")[0]["authors"] == ["E. Editor"], "an edited volume has editors, not authors"
+            cr = cr_main
             dl.http_get = lambda *a, **k: (_ for _ in ()).throw(OSError("offline"))
             assert bk.openlibrary_search(isbn="9780201835953") == [] and bk.crossref_books("Platforms and Their Governance") == [], "a lookup that fails gives nothing, not an error"
             dl.http_get = fake_get

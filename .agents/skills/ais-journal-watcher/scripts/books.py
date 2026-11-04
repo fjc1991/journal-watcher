@@ -173,6 +173,16 @@ def _record(title, authors, publisher, year, isbn, doi, pages, source, url=""):
             "isbn": isbn13(isbn) if isbn else "", "doi": doi or "", "pages": pages or 0, "source": source, "url": url or ("https://doi.org/" + doi if doi else "")}
 
 
+def _ua():
+    """Open Library asks the programs that use its API to say who they are: this one does (its name, version and project page)."""
+    try:
+        import updater
+        v = updater.version()
+    except Exception:  # noqa: BLE001
+        v = ""
+    return "JournalWatcher/%s (an open-source tool for reading academic papers; https://github.com/fjc1991/journal-watcher)" % (v or "dev")
+
+
 def openlibrary_search(title="", authors=None, isbn="", rows=4):
     """Records Open Library has for an ISBN (if given) or a title (and first author). [] when nothing is found or it cannot be reached. Only the title/author/ISBN are sent."""
     if os.environ.get("JW_OFFLINE"):
@@ -187,7 +197,7 @@ def openlibrary_search(title="", authors=None, isbn="", rows=4):
     else:
         return []
     try:
-        raw, _ = dl.http_get("https://openlibrary.org/search.json?" + urllib.parse.urlencode(q), timeout=25, headers={"Accept": "application/json"})
+        raw, _ = dl.http_get("https://openlibrary.org/search.json?" + urllib.parse.urlencode(q), timeout=25, headers={"Accept": "application/json", "User-Agent": _ua()})
         docs = json.loads(raw.decode("utf-8", "replace")).get("docs") or []
     except Exception:  # noqa: BLE001
         return []
@@ -216,7 +226,8 @@ def crossref_books(title, rows=3):
     for it in items:
         m = importer._meta_from_item(it)
         if m and m.get("doi"):
-            out.append(_record(m["title"], m["authors"], m.get("publisher"), m.get("pub_date"), (it.get("ISBN") or [""])[0], m["doi"], 0, "crossref", m.get("url")))
+            eds = [" ".join(x for x in [e.get("given"), e.get("family")] if x) or e.get("name", "") for e in it.get("editor") or []]            # (an edited volume has editors, not authors)
+            out.append(_record(m["title"], m["authors"] or [e for e in eds if e], m.get("publisher"), m.get("pub_date"), (it.get("ISBN") or [""])[0], m["doi"], 0, "crossref", m.get("url")))
     return out
 
 
