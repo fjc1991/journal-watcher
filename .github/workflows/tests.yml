@@ -16,6 +16,8 @@ jobs:
       - run: python -m playwright install chromium     # one check opens a page to see the sign-in success banner; it is skipped when no browser is installed
       - name: Offline checks (no network, no API key)
         run: python .agents/skills/ais-journal-watcher/scripts/test_reader.py
+      - name: Changing the data folder (copying one data folder into another)
+        run: python .agents/skills/ais-journal-watcher/scripts/test_movehome.py
   ui:
     runs-on: macos-15
     timeout-minutes: 45

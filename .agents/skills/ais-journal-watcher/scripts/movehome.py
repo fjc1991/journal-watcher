@@ -9,6 +9,8 @@ Rules (decided with the author, Nov 2026):
     by DOI or title, keeps its better row), otherwise papers whose PDFs were just copied would be missing from the list
   * per-computer items never travel: paths.LOCAL_ITEMS (the sign-in browser profile and cookies, signins.json, update state, the models, staging, fetched, the lookup
     caches) and the server.lock, wherever an older version left them inside the data folder; they are made afresh where they belong (paths.LOCAL)
+  * the computers' "I am here" files (devices/, syncinfo.py) never travel either: after a change of folder this computer has a new id (its id is kept per data
+    folder, in paths.LOCAL), so its old file would show up in the new folder as a second computer with its own name, "open now" for three minutes
 
 This module imports paths only inside functions: paths.py fixes ROOT when it is first imported (from JW_HOME), and the app may copy before it has chosen a folder.
 The app always starts a fresh process after a copy, so nothing here depends on paths.ROOT.
@@ -32,6 +34,7 @@ def _excluded():
     import paths
     ex = {os.path.join(STATE_REL, n) for n in paths.LOCAL_ITEMS}
     ex.add(os.path.join(STATE_REL, "server.lock"))
+    ex.add(os.path.join(SKILL_REL, "devices"))
     return ex
 
 

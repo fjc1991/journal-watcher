@@ -55,6 +55,7 @@ put(SRC, skill + "/state/seen.json", '{"shared": true}')
 put(SRC, skill + "/state/runs/2026-W40_weekly.json", "{}")
 put(SRC, skill + "/state/server.lock", '{"pid": 1}')
 put(SRC, skill + "/state/.DS_Store", "x")
+put(SRC, skill + "/devices/" + "a" * 32 + ".json", '{"id": "%s", "name": "This Mac"}' % ("a" * 32))      # this computer's "I am here" file, written under its old id
 for name in paths.LOCAL_ITEMS:
     if name.endswith(".json"):
         put(SRC, skill + "/state/" + name, "{}")
@@ -79,7 +80,7 @@ check("check: source inside destination refused", movehome.check(SRC, T) is not 
 check("check: fine pair", movehome.check(SRC, DST) is None)
 p = movehome.plan(SRC)
 check("plan counts pdfs", p["pdfs"] == 2, p)
-check("plan leaves out local items and the lock", set(os.path.basename(s) for s in p["skipped"]) == set(paths.LOCAL_ITEMS) | {"server.lock"}, p["skipped"])
+check("plan leaves out local items and the lock", set(os.path.basename(s) for s in p["skipped"]) == set(paths.LOCAL_ITEMS) | {"server.lock", "devices"}, p["skipped"])
 
 seen = []
 res = movehome.copy_into(SRC, DST, say=lambda d, t, rel: seen.append((d, t)))
@@ -95,6 +96,7 @@ check("missing settings file copied", os.path.exists(os.path.join(DST, skill + "
 check("shared state copied", os.path.exists(os.path.join(DST, skill + "/state/seen.json")) and os.path.exists(os.path.join(DST, skill + "/state/runs/2026-W40_weekly.json")))
 check("lock not copied", not os.path.exists(os.path.join(DST, skill + "/state/server.lock")))
 check(".DS_Store not copied", not os.path.exists(os.path.join(DST, skill + "/state/.DS_Store")))
+check("the computers' 'I am here' files not copied", not os.path.lexists(os.path.join(DST, skill, "devices")))
 check("local items not copied", not any(os.path.lexists(os.path.join(DST, skill, "state", n)) for n in paths.LOCAL_ITEMS))
 check("kept count (.env and ai.json were already there)", res["kept"] == 2, res["kept"])
 check("copied count", res["copied"] == 3 + 1 + 1 + 2, res["copied"])        # a.pdf a.md b.pdf notes.json | journals.json | seen.json runs
