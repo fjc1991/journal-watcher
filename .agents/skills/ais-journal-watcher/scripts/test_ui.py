@@ -975,6 +975,7 @@ bks.crossref_books = lambda title, rows=3: []
             board = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")))
             check("star and note are saved in Papers/_folders/lab.ideas.json", any(x["star"] and x["note"] == "Talk to my supervisor" for x in board["ideas"]) and board["runs"])
             page.click('.idea >> nth=0 >> [data-a="develop"]'); page.wait_for_selector(".idea-dev .of-sec", timeout=60000)
+            page.wait_for_function("(document.querySelector('.idea .idea-tabs .on') || {}).textContent.includes('✓')", timeout=60000)   # (the sections show while the answer still streams; the ✓ only once the server has saved it on the board)
             check("the outline appears in sections on the Outline tab of the idea card", page.locator('.idea >> nth=0 >> .idea-tabs .on').inner_text().strip().startswith("Outline") and page.locator(".idea-dev .of-sec").count() >= 2)
             check("Develop turns the idea into an outline saved on the board", "working title" in page.inner_text(".idea-dev").lower() and "developed" in open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")).read())
             page.reload(); page.wait_for_selector("#libitem"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs")
