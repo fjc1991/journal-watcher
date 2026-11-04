@@ -413,6 +413,9 @@ def main():
             n1 = len(SEEN)
             again = list(bk.summary_stream(brel, 1, "A Test Book"))
             assert len(SEEN) == n1 and again[-1]["cached"] is True and again[-1]["cost"] == 0.0 and next(m for m in again if m["type"] == "final")["text"] == final
+            ai.cache_clear()                                     # (the saved summary is the book's own: clearing the AI's answer cache in Settings does not make it cost again)
+            again2 = list(bk.summary_stream(brel, 1, "A Test Book"))
+            assert len(SEEN) == n1 and again2[-1]["cached"] is True and next(m for m in again2 if m["type"] == "final")["text"] == final
             list(bk.summary_stream(brel, 1, "A Test Book", fresh=True))
             assert len(SEEN) == n1 + 1, "a fresh summary really asks"
             # --- the offset can still be changed afterwards, and the summary stays
