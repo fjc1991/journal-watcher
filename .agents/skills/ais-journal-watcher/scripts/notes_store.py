@@ -72,7 +72,7 @@ def skim_path(pdf):
 
 def sidecars(pdf):
     """Files that belong to a paper besides the PDF (move/delete them together)."""
-    return [p for p in (pdf[:-4] + ".md", notes_path(pdf), chat_path(pdf), card_path(pdf), skim_path(pdf)) if os.path.exists(p)]
+    return [p for p in (pdf[:-4] + ".md", notes_path(pdf), chat_path(pdf), card_path(pdf), skim_path(pdf), pdf[:-4] + ".book.json", pdf[:-4] + ".epub") if os.path.exists(p)]       # (the last two: a book's own details and the EPUB it was made from: see books.py)
 
 
 def sha1_of(pdf):

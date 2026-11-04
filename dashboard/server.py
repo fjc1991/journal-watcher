@@ -38,6 +38,7 @@ import activity  # noqa: E402
 import aifiles  # noqa: E402
 import authorcache as ac  # noqa: E402
 import bibimport  # noqa: E402
+import books  # noqa: E402
 import exports  # noqa: E402
 import folders as fo  # noqa: E402
 import importer  # noqa: E402
@@ -827,8 +828,10 @@ class Handler(BaseHTTPRequestHandler):
                 pdf = ns.pdf_path(r["file"]); e = papercard.estimate(pdf, quick=True) if pdf else None
                 cost = None if cost is None or not e or e["cost"] is None else cost + e["cost"]
             return self.send_json({"evidence": evidence.build(rows), "cards": cards, "estimate": {"cards": cost}})
-        if path == "/api/library/search":
-            return self.send_json(ls.search(pl.library(), one("q"), one("status"), one("star") == "1", one("folder"), one("journal"),
+        if path == "/api/library/search":     # books=only: just the books (the Books tab); books=all: both; otherwise papers only (a book has its own tab)
+            bk_ = one("books")
+            rows_ = [r for r in pl.library() if bk_ == "all" or (r.get("journal") == "Books") == (bk_ == "only")]
+            return self.send_json(ls.search(rows_, one("q"), one("status"), one("star") == "1", one("folder"), one("journal"),
                                             one("year"), one("tag"), one("notes") == "1", one("sort")))
         if path == "/api/library/highlights":
             return self.send_json(ls.highlights(pl.library(), one("q"), one("tag") or None, one("color") or None, one("folder") or None, one("journal") or None))
@@ -955,8 +958,11 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < n <= 150 * 1024 * 1024:
                 return self.send_json({"error": "the file is empty or larger than 150 MB"}, 400)
             data = self.rfile.read(n)
+            name = urllib.parse.unquote(self.headers.get("X-Filename") or "paper.pdf")
             try:
-                return self.send_json({"ok": True, **importer.analyse_pdf(data, urllib.parse.unquote(self.headers.get("X-Filename") or "paper.pdf"))})
+                if books.is_epub(data) or self.headers.get("X-Kind") == "book":       # an EPUB is always a book; a PDF is one when the dialog says so (X-Kind: book)
+                    return self.send_json({"ok": True, **books.analyse(data, name, hint_pdf=True)})
+                return self.send_json({"ok": True, **importer.analyse_pdf(data, name)})
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
         try:
@@ -968,7 +974,7 @@ class Handler(BaseHTTPRequestHandler):
                 res = importer.confirm(b.get("token"), b.get("fields"))
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
-            return self.finish_import(res, bool(b.get("summarize")))
+            return self.finish_import(res, bool(b.get("summarize")) and (b.get("fields") or {}).get("kind") != "book")      # (a book is never summarised by itself: it is long, and that costs)
         if path == "/api/sync":             # {action: "rename", name} | {action: "merge", path} (join the library index copies) | {action: "set_aside", path}
             try:
                 act = b.get("action")
@@ -985,6 +991,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(e)}, 400)
             return self.send_json({"ok": True, **res, **syncinfo.info()})
         if path == "/api/import/check":     # {doi, title}: is this paper already in the library? (the review dialog asks again when you pick another record or edit the boxes)
+            if b.get("kind") == "book":
+                return self.send_json({"ok": True, "existing": books._existing_book(books.isbn13(str(b.get("isbn") or "")), str(b.get("title") or ""), importer.clean_doi(b.get("doi")) if str(b.get("doi") or "").strip() else "")})
             return self.send_json({"ok": True, "existing": importer.check_existing(b.get("doi"), str(b.get("title") or ""))})
         if path == "/api/import/discard":   # {tokens: [...]}: Cancel, or papers you unticked
             return self.send_json({"ok": True, "removed": importer.discard(b.get("tokens") if isinstance(b.get("tokens"), list) else [])})

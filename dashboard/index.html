@@ -1128,7 +1128,7 @@ function renderLibrary() {
   };
   if (typeof NAV.j === "string" && NAV.j[0] === "@") { LibraryUI.folderView(box, NAV.j.slice(1)); return; }
   if (NAV.j === null) {
-    box.innerHTML = pageHead({tool: "library", icon: "library", eyebrow: "Library", title: "Library", id: "lib-head", sub: `${LIB.length} papers · search everything you’ve read and written, or browse by journal`}) + `
+    box.innerHTML = pageHead({tool: "library", icon: "library", eyebrow: "Library", title: "Library", id: "lib-head", sub: `${LIB.filter(x => x.journal !== "Books").length} papers · search everything you’ve read and written, or browse by journal`}) + `
       <div id="libtop" style="margin-top:14px"></div>
       <div id="libbrowse"><div class="tiles" id="libtiles" style="margin-top:14px"></div>
       <div class="alllink"><a href="#" id="liball">Show all journals, grouped by journal and year →</a></div></div>`;

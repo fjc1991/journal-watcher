@@ -155,6 +155,8 @@ def library():
                 r["skim"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".skim.json"))   # skim layer (skim.py)
                 key = dl.index_key(r)
                 r["key"], r["state"], r["folders"] = key, state.get(key) or {}, member.get(key, [])
+                if r.get("journal") == "Books":      # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
+                    r["book"] = dl.load_json(os.path.join(ROOT, r["file"][:-4] + ".book.json"), {})
                 # Papers/YYYY-MM/<Journal>/... -> publication year for grouping
                 m = re.match(r"Papers/(\d{4})-\d{2}/", r["file"])
                 r["year"] = m.group(1) if m else ""

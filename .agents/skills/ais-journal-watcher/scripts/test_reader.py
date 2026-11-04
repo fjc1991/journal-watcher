@@ -782,6 +782,177 @@ print("OK")
         finally:
             os.remove(home); shutil.rmtree(real_home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("sync: each computer says it is here (and is forgotten when it stops), Dropbox's conflicted copies are found, the library index copies join without losing a paper, copies are set aside and never deleted, bad paths are refused", t_sync_info)
+    def t_books():
+        """Books (PDF and EPUB): recognised, read, checked, filed under the 'Books' journal with the EPUB kept beside a PDF made from it, found again by ISBN, DRM refused."""
+        import csv, zipfile
+        import books as bk, importer, pymupdf
+        import pipeline as pl_, identity as idn
+        from datetime import datetime
+
+        def epub(title="Platforms and Their Governance", authors=("Lovelace, Ada",), isbn="978-0-201-83595-3", publisher="Test University Press", date="2019-05-01", chapters=3, drm=False, font=False):
+            b = io.BytesIO()
+            with zipfile.ZipFile(b, "w") as z:
+                z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+                z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+                if drm or font:
+                    z.writestr("META-INF/encryption.xml", '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><EncryptedData><EncryptionMethod Algorithm="%s"/></EncryptedData></encryption>'
+                               % ("http://www.idpf.org/2008/embedding" if font else "http://www.w3.org/2001/04/xmlenc#aes128-cbc"))
+                z.writestr("OEBPS/content.opf", '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:isbn:%s</dc:identifier>'
+                           '<dc:title>%s</dc:title>%s<dc:publisher>%s</dc:publisher><dc:date>%s</dc:date><dc:language>en</dc:language></metadata><manifest>%s<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine>%s</spine></package>'
+                           % (isbn, title, "".join("<dc:creator>%s</dc:creator>" % a for a in authors), publisher, date, "".join('<item id="c%d" href="c%d.xhtml" media-type="application/xhtml+xml"/>' % (i, i) for i in range(chapters)),
+                              "".join('<itemref idref="c%d"/>' % i for i in range(chapters))))
+                z.writestr("OEBPS/nav.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol>%s</ol></nav></body></html>' % "".join('<li><a href="c%d.xhtml">Chapter %d</a></li>' % (i, i + 1) for i in range(chapters)))
+                for i in range(chapters):
+                    z.writestr("OEBPS/c%d.xhtml" % i, '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter %d</h1>%s</body></html>' % (i + 1, "".join("<p>%s</p>" % ("Platform governance and complementors, paragraph %d of chapter %d. " % (j, i + 1) + "Open ecosystems need rules. " * 20) for j in range(25))))
+            return b.getvalue()
+
+        def pdf_book(title, isbn_line="", pages=30):
+            d = pymupdf.open()
+            for i in range(pages):
+                pg = d.new_page()
+                pg.insert_textbox(pymupdf.Rect(50, 50, 545, 120), title if i == 0 else "Chapter %d" % i, fontsize=20)
+                pg.insert_textbox(pymupdf.Rect(50, 140, 545, 780), (isbn_line + " " if i == 1 else "") + "Words about platforms and ecosystems. " * 60 + "".join(os.urandom(8).hex() for _ in range(40)), fontsize=10)
+            d.set_toc([[1, "Introduction", 3], [1, "Chapter One", 10], [2, "A section", 12]])
+            d.embfile_add("padding", os.urandom(45000))
+            out = d.tobytes(); d.close(); return out
+
+        # ---- ISBNs
+        assert bk.isbn13("0201835959") == "9780201835953" and bk.isbn13("978-0-201-83595-3") == "9780201835953" and bk.isbn_ok("9780201835954") == "" and bk.isbn_ok("12345") == "" and bk.isbn13("") == ""
+        assert bk.find_isbn("Copyright 2019. ISBN 978-0-201-83595-3 (paperback)") == "9780201835953" and bk.find_isbn("ISBN-10: 0-201-83595-9") == "9780201835953" and bk.find_isbn("ISBN 978-0-201-83595-4") == "" and bk.find_isbn("no number here") == ""
+        # ---- recognising and reading an EPUB
+        good = epub()
+        assert bk.is_epub(good) and not bk.is_epub(b"%PDF-1.4 x") and not bk.is_epub(b"PK\x03\x04junk") and not bk.is_epub(None)
+        z = io.BytesIO()
+        with zipfile.ZipFile(z, "w") as zz:
+            zz.writestr("hello.txt", "a plain zip")
+        assert not bk.is_epub(z.getvalue())
+        own = bk.read_epub(good)
+        assert own["title"] == "Platforms and Their Governance" and own["authors"] == ["Ada Lovelace"] and own["isbn"] == "9780201835953" and own["publisher"] == "Test University Press" and own["date"] == "2019-05-01", own
+        assert bk.read_epub(epub(authors=("Smith, J., Doe, A.",)))["authors"] == ["Smith, J., Doe, A."], "a list of names is not 'flipped'"
+        try:
+            bk.read_epub(epub(drm=True)); raise AssertionError("a DRM EPUB was read")
+        except ValueError as ex:
+            assert "copy-protected" in str(ex)
+        assert bk.read_epub(epub(font=True))["title"], "font obfuscation is not DRM"
+        old_max = bk.MAX_UNPACKED
+        bk.MAX_UNPACKED = 500
+        try:
+            bk.read_epub(good); raise AssertionError("a huge unpacked size was accepted")
+        except ValueError as ex:
+            assert "damaged" in str(ex)
+        finally:
+            bk.MAX_UNPACKED = old_max
+        try:
+            bk.read_epub(b"not a zip at all"); raise AssertionError("garbage accepted")
+        except ValueError:
+            pass
+        # ---- turning it into pages keeps the chapters as the outline
+        pdf, toc, pages = bk.to_pdf(epub(chapters=4))
+        with pymupdf.open(stream=pdf, filetype="pdf") as d:
+            assert len(d) == pages and pages >= 4 and [t for _, t, _ in d.get_toc()] == ["Chapter %d" % i for i in range(1, 5)] and "Platform governance" in d[0].get_text() + d[1].get_text()
+        # ---- lookups: what is sent and how the answers are read (no network)
+        saved = (dl.http_get, os.environ.get("JW_OFFLINE"))
+        asked = []
+        ol = {"docs": [{"key": "/works/OL1W", "title": "Platforms and Their Governance", "subtitle": "A study", "author_name": ["Ada Lovelace"], "first_publish_year": 2019, "publisher": ["Test University Press", "Other"], "isbn": ["0201835959", "bad", "9780201835953"], "number_of_pages_median": 312}]}
+        cr = {"message": {"items": [{"title": ["Platforms and Their Governance (2nd ed.)"], "author": [{"given": "Ada", "family": "Lovelace"}], "DOI": "10.5555/book.1", "publisher": "Crossref Press", "ISBN": ["9780201835953"], "published": {"date-parts": [[2021]]}, "type": "book", "URL": "https://doi.org/10.5555/book.1"},
+                           {"title": ["A Quite Different Book About Platform Strategy"], "author": [{"given": "Zed", "family": "Quinn"}], "DOI": "10.5555/book.2", "publisher": "Other Press", "published": {"date-parts": [[2012]]}, "type": "book"}]}}
+
+        sent = []
+
+        def fake_get(url, timeout=25, headers=None):
+            asked.append(url); sent.append((url, dict(headers or {})))
+            return json.dumps(ol if "openlibrary" in url else cr).encode(), {}
+        dl.http_get = fake_get
+        os.environ.pop("JW_OFFLINE", None)
+        try:
+            r = bk.openlibrary_search(isbn="9780201835953")
+            assert asked[-1].startswith("https://openlibrary.org/search.json?") and "isbn%3A9780201835953" in asked[-1] and len(r) == 1
+            assert r[0]["title"] == "Platforms and Their Governance: A study" and r[0]["authors"] == ["Ada Lovelace"] and r[0]["year"] == "2019" and r[0]["publisher"] == "Test University Press" and r[0]["isbn"] == "9780201835953" and r[0]["pages"] == 312, r
+            r2 = bk.openlibrary_search(title="Platforms and Their Governance", authors=["Ada Lovelace"])
+            assert "title=Platforms" in asked[-1] and "author=Ada" in asked[-1] and r2[0]["isbn"] == "9780201835953", (asked[-1], r2)
+            assert bk.openlibrary_search(title="abc") == [] and bk.openlibrary_search() == [], "nothing is asked for a title that short"
+            ua = next(h["User-Agent"] for u, h in sent if "openlibrary" in u)
+            assert ua.startswith("JournalWatcher/") and "Mozilla" not in ua and "github.com/fjc1991/journal-watcher" in ua, ua          # (Open Library asks programs to say who they are: this one does)
+            c = bk.crossref_books("Platforms and Their Governance")
+            assert "filter=type:book" in asked[-1] and c[0]["doi"] == "10.5555/book.1" and c[0]["publisher"] == "Crossref Press" and c[0]["year"] == "2021" and c[0]["isbn"] == "9780201835953", c
+            cr_main = cr
+            cr = {"message": {"items": [{"title": ["An Edited Volume on Platform Research"], "editor": [{"given": "E.", "family": "Editor"}], "DOI": "10.5555/ed.1", "publisher": "P", "type": "edited-book"}]}}
+            assert bk.crossref_books("An Edited Volume on Platform Research")[0]["authors"] == ["E. Editor"], "an edited volume has editors, not authors"
+            cr = cr_main
+            dl.http_get = lambda *a, **k: (_ for _ in ()).throw(OSError("offline"))
+            assert bk.openlibrary_search(isbn="9780201835953") == [] and bk.crossref_books("Platforms and Their Governance") == [], "a lookup that fails gives nothing, not an error"
+            dl.http_get = fake_get
+            # ---- looking at an EPUB: the file's own details come first and are backed by the file; the lookup's publisher is added to the same book; nothing is filed
+            n_rows = len(importer.library_rows())
+            a = bk.analyse(good, "my book.epub")
+            c0 = a["candidates"][0]
+            assert a["type"] == "book" and a["format"] == "epub" and c0["own"] and c0["verdict"] == "match" and c0["isbn"] == "9780201835953" and a["confidence"] == "high" and a["pick"] == 0 and not a["existing"], a
+            assert c0["pages"] == a["pdf"]["pages"] > 3 and c0["year"] == "2019" and c0["url"].startswith("https://openlibrary.org/") and a["pdf"]["chapters"] == 3 and a["pdf"]["isbn"] == "9780201835953", (c0, a["pdf"])
+            assert c0["doi"] == "10.5555/book.1", "the same ISBN in Crossref: its DOI goes into the same record, which is not listed twice"
+            assert [x["doi"] for x in a["candidates"] if x["source"] == "crossref"] == ["10.5555/book.2"] and len(a["candidates"]) == 2 and len(importer.library_rows()) == n_rows, [(x["source"], x["title"]) for x in a["candidates"]]
+            stg = lambda t, e: os.path.join(importer.STAGING, t + e)
+            assert os.path.exists(stg(a["token"], ".pdf")) and os.path.exists(stg(a["token"], ".conv"))
+            importer.discard([a["token"]])
+            assert not os.path.exists(stg(a["token"], ".pdf")) and not os.path.exists(stg(a["token"], ".conv")), "cancelling forgets the converted copy too"
+            # ---- a PDF you say is a book: its printed ISBN is looked up
+            pb = pdf_book("Platforms and Their Governance", "ISBN 978-0-201-83595-3")
+            asked.clear()
+            ab = bk.analyse(pb, "book.pdf", hint_pdf=True)
+            assert ab["format"] == "pdf" and ab["pdf"]["isbn"] == "9780201835953" and "isbn%3A9780201835953" in asked[0] and ab["pdf"]["pages"] == 30 and ab["pdf"]["chapters"] == 3, (ab["pdf"], asked)
+            importer.discard([ab["token"]])
+            for junk in (b"plain text", b"PK\x03\x04junk"):
+                try:
+                    bk.analyse(junk, "x.txt"); raise AssertionError("junk accepted")
+                except ValueError:
+                    pass
+            # ---- filing an EPUB: through importer.confirm (kind 'book'), like the dialog does
+            a = bk.analyse(good, "my book.epub")
+            r = importer.confirm(a["token"], {"kind": "book", "title": "Platforms and Their Governance", "authors": "Ada Lovelace", "publisher": "Test University Press", "pub_date": "2019", "isbn": "0-201-83595-9", "source": "lookup"})
+            assert r["file"].startswith("Papers/2019-01/Books/2019-01_BOOK_") and r["file"].endswith(".pdf") and not r["existing"], r
+            full = os.path.join(TMP, r["file"])
+            assert open(full[:-4] + ".epub", "rb").read() == good, "the EPUB you gave is kept as it was"
+            info = json.load(open(full[:-4] + ".book.json"))
+            assert info["isbn"] == "9780201835953" and info["publisher"] == "Test University Press" and info["source"] == "epub" and info["offset"] == 0 and [t for _, t, _ in info["toc"]] == ["Chapter 1", "Chapter 2", "Chapter 3"], info
+            with pymupdf.open(full) as d:
+                assert len(d) == info["pages"] and [t for _, t, _ in d.get_toc()] == ["Chapter 1", "Chapter 2", "Chapter 3"]
+            row = next((x for x in importer.library_rows() if x["file"] == r["file"]), None)
+            assert row and row["journal"] == "Books" and row["abbr"] == "BOOK" and row["authors"] == "Ada Lovelace" and "details from a book database" in row["note"], row
+            assert os.path.exists(full[:-4] + ".epub") and not os.listdir(importer.STAGING), os.listdir(importer.STAGING)
+            assert all(p in ns.sidecars(full) for p in (full[:-4] + ".epub", full[:-4] + ".book.json")), "they move and go with the book"
+            sp_ = (paths.PAPERS, paths.ROOT)
+            paths.PAPERS, paths.ROOT = dl.PAPERS, dl.ROOT          # (this file keeps the pipeline module on another scratch folder: the audit reads paths.*)
+            try:
+                audited = [x["title"] for x in idn.audit()]
+            finally:
+                paths.PAPERS, paths.ROOT = sp_
+            assert "Platforms and Their Governance" not in audited, "books are not audited like papers (their title is not a DOI to look for)"
+            # the same book again (same ISBN, a different title typed) is recognised, not filed twice
+            a2 = bk.analyse(epub(title="Platforms Governed"), "again.epub")
+            assert a2["existing"] == r["file"], a2["existing"]
+            r2 = importer.confirm(a2["token"], {"kind": "book", "title": "Platforms Governed", "isbn": "9780201835953", "source": "hand"})
+            assert r2["existing"] and r2["file"] == r["file"] and len([x for x in importer.library_rows() if x["journal"] == "Books"]) == 1
+            # refused details keep the book staged; a bad ISBN says so
+            a3 = bk.analyse(epub(title="Another Book Entirely", isbn="978-0-306-40615-7"), "x.epub")
+            for bad, msg in (({"title": ""}, "title"), ({"title": "T", "isbn": "9780201835954"}, "ISBN"), ({"title": "T", "pub_date": "2019-13"}, "date")):
+                try:
+                    importer.confirm(a3["token"], dict(bad, kind="book")); raise AssertionError("accepted %r" % (bad,))
+                except ValueError as ex:
+                    assert msg in str(ex), (bad, str(ex))
+                assert os.path.exists(stg(a3["token"], ".pdf")) and os.path.exists(stg(a3["token"], ".conv"))
+            r3 = importer.confirm(a3["token"], {"kind": "book", "title": "Another Book Entirely", "authors": ["B. Author"], "pub_date": "", "source": "hand"})
+            assert r3["file"].startswith("Papers/%s/Books/" % datetime.now().strftime("%Y-%m")), r3
+            # a PDF book is filed as it is, with its own outline
+            apdf = bk.analyse(pb, "book.pdf", hint_pdf=True)
+            r4 = importer.confirm(apdf["token"], {"kind": "book", "title": "A PDF Book About Platforms", "authors": "C. Writer", "pub_date": "2015", "isbn": "9780306406157", "source": "hand"})
+            f4 = os.path.join(TMP, r4["file"])
+            assert open(f4, "rb").read() == pb and not os.path.exists(f4[:-4] + ".epub") and json.load(open(f4[:-4] + ".book.json"))["source"] == "pdf" and len(json.load(open(f4[:-4] + ".book.json"))["toc"]) == 3
+            assert not [x for x in os.listdir(importer.STAGING)], "nothing is left staged"
+        finally:
+            dl.http_get = saved[0]
+            if saved[1] is not None:
+                os.environ["JW_OFFLINE"] = saved[1]
+            shutil.rmtree(importer.STAGING, ignore_errors=True)
+    check("books: PDF and EPUB are recognised, DRM and damaged files refused with plain words, the file's own details and Open Library/Crossref records are offered, an EPUB becomes pages with its chapters as the outline and is kept beside them, a book is found again by ISBN", t_books)
     def t_keychain_keys():
         """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain
         key wins over an old line; what cannot be held there stays in the file."""
