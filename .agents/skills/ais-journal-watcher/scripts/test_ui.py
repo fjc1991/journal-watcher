@@ -1329,6 +1329,7 @@ bks.crossref_books = lambda title, rows=3: []
 
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="discover"]'); page.wait_for_selector("#dc-find")
             check("the Library has a Discover tab (whole library, with filters; it waits for you to press Find)", page.locator("#lib-discover .dc-row").count() == 0 and page.locator('#lib-discover [data-s="journal"]').count() == 1)
+            page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")      # (the Library finishes loading its folders and redraws the tab once: a click made before that is lost)
             page.click("#dc-find"); page.wait_for_selector("#lib-discover .dc-row", timeout=60000)
             check("…and finds the same missing paper across the whole library", "The platform classic" in page.inner_text("#lib-discover #dc-out"))
 
@@ -1467,7 +1468,7 @@ bks.crossref_books = lambda title, rows=3: []
             page.go_back(); page.wait_for_selector("#lib-review:not(.hide)"); page.go_back(); page.wait_for_selector('.libtabs [data-tab="ask"].on')
             check("the browser's Back button returns to the Library tab you were on", page.url.endswith("#/library/ask") and page.locator('.libtabs [data-tab="ask"].on').count() == 1, page.url)
             page.click("#folditem"); page.wait_for_selector(".fp-tile"); page.reload(); page.wait_for_selector(".fp-tile"); page.wait_for_selector(".fp", state="visible"); page.wait_for_function("location.hash === '#/folders'")
-            check("reloading the page keeps you on the Folders page", page.url.endswith("#/folders") and page.locator(".fp").is_visible())
+            check("reloading the page keeps you on the Folders page", page.url.endswith("#/folders") and page.locator(".fp").first.is_visible(), "%s | .fp: %d" % (page.url, page.locator(".fp").count()))
             page.goto("about:blank"); page.goto(base + "/#/folder/lab/matrix"); page.wait_for_selector(".fvtabs")
             check("an address like #/folder/lab/matrix opens that folder on that tab", page.locator('.fvtabs [data-ft="matrix"].on').count() == 1 and "Lab" in page.inner_text(".pagehead h1"))
             page.click("#settingsbtn"); page.wait_for_selector("#st-body")
@@ -1658,7 +1659,7 @@ bks.crossref_books = lambda title, rows=3: []
             check("…and 'Journal' in the paper filters does not offer Books", "Books" not in page.inner_text("#lf-journal")); page.fill("#lf-q", "")
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow")
             page.fill("#bk-q", "zymurgy ecosystems"); page.click("#bk-ft"); page.wait_for_selector("#bk-out .ft-i", timeout=60000)
-            check("'In the books' finds passages inside the converted book, with the page in the reading copy", page.locator("#bk-out .ft-i").count() >= 1 and "Platforms and Their Governance" in page.inner_text("#bk-out .ft-i >> nth=0") and "file page" in page.inner_text("#bk-out .ft-i >> nth=0"))
+            check("'In the books' finds passages inside the converted book, each named by chapter and place in the reading copy ('Chapter 1 · location N')", page.locator("#bk-out .ft-i").count() >= 1 and "Platforms and Their Governance" in page.inner_text("#bk-out .ft-i >> nth=0") and "· location " in page.inner_text("#bk-out .ft-h >> nth=0"))
             page.fill("#bk-q", ""); page.click("#bk-list [data-read]"); page.wait_for_selector(".rd-band .textLayer span", timeout=60000)
             page.click('.rd-tabs button[data-tab="toc"]'); page.wait_for_selector("#toc-list, .toc-list, #rd-toc", timeout=10000)
             check("the book opens in the reader, and its chapters are the outline", "Platforms and Their Governance" in page.inner_text("#rd-title") and "Chapter 2" in page.inner_text("body"), page.inner_text("#rd-title"))
@@ -1683,6 +1684,50 @@ bks.crossref_books = lambda title, rows=3: []
             check("dropped on the Folders page an EPUB is a book and a PDF stays a paper (default); one dialog, a destination to choose", page.locator("#ir-c0 [data-k='publisher']").count() == 1 and page.locator("#ir-c1 [data-k='journal']").count() == 1 and page.locator("#ir-to").count() == 1)
             page.select_option("#ir-to", "f:lab"); n_lab = folder("lab")["count"]; page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 2')", timeout=30000)
             check("both are filed and added to the folder", folder("lab")["count"] == n_lab + 2 and len([r_ for r_ in api("/api/library") if r_["journal"] == "Books"]) == 2)
+
+            print("book chapters")
+            ep_row = next(r_ for r_ in api("/api/library") if r_["title"] == "Platforms and Their Governance")
+            bi_ = api("/api/book?file=" + urllib.parse.quote(ep_row["file"]))
+            check("the server gives a book's chapters as page ranges (a chapter runs to where the next starts)", [c_["title"] for c_ in bi_["chapters"]] == ["Chapter 1", "Chapter 2", "Chapter 3"] and bi_["source"] == "epub" and bi_["chapters"][0]["end"] == bi_["chapters"][1]["start"] and bi_["chapters"][2]["end"] == bi_["pages"], str(bi_)[:300])
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")      # (the Library finishes loading its folders and redraws its tab: wait for that, or a click made just before is lost)
+            page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow")
+            page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
+            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li", timeout=10000)
+            check("the Chapters button lists the chapters; an EPUB gives places as 'location N' and has no printed-page box", page.locator("#bk-list .chap-ol li").count() == 3 and "location" in page.inner_text("#bk-list .chap-ol li >> nth=1") and page.locator("[data-chap-offv]").count() == 0 and "no printed pages" in page.inner_text("#bk-list .chaplist"), page.inner_text("#bk-list .chaplist")[:300])
+            c2 = bi_["chapters"][1]
+            page.click('#bk-list [data-chap-open] >> nth=1'); page.wait_for_selector(".rd-band .textLayer span", timeout=60000); page.wait_for_function("document.querySelector('#rd-num') && +document.querySelector('#rd-num').value === %d" % c2["start"], timeout=20000)
+            check("Open on a chapter opens the book at that chapter's first page", int(page.input_value("#rd-num")) == c2["start"])
+            page.click('.rd-bar [data-a="back"]'); page.wait_for_selector("#bk-add"); page.fill("#bk-q", "Platforms and Their Governance"); page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li")
+            page.click('#bk-list [data-chap-find="0"]'); page.wait_for_selector("#bk-scope:not(.hide)")
+            check("'Search in it' shows that the search is limited to that chapter", "Chapter 1" in page.inner_text("#bk-scope") and "Platforms and Their Governance" in page.inner_text("#bk-scope"))
+            page.fill("#bk-q", '"of chapter 3"'); page.click("#bk-ft"); page.wait_for_selector("#bk-out .reshead", timeout=60000); page.wait_for_function("document.querySelector('#bk-out .empty') || document.querySelector('#bk-out .ft-i')", timeout=60000)
+            check("words that are only in a later chapter are not found inside Chapter 1", page.locator("#bk-out .ft-i").count() == 0 and "Not found" in page.inner_text("#bk-out"))
+            page.click('#bk-list [data-chap-find="1"]'); page.fill("#bk-q", '"of chapter 2"'); page.click("#bk-ft"); page.wait_for_selector("#bk-out .ft-i", timeout=60000)
+            heads = page.locator("#bk-out .ft-h").all_inner_texts(); locs = [int(h_.rsplit("location ", 1)[1]) for h_ in heads]
+            check("…inside Chapter 2 its own words are found, each hit named by chapter and place, all within its pages (a page shared with the next chapter is named by the later one), and more than the usual three passages",
+                  len(heads) > 3 and all(c2["start"] <= n_ <= c2["end"] for n_ in locs) and any("Chapter 2 · location " in h_ for h_ in heads) and "chapter 2" in page.inner_text("#bk-out .reshead").lower(), "locations %s, chapter 2 is %s-%s, %d hits" % (sorted(set(locs)), c2["start"], c2["end"], len(heads)))
+            page.click("#bk-scope-x"); page.fill("#bk-q", '"of chapter 3"'); page.click("#bk-ft"); page.wait_for_selector("#bk-out .ft-i", timeout=60000)
+            check("clearing the chapter searches all the books again", page.locator("#bk-scope.hide").count() == 1 and "Chapter 3 · location " in page.inner_text("#bk-out .ft-h >> nth=0"))
+            # a PDF book: file pages until you say where printed page 1 is
+            _dc = _pm.open()
+            for i_ in range(12):
+                _pc = _dc.new_page()
+                if i_ == 0:
+                    _pc.insert_textbox(_pm.Rect(60, 60, 535, 200), "Charlie study of institutional logics in open collaboration communities and their rules.", fontsize=16); _pc.insert_textbox(_pm.Rect(60, 210, 535, 240), "Cy Charlie and Di Delta", fontsize=10)
+                else:
+                    _pc.insert_textbox(_pm.Rect(60, 60, 535, 700), "Page %d of the handbook on logics. " % (i_ + 1) * 20, fontsize=11)
+            _dc.embfile_add("padding", os.urandom(45000)); charlie = base64.b64encode(_dc.tobytes()).decode(); _dc.close()
+            page.evaluate(JS_DROP, ["#lib-books", [PDF(charlie, "charlie-book.pdf")], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=30000)
+            page.fill('[data-k="title"]', "Institutional Logics Handbook"); page.click("#ir-go"); page.wait_for_selector(".di-snack:has-text('Added 1 book')", timeout=30000)
+            pdf_row = next(r_ for r_ in api("/api/library") if r_["title"] == "Institutional Logics Handbook")
+            page.fill("#bk-q", "Institutional Logics"); page.wait_for_selector('#bk-list .librow:has-text("Institutional Logics Handbook")'); page.click("#bk-list [data-chap]"); page.wait_for_selector("[data-chap-offv]", timeout=10000)
+            check("a PDF book without an outline says so and offers 'Printed page 1 is file page …' (file pages until you set it)", "no outline" in page.inner_text("#bk-list .chaplist") and page.input_value("[data-chap-offv]") == "1" and "file pages" in page.inner_text("#bk-list .chaplist"))
+            page.fill("[data-chap-offv]", "0"); page.click("[data-chap-off]"); page.wait_for_function("document.querySelector('.chap-off .st-msg').textContent.length > 0")
+            check("a printed-page position that cannot be right is refused with a reason and nothing changes", "between 0 and" in page.inner_text(".chap-off .st-msg") and api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 0)
+            page.fill("[data-chap-offv]", "13"); page.click("[data-chap-off]"); page.wait_for_function("document.querySelector('.chap-off .st-msg').textContent.includes('between')")
+            check("…also past the last page", "between 0 and 11" in page.inner_text(".chap-off .st-msg") and api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 0)
+            page.fill("[data-chap-offv]", "5"); page.click("[data-chap-off]"); page.wait_for_function("document.querySelector('.chap-off .st-msg').textContent === 'Saved.'")
+            check("'printed page 1 is file page 5' is kept (offset 4) and the page now says how printed pages relate to file pages", api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 4 and "printed page = file page − 4" in page.inner_text("#bk-list .chaplist") and page.input_value("[data-chap-offv]") == "5")
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")

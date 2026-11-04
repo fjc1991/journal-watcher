@@ -39,7 +39,7 @@ def _snippet(text, words, phrases, n=260):
     return ("…" if a else "") + s + ("…" if a + n < len(text) else "")
 
 
-def search(blocks_by_file, q, limit=40):
+def search(blocks_by_file, q, limit=40, per_paper=PER_PAPER):
     phrases, words = parse(q)
     if not phrases and not words:
         return []
@@ -66,7 +66,7 @@ def search(blocks_by_file, q, limit=40):
     scored.sort(key=lambda x: -x[0])
     out, per = [], {}
     for sc, f, row, b in scored:
-        if per.get(f, 0) >= PER_PAPER:
+        if per.get(f, 0) >= per_paper:
             continue
         per[f] = per.get(f, 0) + 1
         out.append({"file": f, "title": row.get("title", ""), "cite": evd.short_cite(row), "page": b["page"] + 1, "snippet": _snippet(b["text"], words, phrases), "quote": b["text"][:130].rsplit(" ", 1)[0] if len(b["text"]) > 130 else b["text"], "score": round(sc, 2)})
@@ -75,7 +75,14 @@ def search(blocks_by_file, q, limit=40):
     return out
 
 
-def stream(rows, q):
+def in_pages(blocks, pages):
+    """Only the paragraphs on file pages from..to (1-based, both included) of one book."""
+    lo, hi = int(pages["from"]), int(pages["to"])
+    return [b for b in blocks if lo - 1 <= b["page"] <= hi - 1]
+
+
+def stream(rows, q, pages=None):
+    """pages: {"file", "from", "to"}: look only inside one chapter of one book (file pages). The paper limit is lifted there, and every passage carries "where" (chapter and page or location) for a book."""
     try:
         phrases, words = parse(q)
         if not phrases and not words:
@@ -89,11 +96,19 @@ def stream(rows, q):
         for i, (r, pdf) in enumerate(todo):
             yield {"type": "status", "msg": "Reading paper %d of %d for the first time: %s" % (i + 1, len(todo), r.get("title", "")[:60])}
             bl.extract(pdf)
+        if pages:
+            rows = [r for r in rows if r.get("file") == pages["file"]]
         for r in rows:
             pdf = ns.pdf_path(r.get("file"))
             if pdf:
-                by[r["file"]] = (r, bl.extract(pdf))
-        items = search(by, q)
+                bs = bl.extract(pdf)
+                by[r["file"]] = (r, in_pages(bs, pages) if pages else bs)
+        items = search(by, q, limit=40, per_paper=12 if pages else PER_PAPER)
+        for it in items:                                           # a book's hit says where it is in words you could cite
+            r = by[it["file"]][0]
+            if r.get("journal") == "Books" and r.get("book"):
+                import books
+                it["where"] = books.label(r["book"], it["page"])
         yield {"type": "results", "n": len(items), "papers": len({i["file"] for i in items}), "searched": len(by), "items": items, "words": words, "phrases": phrases}
     except Exception as e:  # noqa: BLE001
         import traceback

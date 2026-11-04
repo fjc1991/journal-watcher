@@ -27,6 +27,7 @@ import download as dl  # noqa: E402
 import fetch_new as fx  # noqa: E402
 import identity  # noqa: E402
 import importer  # noqa: E402
+import notes_store as ns  # noqa: E402
 
 JOURNAL, ABBR = "Books", "BOOK"
 MAX_UNPACKED = 3 * 1024 ** 3                  # an EPUB that would unpack to more than this is refused (a zip bomb)
@@ -246,6 +247,72 @@ def _candidate(rec, data_pdf, own):
 
 def _strong(c):
     return c["verdict"] == "match" and (c["authors_found"] or c.get("own"))
+
+
+# ---------------------------------------------------------------- chapters, and where a page is
+def chapters(info):
+    """The outline of a book (its .book.json) as ranges of file pages: [{"i", "level", "title", "start", "end"}]. A chapter runs from its own page to the page where the next entry of the same or a higher
+    level starts (that page is in both: a chapter often starts half-way down a page, and a search must not lose the words above it); the last one runs to the end. An entry with no later sibling runs to the end."""
+    pages = int(info.get("pages") or 0)
+    toc = []
+    for e in info.get("toc") or []:
+        try:
+            lvl, title, start = int(e[0]), re.sub(r"\s+", " ", str(e[1])).strip(), int(e[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if title and 1 <= start <= max(pages, start):
+            toc.append((max(1, lvl), title, min(start, pages) if pages else start))
+    out = []
+    for i, (lvl, title, start) in enumerate(toc):
+        end = pages or start
+        for l2, _, p2 in toc[i + 1:]:
+            if l2 <= lvl:
+                end = p2 if p2 > start else start
+                break
+        out.append({"i": i, "level": lvl, "title": title, "start": start, "end": max(start, min(end, pages) if pages else end)})
+    return out
+
+
+def label(info, page):
+    """Where a page is, in words you could cite: 'Chapter 3 · p. 48' (a PDF book, with the printed-page offset you set), 'Chapter 3 · file page 57' (a PDF book with no offset yet) or
+    'Chapter 3 · location 57' (an EPUB has no printed pages: the number is the place in the reading copy, which is all it can honestly be)."""
+    page = int(page)
+    inside = [c for c in chapters(info) if c["start"] <= page <= c["end"]]
+    ch = max(inside, key=lambda c: (c["start"], c["level"], c["i"])) if inside else None            # the innermost entry that holds the page
+    if info.get("source") == "epub":
+        where = "location %d" % page
+    else:
+        off = int(info.get("offset") or 0)
+        where = "file page %d" % page if not off else "p. %d" % (page - off) if page > off else "front matter (file page %d)" % page
+    return (ch["title"] + " · " if ch else "") + where
+
+
+def info_of(rel):
+    """A book's .book.json ({} when it has none), for a path under Papers/."""
+    pdf = ns.pdf_path(rel)
+    return dl.load_json(pdf[:-4] + ".book.json", {}) if pdf else {}
+
+
+def set_offset(rel, offset):
+    """The printed-page offset of a PDF book: printed page 1 is file page offset + 1 (a book with 14 pages of front matter has offset 14). Raises ValueError (plain words)."""
+    pdf = ns.pdf_path(rel)
+    info = dl.load_json(pdf[:-4] + ".book.json", {}) if pdf else {}
+    if not info:
+        raise ValueError("That is not a book in your library.")
+    if info.get("source") == "epub":
+        raise ValueError("An EPUB has no printed pages: its hits are given as chapter and location.")
+    try:
+        off = int(str(offset).strip())
+    except (TypeError, ValueError):
+        raise ValueError("The offset is a whole number of pages (0 if the file starts at printed page 1).")
+    if not 0 <= off < max(1, int(info.get("pages") or 1)):
+        raise ValueError("The offset must be between 0 and %d." % max(0, int(info.get("pages") or 1) - 1))
+    info["offset"] = off
+    tmp = pdf[:-4] + ".book.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, pdf[:-4] + ".book.json")
+    return info
 
 
 def _existing_book(isbn, title, doi=""):

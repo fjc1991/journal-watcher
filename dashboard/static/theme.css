@@ -122,7 +122,7 @@ body.sb-open .sb-scrim { display: block; }
 .navbtn .nt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .navbtn:hover { background: var(--hover); color: var(--ink); }
 .navbtn.on { background: var(--on); color: var(--ink); font-weight: 600; }
-.navbtn .nn { margin-left: auto; font: 500 12px var(--sans); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.navbtn .nn { margin-left: auto; font: 500 12px var(--sans); color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .navbtn .nn:empty { display: none; }
 .navbtn .nn2 { margin-left: auto; color: var(--ink-3); }
 .sb-sec { display: flex; align-items: center; justify-content: space-between; padding: 14px 9px 4px; font: 600 11.5px var(--sans); letter-spacing: .02em; color: var(--ink-3); }
@@ -135,7 +135,7 @@ body.sb-open .sb-scrim { display: block; }
 .sbf-i { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; flex: none; background: color-mix(in srgb, var(--fc) 20%, transparent); color: var(--fc); }
 .sbf-i .ico { width: 13px; height: 13px; }
 .sbf-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sbf .nn { font: 500 12px var(--sans); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.sbf .nn { font: 500 12px var(--sans); color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .sb-none { padding: 4px 10px; color: var(--ink-3); font-size: 12.5px; }
 .sb-spacer { flex: 1 1 0; min-height: 8px; }
 .sb-foot { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 1px; }

@@ -42,6 +42,7 @@ function row(r, i, snips) {
     </div>
     <div class="row actions">
       <button class="btn small star${st.star ? " on" : ""}" data-star="${esc(r.file)}" title="${st.star ? "Starred" : "Star this paper"}" aria-label="Star">${st.star ? "★" : "☆"}</button>
+      ${r.book ? `<button class="btn small" data-chap="${esc(r.file)}" aria-expanded="false" title="The chapters of this book: open it at one, search inside one, say where printed page 1 is">Chapters</button>` : ""}
       <button class="btn primary small" data-read="${i}">${ico("read", "sm")} Read</button>
       <span class="menuwrap"><button class="btn small" data-more aria-haspopup="true" aria-label="More actions" title="More: status, summary, PDF, folders, takeaway">${ico("more", "sm")}</button>
         <div class="menu card hide rowmenu" role="menu">
@@ -51,7 +52,7 @@ function row(r, i, snips) {
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
         </div></span>
-    </div></div>`;
+    </div>${r.book ? `<div class="chaplist hide"></div>` : ""}</div>`;
 }
 function redrawRow(file) {
   const i = byFile(file), el = document.querySelector(`.librow[data-file="${CSS.escape(file)}"]`);
@@ -148,8 +149,44 @@ function tabs(el, opts) {
   else if (F.tab === "discover" && window.DiscoverUI) { const box = $("#lib-discover", el); if (!box.dataset.mounted) { window.DiscoverUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
   else if (F.tab === "ask" && window.AskUI) { const box = $("#lib-ask", el); if (!box.dataset.mounted) { window.AskUI.init(ctx); window.AskUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
 }
+// ---------------------------------------------------------------- a book's chapters: its outline as page ranges; open the book at one, search inside one, say where printed page 1 is
+const BSCOPE = {file: "", from: 0, to: 0, title: "", book: ""};                    // set by "Search in it": the words are then looked for only inside that chapter
+const placeOf = (R, p) => R.source === "epub" ? "location " + p : R.offset ? (p > R.offset ? "p. " + (p - R.offset) : "front matter") : "file page " + p;
+function drawChapters(box, file, R) {
+  box._R = R;
+  box.innerHTML = `<div class="chap-h"><b>Chapters and sections</b> <small>${R.source === "epub" ? "an EPUB has no printed pages: a place is “location N” in the reading copy" : R.offset ? `printed page = file page − ${R.offset}` : "file pages (set where printed page 1 is below to cite printed pages)"}</small></div>
+    ${R.chapters.length ? `<ol class="chap-ol">${R.chapters.map(c => `<li style="margin-left:${(c.level - 1) * 18}px"><span class="chap-t">${esc(c.title)}</span> <small>${esc(placeOf(R, c.start))}${c.end > c.start ? " – " + esc(placeOf(R, c.end)) : ""}</small>
+      <button class="btn small" data-chap-open="${c.start}">Open</button>${F.tab === "books" ? ` <button class="btn small" data-chap-find="${c.i}" title="Look for words only inside this part (type them in the search box above)">Search in it</button>` : ""}</li>`).join("")}</ol>` : `<p class="pmeta">This book has no outline: the file carries no chapter list.</p>`}
+    ${R.source === "epub" ? "" : `<div class="row chap-off"><label>Printed page 1 is file page <input type="number" min="1" max="${R.pages}" value="${R.offset + 1}" data-chap-offv aria-label="File page where printed page 1 is" style="width:5.5em"></label> <button class="btn small" data-chap-off>Save</button> <span class="st-msg" role="status"></span></div>`}`;
+}
+async function chapClick(e) {
+  if (e._chapDone) return; e._chapDone = true;            // (this handler can be registered more than once: a toggle must run once per click)
+  const b = e.target.closest("[data-chap], [data-chap-open], [data-chap-find], [data-chap-off]"); if (!b) return;
+  const card = b.closest(".librow"), file = card && card.dataset.file, box = card && $(".chaplist", card); if (!file || !box) return;
+  const row0 = lib()[byFile(file)];
+  if (b.dataset.chap !== undefined) {
+    if (!box.classList.contains("hide")) { box.classList.add("hide"); b.setAttribute("aria-expanded", "false"); return; }
+    box.classList.remove("hide"); b.setAttribute("aria-expanded", "true"); box.innerHTML = `<div class="pmeta">Reading the outline…</div>`;
+    try { drawChapters(box, file, await api("/api/book?file=" + encodeURIComponent(file))); } catch (er) { box.innerHTML = `<div class="pmeta">${esc(er.message)}</div>`; }
+  } else if (b.dataset.chapOpen !== undefined) { if (row0) ctx.readPaper(row0, {goto: {page: +b.dataset.chapOpen}}); }
+  else if (b.dataset.chapFind !== undefined) {
+    const c = box._R.chapters[+b.dataset.chapFind]; Object.assign(BSCOPE, {file, from: c.start, to: c.end, title: c.title, book: row0 ? row0.title : ""});
+    booksScope(); const q = $("#bk-q"); q && q.focus(); toast("Type the words, then press “In the books”: they are looked for only in “" + c.title + "”.");
+  } else if (b.dataset.chapOff !== undefined) {
+    const inp = $("[data-chap-offv]", box), msg = $(".st-msg", box); let v = parseInt(inp.value, 10);
+    try { const r = await api("/api/book", {file, offset: Number.isFinite(v) ? v - 1 : v}); box._R.offset = r.offset; if (row0 && row0.book) row0.book.offset = r.offset; drawChapters(box, file, box._R); const m2 = $(".st-msg", box); m2.textContent = "Saved."; }
+    catch (er) { msg.textContent = er.message; msg.classList.add("bad"); }
+  }
+}
+function booksScope() {                                         // the chip that says a search is limited to one chapter
+  const el = $("#bk-scope"); if (!el) return;
+  el.classList.toggle("hide", !BSCOPE.file);
+  el.innerHTML = BSCOPE.file ? `<span class="chip">In “${esc(BSCOPE.title)}” of “${esc(BSCOPE.book)}” <button class="linkbtn" id="bk-scope-x" aria-label="Search all the books again">✕ all books</button></span>` : "";
+  const x = $("#bk-scope-x"); if (x) x.onclick = () => { BSCOPE.file = ""; booksScope(); drawBooks && drawBooks(); };
+}
+
 // ---------------------------------------------------------------- the Books tab: your PDF and EPUB books (books.py). They are library rows under the journal "Books", read in the same reader, and searched and asked about with your papers
-let BQ = "", BSORT = "title", BFT = false;
+let BQ = "", BSORT = "title", BFT = false, drawBooks = null;
 const BOOK_SORTS = {title: ["Sort: title", (a, b) => a[0].title.localeCompare(b[0].title)], newest: ["Sort: newest", (a, b) => (b[0].year || "").localeCompare(a[0].year || "") || a[0].title.localeCompare(b[0].title)],
   opened: ["Sort: last opened", (a, b) => ((b[0].state || {}).opened || "").localeCompare((a[0].state || {}).opened || "")], author: ["Sort: author", (a, b) => authors(a[0].authors).localeCompare(authors(b[0].authors))]};
 function booksTab() {
@@ -159,7 +196,7 @@ function booksTab() {
       <select id="bk-sort" aria-label="Sort">${Object.entries(BOOK_SORTS).map(([k, [t]]) => `<option value="${k}"${BSORT === k ? " selected" : ""}>${t}</option>`).join("")}</select>
       <button class="btn primary" id="bk-add">＋ Add a book</button></div>
     <p class="pmeta" style="margin:8px 0 0">PDF and EPUB. Press Add a book, or drop the files here: you check the details before anything is filed. An EPUB is turned into pages that the reader shows (the file itself is kept). Books are searched, highlighted and asked about like your papers.</p></div>
-    <div id="bk-out"></div><div id="bk-list"></div>`;
+    <div class="lf-chips hide" id="bk-scope"></div><div id="bk-out"></div><div id="bk-list"></div>`;
   const draw = () => {
     const q = BQ.trim().toLowerCase(), all = lib().map((r, i) => [r, i]).filter(([r]) => r.journal === "Books");
     const hit = all.filter(([r]) => !q || [r.title, authors(r.authors), (r.book || {}).publisher, (r.book || {}).isbn, r.year].join(" ").toLowerCase().includes(q)).sort(BOOK_SORTS[BSORT][1]);
@@ -167,18 +204,19 @@ function booksTab() {
       (hit.map(([r, i]) => row(r, i)).join("") || (all.length ? `<div class="card empty"><h2>No book matches</h2>Try other words.</div>` : `<div class="card empty"><h2>No books yet</h2>Press <b>＋ Add a book</b> or drop PDF and EPUB files onto this page. Nothing is filed until you have checked the details.</div>`));
     bindRows($("#bk-list", box));
   };
-  $("#bk-q", box).oninput = e => { BQ = e.target.value; BFT = false; $("#bk-out", box).innerHTML = ""; draw(); };
+  drawBooks = draw;
+  $("#bk-q", box).oninput = e => { BQ = e.target.value; BFT = false; $("#bk-out", box).innerHTML = ""; if (!BSCOPE.file) draw(); };         // (limited to a chapter, the words are for the search inside it: the list of books stays as it is)
   $("#bk-q", box).onkeydown = e => { if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); inBooks(box); } };
   $("#bk-sort", box).onchange = e => { BSORT = e.target.value; draw(); };
   $("#bk-ft", box).onclick = () => inBooks(box);
   $("#bk-add", box).onclick = () => window.DropImport && window.DropImport.chooseBooks();
-  draw();
+  booksScope(); draw();
 }
 async function inBooks(box) {                       // the words inside the books: the same search as "In the PDFs", limited to the Books journal
   const q = BQ.trim(), out = $("#bk-out", box); if (!q) return toast("Type the words to look for first.");
   out.innerHTML = `<div class="reshead">Looking inside the books…</div>`; let res = null;
   try {
-    const r = await fetch("/api/library/fulltext", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q, scope: {journal: "BOOK"}})});
+    const r = await fetch("/api/library/fulltext", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q, scope: {journal: "BOOK"}, ...(BSCOPE.file ? {pages: {file: BSCOPE.file, from: BSCOPE.from, to: BSCOPE.to}} : {})})});
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
@@ -186,8 +224,8 @@ async function inBooks(box) {                       // the words inside the book
   } catch (e) { out.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
   const hl = t => re ? t.split(re).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("") : esc(t);
-  out.innerHTML = `<div class="reshead">${res.n} passage${res.n === 1 ? "" : "s"} in ${res.papers} book${res.papers === 1 ? "" : "s"} (of ${res.searched} read) for “${esc(q)}” <button class="linkbtn" id="bk-ftx">close</button></div>` +
-    (res.items.map((it, i) => `<div class="card ft-i" data-ft="${i}" tabindex="0" role="button"><div class="ft-h"><b>${esc(it.cite)}</b> · ${esc(it.title)} · file page ${it.page}</div><div class="ft-s">${hl(it.snippet)}</div></div>`).join("") || `<div class="card empty"><h2>Not found in the books</h2>All the words have to be in one paragraph. Try fewer words, or put an exact phrase in “quotes”.</div>`);
+  out.innerHTML = `<div class="reshead">${res.n} passage${res.n === 1 ? "" : "s"} in ${BSCOPE.file ? `“${esc(BSCOPE.title)}”` : `${res.papers} book${res.papers === 1 ? "" : "s"} (of ${res.searched} read)`} for “${esc(q)}” <button class="linkbtn" id="bk-ftx">close</button></div>` +
+    (res.items.map((it, i) => `<div class="card ft-i" data-ft="${i}" tabindex="0" role="button"><div class="ft-h"><b>${esc(it.cite)}</b> · ${esc(it.title)} · ${esc(it.where || "file page " + it.page)}</div><div class="ft-s">${hl(it.snippet)}</div></div>`).join("") || `<div class="card empty"><h2>Not found in the books</h2>All the words have to be in one paragraph. Try fewer words, or put an exact phrase in “quotes”.</div>`);
   $("#bk-ftx", out).onclick = () => { out.innerHTML = ""; };
   const open = i => { const it = res.items[i], r2 = lib()[byFile(it.file)]; if (r2) ctx.readPaper(r2, {goto: {page: it.page, quote: it.quote}}); };
   out.querySelectorAll("[data-ft]").forEach(c => { c.onclick = () => open(+c.dataset.ft); c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(+c.dataset.ft); } }; });
@@ -210,7 +248,7 @@ async function fulltext(opts) {
   const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
   const hl = t => re ? t.split(re).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("") : esc(t);
   box.innerHTML = `<div class="reshead">${res.n} passage${res.n === 1 ? "" : "s"} in ${res.papers} paper${res.papers === 1 ? "" : "s"} (of ${res.searched} read) for “${esc(q)}” <button class="linkbtn" id="ft-back">back to the normal results</button></div>` +
-    (res.items.map((it, i) => `<div class="card ft-i" data-ft="${i}" tabindex="0" role="button"><div class="ft-h"><b>${esc(it.cite)}</b> · ${esc(it.title)} · p. ${it.page}</div><div class="ft-s">${hl(it.snippet)}</div></div>`).join("") || `<div class="card empty"><h2>Not found in the PDFs</h2>All the words have to be in one paragraph. Try fewer words, or put an exact phrase in “quotes”.</div>`);
+    (res.items.map((it, i) => `<div class="card ft-i" data-ft="${i}" tabindex="0" role="button"><div class="ft-h"><b>${esc(it.cite)}</b> · ${esc(it.title)} · ${esc(it.where || "p. " + it.page)}</div><div class="ft-s">${hl(it.snippet)}</div></div>`).join("") || `<div class="card empty"><h2>Not found in the PDFs</h2>All the words have to be in one paragraph. Try fewer words, or put an exact phrase in “quotes”.</div>`);
   $("#ft-back", box).onclick = () => { FT = null; results(opts); };
   const open = i => { const it = res.items[i], row = lib()[byFile(it.file)]; if (row) ctx.readPaper(row, {goto: {page: it.page, quote: it.quote}}); };
   box.querySelectorAll("[data-ft]").forEach(c => { c.onclick = () => open(+c.dataset.ft); c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(+c.dataset.ft); } }; });
@@ -288,6 +326,7 @@ function shelf() {
 // ---------------------------------------------------------------- delegated row events (status, star, folders, takeaway, select)
 function wireRows() {
   const root = $("#libview");
+  root.addEventListener("click", chapClick);
   root.addEventListener("change", e => {
     const s = e.target.closest("[data-st]"), c = e.target.closest("[data-sel]");
     if (s) setState(s.dataset.st, {status: s.value}).catch(er => notifyError(er));
