@@ -953,6 +953,83 @@ print("OK")
                 os.environ["JW_OFFLINE"] = saved[1]
             shutil.rmtree(importer.STAGING, ignore_errors=True)
     check("books: PDF and EPUB are recognised, DRM and damaged files refused with plain words, the file's own details and Open Library/Crossref records are offered, an EPUB becomes pages with its chapters as the outline and is kept beside them, a book is found again by ISBN", t_books)
+    def t_book_chapters():
+        """A book's outline as page ranges, where a page is in words you could cite (chapter + printed page, or location for an EPUB), the printed-page offset, and search inside one chapter."""
+        import books as bk
+        info = {"source": "pdf", "pages": 30, "offset": 0, "toc": [[1, "Introduction", 1], [1, "Chapter One", 10], [2, "Section 1.1", 12], [2, "Section 1.2", 15], [1, "Chapter Two", 20]]}
+        ch = {c["title"]: (c["start"], c["end"], c["level"]) for c in bk.chapters(info)}
+        assert ch == {"Introduction": (1, 10, 1), "Chapter One": (10, 20, 1), "Section 1.1": (12, 15, 2), "Section 1.2": (15, 20, 2), "Chapter Two": (20, 30, 1)}, ch          # (a chapter runs to the page where the next one starts: that page is in both)
+        assert [c["i"] for c in bk.chapters(info)] == [0, 1, 2, 3, 4]
+        assert bk.chapters({"pages": 10, "toc": []}) == [] and bk.chapters({}) == [] and bk.chapters({"pages": 10, "toc": [["x"], [1, "", 3], [1, "Ok", "bad"], [1, "Fine", 4]]}) == [{"i": 0, "level": 1, "title": "Fine", "start": 4, "end": 10}]
+        assert [c["end"] for c in bk.chapters({"pages": 20, "toc": [[1, "A", 5], [1, "B", 5], [1, "C", 9]]})] == [5, 9, 20], "two chapters on one page: the first is that page only"
+        assert bk.chapters({"pages": 5, "toc": [[1, "Late", 9]]})[0]["start"] == 5, "an entry beyond the last page is put on it"
+        # where a page is
+        assert bk.label(info, 13) == "Section 1.1 · file page 13" and bk.label(info, 5) == "Introduction · file page 5" and bk.label(info, 10) == "Chapter One · file page 10", "the innermost entry holding the page, the later one on a shared page"
+        assert bk.label(dict(info, offset=9), 13) == "Section 1.1 · p. 4" and bk.label(dict(info, offset=9), 5) == "Introduction · front matter (file page 5)" and bk.label(dict(info, offset=9), 10) == "Chapter One · p. 1"
+        assert bk.label(dict(info, source="epub", offset=9), 13) == "Section 1.1 · location 13", "an EPUB has no printed pages: chapter and location"
+        assert bk.label({"source": "pdf", "pages": 9, "toc": []}, 3) == "file page 3"
+        # the offset and a search inside one chapter, in a book that is really in a library
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            child = r'''
+import json, os, sys
+os.environ["JW_OFFLINE"] = "1"
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import books as bk, importer, fulltext as ft, pipeline as pl, pymupdf
+d = pymupdf.open()
+for i in range(1, 31):
+    word = "alpha" if i < 10 else "bravo" if i < 20 else "charlie"
+    pg = d.new_page(); pg.insert_textbox(pymupdf.Rect(50, 50, 545, 780), "Page %%d. The platform %%s%%d governs the ecosystem with clear rules. " %% (i, word, i) * 6 + "".join(os.urandom(8).hex() for _ in range(40)), fontsize=11)
+d.set_toc([[1, "Introduction", 1], [1, "Chapter One", 10], [1, "Chapter Two", 20]]); d.embfile_add("padding", os.urandom(45000))
+data = d.tobytes(); d.close()
+a = bk.analyse(data, "book.pdf", hint_pdf=True)
+rel = importer.confirm(a["token"], {"kind": "book", "title": "A Test Book About Platforms", "authors": "T. Author", "pub_date": "2020", "source": "hand"})["file"]
+info = bk.info_of(rel)
+assert [(c["title"], c["start"], c["end"]) for c in bk.chapters(info)] == [("Introduction", 1, 10), ("Chapter One", 10, 20), ("Chapter Two", 20, 30)], bk.chapters(info)
+# the offset
+assert info["offset"] == 0
+for bad in (-1, 30, 99, "abc", None, "", 1.5):
+    try:
+        bk.set_offset(rel, bad); raise AssertionError("offset %%r accepted" %% (bad,))
+    except ValueError:
+        pass
+assert bk.info_of(rel)["offset"] == 0, "a refused offset changes nothing"
+assert bk.set_offset(rel, " 9 ")["offset"] == 9 and bk.info_of(rel)["offset"] == 9 and bk.label(bk.info_of(rel), 13) == "Chapter One · p. 4"
+for bad in ("Papers/nothing.pdf", "", None, "../x.pdf"):
+    try:
+        bk.set_offset(bad, 1); raise AssertionError("offset for %%r accepted" %% (bad,))
+    except ValueError:
+        pass
+full = os.path.join(paths.ROOT, rel[:-4] + ".book.json"); raw = open(full).read()
+open(full, "w").write(json.dumps(dict(json.loads(raw), source="epub")))
+try:
+    bk.set_offset(rel, 3); raise AssertionError("an EPUB took an offset")
+except ValueError as ex:
+    assert "no printed pages" in str(ex)
+open(full, "w").write(raw)
+# a search inside one chapter: only its pages, with the words that say where
+rows = pl.library()
+run = lambda q, pages=None: next(m for m in ft.stream(rows, q, pages) if m["type"] == "results")
+whole = run("platform")
+assert {i["page"] for i in whole["items"]} and len(whole["items"]) <= 3, "the whole book: at most three passages per paper"
+ch1 = run("platform", {"file": rel, "from": 10, "to": 19})
+pages = sorted(i["page"] for i in ch1["items"])
+assert ch1["searched"] == 1 and pages and all(10 <= p <= 19 for p in pages) and len(pages) > 3, pages                       # (more than three: inside one chapter the paper limit is lifted)
+assert all(i["where"].startswith("Chapter One · p. ") for i in ch1["items"]) and ch1["items"][0]["where"] == "Chapter One · p. %%d" %% (ch1["items"][0]["page"] - 9), ch1["items"][0]
+assert run("charlie", {"file": rel, "from": 10, "to": 19})["n"] == 0 and run("charlie")["n"] >= 1, "words of another chapter are not found inside this one"
+assert run("platform", {"file": "Papers/other.pdf", "from": 1, "to": 5})["searched"] == 0
+assert all("where" not in i or i["where"] for i in whole["items"])
+print("OK")
+''' % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc), capture_output=True, text=True, timeout=180)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1800:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("books: the outline as chapter page ranges, where a page is in words you could cite (chapter and printed page; location for an EPUB), the printed-page offset (checked, kept), and a search inside one chapter", t_book_chapters)
     def t_keychain_keys():
         """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain
         key wins over an old line; what cannot be held there stays in the file."""

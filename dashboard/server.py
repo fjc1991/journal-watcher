@@ -894,6 +894,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "no such folder"}, 404)
             dr = relatedwork.load(f["id"]) if relatedwork else None
             return self.send_json({"doc": claims.load(f["id"]), "papers": len(rows), "library": len(pl.library()), "draft": relatedwork.render(dr)["text"] if dr else "", "review": reviewer.load(f["id"]) if reviewer else None})
+        if path == "/api/book":         # ?file=: a book's details, its chapters as page ranges, and the printed-page offset
+            info = books.info_of(one("file"))
+            if not info:
+                return self.send_json({"error": "that is not a book in your library"}, 404)
+            return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
+                                   "chapters": books.chapters(info)})
         if path == "/api/sync":         # Settings → Computers & sync: which computers use this data folder, which are open now, what Dropbox had to duplicate
             return self.send_json(syncinfo.info())
         if path == "/api/sync/status":  # the small version for the banner: names of the other computers that have the folder open, and how many conflicted copies there are
@@ -975,6 +981,12 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.finish_import(res, bool(b.get("summarize")) and (b.get("fields") or {}).get("kind") != "book")      # (a book is never summarised by itself: it is long, and that costs)
+        if path == "/api/book":             # {file, offset}: where printed page 1 is in a PDF book (the file page minus the offset is the printed page)
+            try:
+                info = books.set_offset(str(b.get("file") or ""), b.get("offset"))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"ok": True, "offset": info.get("offset") or 0})
         if path == "/api/sync":             # {action: "rename", name} | {action: "merge", path} (join the library index copies) | {action: "set_aside", path}
             try:
                 act = b.get("action")
@@ -1138,7 +1150,15 @@ class Handler(BaseHTTPRequestHandler):
             rows = self.scope_rows(b.get("scope") if isinstance(b.get("scope"), dict) else {})
             if rows is None:
                 return self.send_json({"error": "no such folder"}, 404)
-            return self.stream_ndjson(fulltext.stream(rows, str(b.get("q") or "")[:300]))
+            pg = b.get("pages") if isinstance(b.get("pages"), dict) else None            # {file, from, to}: only inside one chapter of one book
+            if pg:
+                try:
+                    pg = {"file": str(pg["file"]), "from": int(pg["from"]), "to": int(pg["to"])}
+                except (KeyError, TypeError, ValueError):
+                    return self.send_json({"error": "bad chapter range"}, 400)
+                if pg["from"] < 1 or pg["to"] < pg["from"]:
+                    return self.send_json({"error": "bad chapter range"}, 400)
+            return self.stream_ndjson(fulltext.stream(rows, str(b.get("q") or "")[:300], pg))
         if path == "/api/smart":         # {action: add (name, filters) | rename (id, name) | delete (id)}
             try:
                 a = b.get("action")
