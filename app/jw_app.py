@@ -280,7 +280,7 @@ class Api:
                 w.load_html(chooser_page(detected_home()))
             return {"ok": True}
         if kind in ("switch", "open"):
-            return self._finish(m["dst"])
+            return self._finish(m["dst"], m["src"])
         if kind == "copy":
             m["busy"] = True
             w.load_html(progress_page(m["src"], m["dst"]))
@@ -300,9 +300,19 @@ class Api:
         m["busy"] = False
         w.load_html(done_page(m["dst"], text, errors))
 
-    def _finish(self, dst):
-        """Use `dst` from now on: remember it and start again as a fresh process (the running dashboard, its lock and its imported modules all belong to the old folder)."""
+    def _finish(self, dst, src=None):
+        """Use `dst` from now on: remember it and start again as a fresh process (the running dashboard, its lock and its imported modules all belong to the old folder).
+        src: the folder this computer used until now; its sign-in browser and language model come along (movehome.carry_local), so there is no new sign-in or download."""
         os.makedirs(dst, exist_ok=True)
+        if src:
+            try:
+                code_on_path()
+                import movehome
+                r = movehome.carry_local(src, dst)
+                if r["errors"]:
+                    print("Could not bring along: %s" % r["errors"])
+            except Exception:  # noqa: BLE001      (a sign-in again is the worst that happens)
+                traceback.print_exc()
         save_config({"home": dst})
         self.move = None
         relaunch()

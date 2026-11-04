@@ -38,7 +38,7 @@ def tree(root):
     for d, _, fs in os.walk(root):
         for f in fs:
             p = os.path.join(d, f)
-            out[os.path.relpath(p, root)] = hashlib.sha1(open(p, "rb").read()).hexdigest()
+            out[os.path.relpath(p, root)] = ("link:" + os.readlink(p)) if os.path.islink(p) else hashlib.sha1(open(p, "rb").read()).hexdigest()
     return out
 
 SRC, DST = os.path.join(T, "old"), os.path.join(T, "Dropbox", "JW")
@@ -55,6 +55,7 @@ put(SRC, skill + "/state/seen.json", '{"shared": true}')
 put(SRC, skill + "/state/runs/2026-W40_weekly.json", "{}")
 put(SRC, skill + "/state/server.lock", '{"pid": 1}')
 put(SRC, skill + "/state/.DS_Store", "x")
+put(SRC, skill + "/devices/" + "a" * 32 + ".json", '{"id": "%s", "name": "This Mac"}' % ("a" * 32))      # this computer's "I am here" file, written under its old id
 for name in paths.LOCAL_ITEMS:
     if name.endswith(".json"):
         put(SRC, skill + "/state/" + name, "{}")
@@ -79,7 +80,7 @@ check("check: source inside destination refused", movehome.check(SRC, T) is not 
 check("check: fine pair", movehome.check(SRC, DST) is None)
 p = movehome.plan(SRC)
 check("plan counts pdfs", p["pdfs"] == 2, p)
-check("plan leaves out local items and the lock", set(os.path.basename(s) for s in p["skipped"]) == set(paths.LOCAL_ITEMS) | {"server.lock"}, p["skipped"])
+check("plan leaves out local items and the lock", set(os.path.basename(s) for s in p["skipped"]) == set(paths.LOCAL_ITEMS) | {"server.lock", "devices"}, p["skipped"])
 
 seen = []
 res = movehome.copy_into(SRC, DST, say=lambda d, t, rel: seen.append((d, t)))
@@ -95,6 +96,7 @@ check("missing settings file copied", os.path.exists(os.path.join(DST, skill + "
 check("shared state copied", os.path.exists(os.path.join(DST, skill + "/state/seen.json")) and os.path.exists(os.path.join(DST, skill + "/state/runs/2026-W40_weekly.json")))
 check("lock not copied", not os.path.exists(os.path.join(DST, skill + "/state/server.lock")))
 check(".DS_Store not copied", not os.path.exists(os.path.join(DST, skill + "/state/.DS_Store")))
+check("the computers' 'I am here' files not copied", not os.path.lexists(os.path.join(DST, skill, "devices")))
 check("local items not copied", not any(os.path.lexists(os.path.join(DST, skill, "state", n)) for n in paths.LOCAL_ITEMS))
 check("kept count (.env and ai.json were already there)", res["kept"] == 2, res["kept"])
 check("copied count", res["copied"] == 3 + 1 + 1 + 2, res["copied"])        # a.pdf a.md b.pdf notes.json | journals.json | seen.json runs
@@ -114,5 +116,42 @@ check("second copy keeps the index", again["index"] == {"papers": 3, "added": 0}
 EMPTY = os.path.join(T, "fresh")
 r2 = movehome.copy_into(SRC, EMPTY)
 check("empty destination: index copied whole", r2["index"] == {"papers": 3, "added": 3} and os.path.exists(os.path.join(EMPTY, ".env")), r2)
+
+# ---- this computer's sign-in browser and model come along to the new folder's per-computer folder (carry_local)
+LIB = os.path.join(T, "Library", "local")
+local_of = lambda root: os.path.join(LIB, hashlib.sha1(os.path.realpath(root).encode()).hexdigest()[:10])     # what the Mac app does (paths.local_dir_for)
+A = local_of(SRC)
+put(A, "browser-profile/Default/Cookies", "cookie jar")
+put(A, "browser-profile/Default/Network/Cookies", "new cookie jar")
+put(A, "browser-profile/Default/Cache/data_0", "x" * 1000)
+put(A, "browser-profile/Default/Code Cache/js/1", "x")
+put(A, "browser-profile/Local State", "{}")
+os.symlink("/tmp/some-host-123", os.path.join(A, "browser-profile", "SingletonLock"))       # what a running Chromium leaves: must not be copied
+put(A, "session-cookies.json", "[1]")
+put(A, "signins.json", '{"ok": true}')
+put(A, "models/bge/model.onnx", "MODEL")
+put(A, "device.json", '{"id": "old"}')
+put(A, "crossref_cache.json", "{}")
+before_a = tree(A)
+cr = movehome.carry_local(SRC, DST, local_of)
+B = local_of(DST)
+check("carry: the sign-in browser, its cookies and state, and the model come along", sorted(cr["carried"]) == sorted(movehome.CARRY) and not cr["errors"], cr)
+check("carry: the cookies are there", open(os.path.join(B, "browser-profile/Default/Cookies")).read() == "cookie jar" and os.path.exists(os.path.join(B, "browser-profile/Default/Network/Cookies")))
+check("carry: the model is there", open(os.path.join(B, "models/bge/model.onnx")).read() == "MODEL")
+check("carry: a running browser's lock is not copied", not os.path.lexists(os.path.join(B, "browser-profile", "SingletonLock")))
+check("carry: the browser's caches are not copied", not os.path.exists(os.path.join(B, "browser-profile/Default/Cache")) and not os.path.exists(os.path.join(B, "browser-profile/Default/Code Cache")))
+check("carry: nothing else (the computer's id, folder-specific caches)", not os.path.exists(os.path.join(B, "device.json")) and not os.path.exists(os.path.join(B, "crossref_cache.json")))
+check("carry: the old per-computer folder is unchanged", tree(A) == before_a)
+check("carry: nothing went into the data folder", not os.path.exists(os.path.join(DST, skill, "state", "browser-profile")) and not os.path.exists(os.path.join(DST, skill, "state", "models")))
+put(A, "signins.json", '{"ok": "newer"}')
+again = movehome.carry_local(SRC, DST, local_of)
+check("carry: what the new folder already has is kept", sorted(again["kept"]) == sorted(movehome.CARRY) and not again["carried"] and open(os.path.join(B, "signins.json")).read() == '{"ok": true}', again)
+check("carry: the same per-computer folder does nothing", movehome.carry_local(SRC, DST, lambda r: A)["skipped"])
+check("carry: never into a data folder (a run from a project folder keeps them in state/)", movehome.carry_local(SRC, DST, lambda r: os.path.join(r, skill, "state"))["skipped"] and not os.path.exists(os.path.join(DST, skill, "state", "models")))
+OLDV = os.path.join(T, "older-version")                                         # a folder an older version used: the items are in its own state/
+put(OLDV, "Papers/x.pdf", "x"); put(OLDV, skill + "/state/browser-profile/Default/Cookies", "old cookies"); put(OLDV, skill + "/state/models/m.onnx", "M")
+NEWV = os.path.join(T, "newer")
+r3 = movehome.carry_local(OLDV, NEWV, local_of)
+check("carry: from where an older version kept them (its state/)", "browser-profile" in r3["carried"] and "models" in r3["carried"] and open(os.path.join(local_of(NEWV), "browser-profile/Default/Cookies")).read() == "old cookies", r3)
 print("\n%s" % ("ALL OK" if not fails else "FAILED: " + ", ".join(fails)))
 sys.exit(1 if fails else 0)

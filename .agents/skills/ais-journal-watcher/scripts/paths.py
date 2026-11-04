@@ -38,17 +38,23 @@ STATE = os.path.join(BASE, "state")
 PAPERS = os.path.join(ROOT, "Papers")
 
 
-def _local_dir():
-    """Where the files that belong to THIS computer live. The data folder may be synced between computers (Dropbox): what must not travel (the sign-in browser's profile and
-    cookies, the embedding model, the lookup caches, the lock that says a dashboard runs here) lives outside it. JW_LOCAL names the folder (tests, scripts); the Mac app
-    uses ~/Library/Application Support/Journal Watcher/local/<one folder per data folder>; a run from a checkout keeps everything in state/ as before."""
+def local_dir_for(root):
+    """The per-computer folder (see _local_dir) of the data folder `root`. Pure: it does not depend on the data folder this process uses, so that a change of data folder
+    can find the old and the new one."""
     env = os.environ.get("JW_LOCAL")
     if env:
         return os.path.abspath(os.path.expanduser(env))
     if FROZEN:
-        h = hashlib.sha1(os.path.realpath(ROOT).encode("utf-8")).hexdigest()[:10]
+        h = hashlib.sha1(os.path.realpath(root).encode("utf-8")).hexdigest()[:10]
         return os.path.join(os.path.expanduser("~/Library/Application Support/Journal Watcher/local"), h)
-    return STATE
+    return os.path.join(root, ".agents", "skills", "ais-journal-watcher", "state") if _home else STATE
+
+
+def _local_dir():
+    """Where the files that belong to THIS computer live. The data folder may be synced between computers (Dropbox): what must not travel (the sign-in browser's profile and
+    cookies, the embedding model, the lookup caches, the lock that says a dashboard runs here) lives outside it. JW_LOCAL names the folder (tests, scripts); the Mac app
+    uses ~/Library/Application Support/Journal Watcher/local/<one folder per data folder>; a run from a checkout keeps everything in state/ as before."""
+    return local_dir_for(ROOT)
 
 
 LOCAL = _local_dir()

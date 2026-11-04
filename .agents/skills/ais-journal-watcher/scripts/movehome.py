@@ -9,6 +9,11 @@ Rules (decided with the author, Nov 2026):
     by DOI or title, keeps its better row), otherwise papers whose PDFs were just copied would be missing from the list
   * per-computer items never travel: paths.LOCAL_ITEMS (the sign-in browser profile and cookies, signins.json, update state, the models, staging, fetched, the lookup
     caches) and the server.lock, wherever an older version left them inside the data folder; they are made afresh where they belong (paths.LOCAL)
+  * the computers' "I am here" files (devices/, syncinfo.py) never travel either: after a change of folder this computer has a new id (its id is kept per data
+    folder, in paths.LOCAL), so its old file would show up in the new folder as a second computer with its own name, "open now" for three minutes
+
+What belongs to one computer does come along on THIS computer (carry_local): the sign-in browser (so you need not sign in to your library again), its cookies and sign-in
+state, and the embedding model (so it is not downloaded again). They are copied from the old folder's per-computer folder to the new one's, never into a data folder.
 
 This module imports paths only inside functions: paths.py fixes ROOT when it is first imported (from JW_HOME), and the app may copy before it has chosen a folder.
 The app always starts a fresh process after a copy, so nothing here depends on paths.ROOT.
@@ -32,6 +37,7 @@ def _excluded():
     import paths
     ex = {os.path.join(STATE_REL, n) for n in paths.LOCAL_ITEMS}
     ex.add(os.path.join(STATE_REL, "server.lock"))
+    ex.add(os.path.join(SKILL_REL, "devices"))
     return ex
 
 
@@ -169,6 +175,52 @@ def join_index(src_idx, dst_idx, dst_root):
     return {"papers": len(rows), "added": len(rows) - len(mine)}
 
 
+CARRY = ("browser-profile", "session-cookies.json", "signins.json", "models")
+# what a browser profile holds that must not be copied: the locks of a running Chromium (a copied one would make the new folder's browser think the profile is in use
+# elsewhere) and the caches (large, and made again)
+PROFILE_SKIP = shutil.ignore_patterns("Singleton*", "lockfile", "*.lock", "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
+                                      "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Crashpad", "CacheStorage")
+
+
+def carry_local(src_root, dst_root, local_of=None):
+    """When THIS computer changes data folder: copy its per-computer items (CARRY) from `src_root`'s per-computer folder to `dst_root`'s. Copy only; an item the new
+    per-computer folder already has is left as it is; nothing goes into a data folder (a run from a project folder keeps them in state/, which would be the shared folder).
+    An older version kept them in the data folder's own state/: they are taken from there when the per-computer folder has none. local_of(root) gives a data folder's
+    per-computer folder (paths.local_dir_for; tests pass their own). Returns {"carried": [names], "kept": [names], "errors": [(name, why)], "skipped": reason or None}."""
+    if local_of is None:
+        import paths
+        local_of = paths.local_dir_for
+    res = {"carried": [], "kept": [], "errors": [], "skipped": None}
+    a, b = local_of(src_root), local_of(dst_root)
+    if _same(a, b):
+        res["skipped"] = "the same per-computer folder"
+        return res
+    if _nested(b, dst_root):
+        res["skipped"] = "the new per-computer folder is inside the data folder"
+        return res
+    for name in CARRY:
+        frm = os.path.join(a, name)
+        if not os.path.lexists(frm):
+            frm = os.path.join(src_root, STATE_REL, name)          # (where an older version kept it)
+        if not os.path.lexists(frm) or os.path.islink(frm):
+            continue
+        to = os.path.join(b, name)
+        if os.path.lexists(to):
+            res["kept"].append(name)
+            continue
+        try:
+            os.makedirs(b, exist_ok=True)
+            if os.path.isdir(frm):
+                shutil.copytree(frm, to, symlinks=True, ignore=PROFILE_SKIP if name == "browser-profile" else None)
+            else:
+                shutil.copy2(frm, to)
+            res["carried"].append(name)
+        except (OSError, shutil.Error) as e:
+            shutil.rmtree(to, ignore_errors=True) if os.path.isdir(to) else None
+            res["errors"].append((name, str(e)[:200]))
+    return res
+
+
 def describe(res, src):
     """One short paragraph of what copy_into did, for the page the app shows."""
     b = res["bytes"]
@@ -179,7 +231,7 @@ def describe(res, src):
     if res["index"]:
         parts.append("the library list now has %d paper%s (%d added)" % (res["index"]["papers"], "" if res["index"]["papers"] == 1 else "s", res["index"]["added"]))
     s = "; ".join(parts) + "."
-    s += " Per-computer items (the sign-in browser, caches, update state) were not copied: they are made afresh. Nothing was changed in %s." % src
+    s += " Per-computer items (the sign-in browser, caches, update state) were not copied into the folder; on this computer the sign-in browser and the language model come along when you open it. Nothing was changed in %s." % src
     if res["errors"]:
         s += " %d file%s could not be copied." % (len(res["errors"]), "" if len(res["errors"]) == 1 else "s")
     return s
