@@ -3,13 +3,14 @@
     embed.index_paper(pdf_path, progress=None)      # no-op if already indexed with the current embedding model
     embed.search(pdf_path, "question", k=12)        # -> blocks (see blocks.py) + "score", best first
 
-Vectors are cached next to the block cache in state/index/ (<sha1>.vec = a float32 .npy, <sha1>.vec.json = which model made
+Vectors are cached next to the block cache in state/index/ (shared with the other computers that use the data folder; <sha1>.vec = a float32 .npy, <sha1>.vec.json = which model made
 them), so the Papers/ folder is never touched and the index can be rebuilt any time.
 """
 import json
 import os
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ai  # noqa: E402
@@ -28,27 +29,42 @@ def _model_id():
     return "%s:%s" % (c["provider"], c["model"])
 
 
-def index_paper(pdf_path, progress=None):
+def _valid(vec, meta, n):
+    """True if the saved vectors are for the current embedding model and match the n passages: the files may have come from another computer through the shared folder, half way through
+    a sync, or from another model, and a wrong shape would only fail later, inside a search."""
     import numpy as np
-    blocks = bl.extract(pdf_path)
-    vec, meta = _paths(pdf_path)
     m = dl.load_json(meta, {})
-    if os.path.exists(vec) and m.get("model") == _model_id() and m.get("n") == len(blocks):
+    if not (os.path.exists(vec) and m.get("model") == _model_id() and m.get("n") == n):
+        return False
+    try:
+        a = np.load(vec, mmap_mode="r")
+        return a.ndim == 2 and a.shape[0] == n and (not m.get("dim") or a.shape[1] == m["dim"])
+    except Exception:  # noqa: BLE001      (unreadable or still arriving: make it again)
+        return False
+
+
+def index_paper(pdf_path, progress=None):
+    """Make (or find) the vectors of one paper. Returns {"n", "cached"} and, when work was done, "extract_s", "embed_s" and "workers" (what the tray shows, so a slow Mac can be understood)."""
+    import numpy as np
+    t0 = time.time()
+    blocks = bl.extract(pdf_path)
+    t1 = time.time()
+    vec, meta = _paths(pdf_path)
+    if _valid(vec, meta, len(blocks)):
         return {"n": len(blocks), "cached": True}
-    out = []
-    for i in range(0, len(blocks), 48):
-        out.append(ai.embed([b["text"] for b in blocks[i:i + 48]]))
-        if progress:
-            progress(min(i + 48, len(blocks)), len(blocks))
-    arr = np.concatenate(out) if out else np.zeros((0, 1), dtype="float32")
+    arr = ai.embed([b["text"] for b in blocks], progress=progress) if blocks else np.zeros((0, 1), dtype="float32")
+    t2 = time.time()
     os.makedirs(bl.INDEX, exist_ok=True)
-    tmp = vec + ".%d.tmp" % threading.get_ident()          # (the background indexer and an Ask may both write)
+    tmp = dl.tmp_path(vec)
     with open(tmp, "wb") as f:
         np.save(f, arr)
     os.replace(tmp, vec)
-    with open(meta, "w") as f:
+    tmp = dl.tmp_path(meta)
+    with open(tmp, "w") as f:
         json.dump({"model": _model_id(), "n": len(blocks), "dim": int(arr.shape[1])}, f)
-    return {"n": len(blocks), "cached": False}
+    os.replace(tmp, meta)                 # (the description last: a reader that finds it finds finished vectors)
+    return {"n": len(blocks), "cached": False, "extract_s": round(t1 - t0, 2), "embed_s": round(t2 - t1, 2),
+            "workers": ai.embed_workers() if ai.config_data()["embeddings"]["provider"] == "local" else 1}
 
 
 def is_indexed(pdf_path):

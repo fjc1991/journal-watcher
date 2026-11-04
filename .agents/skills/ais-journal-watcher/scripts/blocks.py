@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import notes_store as ns  # noqa: E402
 
-INDEX = os.path.join(dl.LOCAL, "index")
+INDEX = os.path.join(dl.STATE, "index")        # shared with the other computers that use the data folder: a paper is read into the index once
 LIG = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl", "­": "", " ": " "}
 MAX_CHARS = 1400      # longer paragraphs are split
 MIN_CHARS = 25        # shorter ones (page numbers, stray labels) are dropped
@@ -117,7 +117,7 @@ def extract(pdf_path, force=False):
             in_refs = False
         b["kind"] = "ref" if in_refs else "meta" if (b["page"] <= 1 or b["page"] == last) and len(b["text"]) < 400 and META.search(b["text"]) else "body"
     os.makedirs(INDEX, exist_ok=True)
-    tmp = cache + ".%d.tmp" % threading.get_ident()     # (the indexer and an Ask may both write)
+    tmp = dl.tmp_path(cache)                            # (the indexer and an Ask may both write, here or on another computer)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"v": VERSION, "sha1": ns.sha1_of(pdf_path), "blocks": out}, f, ensure_ascii=False)
     os.replace(tmp, cache)

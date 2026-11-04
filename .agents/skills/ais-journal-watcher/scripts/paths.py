@@ -8,7 +8,7 @@ the environment variable JW_HOME names it (the app sets it), and it has the same
     <home>/Papers/…                                        the papers and everything you wrote about them
     <home>/.env                                            API keys
     <home>/.agents/skills/ais-journal-watcher/*.json       settings (ai, journals, interests, library, prompts)
-    <home>/.agents/skills/ais-journal-watcher/state/       what can be regenerated (caches, indexes, runs, the browser profile)
+    <home>/.agents/skills/ais-journal-watcher/state/       what can be regenerated or is shared (the search index, saved AI answers, runs, backups; the browser profile and model are per computer: see LOCAL below)
 
     BASE   the folder with the settings and state      ROOT    the data home      STATE, PAPERS  inside them
     STATIC the dashboard's html/css/js (always code)    DEFAULTS  the settings a new home starts from
@@ -40,7 +40,7 @@ PAPERS = os.path.join(ROOT, "Papers")
 
 def _local_dir():
     """Where the files that belong to THIS computer live. The data folder may be synced between computers (Dropbox): what must not travel (the sign-in browser's profile and
-    cookies, the search index, the embedding model, the caches, the lock that says a dashboard runs here) lives outside it. JW_LOCAL names the folder (tests, scripts); the Mac app
+    cookies, the embedding model, the lookup caches, the lock that says a dashboard runs here) lives outside it. JW_LOCAL names the folder (tests, scripts); the Mac app
     uses ~/Library/Application Support/Journal Watcher/local/<one folder per data folder>; a run from a checkout keeps everything in state/ as before."""
     env = os.environ.get("JW_LOCAL")
     if env:
@@ -52,28 +52,57 @@ def _local_dir():
 
 
 LOCAL = _local_dir()
-# the entries of state/ that belong to one computer (everything else in state/ is shared with the data folder: run history, what was screened and seen, the AI spending ledger, backups)
-LOCAL_ITEMS = ("browser-profile", "session-cookies.json", "signins.json", "update_state.json", "models", "ai_cache", "index", "staging", "fetched",
+# the entries of state/ that belong to one computer (everything else in state/ is shared with the data folder: run history, what was screened and seen, the AI spending ledger, backups,
+# and the two regenerable folders below)
+LOCAL_ITEMS = ("browser-profile", "session-cookies.json", "signins.json", "update_state.json", "models", "staging", "fetched",
                "crossref_cache.json", "authors_cache.json", "openalex_cache.json", "cite_cache.json", "personal_vecs.json")
+# regenerable, but worth sharing between the computers that use the data folder: the search index (a paper is read into it once, on whichever computer sees it first) and the saved AI
+# answers (an answer paid for once is free everywhere). Their files are named by the content of the paper or of the request, so they mean the same on every computer.
+SHARED_CACHES = ("index", "ai_cache")
 
 
 def migrate_local(say=None):
-    """Move per-computer entries that an earlier version left in state/ (inside the data folder) to LOCAL, once. Returns the names moved. An entry that is already in LOCAL stays; one that
-    cannot be moved is left where it is (it works from there)."""
+    """Move per-computer entries that an earlier version left in state/ (inside the data folder) to LOCAL, once; and bring the shared caches back from LOCAL (where a development version
+    kept them) into state/. Returns the names moved. An entry that is already in LOCAL stays; one that cannot be moved is left where it is (it works from there)."""
     import shutil
     moved = []
-    if os.path.realpath(LOCAL) == os.path.realpath(STATE) or not os.path.isdir(STATE):
+    if os.path.realpath(LOCAL) == os.path.realpath(STATE):
         return moved
-    os.makedirs(LOCAL, exist_ok=True)
-    for name in LOCAL_ITEMS:
-        src, dst = os.path.join(STATE, name), os.path.join(LOCAL, name)
-        if os.path.lexists(src) and not os.path.lexists(dst):
-            try:
-                shutil.move(src, dst)
+    if os.path.isdir(STATE):
+        os.makedirs(LOCAL, exist_ok=True)
+        for name in LOCAL_ITEMS:
+            src, dst = os.path.join(STATE, name), os.path.join(LOCAL, name)
+            if os.path.lexists(src) and not os.path.lexists(dst):
+                try:
+                    shutil.move(src, dst)
+                    moved.append(name)
+                except OSError as e:
+                    if say:
+                        say("Could not move %s out of the data folder: %s" % (name, e))
+    for name in SHARED_CACHES:
+        src, dst = os.path.join(LOCAL, name), os.path.join(STATE, name)
+        if not os.path.isdir(src) or os.path.islink(src):
+            continue
+        try:
+            os.makedirs(dst, exist_ok=True)
+            n = 0
+            for fn in os.listdir(src):
+                a, b = os.path.join(src, fn), os.path.join(dst, fn)
+                if not os.path.isfile(a):
+                    continue
+                if os.path.exists(b):
+                    os.remove(a)                                   # (the shared one stays; this copy is only a duplicate of something regenerable)
+                else:
+                    shutil.move(a, b); n += 1
+            if n:
                 moved.append(name)
-            except OSError as e:
-                if say:
-                    say("Could not move %s out of the data folder: %s" % (name, e))
+            try:
+                os.rmdir(src)
+            except OSError:
+                pass
+        except OSError as e:
+            if say:
+                say("Could not move %s into the data folder: %s" % (name, e))
     return moved
 
 if FROZEN:

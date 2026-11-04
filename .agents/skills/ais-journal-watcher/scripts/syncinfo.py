@@ -8,7 +8,8 @@ Dropbox copies files between computers; it does not lock them and it cannot merg
     syncinfo.merge_index(rel)  the library index (Papers/_index.csv) of both copies joined: no paper is lost
     syncinfo.set_aside(rel)    any conflicted copy moved (never deleted) to Papers/_conflicts/<time>/
 
-What is kept on one computer only (the sign-in browser, the search index, caches, the lock) is not in the data folder at all: see paths.LOCAL.
+What is kept on one computer only (the sign-in browser, the embedding model, lookup caches, the lock) is not in the data folder at all: see paths.LOCAL. The search index and the saved AI
+answers are shared through the folder (paths.SHARED_CACHES); they can be made again, so a copy Dropbox duplicates there is simply removed (tidy_caches), never shown as a conflict.
 """
 import atexit
 import csv
@@ -170,6 +171,44 @@ def _scan_dirs():
 
 
 _cache = {"at": 0.0, "rows": []}
+STALE_TMP_S = 86400
+
+
+def _cache_dirs():
+    """The shared, regenerable folders (real paths): the search index and the saved AI answers."""
+    return [os.path.realpath(os.path.join(paths.STATE, n)) for n in paths.SHARED_CACHES]
+
+
+def tidy_caches():
+    """Remove what the shared caches cannot use: copies Dropbox made when two computers wrote the same file at once ('… conflicted copy …': the original is still there, and both held the same
+    thing, since the names come from the paper's or the request's content), and temporary files an interrupted write left more than a day ago. Returns how many files were removed."""
+    n, now = 0, time.time()
+    for d in _cache_dirs():
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            full = os.path.join(d, fn)
+            try:
+                if CONFLICT_RE.search(fn) or (fn.endswith(".tmp") and now - os.path.getmtime(full) > STALE_TMP_S):
+                    os.remove(full); n += 1
+            except OSError:
+                pass
+    return n
+
+
+def cache_size():
+    """{"files", "bytes"} of the shared search index and saved answers (Settings shows it: it travels with the data folder)."""
+    files = size = 0
+    for d in _cache_dirs():
+        try:
+            for e in os.scandir(d):
+                if e.is_file():
+                    files += 1; size += e.stat().st_size
+        except OSError:
+            pass
+    return {"files": files, "bytes": size}
 
 
 def conflicts(fresh=False):
@@ -178,7 +217,7 @@ def conflicts(fresh=False):
         return list(_cache["rows"])
     out = []
     root = os.path.realpath(paths.ROOT)
-    skip = {os.path.realpath(os.path.join(paths.PAPERS, "_conflicts")), os.path.realpath(os.path.join(paths.PAPERS, "_removed")), os.path.realpath(paths.LOCAL)}
+    skip = {os.path.realpath(os.path.join(paths.PAPERS, "_conflicts")), os.path.realpath(os.path.join(paths.PAPERS, "_removed")), os.path.realpath(paths.LOCAL), *_cache_dirs()}
     for top, deep in _scan_dirs():
         top = os.path.realpath(top)            # (all paths below are real ones: a data folder reached through a link, such as ~/Dropbox or /var on a Mac, still gives paths relative to itself)
         if not os.path.isdir(top):
@@ -273,4 +312,4 @@ def info():
     m = me()
     comps = computers()
     return {"me": m, "data_folder": paths.ROOT, "local_folder": paths.LOCAL, "separate": os.path.realpath(paths.LOCAL) != os.path.realpath(paths.STATE),
-            "computers": comps, "open_elsewhere": [c for c in comps if c["open"]], "conflicts": conflicts(fresh=True)}
+            "computers": comps, "open_elsewhere": [c for c in comps if c["open"]], "conflicts": conflicts(fresh=True), "shared_cache": cache_size()}

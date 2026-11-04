@@ -22,6 +22,7 @@ Usage:
 import csv
 import json
 import os
+import threading
 import re
 import sys
 import time
@@ -88,6 +89,12 @@ def is_pdf(data):
     responses from in-browser readers fail the second test)."""
     return bool(data) and len(data) > 40_000 and \
         data[:1024].lstrip(b"\xef\xbb\xbf \r\n").startswith(b"%PDF") and b"%%EOF" in data[-2048:]
+
+
+def tmp_path(path):
+    """A temporary file name next to `path` that no other writer uses: files in the data folder may be written by another computer sharing it, another process and another thread at the
+    same moment, and a fixed '.tmp' name would then be written by two of them at once."""
+    return "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
 
 
 def load_json(path, default):

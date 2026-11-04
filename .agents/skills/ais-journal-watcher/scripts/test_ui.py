@@ -1332,7 +1332,13 @@ bks.crossref_books = lambda title, rows=3: []
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="discover"]'); page.wait_for_selector("#dc-find")
             check("the Library has a Discover tab (whole library, with filters; it waits for you to press Find)", page.locator("#lib-discover .dc-row").count() == 0 and page.locator('#lib-discover [data-s="journal"]').count() == 1)
             page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")      # (the Library finishes loading its folders and redraws the tab once: a click made before that is lost)
-            page.click("#dc-find"); page.wait_for_selector("#lib-discover .dc-row", timeout=60000)
+            for _try in range(4):
+                page.click("#dc-find")
+                try:
+                    page.wait_for_function("document.querySelector('#dc-find').disabled || document.querySelector('#lib-discover .dc-row')", timeout=3000); break
+                except Exception:  # noqa: BLE001      (no trace of the click: the tab was redrawn under it; press again)
+                    continue
+            page.wait_for_selector("#lib-discover .dc-row", timeout=60000)
             check("…and finds the same missing paper across the whole library", "The platform classic" in page.inner_text("#lib-discover #dc-out"))
 
             page.click('.libtabs [data-tab="papers"]'); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
@@ -1470,7 +1476,11 @@ bks.crossref_books = lambda title, rows=3: []
             page.go_back(); page.wait_for_selector("#lib-review:not(.hide)"); page.go_back(); page.wait_for_selector('.libtabs [data-tab="ask"].on')
             check("the browser's Back button returns to the Library tab you were on", page.url.endswith("#/library/ask") and page.locator('.libtabs [data-tab="ask"].on').count() == 1, page.url)
             page.click("#folditem"); page.wait_for_selector(".fp-tile"); page.reload(); page.wait_for_selector(".fp-tile"); page.wait_for_selector(".fp", state="visible"); page.wait_for_function("location.hash === '#/folders'")
-            check("reloading the page keeps you on the Folders page", page.url.endswith("#/folders") and page.locator(".fp").first.is_visible(), "%s | .fp: %d" % (page.url, page.locator(".fp").count()))
+            try:
+                page.wait_for_function("location.hash === '#/folders' && !!document.querySelector('.fp') && document.querySelector('.fp').offsetParent !== null", timeout=10000); on_folders = True
+            except Exception:  # noqa: BLE001
+                on_folders = False
+            check("reloading the page keeps you on the Folders page", on_folders and page.url.endswith("#/folders") and page.locator(".fp").first.is_visible(), "%s | .fp: %d" % (page.url, page.locator(".fp").count()))
             page.goto("about:blank"); page.goto(base + "/#/folder/lab/matrix"); page.wait_for_selector(".fvtabs")
             check("an address like #/folder/lab/matrix opens that folder on that tab", page.locator('.fvtabs [data-ft="matrix"].on').count() == 1 and "Lab" in page.inner_text(".pagehead h1"))
             page.click("#settingsbtn"); page.wait_for_selector("#st-body")
@@ -2461,6 +2471,57 @@ bks.crossref_books = lambda title, rows=3: []
             check("messages are announced (status region) and the page has one main landmark and a language", page.get_attribute("#toast", "role") == "status" and page.locator("main").count() == 1 and page.get_attribute("html", "lang") == "en")
             page.emulate_media(reduced_motion="reduce"); tdur = page.evaluate("parseFloat(getComputedStyle(document.querySelector('.btn')).transitionDuration)"); page.emulate_media(reduced_motion="no-preference")
             check("with 'reduce motion' on, transitions are switched off", tdur < 0.01, str(tdur))
+
+            print("your choices follow you between computers (the page keeps them in the data folder)")
+            prefs_now = lambda: api("/api/uiprefs")["prefs"]  # noqa: E731
+
+            def until(cond, secs=8.0):
+                end = time.time() + secs
+                while time.time() < end:
+                    try:
+                        if cond():
+                            return True
+                    except Exception:  # noqa: BLE001
+                        pass
+                    time.sleep(0.15)
+                return False
+            POS_KEY = "jw-pos:Papers/Journal/Smith 2020 – Équilibre.pdf"
+            page.evaluate("localStorage.setItem('jw-fp-view', 'list'); localStorage.setItem('jw-theme', 'dark'); localStorage.setItem('jw-sb', 'folded'); localStorage.setItem('jw-rd-side', '321')")
+            check("a view choice and the theme reach the data folder within a moment", until(lambda: prefs_now().get("jw-fp-view") == "list" and prefs_now().get("jw-theme") == "dark"), str(prefs_now()))
+            time.sleep(0.8)
+            check("…but what depends on this screen (sidebar folded, reader panel width) stays in this browser", "jw-sb" not in prefs_now() and "jw-rd-side" not in prefs_now(), str(prefs_now()))
+            # a second computer = a browser with nothing in it
+            ctx2 = br.new_context(viewport={"width": 1400, "height": 950})
+            p2 = ctx2.new_page(); p2.goto(base + "/#/watch"); p2.wait_for_selector(".navbtn", state="attached")
+            st2 = p2.evaluate("({view: localStorage.getItem('jw-fp-view'), theme: localStorage.getItem('jw-theme'), sb: localStorage.getItem('jw-sb'), side: localStorage.getItem('jw-rd-side'), welcome: localStorage.getItem('jw-welcome'), painted: document.documentElement.dataset.theme})")
+            check("a second computer starts with the same theme (already painted in it), view choice and 'guide seen' - and without the first one's sidebar and panel width", st2 == {"view": "list", "theme": "dark", "sb": None, "side": None, "welcome": "done", "painted": "dark"}, str(st2))
+            p2.evaluate("localStorage.setItem('jw-fp-sort', 'date'); localStorage.removeItem('jw-fp-view')")
+            p2.goto("about:blank")                      # (closing a page sends what is waiting at once)
+            check("a change on the second computer, a removal too, reaches the folder when its page closes", until(lambda: prefs_now().get("jw-fp-sort") == "date" and "jw-fp-view" not in prefs_now()), str(prefs_now()))
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")
+            st1 = page.evaluate("({sort: localStorage.getItem('jw-fp-sort'), view: localStorage.getItem('jw-fp-view'), sb: localStorage.getItem('jw-sb')})")
+            check("the first computer picks both up when it next opens, and keeps its own sidebar choice", st1 == {"sort": "date", "view": None, "sb": "folded"}, str(st1))
+            page.evaluate("localStorage.setItem(%s, JSON.stringify({n: 4, y: 0.25}))" % json.dumps(POS_KEY))
+            time.sleep(1.2)
+            check("where you stopped reading is sent in batches, not at every scroll (nothing within a second)", POS_KEY not in prefs_now(), str(list(prefs_now())))
+            page.goto("about:blank")
+            check("…and at once when the page closes", until(lambda: POS_KEY in prefs_now()) and json.loads(prefs_now()[POS_KEY]) == {"n": 4, "y": 0.25})
+            # a browser that had choices of its own before it was ever in step: they are added, but the folder's own values win
+            ctx3 = br.new_context(viewport={"width": 1400, "height": 950})
+            ctx3.add_init_script("try { if (!localStorage.getItem('jw-prefsync')) { localStorage.setItem('jw-lsn-seed', '7'); localStorage.setItem('jw-theme', 'light'); } } catch (e) {}")
+            p3 = ctx3.new_page(); p3.goto(base + "/#/watch"); p3.wait_for_selector(".navbtn", state="attached")
+            st3 = p3.evaluate("({theme: localStorage.getItem('jw-theme'), painted: document.documentElement.dataset.theme})")
+            check("a browser that had its own choices adds the new ones to the folder, and where both have one the folder's wins", until(lambda: prefs_now().get("jw-lsn-seed") == "7") and prefs_now().get("jw-theme") == "dark" and st3 == {"theme": "dark", "painted": "dark"}, "%s %s" % (st3, prefs_now()))
+            api("/api/uiprefs", {"remove": ["jw-lsn-seed"]})                              # (removed on another computer)
+            p3.reload(); p3.wait_for_selector(".navbtn", state="attached")
+            check("a choice removed on another computer is removed here the next time the page opens", p3.evaluate("localStorage.getItem('jw-lsn-seed')") is None)
+            check("only the named keys can be set through the server", api("/api/uiprefs", {"set": {"jw-sb": "x", "evil": "y", "jw-theme": "dark"}})["changed"] == 0 and "jw-sb" not in prefs_now() and "evil" not in prefs_now())
+            ctx2.close(); ctx3.close()
+            api("/api/uiprefs", {"remove": ["jw-fp-sort", "jw-fp-view", "jw-theme", POS_KEY, "jw-lsn-seed"]})                  # (back to the start for the sections after this one)
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")
+            page.evaluate("localStorage.removeItem('jw-theme'); localStorage.removeItem('jw-fp-sort'); localStorage.removeItem('jw-sb'); localStorage.removeItem('jw-rd-side'); localStorage.removeItem('jw-fp-view'); localStorage.removeItem(%s)" % json.dumps(POS_KEY))
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")
+            page.evaluate("document.documentElement.dataset.theme = 'light'")
 
             print("exports and the library layout")
             bib = urllib.request.urlopen(base + "/api/export/bib?file=" + urllib.request.quote(rows[0][3])).read().decode()

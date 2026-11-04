@@ -11,6 +11,8 @@ Papers/
 .agents/skills/ais-journal-watcher/prompts.json
 .agents/skills/ais-journal-watcher/update.json
 .agents/skills/ais-journal-watcher/support.json
+.agents/skills/ais-journal-watcher/ui_prefs.json
+.agents/skills/ais-journal-watcher/ui_prefs.json.unreadable
 
 # python
 __pycache__/

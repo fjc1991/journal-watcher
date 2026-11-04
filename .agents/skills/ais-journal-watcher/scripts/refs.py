@@ -89,7 +89,7 @@ def parse(pdf_path):
             if len(seg) >= 25:
                 out.append(_entry(len(out), None, seg, block_at(a)))
     os.makedirs(bl.INDEX, exist_ok=True)
-    tmp = cache + ".tmp"
+    tmp = dl.tmp_path(cache)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"v": bl.VERSION, "refs": out}, f, ensure_ascii=False)
     os.replace(tmp, cache)
