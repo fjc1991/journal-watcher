@@ -57,7 +57,8 @@ def is_indexed(pdf_path):
     return os.path.exists(vec) and m.get("model") == _model_id()
 
 
-def search(pdf_path, query, k=12):
+def search(pdf_path, query, k=12, pages=None):
+    """pages: (first, last) file pages, 1-based and both included: only passages there can be found (one chapter of a book)."""
     import numpy as np
     index_paper(pdf_path)
     blocks = bl.extract(pdf_path)
@@ -67,5 +68,7 @@ def search(pdf_path, query, k=12):
     q = ai.embed([query], kind="query")[0]
     scores = arr @ q
     scores[[i for i, b in enumerate(blocks) if b.get("kind", "body") != "body"]] = -1.0     # never answer from references or licence lines
+    if pages:
+        scores[[i for i, b in enumerate(blocks) if not pages[0] - 1 <= b["page"] <= pages[1] - 1]] = -1.0
     top = [i for i in np.argsort(-scores)[:k] if scores[i] > -1.0]
     return [{**blocks[int(i)], "score": float(scores[int(i)])} for i in top]

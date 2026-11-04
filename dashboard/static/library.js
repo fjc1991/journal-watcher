@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -149,6 +149,33 @@ function tabs(el, opts) {
   else if (F.tab === "discover" && window.DiscoverUI) { const box = $("#lib-discover", el); if (!box.dataset.mounted) { window.DiscoverUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
   else if (F.tab === "ask" && window.AskUI) { const box = $("#lib-ask", el); if (!box.dataset.mounted) { window.AskUI.init(ctx); window.AskUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
 }
+const money = c => c == null ? "unknown (its price is not in Settings → AI)" : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
+const sumHtml = s => `<div class="of-md">${md(s.text)}</div><small class="pmeta">Written by ${esc(s.model || "the AI")}${s.cost ? " · " + esc(money(s.cost)) : ""}${s.left_out ? " · the middle of this long chapter was left out" : ""} · <button class="linkbtn" data-chap-redo>Write it again</button></small>`;
+async function lines(url, body, onMsg) {                 // a streamed answer: one JSON object per line
+  const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+  for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i; while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (l) onMsg(JSON.parse(l)); } }
+}
+async function chapterSummary(card, box, i, fresh) {         // the estimate first, then (only if you press the button) the AI call
+  const file = card.dataset.file, c = box._R.chapters[i], out = $(`[data-sumbox="${i}"]`, box); out.classList.remove("hide");
+  out.innerHTML = `<div class="pmeta">Working out what it would cost…</div>`;
+  let e; try { e = await api("/api/book/summary/estimate", {file, chapter: i}); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
+  out.innerHTML = `<div class="sum-est"><p>This sends about <b>${e.pages} page${e.pages === 1 ? "" : "s"}</b> of “${esc(c.title)}” (${Math.round(e.chars / 1000)} thousand characters) to <b>${esc(e.provider)} · ${esc(e.model)}</b>. Cost: <b>${esc(money(e.cost))}</b>.${e.left_out ? " This chapter is long: the middle part is left out, and the summary says so." : ""}</p>
+    <div class="row" style="gap:8px"><button class="btn primary small" data-sum-go>${fresh ? "Write it again" : "Write the summary"}</button><button class="btn small" data-sum-no>Cancel</button></div></div>`;
+  $("[data-sum-no]", out).onclick = () => { out.innerHTML = c.summary ? sumHtml(c.summary) : ""; if (!c.summary) out.classList.add("hide"); };
+  $("[data-sum-go]", out).onclick = async () => {
+    out.innerHTML = `<div class="pmeta" role="status">Writing the summary…</div><div class="of-md" data-live></div>`; let text = "", fin = null;
+    try {
+      await lines("/api/ai/chapter", {file, chapter: i, fresh: !!fresh}, m => {
+        if (m.type === "text") { text += m.delta; $("[data-live]", out).innerHTML = md(text); } else if (m.type === "final") { fin = m.text; } else if (m.type === "error") throw new Error(m.error);
+        else if (m.type === "done") { c.summary = {text: fin || text, model: m.model, cost: m.cost, left_out: m.left_out}; }
+      });
+      out.innerHTML = sumHtml(c.summary); const b = $(`[data-chap-sum="${i}"]`, box); if (b) b.textContent = "Summary";
+    } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }
+  };
+}
+
 // ---------------------------------------------------------------- a book's chapters: its outline as page ranges; open the book at one, search inside one, say where printed page 1 is
 const BSCOPE = {file: "", from: 0, to: 0, title: "", book: ""};                    // set by "Search in it": the words are then looked for only inside that chapter
 const placeOf = (R, p) => R.source === "epub" ? "location " + p : R.offset ? (p > R.offset ? "p. " + (p - R.offset) : "front matter") : "file page " + p;
@@ -156,12 +183,15 @@ function drawChapters(box, file, R) {
   box._R = R;
   box.innerHTML = `<div class="chap-h"><b>Chapters and sections</b> <small>${R.source === "epub" ? "an EPUB has no printed pages: a place is “location N” in the reading copy" : R.offset ? `printed page = file page − ${R.offset}` : "file pages (set where printed page 1 is below to cite printed pages)"}</small></div>
     ${R.chapters.length ? `<ol class="chap-ol">${R.chapters.map(c => `<li style="margin-left:${(c.level - 1) * 18}px"><span class="chap-t">${esc(c.title)}</span> <small>${esc(placeOf(R, c.start))}${c.end > c.start ? " – " + esc(placeOf(R, c.end)) : ""}</small>
-      <button class="btn small" data-chap-open="${c.start}">Open</button>${F.tab === "books" ? ` <button class="btn small" data-chap-find="${c.i}" title="Look for words only inside this part (type them in the search box above)">Search in it</button>` : ""}</li>`).join("")}</ol>` : `<p class="pmeta">This book has no outline: the file carries no chapter list.</p>`}
+      <button class="btn small" data-chap-open="${c.start}">Open</button>${F.tab === "books" ? ` <button class="btn small" data-chap-find="${c.i}" title="Look for words only inside this part (type them in the search box above)">Search in it</button>` : ""}
+      <button class="btn small" data-chap-ask="${c.i}" title="Open the book's Ask tab limited to this part: the AI reads only these pages">Ask about it</button>
+      <button class="btn small" data-chap-sum="${c.i}" title="${c.summary ? "Show the summary you asked for" : "A summary of this part, written by the AI when you ask (you see what it costs first)"}">${c.summary ? "Summary" : "Summarise…"}</button>
+      <div class="chap-sum${c.summary ? "" : " hide"}" data-sumbox="${c.i}">${c.summary ? sumHtml(c.summary) : ""}</div></li>`).join("")}</ol>` : `<p class="pmeta">This book has no outline: the file carries no chapter list.</p>`}
     ${R.source === "epub" ? "" : `<div class="row chap-off"><label>Printed page 1 is file page <input type="number" min="1" max="${R.pages}" value="${R.offset + 1}" data-chap-offv aria-label="File page where printed page 1 is" style="width:5.5em"></label> <button class="btn small" data-chap-off>Save</button> <span class="st-msg" role="status"></span></div>`}`;
 }
 async function chapClick(e) {
   if (e._chapDone) return; e._chapDone = true;            // (this handler can be registered more than once: a toggle must run once per click)
-  const b = e.target.closest("[data-chap], [data-chap-open], [data-chap-find], [data-chap-off]"); if (!b) return;
+  const b = e.target.closest("[data-chap], [data-chap-open], [data-chap-find], [data-chap-off], [data-chap-ask], [data-chap-sum], [data-chap-redo]"); if (!b) return;
   const card = b.closest(".librow"), file = card && card.dataset.file, box = card && $(".chaplist", card); if (!file || !box) return;
   const row0 = lib()[byFile(file)];
   if (b.dataset.chap !== undefined) {
@@ -169,6 +199,11 @@ async function chapClick(e) {
     box.classList.remove("hide"); b.setAttribute("aria-expanded", "true"); box.innerHTML = `<div class="pmeta">Reading the outline…</div>`;
     try { drawChapters(box, file, await api("/api/book?file=" + encodeURIComponent(file))); } catch (er) { box.innerHTML = `<div class="pmeta">${esc(er.message)}</div>`; }
   } else if (b.dataset.chapOpen !== undefined) { if (row0) ctx.readPaper(row0, {goto: {page: +b.dataset.chapOpen}}); }
+  else if (b.dataset.chapAsk !== undefined) { const c = box._R.chapters[+b.dataset.chapAsk]; window.__askChapter = {file, i: c.i}; if (row0) ctx.readPaper(row0, {goto: {page: c.start}, tab: "ask"}); }
+  else if (b.dataset.chapSum !== undefined) {
+    const i = +b.dataset.chapSum, c = box._R.chapters[i], out = $(`[data-sumbox="${i}"]`, box);
+    if (c.summary) out.classList.toggle("hide"); else chapterSummary(card, box, i, false);
+  } else if (b.dataset.chapRedo !== undefined) { const i = +b.closest("[data-sumbox]").dataset.sumbox; chapterSummary(card, box, i, true); }
   else if (b.dataset.chapFind !== undefined) {
     const c = box._R.chapters[+b.dataset.chapFind]; Object.assign(BSCOPE, {file, from: c.start, to: c.end, title: c.title, book: row0 ? row0.title : ""});
     booksScope(); const q = $("#bk-q"); q && q.focus(); toast("Type the words, then press “In the books”: they are looked for only in “" + c.title + "”.");

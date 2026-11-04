@@ -899,7 +899,7 @@ class Handler(BaseHTTPRequestHandler):
             if not info:
                 return self.send_json({"error": "that is not a book in your library"}, 404)
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
-                                   "chapters": books.chapters(info)})
+                                   "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)]})
         if path == "/api/sync":         # Settings → Computers & sync: which computers use this data folder, which are open now, what Dropbox had to duplicate
             return self.send_json(syncinfo.info())
         if path == "/api/sync/status":  # the small version for the banner: names of the other computers that have the folder open, and how many conflicted copies there are
@@ -981,6 +981,18 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.finish_import(res, bool(b.get("summarize")) and (b.get("fields") or {}).get("kind") != "book")      # (a book is never summarised by itself: it is long, and that costs)
+        if path == "/api/book/summary/estimate":      # {file, chapter}: what a summary of that chapter costs, before it is asked for
+            try:
+                return self.send_json({"ok": True, **books.summary_estimate(str(b.get("file") or ""), b.get("chapter"))})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            except ImportError:
+                return self.send_json({"error": "The AI backend isn’t installed on this server yet."}, 501)
+        if path == "/api/ai/chapter":       # {file, chapter, fresh?, override?}: write (or return the saved) summary of one chapter; streams status | text | final | done | error
+            row_ = next((r for r in pl.library() if r["file"] == b.get("file")), {})
+            ov = b.get("override") if isinstance(b.get("override"), dict) else None
+            return self.stream_ndjson(books.summary_stream(str(b.get("file") or ""), b.get("chapter"), row_.get("title") or "", bool(b.get("fresh")), ov),
+                                      job=self.job_of("summary", "Chapter summary · " + (row_.get("title") or "a book")[:50], file=b.get("file"), tab="sum"))
         if path == "/api/book":             # {file, offset}: where printed page 1 is in a PDF book (the file page minus the offset is the printed page)
             try:
                 info = books.set_offset(str(b.get("file") or ""), b.get("offset"))
@@ -1384,7 +1396,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "a paper and a question are required"}, 400)
                 ov = b.get("override") if isinstance(b.get("override"), dict) else None
                 hist = [{"q": str(h.get("q", ""))[:3000], "a": str(h.get("a", ""))[:6000]} for h in (b.get("history") or [])[-4:] if isinstance(h, dict)]
-                return self.stream_ndjson(ask.stream(pdf, q[:6000], "full" if b.get("mode") == "full" else "rag", hist, ov, bool(b.get("fresh"))),
+                pg = b.get("pages") if isinstance(b.get("pages"), dict) else None          # {from, to}: the answer comes from one chapter of a book only
+                if pg:
+                    try:
+                        pg = (int(pg["from"]), int(pg["to"]))
+                    except (KeyError, TypeError, ValueError):
+                        return self.send_json({"error": "bad chapter range"}, 400)
+                    if pg[0] < 1 or pg[1] < pg[0]:
+                        return self.send_json({"error": "bad chapter range"}, 400)
+                return self.stream_ndjson(ask.stream(pdf, q[:6000], "full" if b.get("mode") == "full" else "rag", hist, ov, bool(b.get("fresh")), pg),
                                        job=self.job_of("ask", "Ask · " + q[:60], file=b["file"], tab="ask"))
             if path == "/api/ai/card":      # {file, fresh?}: write (or return) the paper's card; streams status / progress / card / done
                 pdf = ns.pdf_path(b.get("file"))

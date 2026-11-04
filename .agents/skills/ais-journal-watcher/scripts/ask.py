@@ -38,16 +38,19 @@ def quote_of(text, n=130):
     return text if len(text) <= n else text[:n].rsplit(" ", 1)[0]
 
 
-def pick(pdf_path, question, mode, k=12, progress=None):
+def pick(pdf_path, question, mode, k=12, progress=None, pages=None):
+    """pages: (first, last) file pages, both included: read only that part (one chapter of a book)."""
     blocks = [b for b in bl.extract(pdf_path) if b.get("kind", "body") != "ref"]
+    if pages:
+        blocks = [b for b in blocks if pages[0] - 1 <= b["page"] <= pages[1] - 1]
     if mode == "full" and sum(len(b["text"]) for b in blocks) <= FULL_LIMIT:
         return blocks
     if not embed.is_indexed(pdf_path):
         embed.index_paper(pdf_path, progress)
-    top = embed.search(pdf_path, question, k=k if mode != "full" else 40)
+    top = embed.search(pdf_path, question, k=k if mode != "full" else 40, pages=pages)
     # broad questions ("main contribution?") are best answered by the abstract, which rarely matches them by wording: always include it
     lead = max((b for b in blocks if b["page"] == 0 and b.get("kind", "body") == "body"), key=lambda b: len(b["text"]), default=None)
-    if lead and len(lead["text"]) > 500 and all(lead["idx"] != t["idx"] for t in top):
+    if lead and not pages and len(lead["text"]) > 500 and all(lead["idx"] != t["idx"] for t in top):
         top.append(lead)
     return sorted(top, key=lambda b: b["idx"])   # document order reads better
 
@@ -100,21 +103,23 @@ def suggest(pdf_path, last_q=None, last_a=None):
         return []
 
 
-def stream(pdf_path, question, mode="rag", history=None, override=None, fresh=False):
-    """history = [{"q", "a"}, …] earlier turns of this conversation (last four are used), so follow-ups make sense."""
+def stream(pdf_path, question, mode="rag", history=None, override=None, fresh=False, pages=None):
+    """history = [{"q", "a"}, …] earlier turns of this conversation (last four are used), so follow-ups make sense. pages = (first, last) file pages: the answer comes from that chapter only."""
     try:
         yield {"type": "status", "msg": "Reading the paper…"}
         marks = []
         history = [h for h in (history or []) if h.get("q") and h.get("a")][-4:]
         # a short follow-up ("and why?") is retrieved together with the previous question
         rq = question if not history or len(question.split()) > 8 else history[-1]["q"] + " " + question
-        chosen = pick(pdf_path, rq, mode, progress=lambda d, t: marks.append((d, t)))
+        chosen = pick(pdf_path, rq, mode, progress=lambda d, t: marks.append((d, t)), pages=pages)
         if marks:
             yield {"type": "status", "msg": "Indexed %d passages (first time only)." % marks[-1][1]}
         if not chosen:
-            yield {"type": "error", "error": "No text could be read from this PDF (a scanned image?)."}
+            yield {"type": "error", "error": "No text could be read from %s (a scanned image?)." % ("this chapter" if pages else "this PDF")}
             return
-        passages = [{"n": i + 1, "page": b["page"] + 1, "quote": quote_of(b["text"])} for i, b in enumerate(chosen)]
+        import books
+        info = books.info_at(pdf_path)                 # a book's passages say where they are in words you could cite (chapter and printed page, or location)
+        passages = [{"n": i + 1, "page": b["page"] + 1, "quote": quote_of(b["text"]), **({"where": books.label(info, b["page"] + 1)} if info else {})} for i, b in enumerate(chosen)]
         yield {"type": "passages", "passages": passages}
         body = "\n\n".join("[%d] (p. %d) %s" % (i + 1, b["page"] + 1, b["text"]) for i, b in enumerate(chosen))
         messages = []
