@@ -10,15 +10,17 @@ import {wire as wireOut} from "./output.js";
 import {turnHtml as askTurn, actionButtons, compareButtons} from "./askview.js";
 
 let panel, log, input, busy = false, ctxText = "", CFG = null;
-let turns = [];            // [{q, text, passages, model, cost, cached, invalid, done, error, alt?, follow?}]
+let turns = [];            // [{q, text, passages, model, cost, cached, invalid, done, error, alt?, follow?, chap?, pages?}]
+let chapters = [], chap = -1;          // a book's chapters, and the one the questions are limited to (-1: the whole book)
+const curPages = () => chap >= 0 && chapters[chap] ? {from: chapters[chap].start, to: chapters[chap].end, title: chapters[chap].title} : null;
 const STARTERS = ["What is the main contribution of this paper?", "What theory, method and sample does it use?",
   "List the hypotheses or propositions and whether they were supported.", "What are the limitations and the suggested future research?"];
 const saveChat = debounce(() => fetch("/api/doc/chat", {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-  body: JSON.stringify({file: S.file, turns: turns.filter(t => t.done || t.text).map(({q, text, passages, model, cost, cached, invalid, follow, alt}) => ({q, text, passages, model, cost, cached, invalid, follow, alt, done: true}))})}).catch(() => {}), 600);
+  body: JSON.stringify({file: S.file, turns: turns.filter(t => t.done || t.text).map(({q, text, passages, model, cost, cached, invalid, follow, alt, pages}) => ({q, text, passages, model, cost, cached, invalid, follow, alt, pages, done: true}))})}).catch(() => {}), 600);
 
 export function mount(el) {
   panel = el; S.fn.askAbout = askAbout;
-  el.innerHTML = `<div class="rd-sub"><span id="ask-model" style="flex:1;color:var(--ink-3)"></span>
+  el.innerHTML = `<div class="rd-sub"><span id="ask-model" style="flex:1;color:var(--ink-3)"></span><span id="ask-chap"></span>
       <select id="ask-mode" title="What the model reads"><option value="rag">Relevant passages</option><option value="full">Whole paper</option></select>
       <button class="rd-btn" data-k="clear" title="Start a new conversation">🗑</button><button class="rd-btn" data-k="cfg" title="AI provider and model (Settings)">⚙</button></div>
     <div class="ask-log" id="ask-log"></div>
@@ -35,12 +37,23 @@ export function mount(el) {
   input.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } });
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(140, input.scrollHeight) + "px"; });
   wireCites(el, b => { const t = turns[+b.closest(".ask-turn")?.dataset.i]; return t && (b.closest(".ask-alt") && t.alt ? t.alt.passages : t.passages); });
-  on("paper:opened", async () => { turns = []; ctxText = ""; draw(); status(); try { turns = (await api("/api/doc/chat?file=" + encodeURIComponent(S.file))).turns || []; draw(); } catch (e) { /* no saved chat */ } });
+  on("paper:opened", async () => { loadBook(); turns = []; ctxText = ""; draw(); status(); try { turns = (await api("/api/doc/chat?file=" + encodeURIComponent(S.file))).turns || []; draw(); } catch (e) { /* no saved chat */ } });
   on("reader:closed", () => { turns = []; });
   window.addEventListener("jw-settings-changed", () => status());
   draw();
 }
 
+// a book (not a paper) has chapters: the questions can be limited to one, so the model reads only that part
+async function loadBook() {
+  chapters = []; chap = -1; const slot = $("#ask-chap", panel); if (slot) slot.innerHTML = "";
+  let b; try { b = await api("/api/book?file=" + encodeURIComponent(S.file)); } catch (e) { return; }              // 404: it is a paper
+  chapters = b.chapters || []; if (!chapters.length || !slot) return;
+  slot.innerHTML = `<select id="ask-chapsel" aria-label="What the model reads" title="Read the whole book, or only one chapter of it"><option value="-1">Whole book</option>${chapters.map(c => `<option value="${c.i}">${"– ".repeat(c.level - 1)}${esc(c.title)}</option>`).join("")}</select>`;
+  const sel = $("#ask-chapsel", slot);
+  sel.onchange = () => { chap = +sel.value; };
+  const want = window.__askChapter && window.__askChapter.file === S.file ? window.__askChapter.i : -1; window.__askChapter = null;      // "Ask about it" in the Library's chapter list
+  if (want >= 0 && chapters[want]) { chap = want; sel.value = String(want); }
+}
 const submit = () => { const q = input.value.trim(); if (q) { input.value = ""; input.style.height = "auto"; ask(q); } };
 export function askAbout(text) { ctxText = text; draw(); input.value = ""; input.focus(); }
 function clearChat() {
@@ -61,7 +74,7 @@ function draw() {
 }
 function turnHtml(t, i) {
   const sources = t.passages && t.passages.length ? {count: t.passages.length, note: "", html: `<ol class="ask-src" style="margin:0;padding-left:20px">${t.passages.map(p =>
-    `<li value="${p.n}"><button class="cite" data-n="${p.n}">${p.n}</button> p. ${p.page} — ${esc(p.quote.slice(0, 140))}…</li>`).join("")}</ol>`} : null;
+    `<li value="${p.n}"><button class="cite" data-n="${p.n}">${p.n}</button> ${esc(p.where || "p. " + p.page)} — ${esc(p.quote.slice(0, 140))}…</li>`).join("")}</ol>`, ...(t.pages ? {note: ` Only “${t.pages.title}” was read for this answer.`} : {})} : null;
   return askTurn(t, i, {key: "ask:" + S.file, sources, actions: t.done ? actionButtons(compareButtons()) : ""});
 }
 
@@ -69,7 +82,7 @@ function turnHtml(t, i) {
 const histBefore = i => turns.slice(0, i).filter(x => x.done && !x.error && x.text).slice(-4).map(x => ({q: x.q, a: x.text}));
 async function run(q, extra, onMsg) {
   const r = await fetch("/api/ai/ask", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({file: S.file, question: q, mode: $("#ask-mode", panel).value, history: extra.history, override: extra.override, fresh: extra.fresh})});
+    body: JSON.stringify({file: S.file, question: q, mode: $("#ask-mode", panel).value, history: extra.history, override: extra.override, fresh: extra.fresh, pages: extra.pages ? {from: extra.pages.from, to: extra.pages.to} : undefined})});
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(r.status === 404 || r.status === 501 ? "The AI backend isn’t installed on this server yet." : (j.error || r.statusText)); }
   const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
   for (;;) {
@@ -88,18 +101,19 @@ const redraw = i => { const el = log.querySelector(`.ask-turn[data-i="${i}"]`); 
 export async function ask(q, opts = {}) {
   if (busy) return toast("Still answering the last question.");
   busy = true; const full = ctxText ? `${q}\n\nPassage from the paper: “${ctxText}”` : q; ctxText = "";
-  const t = {q, text: "", passages: [], status: "Reading the paper…", done: false};
+  const prev = opts.replace != null ? turns[opts.replace] : null, pages = prev ? prev.pages : curPages();         // asking again keeps the chapter the first answer was limited to
+  const t = {q, text: "", passages: [], status: "Reading the paper…", done: false, pages};
   let i = opts.replace;
   if (i == null) { turns.push(t); i = turns.length - 1; } else turns[i] = t;
   draw();
-  try { await run(full, {fresh: opts.fresh, history: histBefore(i)}, m => { apply(t, m); redraw(i); }); if (!t.error && !t.text) t.error = "The model returned no answer."; }
+  try { await run(full, {fresh: opts.fresh, history: histBefore(i), pages}, m => { apply(t, m); redraw(i); }); if (!t.error && !t.text) t.error = "The model returned no answer."; }
   catch (e) { t.error = e.message; }
   t.done = !t.error; busy = false; redraw(i); status(); if (t.done) saveChat();
 }
 async function compare(i, over) {
   const t = turns[i]; if (busy || !t) return; busy = true;
   t.alt = {text: "", passages: t.passages, status: "Asking " + over.model + "…", done: false, want: over.provider + " · " + over.model}; redraw(i);
-  try { await run(t.q, {override: over, history: histBefore(i)}, m => { apply(t.alt, m); redraw(i); }); if (!t.alt.error && !t.alt.text) t.alt.error = "No answer."; } catch (e) { t.alt.error = e.message; }
+  try { await run(t.q, {override: over, history: histBefore(i), pages: t.pages}, m => { apply(t.alt, m); redraw(i); }); if (!t.alt.error && !t.alt.text) t.alt.error = "No answer."; } catch (e) { t.alt.error = e.message; }
   t.alt.done = !t.alt.error; busy = false; redraw(i); status(); saveChat();
 }
 async function turnAction(i, a) {

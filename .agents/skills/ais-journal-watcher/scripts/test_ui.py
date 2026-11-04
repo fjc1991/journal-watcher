@@ -78,6 +78,8 @@ class Fake(BaseHTTPRequestHandler):
             out = "FIGURE: this box shows a table of numbers."
         elif system.startswith("You write the script of a short spoken briefing"):
             out = "Here is the paper in two minutes. The authors ask how open rules change who joins a platform.\n\nThey study one hundred and twenty firms. Open rules attract more entrants. The effect is strongest for small firms.\n\nBe careful: it is one platform only. What would happen elsewhere?"
+        elif system.startswith("You summarise ONE chapter"):
+            out = "**Argument.** FAKE CHAPTER SUMMARY of %s.\n\n**Key points.**\n- A point about rules (p. 5).\n- Another point (pp. 6-7).\n" % text.split("\n")[1][:40]
         elif system.startswith("You write the RELATED WORK"):
             out = ("## Disclosure and trust\nPlatform rules shape how participants behave [P1-2, P2-3]. {P3-4} show that transparency changes entry. Governance can also backfire when rules are opaque [P2-5].\n\n"
                    "## Methods and contexts\nMost of these studies rely on observational panels from a single platform [P1-4]. Another sentence follows here that carries no citation at all, so it must be flagged.\n\n"
@@ -1728,6 +1730,41 @@ bks.crossref_books = lambda title, rows=3: []
             check("…also past the last page", "between 0 and 11" in page.inner_text(".chap-off .st-msg") and api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 0)
             page.fill("[data-chap-offv]", "5"); page.click("[data-chap-off]"); page.wait_for_function("document.querySelector('.chap-off .st-msg').textContent === 'Saved.'")
             check("'printed page 1 is file page 5' is kept (offset 4) and the page now says how printed pages relate to file pages", api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 4 and "printed page = file page − 4" in page.inner_text("#bk-list .chaplist") and page.input_value("[data-chap-offv]") == "5")
+
+            print("book chapters: ask and summary")
+            chat_calls = lambda marker: [b_ for pth_, b_ in SEEN if pth_.endswith("/chat/completions") and b_["messages"] and b_["messages"][0]["role"] == "system" and b_["messages"][0]["content"].startswith(marker)]
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
+            page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
+            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li", timeout=10000)
+            n_sum0 = len(chat_calls("You summarise ONE chapter"))
+            page.click('#bk-list [data-chap-sum="1"]'); page.wait_for_selector("#bk-list .sum-est", timeout=10000)
+            est_txt = page.inner_text("#bk-list .sum-est")
+            check("'Summarise…' shows what it would do and what it costs BEFORE anything is sent (provider and model, pages, cost), with a way to cancel", "fake · m1" in est_txt and "Cost:" in est_txt and "page" in est_txt and page.locator("[data-sum-go]").count() == 1 and page.locator("[data-sum-no]").count() == 1 and len(chat_calls("You summarise ONE chapter")) == n_sum0, est_txt)
+            page.click("[data-sum-no]"); page.wait_for_function("document.querySelector('[data-sumbox=\"1\"]').classList.contains('hide')")
+            check("cancelling asks nothing and leaves the chapter as it was", len(chat_calls("You summarise ONE chapter")) == n_sum0 and "Summarise" in page.inner_text('[data-chap-sum="1"]'))
+            page.click('#bk-list [data-chap-sum="1"]'); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_selector("#bk-list .chap-sum .pmeta:has-text('Written by')", timeout=60000)
+            sum_txt = page.inner_text('[data-sumbox="1"]')
+            check("pressing 'Write the summary' makes ONE request, shows the summary with its pages said as locations (an EPUB), who wrote it and what it cost", len(chat_calls("You summarise ONE chapter")) == n_sum0 + 1 and "FAKE CHAPTER SUMMARY" in sum_txt and "(location 5)" in sum_txt and "(location 6 – location 7)" in sum_txt and "(p. 5)" not in sum_txt and "Written by m1" in sum_txt, sum_txt[:300])
+            check("…and the button now says Summary", page.inner_text('[data-chap-sum="1"]').strip() == "Summary")
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
+            page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
+            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li"); n_sum1 = len(chat_calls("You summarise ONE chapter"))
+            check("after a reload the summary is still there (kept with the book) and is shown without asking again", page.inner_text('[data-chap-sum="1"]').strip() == "Summary" and "FAKE CHAPTER SUMMARY" in page.inner_text('[data-sumbox="1"]') and page.locator('[data-sumbox="1"].hide').count() == 0 and len(chat_calls("You summarise ONE chapter")) == n_sum1)
+            page.click('#bk-list [data-chap-sum="1"]'); page.click('#bk-list [data-chap-sum="1"]')
+            check("opening and closing it again sends nothing", len(chat_calls("You summarise ONE chapter")) == n_sum1)
+            page.click("[data-chap-redo]"); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_function("document.querySelector('[data-sumbox=\"1\"] .pmeta') && document.querySelector('[data-sumbox=\"1\"] .pmeta').textContent.includes('Written by')", timeout=60000)
+            check("'Write it again' asks again (after showing the cost again)", len(chat_calls("You summarise ONE chapter")) == n_sum1 + 1)
+            # ask about one chapter: the reader's Ask tab opens limited to it
+            page.click('#bk-list [data-chap-ask="1"]'); page.wait_for_selector(".rd-band .textLayer span", timeout=60000); page.wait_for_selector("#ask-chapsel", timeout=10000)
+            check("'Ask about it' opens the book in the reader on the Ask tab with that chapter chosen", page.eval_on_selector("#ask-chapsel", "e => e.value") == "1" and page.locator('.rd-tabs button[data-tab="ask"].on').count() == 1 and "Chapter 2" in page.inner_text("#ask-chapsel"), page.inner_text("#ask-chapsel"))
+            page.select_option("#ask-mode", "full"); page.fill("#ask-q", "What does this chapter say about rules?"); page.click('.ask-box [data-k="send"]')
+            page.wait_for_function("document.querySelector('.ask-turn') && document.querySelector('.ask-turn').innerText.includes('Sources')", timeout=60000)
+            ask_req = [b_ for pth_, b_ in SEEN if pth_.endswith("/chat/completions") and "Passages from the paper" in str(b_["messages"][-1]["content"])][-1]
+            sent_pages = sorted({int(x_) for x_ in re.findall(r"\(p\. (\d+)\)", ask_req["messages"][-1]["content"])})
+            check("the question reaches the model with only that chapter's pages", sent_pages and all(c2["start"] <= n_ <= c2["end"] for n_ in sent_pages), "pages sent %s, chapter %s-%s" % (sent_pages, c2["start"], c2["end"]))
+            turn_html = page.locator(".ask-turn").first.inner_html()
+            check("…and the answer's sources say where they are in words (chapter · location) and that only the chapter was read", "Only “Chapter 2” was read" in turn_html and "Chapter 2 · location " in turn_html, turn_html[-400:])
+            page.click('.rd-bar [data-a="back"]'); page.wait_for_selector("#bk-add")
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")

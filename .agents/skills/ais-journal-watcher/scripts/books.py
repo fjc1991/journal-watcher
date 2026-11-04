@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import threading
 import urllib.parse
 import zipfile
 from datetime import datetime
@@ -26,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import fetch_new as fx  # noqa: E402
 import identity  # noqa: E402
+import blocks as bl  # noqa: E402
 import importer  # noqa: E402
 import notes_store as ns  # noqa: E402
 
@@ -273,24 +275,43 @@ def chapters(info):
     return out
 
 
+def place(info, page):
+    """Where a page is, without the chapter: 'p. 48', 'file page 57', 'front matter (file page 5)' or, for an EPUB (no printed pages), 'location 57'."""
+    page = int(page)
+    if info.get("source") == "epub":
+        return "location %d" % page
+    off = int(info.get("offset") or 0)
+    return "file page %d" % page if not off else "p. %d" % (page - off) if page > off else "front matter (file page %d)" % page
+
+
+def info_at(pdf):
+    """A book's .book.json for the absolute path of its PDF ({} for anything that is not a book)."""
+    return dl.load_json(pdf[:-4] + ".book.json", {}) if isinstance(pdf, str) and pdf.lower().endswith(".pdf") else {}
+
+
 def label(info, page):
     """Where a page is, in words you could cite: 'Chapter 3 · p. 48' (a PDF book, with the printed-page offset you set), 'Chapter 3 · file page 57' (a PDF book with no offset yet) or
     'Chapter 3 · location 57' (an EPUB has no printed pages: the number is the place in the reading copy, which is all it can honestly be)."""
     page = int(page)
     inside = [c for c in chapters(info) if c["start"] <= page <= c["end"]]
     ch = max(inside, key=lambda c: (c["start"], c["level"], c["i"])) if inside else None            # the innermost entry that holds the page
-    if info.get("source") == "epub":
-        where = "location %d" % page
-    else:
-        off = int(info.get("offset") or 0)
-        where = "file page %d" % page if not off else "p. %d" % (page - off) if page > off else "front matter (file page %d)" % page
-    return (ch["title"] + " · " if ch else "") + where
+    return (ch["title"] + " · " if ch else "") + place(info, page)
 
 
 def info_of(rel):
     """A book's .book.json ({} when it has none), for a path under Papers/."""
     pdf = ns.pdf_path(rel)
     return dl.load_json(pdf[:-4] + ".book.json", {}) if pdf else {}
+
+
+_BOOKLOCK = threading.Lock()
+
+
+def _write_info(pdf, info):
+    tmp = pdf[:-4] + ".book.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, pdf[:-4] + ".book.json")
 
 
 def set_offset(rel, offset):
@@ -307,12 +328,126 @@ def set_offset(rel, offset):
         raise ValueError("The offset is a whole number of pages (0 if the file starts at printed page 1).")
     if not 0 <= off < max(1, int(info.get("pages") or 1)):
         raise ValueError("The offset must be between 0 and %d." % max(0, int(info.get("pages") or 1) - 1))
-    info["offset"] = off
-    tmp = pdf[:-4] + ".book.json.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(info, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, pdf[:-4] + ".book.json")
+    with _BOOKLOCK:
+        info = dl.load_json(pdf[:-4] + ".book.json", {})            # (read again under the lock: a summary may have been saved meanwhile)
+        info["offset"] = off
+        _write_info(pdf, info)
     return info
+
+
+
+# ---------------------------------------------------------------- a summary of one chapter, on request, after you have seen what it costs
+SUMMARY_SYSTEM = """You summarise ONE chapter of an academic book for a researcher who has not read it. You are given the chapter's text, with page markers like [57] where a page begins.
+Write Markdown, concise, no preamble, about 350 words at most, in exactly this shape:
+**Argument.** Two or three sentences: what the chapter argues and why it matters.
+**Key points.** Four to seven bullets: claims, concepts, definitions. Each ends with the page it comes from, written (p. 57) with a number from the page markers.
+**Evidence and method.** One to three sentences: what it rests on (cases, data, theory). Say so if the text gives none.
+**Limits.** One sentence: what the chapter leaves open, or what to check in the book itself.
+Use only the text you are given; never add facts from elsewhere. If a note says part of the chapter was left out, say so in one short line before **Argument.**"""
+SUMMARY_MAX_CHARS = 150_000            # about 37,000 tokens: a longer chapter is read from its start and its end, and the estimate says so
+SUMMARY_OUT_TOKENS = 600
+
+
+def chapter_key(c):
+    return "%d-%d" % (c["start"], c["end"])
+
+
+def chapter_text(pdf, c):
+    """(text, characters, left_out) of one chapter for a summary: its body paragraphs with [page] markers. Over SUMMARY_MAX_CHARS the first 60 % and the last 40 % of the allowance are kept
+    and a note says what was left out."""
+    bs = [b for b in bl.extract(pdf) if b.get("kind", "body") == "body" and c["start"] - 1 <= b["page"] <= c["end"] - 1]
+    parts, last = [], None
+    for b in bs:
+        mark = "[%d] " % (b["page"] + 1) if b["page"] != last else ""
+        last = b["page"]
+        parts.append(mark + b["text"])
+    total = sum(len(x) for x in parts)
+    if total <= SUMMARY_MAX_CHARS:
+        return "\n\n".join(parts), total, False
+    head, tail, used = [], [], 0
+    for x in parts:
+        if used + len(x) > SUMMARY_MAX_CHARS * 0.6:
+            break
+        head.append(x); used += len(x)
+    used2 = 0
+    for x in reversed(parts[len(head):]):
+        if used2 + len(x) > SUMMARY_MAX_CHARS * 0.4:
+            break
+        tail.insert(0, x); used2 += len(x)
+    return "\n\n".join(head + ["[Note: the middle of this chapter, about %d%% of it, is left out here because it is long.]" % round(100 * (total - used - used2) / total)] + tail), used + used2, True
+
+
+def _chapter(rel, i):
+    pdf = ns.pdf_path(rel)
+    info = info_at(pdf) if pdf else {}
+    if not info:
+        raise ValueError("That is not a book in your library.")
+    chs = chapters(info)
+    try:
+        n = int(i)
+        if isinstance(i, bool) or not 0 <= n < len(chs):          # (not -1: that would be the last chapter)
+            raise IndexError(n)
+        c = chs[n]
+    except (TypeError, ValueError, IndexError):
+        raise ValueError("That chapter does not exist.")
+    return pdf, info, c
+
+
+def summary_estimate(rel, i):
+    """What a summary of chapter i costs, before anyone asks for it: {"chars", "pages", "cost" (None when the model has no price in ai.json), "provider", "model", "left_out", "saved"}."""
+    import ai
+    pdf, info, c = _chapter(rel, i)
+    text, used, left_out = chapter_text(pdf, c)
+    chars = used + len(SUMMARY_SYSTEM) + 300
+    provider, model = ai.feature_model("summarize")
+    return {"chars": chars, "pages": c["end"] - c["start"] + 1, "cost": ai.estimate("summarize", chars, SUMMARY_OUT_TOKENS), "provider": provider, "model": model, "left_out": left_out,
+            "saved": bool((info.get("summaries") or {}).get(chapter_key(c)))}
+
+
+def _relabel(text, info):
+    """The model cites file pages, (p. 57): say them the way the rest of the app does ('p. 48' with your offset, 'location 57' for an EPUB)."""
+    def one(m):
+        a, b = int(m.group(1)), m.group(2)
+        return "(" + place(info, a) + ((" – " + place(info, int(b))) if b else "") + ")"
+    return re.sub(r"\(pp?\.\s*(\d+)(?:\s*[–-]\s*(\d+))?\)", one, text)
+
+
+def summary_stream(rel, i, title="", fresh=False, override=None):
+    """Write (or return the saved) summary of chapter i. Yields {"type": "status"|"text"|"final"|"done"|"error"}; "final" carries the text with its pages said the way the rest of the app says
+    them. It goes through the budgeted AI layer like every other call, so the monthly limit, the ledger and the tray apply."""
+    import ai
+    try:
+        pdf, info, c = _chapter(rel, i)
+        key = chapter_key(c)
+        saved = (info.get("summaries") or {}).get(key)
+        if saved and not fresh:
+            yield {"type": "text", "delta": saved["text"]}
+            yield {"type": "final", "text": saved["text"]}
+            yield {"type": "done", "provider": saved.get("provider", ""), "model": saved.get("model", ""), "cost": 0.0, "cached": True, "saved": True}
+            return
+        yield {"type": "status", "msg": "Reading the chapter…"}
+        text, used, left_out = chapter_text(pdf, c)
+        if not text.strip():
+            yield {"type": "error", "error": "No text could be read from this chapter (a scanned image?)."}
+            return
+        messages = [{"role": "user", "content": "Book: %s\nChapter: %s (pages %d–%d of the file)\n\nText of the chapter:\n\n%s" % (title or "a book", c["title"], c["start"], c["end"], text)}]
+        yield {"type": "status", "msg": "Writing the summary…"}
+        for kind, v in ai.stream("summarize", messages, system=SUMMARY_SYSTEM, max_tokens=1200, cache=True, fresh=fresh, override=override):
+            if kind == "text":
+                yield {"type": "text", "delta": v}
+            else:
+                final = _relabel(v.text, info)
+                with _BOOKLOCK:
+                    cur = info_at(pdf)
+                    cur.setdefault("summaries", {})[key] = {"title": c["title"], "start": c["start"], "end": c["end"], "text": final, "provider": v.provider, "model": v.model,
+                                                            "cost": v.cost, "left_out": left_out, "at": datetime.now().isoformat(timespec="seconds")}
+                    _write_info(pdf, cur)
+                yield {"type": "final", "text": final}
+                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "saved": True, "left_out": left_out}
+    except ValueError as e:
+        yield {"type": "error", "error": str(e)}
+    except ai.AIError as e:
+        yield {"type": "error", "error": str(e)}
 
 
 def _existing_book(isbn, title, doi=""):

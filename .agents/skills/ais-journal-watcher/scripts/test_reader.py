@@ -355,6 +355,99 @@ def main():
         write_cfg(CFG)
     check("ask reports a missing key as an error message", t_ask_err)
 
+    def t_chapter_ai():
+        """Asking about one chapter reads only its pages; a book's passages say where they are; a chapter summary costs nothing to look up, is asked for after the estimate, goes through the budgeted
+        layer, says its pages the way the app says them, and is kept."""
+        import books as bk
+        # --- retrieval and Ask limited to file pages (the fixture has 4 pages with the same four paragraphs on each)
+        top = embed.search(pdf, "How many firms are in the sample?", k=20, pages=(2, 3))
+        assert top and {b["page"] for b in top} <= {1, 2} and {b["page"] for b in embed.search(pdf, "How many firms are in the sample?", k=40)} == {0, 1, 2, 3}, "only pages 2 and 3 can be found"
+        full = list(ask.stream(pdf, "Summarise.", "full", pages=(2, 3)))
+        ps = next(m for m in full if m["type"] == "passages")["passages"]
+        sent = SEEN[-1][1]["messages"][-1]["content"]
+        assert {p["page"] for p in ps} == {2, 3} and full[-1]["type"] == "done" and "(p. 2)" in sent and "(p. 1)" not in sent and "(p. 4)" not in sent, ({p["page"] for p in ps}, sent[:200])
+        rag = next(m for m in ask.stream(pdf, "How many firms are in the sample?", "rag", pages=(4, 4)) if m["type"] == "passages")["passages"]
+        assert rag and all(p["page"] == 4 for p in rag), "the closest passages, from page 4 only"
+        err = list(ask.stream(pdf, "q", "full", pages=(40, 41)))[-1]
+        assert err["type"] == "error" and "this chapter" in err["error"], err
+        assert all("where" not in p for p in ps), "a paper's passages have no 'where'"
+        # --- a book's passages say where they are
+        bpdf = os.path.join(d, "b.pdf"); shutil.copy(pdf, bpdf); brel = rel.replace("x.pdf", "b.pdf")
+        json.dump({"source": "pdf", "pages": 4, "offset": 1, "toc": [[1, "Intro", 1], [1, "Methods", 3]]}, open(bpdf[:-4] + ".book.json", "w"))
+        bps = next(m for m in ask.stream(bpdf, "Summarise.", "full", pages=(3, 4)) if m["type"] == "passages")["passages"]
+        assert {p["where"] for p in bps} == {"Methods · p. 2", "Methods · p. 3"}, {p["where"] for p in bps}
+        saved_cfg, had = dict(CFG), hasattr(Fake, "pieces")
+        write_cfg(dict(CFG, features={"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}))
+        old_pieces = getattr(Fake, "pieces", None)
+        try:
+            # --- the estimate is free: no request is made
+            n0 = len(SEEN)
+            est = bk.summary_estimate(brel, 1)
+            assert len(SEEN) == n0 and est["pages"] == 2 and est["provider"] == "fake" and est["model"] == "m1" and est["cost"] and est["cost"] > 0 and est["left_out"] is False and est["saved"] is False, est
+            for bad in (9, -1, "x", None):
+                try:
+                    bk.summary_estimate(brel, bad); raise AssertionError("chapter %r accepted" % (bad,))
+                except ValueError as ex:
+                    assert "does not exist" in str(ex)
+            try:
+                bk.summary_estimate(rel, 0); raise AssertionError("a paper is not a book")
+            except ValueError as ex:
+                assert "not a book" in str(ex)
+            # --- asking for it: one request through the budgeted layer, the model's file pages said the way the app says them, the result kept
+            Fake.pieces = ["**Argument.** It argues something. ", "**Key points.**\n- A claim (p. 3).\n- Another (pp. 3-4).\n"]
+            msgs = list(bk.summary_stream(brel, 1, "A Test Book"))
+            kinds = [m["type"] for m in msgs]
+            assert kinds[0] == "status" and "text" in kinds and kinds[-2:] == ["final", "done"], kinds
+            final = next(m for m in msgs if m["type"] == "final")["text"]
+            assert "(p. 2)" in final and "(p. 2 – p. 3)" in final and "(p. 3)" not in final, final        # (offset 1: file page 3 is printed page 2)
+            req = SEEN[-1][1]
+            body = req["messages"][-1]["content"]
+            assert len(SEEN) == n0 + 1 and "Book: A Test Book" in body and "Chapter: Methods (pages 3–4 of the file)" in body and "[3] " in body and "[4] " in body and "[1] " not in body, body[:300]
+            assert "ONE chapter" in req["messages"][0]["content"] if req["messages"][0]["role"] == "system" else True
+            assert msgs[-1]["saved"] is True and msgs[-1]["cached"] is False and msgs[-1]["model"] == "m1"
+            kept = bk.info_at(bpdf)["summaries"]["3-4"]
+            assert kept["text"] == final and kept["title"] == "Methods" and kept["model"] == "m1" and kept["left_out"] is False, kept
+            assert next(c for c in json.loads(json.dumps(bk.chapters(bk.info_at(bpdf)))) if c["i"] == 1)["start"] == 3
+            assert bk.summary_estimate(brel, 1)["saved"] is True
+            # --- asking again returns the saved one without a request; "fresh" asks again
+            n1 = len(SEEN)
+            again = list(bk.summary_stream(brel, 1, "A Test Book"))
+            assert len(SEEN) == n1 and again[-1]["cached"] is True and again[-1]["cost"] == 0.0 and next(m for m in again if m["type"] == "final")["text"] == final
+            ai.cache_clear()                                     # (the saved summary is the book's own: clearing the AI's answer cache in Settings does not make it cost again)
+            again2 = list(bk.summary_stream(brel, 1, "A Test Book"))
+            assert len(SEEN) == n1 and again2[-1]["cached"] is True and next(m for m in again2 if m["type"] == "final")["text"] == final
+            list(bk.summary_stream(brel, 1, "A Test Book", fresh=True))
+            assert len(SEEN) == n1 + 1, "a fresh summary really asks"
+            # --- the offset can still be changed afterwards, and the summary stays
+            bk.set_offset(brel, 2)
+            ki = bk.info_at(bpdf)
+            assert ki["offset"] == 2 and ki["summaries"]["3-4"]["text"], ki
+            # --- a long chapter: the middle is left out, said in the estimate, in the prompt and in the record
+            old_max = bk.SUMMARY_MAX_CHARS
+            bk.SUMMARY_MAX_CHARS = 300
+            try:
+                est2 = bk.summary_estimate(brel, 0)
+                assert est2["left_out"] is True and est2["chars"] < 300 + len(bk.SUMMARY_SYSTEM) + 400, est2
+                list(bk.summary_stream(brel, 0, "A Test Book"))
+                assert "[Note: the middle of this chapter" in SEEN[-1][1]["messages"][-1]["content"] and bk.info_at(bpdf)["summaries"]["1-3"]["left_out"] is True
+            finally:
+                bk.SUMMARY_MAX_CHARS = old_max
+            # --- errors are messages, not crashes
+            assert list(bk.summary_stream(brel, 9))[-1] == {"type": "error", "error": "That chapter does not exist."}
+            assert "not a book" in list(bk.summary_stream(rel, 0))[-1]["error"]
+        finally:
+            write_cfg(saved_cfg)
+            if had:
+                Fake.pieces = old_pieces
+            elif hasattr(Fake, "pieces"):
+                del Fake.pieces
+            for ext in (".pdf", ".book.json"):
+                try:
+                    os.remove(bpdf[:-4] + ext)
+                except OSError:
+                    pass
+    check("books: Ask can be limited to one chapter (only its pages; a book's passages say where they are), and a chapter summary is estimated for free, asked for through the budgeted layer, worded with your pages, kept, and not asked twice", t_chapter_ai)
+
 
     print("library: folders, status, search, import, exports")
     import exports
