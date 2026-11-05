@@ -373,6 +373,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
           <input type="search" id="q" placeholder="Filter by title or author…">
         </div>
         <div class="papers" id="papers" style="margin-top:14px"></div>
+        <div class="papersmore hide" id="papersmore"><button class="btn" id="moremore" type="button">Show more</button></div>
       </div>
     </div>
 
@@ -919,18 +920,19 @@ function renderMeta() {
   ysel.innerHTML = `<option value="">All years</option>` + years.map(y => `<option${y === cur ? " selected" : ""}>${y}</option>`).join("");
 }
 const special = j => j === "~borderline" || j === "~queue";
-function visible(p) {
+const filters = () => ({jsel: $("#jsel").value, t: $("#tfilter").value, q: $("#q").value.trim().toLowerCase(), y: $("#yfilter").value});   // (read once per list, not once per paper)
+function visible(p, f = filters()) {
   const v = p.verdict;
   if (special(NAV.j)) {
     if (NAV.j === "~borderline" && v !== "borderline") return false;
     if (NAV.j === "~queue" && v !== "download") return false;
-    if ($("#jsel").value && p.abbr !== $("#jsel").value) return false;
+    if (f.jsel && p.abbr !== f.jsel) return false;
   } else {
     if (FILTER === "relevant" && !(v === "download" || v === "borderline" || !v || v === "error")) return false;
     if (["download", "borderline", "skip"].includes(FILTER) && v !== FILTER) return false;
     if (NAV.j && NAV.j !== "*" && p.abbr !== NAV.j) return false;
   }
-  const t = $("#tfilter").value, q = $("#q").value.trim().toLowerCase(), y = $("#yfilter").value;
+  const {t, q, y} = f;
   if (y && (p.pub_date || "").slice(0, 4) !== y) return false;
   if (t && !(p.topics || []).includes(t)) return false;
   if (q && !((p.title || "") + " " + authorsText(p.authors)).toLowerCase().includes(q)) return false;
@@ -941,7 +943,7 @@ const FITS = new Map(), FITS_TRIED = new Set();
 const fitChip = p => { const f = FITS.get(p.id); return f ? `<span class="tag fit ${f.band}" title="How close it is to the papers you read, starred or marked up (compared with the others in this list)">fit: ${f.band}</span>` : ""; };
 async function ensureFits(ps) {
   const todo = ps.filter(p => !FITS_TRIED.has(p.id) && p.title).slice(0, 400); if (!todo.length) return; todo.forEach(p => FITS_TRIED.add(p.id));
-  try { const r = await api("/api/personal/fit", {items: todo.map(p => ({id: p.id, title: p.title, abstract: p.abstract || "", topics: p.topics || []}))}); const f = r.fits || {}; if (!Object.keys(f).length) return; Object.entries(f).forEach(([k, v]) => FITS.set(k, v)); if (NAV.view === "run" && NAV.j !== null) renderList(true); }
+  try { const r = await api("/api/personal/fit", {items: todo.map(p => ({id: p.id, title: p.title, abstract: p.abstract || "", topics: p.topics || []}))}); const f = r.fits || {}; if (!Object.keys(f).length) return; Object.entries(f).forEach(([k, v]) => FITS.set(k, v)); if (NAV.view === "run" && NAV.j !== null) renderList({keep: true, noFits: true}); }
   catch (e) { /* a courtesy: the list works without it */ }
 }
 function sorted() {
@@ -1029,18 +1031,58 @@ function card(p) {
   if (!visible(p)) el.classList.add("hide");
   return el;
 }
-function renderList(again) {
-  const box = $("#papers"); box.innerHTML = "";
-  const ps = sorted();
-  ps.forEach(p => box.append(card(p)));
-  if (!again) ensureFits(ps.filter(p => visible(p) && (p.verdict === "borderline" || p.verdict === "download" || !p.verdict)));
-  if (!ps.filter(visible).length) box.innerHTML = `<div class="card empty"><h2>${ps.length ? "Nothing matches these filters" : (BUSY ? "Looking for papers…" : "No papers in this run")}</h2>${ps.length ? "Try “All” to see skipped papers." : ""}</div>`;
+// The list draws the papers that match, LIST_STEP at a time (a run can have 1000 or more): more come as you scroll near the end, or with "Show more".
+// {keep}: a redraw in place (a verdict, Select all, new fit scores) keeps how many are drawn; otherwise (a filter, a search, another view) it starts again.
+const LIST_STEP = 60; let SHOWN = LIST_STEP, VIS = [];
+const drawnCards = () => $("#papers").querySelectorAll(":scope > .paper").length;
+function renderList(o) {
+  if (!o || o instanceof Event) o = {};
+  const box = $("#papers"), f = filters();
+  VIS = sorted().filter(p => visible(p, f));
+  if (!o.keep) {
+    SHOWN = LIST_STEP;
+    const top = $("#listview").getBoundingClientRect().top;
+    if (top < 0) window.scrollTo({top: window.scrollY + top - 10});     // (back to the list's start, so a short new list does not leave you below it)
+  }
+  box.innerHTML = "";
+  VIS.slice(0, SHOWN).forEach(p => box.append(card(p)));
+  if (!o.noFits) ensureFits(VIS.filter(p => p.verdict === "borderline" || p.verdict === "download" || !p.verdict));
+  if (!VIS.length) box.innerHTML = `<div class="card empty"><h2>${order.length ? "Nothing matches these filters" : (BUSY ? "Looking for papers…" : "No papers in this run")}</h2>${order.length ? "Try “All” to see skipped papers." : ""}</div>`;
+  drawMore();
 }
+function drawMore() {
+  const left = Math.max(0, VIS.length - drawnCards());
+  $("#papersmore").classList.toggle("hide", !left);
+  $("#moremore").textContent = `Show ${Math.min(LIST_STEP, left)} more (${left} left)`;
+}
+function showMore() {
+  const box = $("#papers"), n = drawnCards();
+  if (n >= VIS.length) return;
+  SHOWN = n + LIST_STEP;
+  VIS.slice(n, SHOWN).forEach(p => box.append(card(p)));
+  drawMore();
+}
+$("#moremore").onclick = showMore;
+if ("IntersectionObserver" in window)
+  new IntersectionObserver(es => { if (es.some(e => e.isIntersecting) && !$("#papersmore").classList.contains("hide")) showMore(); }, {rootMargin: "800px 0px"}).observe($("#papersmore"));
 function updateCard(id) {
-  const p = papers.get(id), old = document.querySelector(`.paper[data-id="${CSS.escape(id)}"]`);
-  if (old) old.replaceWith(card(p));
+  const p = papers.get(id), old = $("#papers").querySelector(`.paper[data-id="${CSS.escape(id)}"]`);
+  if (!old) return;
+  if (visible(p)) old.replaceWith(card(p));
+  else { old.remove(); VIS = VIS.filter(x => x.id !== id); drawMore(); }    // (it no longer matches the filter: not kept as a hidden card)
 }
-let rT = null; function scheduleList() { clearTimeout(rT); rT = setTimeout(() => { if (NAV.view === "run" && NAV.j !== null) renderList(); }, 600); }
+function addPaper(p) {        // a paper found during a run: drawn only while the first batch is not full
+  if (papers.has(p.id)) return;
+  papers.set(p.id, p); order.push(p.id);
+  if (NAV.view === "run" && NAV.j !== null && visible(p)) {
+    const box = $("#papers"); const em = box.querySelector(".empty"); if (em) em.remove();
+    VIS.push(p);
+    if (drawnCards() < SHOWN) box.append(card(p));
+    drawMore();
+  }
+  metaSoon(); renderTilesSoon();
+}
+let rT = null; function scheduleList() { clearTimeout(rT); rT = setTimeout(() => { if (NAV.view === "run" && NAV.j !== null) renderList({keep: true}); }, 600); }
 function updateSel() {
   for (const id of [...SEL]) { const p = papers.get(id); if (!p || p.dl_status === "ok") SEL.delete(id); }
   $("#selcount").textContent = `${SEL.size} selected`;
@@ -1049,17 +1091,17 @@ function updateSel() {
 document.querySelectorAll("#vfilter button").forEach(b => b.onclick = () => {
   FILTER = b.dataset.v; document.querySelectorAll("#vfilter button").forEach(x => x.classList.toggle("on", x === b)); renderList(); renderMeta();
 });
-["#yfilter", "#tfilter", "#sort"].forEach(s => $(s).onchange = renderList);
-$("#q").oninput = () => { clearTimeout($("#q")._t); $("#q")._t = setTimeout(renderList, 200); };
-$("#selrec").onclick = () => { const terms = RUN && RUN.params && RUN.params.terms; papers.forEach(p => { if ((terms ? (!p.verdict || p.verdict === "download") && visible(p) : p.verdict === "download") && p.dl_status !== "ok") SEL.add(p.id); }); if (NAV.j !== null) renderList(); updateSel(); };
-$("#selnone").onclick = () => { SEL.clear(); if (NAV.j !== null) renderList(); updateSel(); };
+["#yfilter", "#tfilter", "#sort"].forEach(s => $(s).onchange = () => renderList());
+$("#q").oninput = () => { clearTimeout($("#q")._t); $("#q")._t = setTimeout(() => renderList(), 200); };
+$("#selrec").onclick = () => { const terms = RUN && RUN.params && RUN.params.terms; papers.forEach(p => { if ((terms ? (!p.verdict || p.verdict === "download") && visible(p) : p.verdict === "download") && p.dl_status !== "ok") SEL.add(p.id); }); if (NAV.j !== null) renderList({keep: true}); updateSel(); };
+$("#selnone").onclick = () => { SEL.clear(); if (NAV.j !== null) renderList({keep: true}); updateSel(); };
 $("#dlbtn").onclick = async () => {
   try { await api("/api/download", {ids: [...SEL]}); toast(`Downloading ${SEL.size} papers in the background.`); }
   catch (e) { toast(e.message); }
 };
 $("#allpapers").onclick = e => { e.preventDefault(); go({j: "*"}); };
 document.querySelectorAll("#viewtabs button").forEach(b => b.onclick = () => go({j: b.dataset.vt || null}));
-$("#jsel").onchange = renderList;
+$("#jsel").onchange = () => renderList();
 $("#qbtn").onclick = async () => {
   const ids = [...papers.values()].filter(p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary)).map(p => p.id);
   try { await api("/api/download", {ids}); toast(`Downloading ${ids.length} queued papers in the background.`); }
@@ -1074,7 +1116,7 @@ async function setVerdict(ids, verdict, undo = true) {
     p.verdict = verdict; p.user_set = verdict !== p.ai_verdict;
     if (verdict === "download" && p.dl_status !== "ok") SEL.add(i); else SEL.delete(i);
   });
-  renderList(); renderMeta(); renderTilesSoon(); updateSel();
+  renderList({keep: true}); renderMeta(); renderTilesSoon(); updateSel();
   if (undo) {
     const t = $("#toast");
     t.innerHTML = `${verdict === "download" ? "Moved to the download queue" : verdict === "skip" ? "Marked not relevant" : "Moved back to borderline"}
@@ -1311,15 +1353,7 @@ function connect() {
     $("#progcount").textContent = d.total ? `${d.done} / ${d.total}` : "";
     $("#progbar").style.width = d.total ? (100 * d.done / d.total) + "%" : "0";
   });
-  es.addEventListener("paper", e => {
-    const p = JSON.parse(e.data); if (papers.has(p.id)) return;
-    papers.set(p.id, p); order.push(p.id);
-    if (NAV.view === "run" && NAV.j !== null && visible(p)) {
-      const box = $("#papers"); const em = box.querySelector(".empty"); if (em) em.remove();
-      box.append(card(p));
-    }
-    metaSoon(); renderTilesSoon();
-  });
+  es.addEventListener("paper", e => addPaper(JSON.parse(e.data)));
   es.addEventListener("journal", e => { const d = JSON.parse(e.data); JST[d.abbr] = d; renderTilesSoon(); });
   es.addEventListener("verdict", e => {
     const d = JSON.parse(e.data), p = papers.get(d.id); if (!p) return;

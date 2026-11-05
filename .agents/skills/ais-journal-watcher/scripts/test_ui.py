@@ -2185,6 +2185,74 @@ bks.crossref_books = lambda title, rows=3: []
             check("at 3440 px the text is as readable as at 1400 px (WCAG AA, light and dark, Watch and Library)", not con_w, str(con_w[:3]))
             page.set_viewport_size({"width": 1400, "height": 950})
 
+            print("the Watch page uses the width, its journal tiles are bigger, and a run of 1000 papers is drawn in batches")
+            runs_dir_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")
+            jl_ = [j["abbr"] for j in api("/api/config")["journals"]][:4]
+            rid_ = "2025-W03_weekly"                    # a past week of its own (removed at the end of this block)
+            pp_ = [{"id": "bt-%04d" % k, "title": "Batch paper %04d" % k, "abbr": jl_[k % len(jl_)], "journal": "Test", "pub_date": "2025-01-01", "abstract": "We study platforms.",
+                    "authors": ["A. Author"], "verdict": "download" if k < 700 else "borderline" if k < 800 else "skip", "relevance": 1000 - k, "reason": "test", "topics": []} for k in range(1000)]
+            fx_ = os.path.join(runs_dir_, rid_ + ".json")
+            json.dump({"id": rid_, "kind": "weekly", "params": {"topics": [], "query": ""}, "created": "2025-01-13T10:00:00+00:00", "stage": "ready", "status": "done",
+                       "usage": {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}, "week": "2025-W03", "checks": ["2025-01-13T10:00:00+00:00"], "errors": [], "jstate": {}, "papers": pp_}, open(fx_, "w"))
+            ncards = lambda: page.locator("#papers > .paper").count()
+            def open_batch(width):
+                page.set_viewport_size({"width": width, "height": 950}); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_timeout(400)
+                page.evaluate("document.body.classList.remove('sb-folded')")
+                page.evaluate("openRun({id: %s})" % json.dumps(rid_)); page.wait_for_selector("#tiles .tile", timeout=10000); page.wait_for_timeout(300)
+            try:
+                open_batch(1580)
+                g_ = page.evaluate("""() => ({layout: document.querySelector('#layout').getBoundingClientRect().width, content: document.querySelector('#content').getBoundingClientRect().width,
+                                              tiles: [...document.querySelectorAll('#tiles .tile')].map(t => Math.round(t.getBoundingClientRect().width)), fs: getComputedStyle(document.querySelector('#tiles .tname')).fontSize})""")
+                check("at 1580 px the Watch page uses all the space beside the sidebar, and its journal tiles are bigger (about 440 px, two a row; they were 380)",
+                      abs(g_["layout"] - g_["content"]) <= 1 and len(g_["tiles"]) >= 2 and min(g_["tiles"]) >= 400 and g_["fs"] == "17px", str(g_))
+                shot(page, "25-watch-tiles-1580")
+                page.set_viewport_size({"width": 1400, "height": 950}); page.goto("about:blank"); page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#libtiles .tile", timeout=10000)
+                check("…the Library's journal tiles keep their size", page.evaluate("getComputedStyle(document.querySelector('#libtiles .tname')).fontSize") == "15px")
+                open_batch(1400)
+                page.evaluate("go({j: '*'})"); page.wait_for_selector("#papers > .paper"); page.wait_for_timeout(300)
+                check("a run with 1000 papers draws the first 60 (none built and hidden), with a 'Show more' button below",
+                      ncards() == 60 and page.locator("#papers .paper.hide").count() == 0 and page.locator("#moremore").is_visible() and "more" in page.inner_text("#moremore"), "%d cards, %s" % (ncards(), page.inner_text("#papersmore")))
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_function("document.querySelectorAll('#papers > .paper').length > 60", timeout=10000); page.wait_for_timeout(300)
+                n1 = ncards()
+                check("…scrolling near the end draws the next 60", 60 < n1 <= 120, str(n1))
+                page.evaluate("window.scrollTo(0, 0)"); page.wait_for_timeout(200); page.click("#moremore"); page.wait_for_timeout(300)
+                n2 = ncards()
+                check("…'Show more' draws 60 more and says how many are left", n1 < n2 <= n1 + 60 and "left" in page.inner_text("#moremore"), "%d → %d, %s" % (n1, n2, page.inner_text("#moremore")))
+                page.click('#vfilter button[data-v="skip"]'); page.wait_for_timeout(600)
+                check("a filter starts again with its own first 60 (Skipped: 60 of 200, none hidden)", ncards() == 60 and page.locator("#papers > .paper.skip").count() == 60, str(ncards()))
+                page.fill("#q", "Batch paper 0999"); page.wait_for_timeout(600)
+                check("…a search finds a paper beyond the first batch, and nothing more is offered", ncards() == 1 and "0999" in page.inner_text("#papers") and not page.locator("#moremore").is_visible(), str(ncards()))
+                page.fill("#q", ""); page.wait_for_timeout(600)
+                check("…clearing it starts again at 60", ncards() == 60, str(ncards()))
+                page.click('#vfilter button[data-v="borderline"]'); page.wait_for_timeout(600); page.click("#moremore"); page.wait_for_timeout(300)
+                nb_ = ncards()
+                card_ = page.locator("#papers > .paper").nth(70); card_.scroll_into_view_if_needed(); page.wait_for_timeout(200)
+                y0 = page.evaluate("window.scrollY")
+                card_.locator('[data-act="queue"]').click(); page.wait_for_timeout(800)
+                y1 = page.evaluate("window.scrollY")
+                check("moving a paper to the download queue keeps what is drawn and where you are (no jump back to the first 60 at the top)", nb_ == 100 and ncards() == 99 and abs(y1 - y0) < 950, "%d → %d cards, scroll %d → %d" % (nb_, ncards(), y0, y1))
+                page.click('#vfilter button[data-v="download"]'); page.wait_for_timeout(600)
+                page.click("#selrec"); page.wait_for_timeout(300)
+                check("'Select all' selects every download paper, drawn or not (701: one was just moved to the queue), while only the first batch is drawn",
+                      page.inner_text("#selcount").strip() == "701 selected" and ncards() == 60, "%s, %d cards" % (page.inner_text("#selcount"), ncards()))
+                page.click("#moremore"); page.wait_for_timeout(300)
+                later_ = page.evaluate("[...document.querySelectorAll('#papers > .paper')].slice(60).map(c => c.querySelector('input[type=checkbox]').checked)")
+                check("…and the papers drawn after it come ticked", later_ and all(later_), str(later_[:5]))
+                page.click("#selnone"); page.click('#vfilter button[data-v="download"]'); page.wait_for_timeout(600)
+                left0 = int(re.search(r"\((\d+) left\)", page.inner_text("#moremore")).group(1))
+                page.evaluate("""(a) => { for (let k = 0; k < 5; k++) addPaper({id: 'fresh-' + k, title: 'Fresh paper ' + k, abbr: a, journal: 'Test', pub_date: '2025-01-01', abstract: 'x',
+                                                                     authors: ['A. Author'], verdict: 'download', relevance: 1, reason: 'test', topics: []}); }""", jl_[0])
+                left1 = int(re.search(r"\((\d+) left\)", page.inner_text("#moremore")).group(1))
+                check("a paper found during a run is not drawn past the first batch: it is counted in 'left'", ncards() == 60 and left1 == left0 + 5, "%d cards, %d → %d left" % (ncards(), left0, left1))
+                page.fill("#q", "Fresh paper 3"); page.wait_for_timeout(600)
+                check("…and a search finds it", ncards() == 1 and "Fresh paper 3" in page.inner_text("#papers"), str(ncards()))
+                page.fill("#q", "")
+            finally:
+                if os.path.exists(fx_):
+                    os.remove(fx_)
+                page.set_viewport_size({"width": 1400, "height": 950}); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_timeout(400)
+
             print("an archive search is remembered: a repeat is not paid for twice")
             screened = os.path.join(TMP, "screened.log")
             def batches():
