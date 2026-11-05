@@ -753,22 +753,25 @@ bks.crossref_books = lambda title, rows=3: []
             fh = page.locator(".bd-fh").bounding_box(); page.mouse.move(fh["x"] + 400, fh["y"] + 8); page.mouse.down(); page.mouse.move(fh["x"] + 460, fh["y"] + 8, steps=5); page.mouse.up(); page.wait_for_timeout(400)
             lefts1 = page.evaluate("[...document.querySelectorAll('.nc-card.note')].map(e => e.offsetLeft)")
             check("moving a frame carries the cards inside it", all(abs((b - a) - 60) <= 3 for a, b in zip(lefts0, lefts1)), str((lefts0, lefts1, page.evaluate("[[...document.querySelectorAll('.bd-frame')].map(e => [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight]), [...document.querySelectorAll('.nc-card')].map(e => [e.className.split(' ')[1], e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight])]"))))
+            def notes_when(ok, secs=10):          # the notes file once ok(it) holds (or as it is after `secs`): the page saves a while after a change, after any save already under way
+                d, end = {}, time.time() + secs
+                while True:
+                    try:
+                        d = json.load(open(sidecar(2, ".notes.json")))
+                    except (OSError, ValueError):
+                        d = {}
+                    if ok(d) or time.time() > end:
+                        return d
+                    time.sleep(0.2)
             page.fill("#nc-pn", "Overall: a solid paper about platforms.")
-            saved = {}
-            for _ in range(50):          # (typing → 0.5 s → the note is set → 0.8 s → saved, after any save already under way: wait for the file rather than a fixed time)
-                try:
-                    saved = json.load(open(sidecar(2, ".notes.json")))
-                except (OSError, ValueError):
-                    saved = {}
-                if str(saved.get("paper_note") or "").startswith("Overall"):
-                    break
-                time.sleep(0.2)
+            saved = notes_when(lambda d: str(d.get("paper_note") or "").startswith("Overall"))         # (typing → 0.5 s → the note is set → 0.8 s → saved)
             check("frames, arrows and the note on the paper as a whole are saved with the notes", (saved.get("frames") or [{}])[0].get("label") == "Key ideas" and (saved.get("links") or [{}])[0].get("label") == "refines" and str(saved.get("paper_note") or "").startswith("Overall"), json.dumps({k: saved.get(k) for k in ("frames", "links", "paper_note")})[:300])
             page.click('[data-k="view"][data-v="outline"]'); page.wait_for_selector(".ol-g")
             titles_ = [t.strip().lower() for t in page.locator(".ol-g h4").all_inner_texts()]
             check("the outline lists your frame first (with its cards), then the rest by page, with the arrow and the note on the paper", titles_[0].startswith("key ideas") and page.locator(".ol-g.frame .ol-item").count() >= 2 and "refines" in page.inner_text(".ol-lks") and "solid paper" in page.inner_text(".ol-pn"), str(titles_))
-            page.click(".ol-item.note >> nth=0 >> [data-o=edit]"); page.fill(".ol-ta", "Edited in the outline"); page.wait_for_timeout(2200)
-            check("a note can be edited in the outline and the canvas card follows", json.load(open(sidecar(2, ".notes.json")))["cards"] and any(c.get("text") == "Edited in the outline" for c in json.load(open(sidecar(2, ".notes.json")))["cards"]))
+            page.click(".ol-item.note >> nth=0 >> [data-o=edit]"); page.fill(".ol-ta", "Edited in the outline")
+            edited = notes_when(lambda d: any(c.get("text") == "Edited in the outline" for c in d.get("cards") or []))
+            check("a note can be edited in the outline and the canvas card follows", any(c.get("text") == "Edited in the outline" for c in edited.get("cards") or []))
             page.click('[data-k="view"][data-v="canvas"]'); page.wait_for_selector(".nc-card")
             page.click(".bd-fh [data-fc=del]"); page.wait_for_function("document.querySelectorAll('.bd-frame').length === 0")
             page.click('[data-k="undo"]'); page.wait_for_function("document.querySelectorAll('.bd-frame').length === 1")
