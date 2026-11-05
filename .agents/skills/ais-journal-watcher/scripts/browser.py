@@ -159,6 +159,11 @@ def prefer_pdf_downloads():
 USER_WAIT = 180         # seconds a visible check page waits for the user's tick
 
 
+def _ssrn_ids(u):
+    """The paper numbers an SSRN download address names: SSRN_ID<n> and/or abstractid=<n> (explicit identifiers only: a stray "code" number does not count)."""
+    return {a or b for a, b in re.findall(r"SSRN_ID(\d+)|[?&;]abstract_?id=(\d+)", u, re.I)}
+
+
 class Browser:
     """Context manager around one persistent Chromium context.
 
@@ -252,9 +257,10 @@ class Browser:
             self._ua = ua.replace("HeadlessChrome", "Chrome")
         return self._ua
 
-    def _try(self, page, url, wait_s, settle_s=5):
+    def _try(self, page, url, wait_s, settle_s=5, referer=None):
         """Navigate to url; return PDF bytes if the browser ends up with one.
-        Gives up `settle_s` after the page stops being a challenge page."""
+        Gives up `settle_s` after the page stops being a challenge page. `referer`: the page a followed link was on (sent as a browser does when you click it;
+        SSRN, for one, sends a download that does not come from its paper page back to that page)."""
         resps, dls = [], []
         on_resp = lambda r: resps.append(r)
         on_dl = lambda d: dls.append(d)
@@ -262,7 +268,7 @@ class Browser:
         page.on("download", on_dl)
         try:
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000, referer=referer)
             except PWError:
                 pass  # "Download is starting" or a slow challenge page
             deadline, calm = time.time() + wait_s, None
@@ -313,23 +319,23 @@ class Browser:
         base = page.url
         doi = (doi or doi_in_url(url) or doi_in_url(base) or "").lower().rstrip("/") or None
         names = lambda u: bool(doi) and bool(re.search(re.escape(doi) + r"(?=$|[?#&/])", urllib.parse.unquote(u).lower()))
+        links = [(urllib.parse.urljoin(base, l["href"]), l) for l in found["links"]]
+        ssrn = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "")
+        if ssrn:                    # SSRN: its "Download This Paper" button first. The page's citation_pdf_url (Delivery.cfm?abstractid=<n>, without &mirid=1) is sent back to the
+            for u, l in links:      # paper page instead of giving the PDF (seen on the site, Nov 2026); the button's address is the one that downloads.
+                if site_of(u) == site_of(base) and re.search(r"Delivery\.cfm", u, re.I) and _ssrn_ids(u) == {ssrn.group(1)}:
+                    return u
         for m in found["meta"]:
             u = urllib.parse.urljoin(base, m)
             if names(u) or site_of(u) == site_of(base):
                 return u
-        links = [(urllib.parse.urljoin(base, l["href"]), l) for l in found["links"]]
         for u, l in links:
             if names(u) and not l["ref"]:
                 return u
-        ssrn = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "")
         for u, l in links:
             if site_of(u) != site_of(base):
                 continue
-            if ssrn and re.search(r"Delivery\.cfm", u, re.I):      # SSRN's own download link carries the paper's number (and no DOI), as SSRN_ID<n> and/or abstractid=<n>
-                ids = set(re.findall(r"SSRN_ID(\d+)|[?&;]abstract_?id=(\d+)", u, re.I))
-                ids = {a or b for a, b in ids}
-                if ids == {ssrn.group(1)}:          # explicit identifiers only, and none that names another paper (a stray "code" number that happens to match does not count);
-                    return u                        # the number decides, whatever box the button sits in (SSRN's page layout is not known here)
+            if ssrn and re.search(r"Delivery\.cfm", u, re.I):      # (another paper's SSRN button, or one naming two papers: never)
                 continue
             if l["other"]:
                 continue
@@ -354,7 +360,7 @@ class Browser:
             if not cand and not is_challenge(page):
                 cand = self._pdf_link(page, url, doi)
             if cand and cand != url:
-                data = self._try(page, cand, wait_s)
+                data = self._try(page, cand, wait_s, referer=page.url)
                 if data:
                     return data, "browser", None
             host = urllib.parse.urlsplit(page.url).netloc

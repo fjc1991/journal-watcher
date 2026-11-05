@@ -4274,6 +4274,9 @@ print("OK")
                                "<a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1&type=2'>Open PDF in Browser</a></div>"
                                "<div class='related-papers'><a href='/sol3/Delivery.cfm?abstractid=9999999&mirid=1'>Download</a></div>")
         PAGES["/ssrn-real-other"] = "<h1>A paper</h1><div><a href='/sol3/Delivery.cfm?abstractid=9999999&mirid=1'>Download This Paper</a></div>"
+        PAGES["/sol3/papers.cfm"] = ("<meta name='citation_pdf_url' content='/sol3/Delivery.cfm?abstractid=4723385'>"                        # SSRN's paper page as it is (Nov 2026): a citation_pdf_url
+                                     "<h1>A paper</h1><div class='abstract-buttons'><a href='Delivery.cfm?abstractid=4723385&mirid=1' class='button-link primary'>Download This Paper</a>"   # without &mirid=1,
+                                     "<a href='Delivery.cfm?abstractid=4723385&mirid=1&type=2'>Open PDF in Browser</a></div>")                                                    # and the buttons
         PAGES["/ssrn-banner"] = "<h1>A paper</h1><div class='top-banner'><a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1'>Download This Paper</a></div>"
         SSRN_PDF = b"%PDF-1.4\n" + b"0" * 50_000 + b"\n%%EOF\n"
         delivered = []
@@ -4284,8 +4287,10 @@ print("OK")
             def log_message(self, *a): pass
             def do_GET(self):
                 path = self.path.split("?")[0]
-                if path == "/sol3/Delivery.cfm":                                   # SSRN sends the PDF as a download
-                    delivered.append(self.path)
+                if path == "/sol3/Delivery.cfm":                                   # SSRN sends the PDF as a download: from its button (&mirid=1), clicked on a page of the site;
+                    delivered.append((self.path, self.headers.get("Referer") or ""))  # anything else is sent back to the paper page
+                    if "mirid=1" not in self.path or not (self.headers.get("Referer") or "").startswith(base3):
+                        self.send_response(302); self.send_header("Location", "/sol3/papers.cfm?abstract_id=4723385"); self.end_headers(); return
                     self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Disposition", 'attachment; filename="SSRN-id4723385.pdf"')
                     self.send_header("Content-Length", str(len(SSRN_PDF))); self.end_headers(); self.wfile.write(SSRN_PDF); return
                 if path in REDIRECTS:
@@ -4370,7 +4375,14 @@ print("OK")
             try:
                 with brw.Browser(interactive=False) as b_:
                     d_, n_ = b_.fetch_pdf(base3 + "/ssrn-real", wait_s=10, doi="10.2139/ssrn.4723385")
-                assert d_ == SSRN_PDF and n_ == "browser" and delivered and "abstractid=4723385" in delivered[0], (n_, delivered)                  # the paper's page, its button, the PDF
+                assert d_ == SSRN_PDF and n_ == "browser" and delivered and "abstractid=4723385" in delivered[0][0], (n_, delivered)               # the paper's page, its button, the PDF
+                brw.PROFILE = os.path.join(TMP, "ssrn-profile-2"); delivered.clear()
+                with brw.Browser(interactive=False) as b_:
+                    pg_ = b_.ctx.new_page(); pg_.goto(base3 + "/sol3/papers.cfm?abstract_id=4723385")
+                    btn_ = brw.Browser._pdf_link(pg_, base3 + "/sol3/papers.cfm?abstract_id=4723385", "10.2139/ssrn.4723385"); pg_.close()
+                    d_, n_ = b_.fetch_pdf(base3 + "/sol3/papers.cfm?abstract_id=4723385", wait_s=10, doi="10.2139/ssrn.4723385")
+                assert btn_ and btn_.endswith("/sol3/Delivery.cfm?abstractid=4723385&mirid=1"), btn_                                                # the button, not the citation_pdf_url
+                assert d_ == SSRN_PDF and delivered and "mirid=1" in delivered[0][0] and "/sol3/papers.cfm" in delivered[0][1], (n_, delivered)   # followed from the paper page: the PDF
             finally:
                 brw.PROFILE = prof_
             brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}
