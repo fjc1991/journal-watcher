@@ -173,6 +173,29 @@ def set_key(provider, key):
     return cfg
 
 
+def remove_key(provider):
+    """Remove a provider's API key from this computer: this Mac's Keychain and the data folder's .env file. Returns the fresh config; "key_note" says what was
+    removed, or that the key is still set where the app cannot change it (the environment it was started with)."""
+    p = (config_data().get("providers") or {}).get(provider)
+    name = (p or {}).get("key_env")
+    if not name:
+        raise ValueError("%s needs no key" % provider)
+    where = []
+    if keychain.available() and keychain.get(name):
+        keychain.delete(name)
+        where.append("this Mac's Keychain")
+    if _drop_from_env_file(name):
+        where.append("the .env file of your data folder")
+    os.environ.pop(name, None)
+    with _lock:
+        _clients.clear()                  # a client made with the removed key must not go on using it
+    cfg = config()
+    left = _key(name)
+    cfg["key_note"] = ("Removed from %s." % " and ".join(where) if where else "There was no saved key to remove.") + (
+        " A key is still set outside the app (in the environment it was started with), so this provider still has one." if left else "")
+    return cfg
+
+
 def _env_path():
     return os.path.join(dl.ROOT, ".env")
 

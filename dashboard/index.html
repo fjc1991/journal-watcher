@@ -32,6 +32,10 @@ a { color: var(--accent); }
 .pill.busy .dot { background: var(--accent); animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: .3; } }
 .cost { font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 12px; }
+.runitem { position: relative; }
+.runitem .rundel { position: absolute; top: 6px; right: 6px; border: 0; background: none; color: var(--ink-2); font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 6px; cursor: pointer; opacity: 0; }
+.runitem:hover .rundel, .runitem .rundel:focus-visible { opacity: 1; }
+.runitem .rundel:hover { background: var(--line, rgba(0,0,0,.08)); color: var(--bad, #b42318); }
 .btn { border: 1px solid var(--line); background: var(--panel); padding: 6px 12px; border-radius: 8px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
 .btn:hover { border-color: var(--ink-3); }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
@@ -824,6 +828,14 @@ function drawResume() {
     $("#resumelist").append(d);
   });
 }
+async function deleteRun(r) {
+  if (!confirm(`Delete “${r.title}”?\n\nThe record of this ${r.kind === "weekly" ? "weekly check" : "search"} (its list of papers, verdicts and cost) is deleted. The papers it downloaded stay in your library.`)) return;
+  try {
+    await api("/api/runs/delete", {id: r.id});
+    if (RUN && RUN.id === r.id) { RUN = null; go({view: "home"}); }
+    toast(`Deleted “${r.title}”.`); loadRuns();
+  } catch (e) { toast(e.message); }
+}
 function drawRuns() {
   const weekly = RUNS.filter(r => r.kind === "weekly"), search = RUNS.filter(r => r.kind !== "weekly");
   $("#n-weekly").textContent = weekly.length ? `(${weekly.length})` : "";
@@ -839,8 +851,9 @@ function drawRuns() {
       ? `${(r.checks || []).length} check${(r.checks || []).length === 1 ? "" : "s"} · last ${fmtWhen(r.updated || r.created)}`
       : r.updated && r.updated !== r.created ? `${fmtWhen(r.created)}, updated ${fmtWhen(r.updated)}` : fmtWhen(r.created);
     d.innerHTML = `<b>${esc(r.title)}${r.week === CFG.this_week ? `<span class="now">This week</span>` : ""}</b>
-      <span>${got} · ${r.n_papers} papers · ${r.n_download} to download · $${(r.cost || 0).toFixed(2)}</span>`;
-    d.onclick = () => openRun(r);
+      <span>${got} · ${r.n_papers} papers · ${r.n_download} to download · $${(r.cost || 0).toFixed(2)}</span>
+      <button class="rundel" data-rundel="${esc(r.id)}" aria-label="Delete the run ${esc(r.title)}" title="Delete this ${r.kind === "weekly" ? "weekly check" : "search"} (its papers stay in your library)">×</button>`;
+    d.onclick = e => { if (e.target.closest("[data-rundel]")) { e.stopPropagation(); deleteRun(r); return; } openRun(r); };
     $("#runs").append(d);
   });
   document.querySelectorAll("#runs .runitem").forEach(x => x.classList.toggle("on", NAV.view === "run" && RUN && x.dataset.id === RUN.id));
@@ -851,7 +864,7 @@ function setRun(run) {
   RUN = run; JST = run.jstate || {};
   papers.clear(); order = [];
   (run.papers || []).forEach(p => { papers.set(p.id, p); order.push(p.id); });
-  if (!SEL.size && run.kind === "weekly") papers.forEach(p => { if (p.verdict === "download" && p.dl_status !== "ok") SEL.add(p.id); });
+  if (!SEL.size && run.kind === "weekly") papers.forEach(p => { if (p.verdict === "download" && !["ok", "deleted"].includes(p.dl_status)) SEL.add(p.id); });
   $("#runtitle").textContent = run.title;
   setCost(run.cost, run.cost_detail);
 }
@@ -954,6 +967,7 @@ function dlText(p) {
     case "needs_check": return `<span class="dl bad" title="The “verify you are human” box wasn’t ticked within 3 minutes. Select the paper and press Download again to retry.">Verification not completed</span>`;
     case "wrong_paper": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Wrong PDF refused</span>`;
     case "failed": return `<span class="dl bad">Couldn’t download</span>`;
+    case "deleted": return `<span class="dl" title="${esc(p.dl_note || "")}">Deleted by you</span>`;
     default: return "";
   }
 }
@@ -972,7 +986,7 @@ function card(p) {
     (p.model_verdict && p.model_verdict !== p.verdict ? `<span class="tag" title="In a search by terms every match is a download. This is what the AI said about it against your interests.">AI said ${esc(p.model_verdict)}</span>` : "") +
     (/^Matched:/.test(p.reason || "") ? "" : (p.term_hits || []).map(h => `<span class="tag you" title="Found in the ${esc(h.field)}: one of your search terms">≈ ${esc(h.text)}</span>`).join(""));   // (after "Screen with AI" the reason is the model's: the matched terms stay as tags)
   el.innerHTML = `
-    <input type="checkbox" ${SEL.has(p.id) ? "checked" : ""} ${p.dl_status === "ok" ? "disabled" : ""} aria-label="Select for download">
+    <input type="checkbox" ${SEL.has(p.id) ? "checked" : ""} ${["ok", "deleted"].includes(p.dl_status) ? "disabled" : ""} aria-label="Select for download">
     <div>
       <div class="ptitle">${esc(p.title)}</div>
       ${p.authors && p.authors.length ? `<div class="pauth">${esc(shortAuthors(p.authors))}</div>` : ""}

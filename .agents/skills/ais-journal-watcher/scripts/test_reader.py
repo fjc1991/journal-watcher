@@ -748,6 +748,121 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
         finally:
             write_cfg(saved_cfg)
     check("a run's cost names every model that ran at its own price, counts calls without a price as such, skips saved answers, keeps old runs right, and the screening estimate follows the screening model", t_run_cost_detail)
+    def t_delete_items():
+        """What you added can be deleted: a paper or a book is deleted for good (files, notes, summary, card, search index, folders, reading status) and stays out of
+        later runs, adding it yourself brings it back, a past run's record can be deleted, and an API key can be removed from this computer."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            child = r"""
+import csv, json, os, sys, threading
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import download as dl, deletion, pipeline as pl, folders as fo, readstate as rs, uiprefs, notes_store as ns, blocks as bl, ai
+ROOT = paths.ROOT
+out = {}
+def put(rel, data=b"x"):
+    p = os.path.join(ROOT, rel); os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "wb").write(data); return p
+A, B, C = "Papers/2025-01/MISQ/Alpha.pdf", "Papers/Books/Beta.pdf", "Papers/2025-01/MISQ/Gamma.pdf"
+pa = put(A, b"%%PDF-alpha"); put(A[:-4] + ".md", b"summary"); open(ns.notes_path(pa), "w").write("{}"); open(ns.card_path(pa), "w").write("{}")
+pb = put(B, b"%%PDF-beta"); put(B[:-4] + ".epub", b"epub"); put(B[:-4] + ".book.json", b'{"source": "epub"}')
+put(C, b"%%PDF-gamma")
+for p, f in (({"doi": "10.1/a", "title": "Alpha", "journal": "MISQ", "abbr": "MISQ"}, A), ({"doi": "", "title": "Beta, a book", "journal": "Books", "abbr": "BOOK"}, B), ({"doi": "10.1/c", "title": "Gamma", "journal": "MISQ", "abbr": "MISQ"}, C)):
+    dl.save_index(p, f, "ok")
+kA = dl.index_key({"doi": "10.1/a"})
+fid = fo.create("Lab")["id"]; fo.add(fid, [kA, dl.index_key({"doi": "10.1/c"})])
+rs.update(kA, {"status": "reading"})
+uiprefs.update({"jw-pos:" + A: '{"n": 3}', "jw-pos:" + C: '{"n": 1}'}, [])
+sha = ns.sha1_of(pa)
+os.makedirs(bl.INDEX, exist_ok=True)
+for ext in (".blocks.json", ".vec", ".vec.json", ".refs.json"):
+    open(os.path.join(bl.INDEX, sha + ext), "w").write("x")
+r1 = deletion.delete_item(A)
+out["a"] = {"res": r1, "left": [p for p in (A, A[:-4] + ".md", os.path.relpath(ns.notes_path(pa), ROOT), os.path.relpath(ns.card_path(pa), ROOT)) if os.path.exists(os.path.join(ROOT, p))],
+            "index_left": [f for f in os.listdir(bl.INDEX) if f.startswith(sha)], "folder": fo.get(fid)["papers"], "status": kA in rs.load(),
+            "pos": sorted(k for k in uiprefs.get()["prefs"] if k.startswith("jw-pos:")), "library": sorted(r["file"] for r in pl.library()),
+            "row": [r for r in csv.DictReader(open(os.path.join(paths.PAPERS, "_index.csv"))) if r["doi"] == "10.1/a"][0]}
+r2 = deletion.delete_item(B)
+out["b"] = {"res": r2, "left": [p for p in (B, B[:-4] + ".epub", B[:-4] + ".book.json") if os.path.exists(os.path.join(ROOT, p))], "gamma": os.path.exists(os.path.join(ROOT, C))}
+put("Papers/_removed/2025/x.pdf", b"%%PDF"); put("Papers/2025-01/MISQ/notindex.pdf", b"%%PDF")
+dl.save_index({"doi": "10.1/r", "title": "Set aside"}, "Papers/_removed/2025/x.pdf", "ok")      # (a damaged index pointing into Papers/_removed: still not a library paper)
+errs = {}
+for bad in ("../outside.pdf", "Papers/_removed/2025/x.pdf", A, "Papers/2025-01/MISQ/Alpha.md", "Papers/2025-01/MISQ/notindex.pdf", "", None):
+    try:
+        deletion.delete_item(bad); errs[str(bad)] = "accepted"
+    except ValueError as e:
+        errs[str(bad)] = "refused"
+out["errs"] = errs
+out["gone"] = sorted(deletion.deleted_keys())
+# a later run: the deleted paper is marked and never downloaded
+run = pl.Run("picks", {"label": "after"})
+run.add_paper({"id": "p1", "doi": "10.1/a", "title": "Alpha", "verdict": "download", "publisher": "x", "abbr": "MISQ", "journal": "MISQ"})
+run.add_paper({"id": "p2", "doi": "10.1/new", "title": "New one", "verdict": "download", "publisher": "x", "abbr": "MISQ", "journal": "MISQ"})
+pl.mark_downloaded(run)
+out["marked"] = {i: run.papers[i].get("dl_status") for i in ("p1", "p2")}
+asked = []
+class _Br:
+    def __init__(self, **k): pass
+    def __enter__(self): return None
+    def __exit__(self, *a): return False
+def fake_dl(p, env, browser=None, dry=False):
+    asked.append(p["id"]); f = put("Papers/2025-01/MISQ/%%s.pdf" %% p["id"], b"%%PDF"); return True, f, "browser"
+pl.dl.download_paper, pl.dl.open_browser, pl.summarize = fake_dl, _Br, (lambda p, path, usage: "summary")
+run.papers["p1"]["dl_status"] = None                       # (as if the run had been made before the paper was deleted)
+pl.download_and_summarize(run, ["p1", "p2"], lambda *a, **k: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0)
+out["downloaded"] = asked; out["after_dl"] = run.papers["p1"].get("dl_status")
+# you add it yourself again: it is back, and runs see it as downloaded
+put(A, b"%%PDF-alpha-again"); dl.save_index({"doi": "10.1/a", "title": "Alpha", "journal": "MISQ", "abbr": "MISQ"}, A, "ok")
+pl.mark_downloaded(run)
+out["readded"] = {"gone": kA in deletion.deleted_keys(), "status": run.papers["p1"].get("dl_status"), "library": A in [r["file"] for r in pl.library()]}
+# a past run's record
+run.save(force=True)
+rp = os.path.join(pl.RUNS, run.id + ".json")
+t = deletion.delete_run(run.id)
+runerr = []
+for bad in (run.id, "../x", ""):
+    try:
+        deletion.delete_run(bad); runerr.append("accepted")
+    except ValueError:
+        runerr.append("refused")
+out["run"] = {"title": t, "file_left": os.path.exists(rp), "again": runerr, "library_kept": A in [r["file"] for r in pl.library()]}
+# an API key
+open(os.path.join(ROOT, ".env"), "a").write("OPENAI_API_KEY=sk-test-123\n")
+c1 = ai.config()["providers"]["openai"]["configured"]
+cfg = ai.remove_key("openai")
+out["key"] = {"before": c1, "after": cfg["providers"]["openai"]["configured"], "note": cfg.get("key_note"), "env_file": "OPENAI_API_KEY" in open(os.path.join(ROOT, ".env")).read(),
+              "again": ai.remove_key("openai").get("key_note")}
+try:
+    ai.remove_key("ollama"); out["key"]["ollama"] = "accepted"
+except ValueError:
+    out["key"]["ollama"] = "refused"
+print("JSON" + json.dumps(out))
+""" % HERE
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "OPENAI_API_KEY")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=180)
+            assert r.returncode == 0, r.stderr[-1500:]
+            o = json.loads(r.stdout.split("JSON", 1)[1])
+            a, b = o["a"], o["b"]
+            assert a["res"]["kind"] == "paper" and a["res"]["title"] == "Alpha" and len(a["res"]["deleted"]) == 4 and a["left"] == [], a
+            assert a["index_left"] == [], "its passages in the search index are deleted too"
+            assert a["folder"] == ["10.1/c"] and a["status"] is False, "out of its folder, no reading status"
+            assert a["pos"] == ["jw-pos:Papers/2025-01/MISQ/Gamma.pdf"], "where you stopped reading it is forgotten (the other paper's stays)"
+            assert a["library"] == ["Papers/2025-01/MISQ/Gamma.pdf", "Papers/Books/Beta.pdf"], a["library"]
+            assert a["row"]["status"] == "deleted" and a["row"]["file"] == "" and a["row"]["note"].startswith("deleted by you"), a["row"]
+            assert b["res"]["kind"] == "book" and b["left"] == [] and b["gamma"] is True, "a book: its PDF, EPUB and details go; the other papers stay"
+            assert all(v == "refused" for v in o["errs"].values()), o["errs"]
+            assert o["gone"] == sorted(["10.1/a", "beta, a book"]), o["gone"]
+            assert o["marked"] == {"p1": "deleted", "p2": None}, o["marked"]
+            assert o["downloaded"] == ["p2"] and o["after_dl"] == "deleted", "a run never downloads a paper you deleted"
+            assert o["readded"] == {"gone": False, "status": "ok", "library": True}, o["readded"]
+            assert o["run"]["file_left"] is False and o["run"]["again"] == ["refused"] * 3 and o["run"]["library_kept"] is True, o["run"]
+            k = o["key"]
+            assert k["before"] is True and k["after"] is False and k["env_file"] is False and "Removed from the .env file" in k["note"], k
+            assert k["again"].startswith("There was no saved key") and k["ollama"] == "refused", k
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("deleting what you added: a paper or a book is deleted for good (files, notes, summary, card, search index, folders, reading status, reading position) and never downloaded again by a run, adding it yourself brings it back, bad paths are refused, a past run's record can be deleted, and an API key removed", t_delete_items)
 
 
     print("library: folders, status, search, import, exports")
