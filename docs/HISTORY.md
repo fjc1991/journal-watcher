@@ -873,6 +873,18 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** OpenAlex's live answers (shapes, types, costs per call) were not read from here; the tests use a fake built from its documentation. Real downloads of papers from journals the app does not watch.
 
+### Item 31. SSRN downloads, second fix: the button, not citation_pdf_url, followed from its page (2026-11-05, the author's report)
+
+**Reported.** After 1.2.6 (item 29) SSRN papers still ended as "Couldn't download" while the author's browser downloaded them. The index note was unchanged: "browser: no PDF at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7115195".
+
+**Found.** The author saved the paper's page from their browser (not signed in to SSRN). It carries `<meta name="citation_pdf_url" content="https://papers.ssrn.com/sol3/Delivery.cfm?abstractid=7115195">`, without `&mirid=1`, and the buttons `Delivery.cfm?abstractid=7115195&mirid=1` (Download This Paper) and `…&type=2` (Open PDF in Browser). `_pdf_link` looks at the page's citation_pdf_url first, and on SSRN's own host that meta tag counts as the page's PDF, so the app always went to the address without `&mirid=1`, which ends on the paper page again. Run against the saved page served under SSRN's address (intercepted locally, nothing sent), the link finder chose `Delivery.cfm?abstractid=7115195`; item 29's tests used local pages on another host, where the meta tag did not count, so they never met this. A second difference: `page.goto` sends no referrer, while a click on the button sends the paper page; SSRN may refuse a download without it.
+
+**Changed.** For an SSRN DOI, `_pdf_link` takes the page's own Delivery.cfm button naming exactly this paper before the meta tag (`_ssrn_ids`, the identifier rule of item 29). `_fetch` opens a link it followed from a landing page with that page as the referrer (`_try(referer=)`), as a browser does on a click; it says where the request comes from and hides nothing.
+
+**Tests.** `t_library_test`: a local SSRN-shaped page at /sol3/papers.cfm with the meta tag and the buttons, whose server sends Delivery.cfm without `&mirid=1`, or without a referrer from the site, back to the paper page: the link finder picks the button, and `fetch_pdf` gets the PDF. On the code before, it fails with the author's note ("no PDF at …/sol3/papers.cfm…"); without the referrer only, the same; without the button rule only, no link. The saved page itself is not in the repository (it holds the author's address and session).
+
+**Not verified.** SSRN itself (unreachable from the sandbox): whether the referrer is needed, and whether SSRN asks for a human check (the app's "Open the check" handles it).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
