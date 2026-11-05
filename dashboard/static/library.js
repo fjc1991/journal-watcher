@@ -51,6 +51,7 @@ function row(r, i, snips) {
           <a target="_blank" href="${fileUrl(r.file)}" role="menuitem">${ico("papers", "sm")} Open the PDF</a>
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
+          <button data-delitem="${esc(r.file)}" role="menuitem" class="danger">${ico("x", "sm")} Delete this ${r.book ? "book" : "paper"}…</button>
         </div></span>
     </div>${r.book ? `<div class="chaplist hide"></div>` : ""}</div>`;
 }
@@ -427,8 +428,9 @@ function wireRows() {
     const more = e.target.closest("[data-more]");
     if (more) { e.stopPropagation(); const m = more.parentElement.querySelector(".menu"), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); return; }
     const pick = e.target.closest(".rowmenu button, .rowmenu a"); if (pick) pick.closest(".menu").classList.add("hide");
-    const star = e.target.closest("[data-star]"), fold = e.target.closest("[data-fold]"), take = e.target.closest("[data-take]"), of = e.target.closest("[data-openfolder]"), cd = e.target.closest("[data-card]");
-    if (cd) { const i = byFile(cd.dataset.card); if (i >= 0) ctx.readPaper(lib()[i], {tab: "card"}); }
+    const star = e.target.closest("[data-star]"), fold = e.target.closest("[data-fold]"), take = e.target.closest("[data-take]"), of = e.target.closest("[data-openfolder]"), cd = e.target.closest("[data-card]"), del = e.target.closest("[data-delitem]");
+    if (del) deleteItems([del.dataset.delitem]);
+    else if (cd) { const i = byFile(cd.dataset.card); if (i >= 0) ctx.readPaper(lib()[i], {tab: "card"}); }
     else if (star) { const r = lib()[byFile(star.dataset.star)]; setState(star.dataset.star, {star: !(r.state || {}).star}).catch(er => notifyError(er)); }
     else if (fold) { e.stopPropagation(); folderPop(fold.closest(".menuwrap")?.querySelector("[data-more]") || fold, fold.dataset.fold); }
     else if (take) { const r = lib()[byFile(take.dataset.take)], v = prompt("One-line takeaway for this paper (what to remember):", (r.state || {}).takeaway || ""); if (v !== null) setState(take.dataset.take, {takeaway: v}).catch(er => notifyError(er)); }
@@ -447,13 +449,28 @@ function wireRows() {
   document.addEventListener("click", e => { if (!e.target.closest(".fpop")) $$(".fpop").forEach(p => p.remove()); if (!e.target.closest(".menuwrap")) $$(".menuwrap .menu").forEach(m => m.classList.add("hide")); });
   // (PDFs dropped from your desktop are handled by dropimport.js: onto a folder, inside a folder, or anywhere in the Library with a chooser)
 }
+async function deleteItems(files) {      // delete papers or books for good, after saying exactly what goes (deletion.py)
+  const rows = files.map(f => lib()[byFile(f)]).filter(Boolean);
+  if (!rows.length) return;
+  const one = rows.length === 1, books = rows.filter(r => r.book).length;
+  const what = one ? `the ${rows[0].book ? "book" : "paper"} “${rows[0].title || rows[0].file}”` : `${rows.length} ${books === rows.length ? "books" : books ? "papers and books" : "papers"}`;
+  const files_ = one && rows[0].book ? "its PDF and EPUB" : one ? "its PDF" : "their files (PDF, EPUB)";
+  if (!confirm(`Delete ${what} for good?\n\n${files_[0].toUpperCase() + files_.slice(1)} and ${one ? "its" : "their"} notes, highlights, summary and card are deleted from this computer and from your data folder. This cannot be undone in Journal Watcher (Dropbox keeps deleted files for 30 days).\n\nA weekly check or archive search will not download ${one ? "it" : "them"} again; you can still add ${one ? "it" : "them"} yourself.`)) return;
+  try {
+    const r = await api("/api/library/delete", {files: rows.map(x => x.file)});
+    rows.forEach(x => SEL.delete(x.file));
+    toast(r.errors.length ? `Deleted ${r.deleted.length}; ${r.errors.length} could not be deleted (${r.errors[0].error})` : one ? `Deleted “${rows[0].title || rows[0].file}”.` : `Deleted ${r.deleted.length} ${books === rows.length ? "books" : "items"}.`);
+    window.dispatchEvent(new Event("jw-library-changed"));
+  } catch (er) { notifyError(er); }
+}
 function actionbar() {
   const bar = $("#lib-actionbar"); if (!bar) return;
   for (const f of [...SEL]) if (byFile(f) < 0) SEL.delete(f);
   bar.classList.toggle("hide", !SEL.size);
   if (!SEL.size) return;
   bar.innerHTML = `<b>${SEL.size} selected</b><span class="menuwrap"><button class="btn small" id="ab-fold">📁 Add to folder ▾</button></span>
-    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small" id="ab-clear">Clear</button>`;
+    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
+  $("#ab-del").onclick = () => deleteItems([...SEL]);
   $("#ab-clear").onclick = () => { SEL.clear(); $$(".rsel").forEach(c => c.checked = false); actionbar(); };
   $("#ab-fold").onclick = e => { e.stopPropagation(); folderPop(e.currentTarget, [...SEL], true); };
   $("#ab-exp").onclick = e => { e.stopPropagation(); exportMenu($("#ab-expmenu"), {files: [...SEL]}); };

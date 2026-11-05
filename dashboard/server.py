@@ -48,6 +48,7 @@ import pipeline as pl  # noqa: E402
 import prefs  # noqa: E402
 import signins  # noqa: E402
 import identity  # noqa: E402
+import deletion  # noqa: E402
 import support  # noqa: E402
 import syncinfo  # noqa: E402
 import uiprefs  # noqa: E402
@@ -1379,8 +1380,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(ai.save_config(b))
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     return self.send_json({"error": str(e)[:120] or "bad settings"}, 400)
-            if path == "/api/ai/key":       # {provider, key}: saved in the data home's .env (mode 600), never echoed back
+            if path == "/api/ai/key":       # {provider, key}: saved in the data home's .env (mode 600), never echoed back; {provider, remove: true}: the saved key is removed
                 try:
+                    if b.get("remove"):
+                        return self.send_json(ai.remove_key(str(b.get("provider") or "")))
                     return self.send_json(ai.set_key(str(b.get("provider") or ""), b.get("key")))
                 except ValueError as e:
                     return self.send_json({"error": str(e)[:160]}, 400)
@@ -1663,6 +1666,30 @@ class Handler(BaseHTTPRequestHandler):
             if not summaries.start([str(f) for f in files] if files is not None else None):
                 return self.send_json({"error": "Every one of these papers has a summary already."}, 400)
             return self.send_json({"ok": True, "status": summaries.status()})
+        if path == "/api/library/delete":        # {files: [...]}: delete these papers or books for good (files, notes, summary, card, search index); a run never downloads them again
+            files = b.get("files")
+            if not isinstance(files, list) or not files or len(files) > 500:
+                return self.send_json({"error": "files must be a list of library files"}, 400)
+            if JOBS.busy() and JOBS.kind == "download":
+                return self.send_json({"error": "A download is running. Delete when it has finished."}, 409)
+            done, errors = [], []
+            for f in files:
+                try:
+                    done.append(deletion.delete_item(str(f)))
+                except (ValueError, OSError) as e:
+                    errors.append({"file": str(f)[:300], "error": str(e)[:200]})
+            return self.send_json({"ok": not errors, "deleted": done, "errors": errors})
+        if path == "/api/runs/delete":           # {id}: delete the record of a past run (its papers stay in the library)
+            rid = str(b.get("id") or "")
+            if JOBS.busy() and JOBS.run is not None and JOBS.run.id == os.path.basename(rid):
+                return self.send_json({"error": "That run is still working. Stop it first."}, 409)
+            try:
+                title = deletion.delete_run(rid)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 404)
+            if JOBS.run is not None and JOBS.run.id == os.path.basename(rid):
+                JOBS.run = None
+            return self.send_json({"ok": True, "title": title})
         if path == "/api/library/check":         # start "Check my PDFs"
             return self.send_json({"ok": True, "started": start_pdfcheck(), **PDFCHECK})
         if path in ("/api/library/check/keep", "/api/library/check/remove"):

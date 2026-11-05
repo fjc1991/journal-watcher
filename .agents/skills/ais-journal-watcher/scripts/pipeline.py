@@ -460,14 +460,24 @@ def slim(p):
     return {k: p.get(k) for k in keys}
 
 
+DELETED_NOTE = "You deleted this paper from your library: it is not downloaded again (add it yourself if you want it back)."
+
+
 def mark_downloaded(run):
-    have = downloaded_files()
+    """Papers of the run that are in the library get their file; papers you deleted are marked "deleted" (never downloaded again by a run)."""
+    import deletion
+    have, gone = downloaded_files(), deletion.deleted_keys()
     for p in run.papers.values():
-        f = have.get(paper_key(p))
+        k = paper_key(p)
+        f = have.get(k)
         if f:
             p["file"], p["dl_status"] = f, "ok"
             md = f[:-4] + ".md"
             p["summary"] = md if os.path.exists(os.path.join(ROOT, md)) else None
+        elif k in gone:
+            p["file"], p["summary"], p["dl_status"], p["dl_note"] = None, None, "deleted", DELETED_NOTE
+        elif p.get("dl_status") == "deleted":               # (no longer deleted: the row was replaced when you added the paper again elsewhere)
+            p["dl_status"], p["dl_note"] = None, None
 
 
 # ---------------------------------------------------------------- fetching
@@ -1154,12 +1164,18 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None):
             challenged.add(current["pub"])                  # that site is watching: leave more time between its papers for the rest of the batch
     current = {}
 
+    import deletion
+    gone = deletion.deleted_keys()
     with dl.open_browser(on_challenge=on_challenge) as br:
         for n, p in enumerate(papers, 1):
             if stop.is_set():
                 break
             if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])):
                 got.append(p)
+                continue
+            if paper_key(p) in gone:                         # you deleted it: never fetched again by a run
+                p.update(dl_status="deleted", dl_note=DELETED_NOTE)
+                emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
                 continue
             pub = p.get("publisher") or "other"
             if pub in last_at:

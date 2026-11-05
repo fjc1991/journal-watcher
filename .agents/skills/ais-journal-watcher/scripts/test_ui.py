@@ -2629,6 +2629,42 @@ bks.crossref_books = lambda title, rows=3: []
             check("the screening estimate is the screening model's price, and the page knows that model's name", cfg_.get("est_cost_per_paper") is not None and abs(cfg_["est_cost_per_paper"] - (1500 / 3.3 * 1.0 + 60 * 2.0) / 1e6) < 1e-6 and cfg_.get("screen_model") == "m1", str({k: cfg_.get(k) for k in ("est_cost_per_paper", "screen_model")}))
             page.evaluate("window.Settings && Settings.close()")
 
+            print("you can delete what you added")
+            import pymupdf as _pmu                                         # (a paper of its own, so the papers later checks use stay)
+            delp = os.path.join(TMP, "Papers", "2025-04", "DelTest"); os.makedirs(delp, exist_ok=True)
+            d_ = _pmu.open(); d_.new_page().insert_text((72, 72), "A Paper Added Only To Be Deleted"); d_.save(os.path.join(delp, "gone.pdf")); d_.close()
+            open(os.path.join(delp, "gone.notes.json"), "w").write('{"notes": [{"text": "my note"}]}'); open(os.path.join(delp, "gone.md"), "w").write("its summary")
+            hdr_ = next(csv.reader(open(os.path.join(TMP, "Papers", "_index.csv"), newline="")))
+            with open(os.path.join(TMP, "Papers", "_index.csv"), "a", newline="") as f_:
+                csv.DictWriter(f_, hdr_, extrasaction="ignore").writerow({"date_checked": "2026-10-29", "journal": "Test Journal", "abbr": "TJ", "title": "A Paper Added Only To Be Deleted", "authors": "Jane Doe", "doi": "10.9999/del.gone", "file": "Papers/2025-04/DelTest/gone.pdf", "status": "ok", "note": "browser"})
+            page.goto("about:blank"); page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
+            victim = [r_ for r_ in api("/api/library") if r_["file"] == "Papers/2025-04/DelTest/gone.pdf"][0]
+            page.fill("#lf-q", victim["title"][:40]); page.wait_for_function("(t) => [...document.querySelectorAll('.librow')].some(e => e.innerText.includes(t))", arg=victim["title"][:25])
+            row_ = page.locator(".librow", has_text=victim["title"][:25]).first
+            page.wait_for_timeout(600)                                    # (the search re-draws the list after a pause: open the menu once it has settled)
+            row_.locator("[data-more]").click(); row_.locator(".rowmenu:not(.hide)").wait_for(timeout=5000)
+            check("each paper's menu has 'Delete this paper…'", row_.locator("[data-delitem]").inner_text().strip().startswith("Delete this paper"))
+            n_dlg = len(dialogs)                                          # (the page's dialogs are accepted and recorded by the handler set up above)
+            row_.locator("[data-delitem]").click()
+            page.wait_for_function("(t) => ![...document.querySelectorAll('.librow')].some(e => e.innerText.includes(t))", arg=victim["title"][:25], timeout=10000)
+            dlg_ = dialogs[n_dlg:]
+            check("deleting asks first, saying what goes and that it is not downloaded again", dlg_ and "for good" in dlg_[0] and "notes, highlights, summary and card" in dlg_[0] and "will not download it again" in dlg_[0], dlg_[:1])
+            check("…and the paper, its notes and its summary are gone, and the index says you deleted it", victim["file"] not in [r_["file"] for r_ in api("/api/library")] and not any(os.path.exists(os.path.join(delp, n_)) for n_ in ("gone.pdf", "gone.notes.json", "gone.md"))
+                  and any(r_["doi"] == "10.9999/del.gone" and r_["status"] == "deleted" and not r_["file"] for r_ in csv.DictReader(open(os.path.join(TMP, "Papers", "_index.csv"), newline=""))), str(os.listdir(delp)))
+            page.fill("#lf-q", "")
+            n_runs = len(api("/api/runs"))
+            if n_runs:
+                page.click("#watchitem"); page.wait_for_selector("#runs .runitem [data-rundel]", state="attached")
+                rid_ = page.get_attribute("#runs .runitem [data-rundel]", "data-rundel")       # (the first run in the tab that is shown)
+                n_dlg = len(dialogs)
+                page.evaluate("(id) => document.querySelector(`#runs [data-rundel=\"${id}\"]`).click()", rid_)
+                page.wait_for_function("(id) => !document.querySelector(`#runs [data-rundel=\"${id}\"]`)", arg=rid_, timeout=10000)
+                check("a past run can be deleted from the Watch list after asking (its papers stay)", len(api("/api/runs")) == n_runs - 1 and rid_ not in [x["id"] for x in api("/api/runs")] and any("papers it downloaded stay" in m for m in dialogs[n_dlg:]), str(dialogs[n_dlg:])[:200])
+            page.evaluate("window.Settings.open('ai')"); page.wait_for_selector('tr[data-p="fake"]')
+            has_rm = page.locator('tr[data-p="fake"] [data-keyremove]').count() == 1
+            check("a provider with a saved key has 'Remove' next to 'Change'", has_rm)
+            page.evaluate("window.Settings && Settings.close()")
+
             print("exports and the library layout")
             bib = urllib.request.urlopen(base + "/api/export/bib?file=" + urllib.request.quote(rows[0][3])).read().decode()
             check("BibTeX export works", "@article{" in bib and "Open Platforms" in bib)
