@@ -369,10 +369,10 @@ def download_paper(p, env, dry=False, browser=None):
                 if p.get("publisher") == "hbr":
                     data, note = vet(*browser.page_to_pdf(u))
                 else:
-                    data, note = vet(*browser.fetch_pdf(u, doi=doi))
+                    data, note = vet(*browser.fetch_pdf(u, doi=doi, own=True))
                     member = MEMBER_FOR.get(p.get("publisher"))
                     if not data and "needs_login" in note and member and browser.renew_member(member):
-                        data, note = vet(*browser.fetch_pdf(u, doi=doi))  # member session renewed silently: retry
+                        data, note = vet(*browser.fetch_pdf(u, doi=doi, own=True))  # member session renewed silently: retry
                     lib_ = signins.profile()
                     paywalled = "needs_login" in note or note.startswith("browser: no PDF at")
                     if not data and paywalled and lib_["signs_in"] and lib_["configured"]:
@@ -385,7 +385,7 @@ def download_paper(p, env, dry=False, browser=None):
                             note += "; needs_library_login"
                         else:
                             seen, plain = len(refused), note
-                            d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi)
+                            d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi, own=True)
                             d4, _ = vet(d4, "browser (via your library)")
                             if d4:
                                 data, note = d4, "browser (via your library)"
@@ -529,9 +529,10 @@ def main():
 class open_browser:
     """Opens browser.Browser if Playwright is installed; yields None otherwise."""
 
-    def __init__(self, no_browser=False, on_challenge=None):
+    def __init__(self, no_browser=False, on_challenge=None, ask=False):
         self.no_browser = no_browser
         self.on_challenge = on_challenge
+        self.ask = ask              # the app: a human check opens nothing by itself (browser.Browser ask mode)
         self.b = None
 
     def __enter__(self):
@@ -540,7 +541,7 @@ class open_browser:
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from browser import Browser
-            self.b = Browser(on_challenge=self.on_challenge)
+            self.b = Browser(on_challenge=self.on_challenge, ask=self.ask)
             return self.b.__enter__()
         except Exception as e:
             print("(browser route unavailable: %s)" % str(e)[:80])

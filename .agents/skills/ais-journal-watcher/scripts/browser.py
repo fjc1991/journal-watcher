@@ -5,9 +5,15 @@ Publishers sit behind Cloudflare-style bot protection, so plain HTTP gets 403.
 Downloads run in the background (Chromium's new headless mode with a normal
 user agent passes most checks) and reuse the sign-ins saved by `login`.
 When a site insists on an interactive "Verify you are human" check (e.g.
-ScienceDirect), a visible window opens on that page and the user ticks the box
-themselves (it is never clicked automatically). The rest of that site's papers
-in the same batch reuse the window, so it is one tick per batch.
+ScienceDirect), the user ticks the box themselves in a visible window (it is
+never clicked automatically). Two ways:
+  * ask=True (the app's downloads): nothing opens by itself. The site and page
+    are noted (pending), on_challenge(host, "pending") tells the app, and the
+    download carries on with other sites in the background. When the user
+    presses "Open the check", open_check(host) shows that one page in a window,
+    keeps the PDF it gives, and goes back to the background.
+  * ask=False (the command line): a window opens at once on that page, and the
+    rest of that site's papers in the same batch reuse it (one tick per batch).
 AIS_BROWSER_INTERACTIVE=0 skips such papers instead (status needs_check).
 
 Usage:
@@ -149,15 +155,22 @@ def prefer_pdf_downloads():
         json.dump(prefs, f)
 
 
+USER_WAIT = 180         # seconds a visible check page waits for the user's tick
+
+
 class Browser:
     """Context manager around one persistent Chromium context.
 
     visible=False (default): background downloads; an interactive challenge
     reopens just that page in a visible window and calls
     on_challenge(host, state) with state "waiting" / "passed" / "failed".
+    ask=True: an interactive challenge opens nothing; it is noted in `pending`
+    and announced as "pending" ("again" for a site the user already passed in
+    this batch), and open_check(host) shows it when the user asks ("open", then
+    "passed" / "failed"). `stop` (a threading.Event) ends a wait for the user.
     """
 
-    def __init__(self, visible=None, on_challenge=None, interactive=None):
+    def __init__(self, visible=None, on_challenge=None, interactive=None, ask=False):
         if visible is None:
             visible = os.environ.get("AIS_BROWSER_VISIBLE") == "1"
         if interactive is None:  # default: let the user verify in a visible window
@@ -166,6 +179,11 @@ class Browser:
         self.visible = self.start_visible = visible
         self.on_challenge = on_challenge
         self.interactive = interactive
+        self.ask = ask
+        self.pending = {}       # ask mode: host of a check page -> (url asked for, doi, host of that url), until the user opens it
+        self.cleared = set()    # ask mode: hosts whose check the user passed in this batch
+        self._prefetched = {}   # url -> (pdf, note) a check window already got: the paper's retry takes it instead of asking the site again
+        self.stop = None
         self.ctx = None
         self._ua = None
 
@@ -266,6 +284,8 @@ class Browser:
                         if is_pdf(data):
                             return data
                 resps.clear()
+                if wait_s >= USER_WAIT and self.stop is not None and self.stop.is_set():
+                    break                                   # Stop pressed during a wait for the user's tick (an ordinary page load is let finish: cut short, it would read as a paywall or a sign-in)
                 if is_challenge(page):
                     calm = None
                 else:
@@ -362,29 +382,69 @@ class Browser:
         finally:
             page.close()
 
-    def fetch_pdf(self, url, wait_s=25, doi=None):
-        """Returns (pdf_bytes | None, note). `doi`: the paper's DOI, when the page we land on should name it (the publishers' own routes); a free copy on some repository does not."""
+    def fetch_pdf(self, url, wait_s=25, doi=None, own=False):
+        """Returns (pdf_bytes | None, note). `doi`: the paper's DOI, when the page we land on should name it (the publishers' own routes); a free copy on some repository does not.
+        `own`: this is the paper's own page (its publisher, or the publisher through the library). In ask mode only such a page's check is noted for the user;
+        a check on another route (a free copy elsewhere) just gives its note, and nothing opens."""
         host = urllib.parse.urlsplit(url).netloc
+        if url in self._prefetched:
+            return self._prefetched.pop(url)
         if host in self.checked_hosts:
             # the user already verified this site in the visible window: stay there
             if not self.visible:
                 self._launch(visible=True)
-            data, note, again = self._fetch(url, wait_s=180, doi=doi)
+            data, note, again = self._fetch(url, wait_s=USER_WAIT, doi=doi)
             if again:
                 self._notify(again, "waiting")
             return data, note
         if self.visible and not self.start_visible:
             self._launch(visible=False)  # back to the background for other sites
         data, note, chall = self._fetch(url, wait_s, doi=doi)
+        if chall and self.ask and self.interactive:
+            # nothing opens by itself: note the page, tell the app, and let the download go on with other sites
+            if own:
+                self.pending[chall] = (url, doi, host)
+                self._notify(chall, "again" if chall in self.cleared else "pending")
+            return data, note
         if chall and self.interactive:
             # "Verify you are human": open this page in a window for the user
             self._notify(chall, "waiting")
             self._launch(visible=True)
-            data, note, still = self._fetch(url, wait_s=180, doi=doi)
+            data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
             self._notify(chall, "failed" if still else "passed")
             if not still:
                 self.checked_hosts.update({host, chall})
         return data, note
+
+    def open_check(self, host, stay=False):
+        """The user pressed "Open the check" for `host` (ask mode): show its noted page in a visible window, wait up to 3 minutes for the user's tick (never
+        clicked here), keep the PDF it gives for the paper's retry, then go back to the background. stay=True (the site asked again after a pass): the window
+        stays for the rest of that site's papers in this batch. Returns whether the check was passed."""
+        if host not in self.pending:
+            return False
+        url, doi, url_host = self.pending.pop(host)
+        self._notify(host, "open")
+        try:
+            self._launch(visible=True)
+            data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
+        except PWError:                                     # the user closed the window (or the browser went away): a check not passed, never a crash
+            data, still = None, True
+        if data:
+            self._prefetched[url] = (data, note)
+        ok = not still and not (self.stop is not None and self.stop.is_set())
+        self._notify(host, "passed" if ok else "failed")
+        if ok:
+            self.cleared.add(host)
+            if stay:
+                self.checked_hosts.add(host)                # (the check's own site only: never a resolver or the library's address the paper started from)
+        if not (ok and stay) and not self.start_visible:
+            self._launch(visible=False)                     # back to the background
+        return ok
+
+    def background(self):
+        """Back to the background (a site's visible window is no longer needed)."""
+        if self.visible and not self.start_visible:
+            self._launch(visible=False)
 
     def page_to_pdf(self, url, min_chars=5000):
         """Save an article web page (HBR) as a PDF. Needs the headless browser."""

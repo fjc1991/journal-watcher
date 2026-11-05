@@ -454,6 +454,17 @@ def wait_for(url, seconds=60):
     return False
 
 
+def mac_notify(title, text):
+    """A notification in the Mac's Notification Centre (it may show as coming from Script Editor: osascript sends it). The words go in as arguments, never
+    inside the script, so nothing in them can run. Never raises, never waits."""
+    import subprocess
+    try:
+        subprocess.Popen(["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title \"Journal Watcher\" subtitle (item 1 of argv)",
+                          "-e", "end run", str(title)[:120], str(text)[:300]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def launch(window, home):
     """Point the app at a data folder, start the dashboard server in this process and show it."""
     try:
@@ -472,6 +483,7 @@ def launch(window, home):
         import server                                  # noqa: E402  (after JW_HOME is set: paths.py reads it when it is first imported)
         import updater                                 # noqa: E402
         updater.EXIT = lambda: os._exit(0)             # "Update now": the new app is swapped in once this process has gone
+        server.pl.NOTIFY = mac_notify                  # a "verify you are human" check waits for the user: a Mac notification
         srv, url = server.start(PORT, quiet=True)
         if srv is None:                                # another copy holds this folder: say so (never show it silently: it may be another version, or broken)
             other = {}

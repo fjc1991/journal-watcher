@@ -88,6 +88,7 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .banner { padding: 14px 16px; border-radius: 12px; background: var(--bl-soft); color: var(--ink); border: 1px solid var(--bl);
   display: flex; gap: 12px; align-items: flex-start; }
 .banner b { color: var(--bl); }
+.banner .chk { margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .runhead { padding: 16px 18px; }
 .runhead h1 { font: 600 22px var(--serif); margin: 0 0 4px; }
 .meta { color: var(--ink-3); font-size: 12px; }
@@ -964,7 +965,9 @@ function dlText(p) {
     case "needs_nova": case "needs_library": return `<span class="dl bad">Needs library sign-in</span>`;
     case "not_yet": return `<span class="dl bad" title="Brand-new “articles in advance” reach the library’s EBSCO once they’re in an issue — retry in a few weeks.">Not in the library’s EBSCO yet</span>`;
     case "unavailable": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Not in your library’s holdings</span>`;
-    case "needs_check": return `<span class="dl bad" title="The “verify you are human” box wasn’t ticked within 3 minutes. Select the paper and press Download again to retry.">Verification not completed</span>`;
+    case "needs_check": return p.dl_note && p.dl_note.startsWith("waiting for you")
+      ? `<span class="dl wait" title="Its site wants a “verify you are human” check. Press “Open the check” at the top of the page when you are ready.">Waiting for your check</span>`
+      : `<span class="dl bad" title="Its site wants a “verify you are human” check that was not done. Select the paper and press Download again: when nothing else is downloading, the check opens straight away and you tick the box yourself.">Needs a human check</span>`;
     case "wrong_paper": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Wrong PDF refused</span>`;
     case "failed": return `<span class="dl bad">Couldn’t download</span>`;
     case "deleted": return `<span class="dl" title="${esc(p.dl_note || "")}">Deleted by you</span>`;
@@ -1245,6 +1248,23 @@ async function loadSummary(path) {
 }
 
 // ---------- status + live events
+let CHECKS = {}, CHECKNOTE = "";        // the "verify you are human" checks waiting for the user (host -> the pipeline's event), and the latest word on one
+function paintChecks() {
+  const hosts = Object.keys(CHECKS), many = hosts.length > 1;
+  $("#bannertext").innerHTML = (hosts.length ? `<b>A site wants to check you’re human.</b>` + hosts.map(h => `<div class="chk"><span>${esc(CHECKS[h].msg)}</span>
+      <button class="btn small primary" data-check="${esc(h)}">Open the check${many ? " · " + esc(CHECKS[h].site || h) : ""}</button></div>`).join("") : "")
+    + (CHECKNOTE ? `<div class="chk">${esc(CHECKNOTE)}</div>` : "");
+  $("#banner").classList.toggle("hide", !hosts.length && !CHECKNOTE);
+}
+$("#banner").addEventListener("click", async e => {
+  const b = e.target.closest("[data-check]"); if (!b) return;
+  const h = b.dataset.check;
+  delete CHECKS[h];                     // (said before the answer: the window's own news, or the end of the download, may arrive first and must have the last word)
+  CHECKNOTE = "Opening as soon as the paper being downloaded is done: a Chromium window will show the check. Tick the box there yourself.";
+  paintChecks();
+  try { await api("/api/check", {host: h}); }
+  catch (er) { CHECKNOTE = ""; paintChecks(); toast(er.message); }       // (the button is not put back: the server's list is what waits; a reload shows it)
+});
 function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
   $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
@@ -1254,7 +1274,7 @@ function setBusy(busy, kind) {
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
   $("#againbtn").classList.toggle("hide", busy || !RUN || RUN.kind !== "search");
-  if (!busy) { $("#prog").classList.remove("on"); $("#banner").classList.add("hide"); }
+  if (!busy) { $("#prog").classList.remove("on"); CHECKS = {}; CHECKNOTE = ""; $("#banner").classList.add("hide"); }
   updateSel(); renderTilesSoon();
 }
 function setCost(c, d) {            // the run's AI cost, naming the models that ran; a call whose price is not known makes it "at least", with a way to add the price
@@ -1274,6 +1294,7 @@ function connect() {
   es.addEventListener("activity", e => { if (window.Activity) Activity.event(JSON.parse(e.data)); });
   es.addEventListener("hello", async () => {
     const st = await api("/api/state"); setBusy(st.busy, st.kind);
+    if (st.busy) { CHECKS = {}; CHECKNOTE = ""; (st.checks || []).forEach(c => CHECKS[c.host] = c); paintChecks(); }   // (a reloaded or reconnected page shows what waits now, and nothing older)
     if (st.run && (!RUN || st.run.id === RUN.id)) { setRun(st.run); render(); }
   });
   es.addEventListener("job", e => {
@@ -1312,10 +1333,16 @@ function connect() {
   });
   es.addEventListener("challenge", e => {
     const d = JSON.parse(e.data);
-    $("#bannertext").innerHTML = d.state === "waiting"
-      ? `<b>A site wants to check you’re human.</b><br>${esc(d.msg)}` : esc(d.msg);
-    $("#banner").classList.toggle("hide", d.state === "passed");
-    if (d.state === "waiting") toast("Action needed: tick “Verify you are human” in the browser window.");
+    if (d.state === "pending" || d.state === "again") {          // a check waits for the user: nothing opens until "Open the check" is pressed
+      CHECKS[d.host] = d; CHECKNOTE = "";
+      toast("Action needed: press “Open the check” at the top of the page.");
+    } else if (d.state === "done") { CHECKS = {}; CHECKNOTE = ""; }
+    else {
+      delete CHECKS[d.host];
+      CHECKNOTE = d.state === "passed" ? "" : d.msg;
+      if (d.state === "waiting") toast("Action needed: tick “Verify you are human” in the browser window.");
+    }
+    paintChecks();
   });
   es.addEventListener("cost", e => { const m = JSON.parse(e.data); setCost(m.cost, m.detail); });
   es.addEventListener("signin", e => {

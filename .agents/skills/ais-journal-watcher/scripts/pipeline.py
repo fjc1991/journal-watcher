@@ -324,6 +324,8 @@ class Run:
                 # interrupted (dashboard closed mid-download): ready to retry
                 p["dl_status"] = "ok" if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])) else None
                 p["dl_note"] = "interrupted — press Download again"
+            elif p.get("dl_status") == "needs_check" and p.get("dl_note") == WAITING_NOTE:
+                p["dl_note"] = NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), p.get("publisher") or "Its site")     # (the app quit while it waited)
             terms_rule(r, p)                    # a search by terms screened before 1.2.1: its skipped and borderline matches become downloads (the model's word is kept)
             r.add_paper(p)
         return r
@@ -1137,9 +1139,31 @@ def _summarize_one(run, p, emit):
     run.save()
 
 
-def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None):
+NOTIFY = None       # the Mac app sets a function (title, text) that shows a notification: a human check is waiting for the user (app/jw_app.py)
+WAITING_NOTE = "waiting for you: press “Open the check” at the top of the page"
+NEEDS_CHECK_NOTE = "%s wants a human check: select the paper and press Download again (or open it in your browser)"
+
+
+def _notify_user(title, text):
+    if NOTIFY:
+        try:
+            NOTIFY(title, text)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=None):
     """Download the papers `ids` (one browser, a site's papers together), then summarise them. Papers from the same publisher are spaced out (pace_gap); the
-    waiting time is used to summarise papers already downloaded, so a careful pace costs little time overall. `sleep`/`clock` are for the tests."""
+    waiting time is used to summarise papers already downloaded, so a careful pace costs little time overall. `sleep`/`clock` are for the tests.
+
+    `checks` (the app): a queue.Queue of the hosts whose "verify you are human" check the user asked to open. With it, a check opens nothing by itself: the
+    paper and the rest of that site's papers are set aside, the user is told (the page's banner, and NOTIFY), and the other sites go on in the background.
+    A press is served between two papers or during a pace wait: the check opens in a window on that one page, and when the user has ticked the box the
+    site's papers come back to the front of the queue, in the background. A site that asks again after a pass gets one more nudge; that time its window
+    stays for its remaining papers. Papers still set aside when the rest is done end as needs_check (no waiting), except when nothing else was being
+    downloaded: then the check opens at once, as the command line does. Without `checks` the check window opens at once (browser.Browser's default)."""
+    import collections
+    import queue as queue_mod
     env = dl.load_env()
     sleep = sleep or (lambda t: stop.wait(t))
     clock = clock or time.monotonic
@@ -1151,66 +1175,190 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None):
     papers.sort(key=lambda p: p.get("publisher") or "")
     total = len(papers)
     got = []
+    ask = checks is not None
+    todo_q = collections.deque(papers)
+    deferred = {}           # host of a check page -> the papers set aside until the user opens it
+    waiting_pub = {}        # publisher -> the host whose check its papers wait for (they are not fetched until then: they would only meet the check page)
+    nudged = {}             # host -> times the user was asked in this batch (at most twice)
+    given_up = set()        # hosts whose check was not passed, or that asked a third time: their papers end as needs_check
+    count = {"done": 0, "final": 0}         # papers finished; papers that got a final answer from a site in this batch (not set aside)
     emit("progress", {"stage": "downloading", "label": "Downloading", "done": 0, "total": total})
+    current = {}
+
     def on_challenge(host, state):
+        if state in ("pending", "again"):                   # (ask mode) the paper's routes go on; the user is told once the paper is actually set aside
+            current.setdefault("chall", (host, state))      # the first check this paper met (its publisher's own page comes first)
+            if current.get("pub"):
+                challenged.add(current["pub"])
+            return
         msg = {"waiting": "%s wants to check you're human. A browser window just opened: tick "
                           "“Verify you are human” (you have 3 minutes); the download then continues "
                           "by itself, and the site's other papers in this batch reuse the window." % host,
+               "open": "A Chromium window is open on %s: tick “Verify you are human” there (you have 3 minutes). Downloading goes back to the background "
+                       "afterwards." % host,
                "passed": "%s check passed; continuing in the background." % host,
-               "failed": "%s check wasn't completed; that paper was skipped." % host}[state]
+               "failed": "%s check wasn't completed; its papers need a check (select them and press Download again)." % host}.get(state)
+        if not msg:
+            return
         emit("challenge", {"host": host, "state": state, "msg": msg})
         emit("log", {"msg": msg, "level": "warn" if state != "passed" else "ok"})
         if state == "waiting" and current.get("pub"):
             challenged.add(current["pub"])                  # that site is watching: leave more time between its papers for the rest of the batch
-    current = {}
+
+    def emit_dl(p):
+        emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
+
+    def finished(p, final=True):
+        count["done"] += 1
+        count["final"] += final
+        emit("progress", {"stage": "downloading", "label": "Downloading", "done": count["done"], "total": total})
+
+    def set_aside(p, host, pub):
+        deferred.setdefault(host, []).append(p)
+        waiting_pub[pub] = host
+        p.update(dl_status="needs_check", dl_note=WAITING_NOTE, manual_url=dl.browser_pdf_url(p))
+        emit_dl(p)
+
+    def nudge(host, state, pub):
+        nudged[host] = nudged.get(host, 0) + 1
+        site = SITE_NAMES.get(pub, host)
+        msg = ("%s wants to check you're human. Its papers wait; the other sites' papers go on downloading in the background. Press “Open the check” when "
+               "you are ready: that one page opens in a window, you tick the box, and downloading goes back to the background." % site if state == "pending" else
+               "%s asked again after your check. Press “Open the check” once more: this time the window stays open for that site's remaining papers in this "
+               "batch." % site)
+        emit("challenge", {"host": host, "state": state, "msg": msg, "site": site})
+        emit("log", {"msg": msg, "level": "warn"})
+        _notify_user("A human check is waiting", "%s wants to check you're human. Open Journal Watcher and press “Open the check”." % site)
+
+    def open_one(br, host, stay):
+        if host not in deferred or host in given_up or not hasattr(br, "open_check"):
+            return
+        try:
+            ok = br.open_check(host, stay=stay)
+        except Exception as e:  # noqa: BLE001        (a check that could not be shown is a check not passed: the batch goes on)
+            emit("log", {"msg": "The check for %s could not be shown: %s" % (host, str(e)[:120]), "level": "warn"})
+            ok = False
+        if ok:
+            back = deferred.pop(host)
+            for k in [k for k, v in waiting_pub.items() if v == host]:
+                waiting_pub.pop(k)
+            for q in back:                                  # no longer waiting for the user (a Stop before they come up leaves them as never tried)
+                q.update(dl_status=None, dl_note=None)
+                emit_dl(q)
+            todo_q.extendleft(reversed(back))               # the site's papers, back to the front of the queue (still paced)
+        else:
+            given_up.add(host)
+
+    def serve(br):
+        """Open the checks the user asked for since the last look (only this thread touches the browser)."""
+        while ask:
+            try:
+                host = checks.get_nowait()
+            except queue_mod.Empty:
+                return
+            open_one(br, host, stay=nudged.get(host, 0) >= 2)
 
     import deletion
     gone = deletion.deleted_keys()
-    with dl.open_browser(on_challenge=on_challenge) as br:
-        for n, p in enumerate(papers, 1):
-            if stop.is_set():
-                break
-            if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])):
-                got.append(p)
-                continue
-            if paper_key(p) in gone:                         # you deleted it: never fetched again by a run
-                p.update(dl_status="deleted", dl_note=DELETED_NOTE)
-                emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
-                continue
-            pub = p.get("publisher") or "other"
-            if pub in last_at:
-                due = last_at[pub] + pace_gap(pub, pace, pub in challenged)
-                if clock() < due:
-                    emit("log", {"msg": "Waiting %d s before the next %s paper (%s download pace, so the site does not take Journal Watcher for a robot)." % (
-                        round(due - clock()), SITE_NAMES.get(pub, pub), pace)})
-                while clock() < due and not stop.is_set():
-                    ready = next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
-                    if ready and due - clock() > 5:
-                        _summarize_one(run, ready, emit)         # use the wait: this paper becomes "Ready to read" sooner
+    try:
+        with dl.open_browser(on_challenge=on_challenge, ask=ask) as br:
+            try:
+                br.stop = stop                                  # Stop also ends a wait for the user's tick
+            except AttributeError:
+                pass
+            while True:
+                while todo_q:
+                    if stop.is_set():
+                        break
+                    serve(br)
+                    if stop.is_set():
+                        break
+                    p = todo_q.popleft()
+                    if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])):
+                        got.append(p)
+                        finished(p, final=False)
+                        continue
+                    if paper_key(p) in gone:                         # you deleted it: never fetched again by a run
+                        p.update(dl_status="deleted", dl_note=DELETED_NOTE)
+                        emit_dl(p)
+                        finished(p, final=False)
+                        continue
+                    pub = p.get("publisher") or "other"
+                    if pub in waiting_pub:                           # its site's check waits for the user
+                        set_aside(p, waiting_pub[pub], pub)
+                        continue
+                    if pub in last_at:
+                        due = last_at[pub] + pace_gap(pub, pace, pub in challenged)
+                        if clock() < due:
+                            emit("log", {"msg": "Waiting %d s before the next %s paper (%s download pace, so the site does not take Journal Watcher for a robot)." % (
+                                round(due - clock()), SITE_NAMES.get(pub, pub), pace)})
+                        while clock() < due and not stop.is_set():
+                            serve(br)                                # a press is served while waiting
+                            ready = next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
+                            if ready and due - clock() > 5:
+                                _summarize_one(run, ready, emit)         # use the wait: this paper becomes "Ready to read" sooner
+                            else:
+                                sleep(min(1.0, max(0.0, due - clock())))
+                        if stop.is_set():
+                            break
+                    current.clear()
+                    current["pub"] = pub
+                    p["dl_status"] = "downloading"
+                    emit("download", {"id": p["id"], "dl_status": "downloading"})
+                    ok, path, note = dl.download_paper(dict(p), env, browser=br)
+                    chall = current.get("chall")
+                    last_at[pub] = clock()
+                    if ok:
+                        p.update(dl_status="ok", file=os.path.relpath(path, ROOT), dl_note=note)
+                        got.append(p)
+                    elif ask and chall and hasattr(br, "open_check"):
+                        host, state = chall
+                        if host not in given_up and state == "again" and nudged.get(host, 0) >= 2 and host not in deferred:
+                            given_up.add(host)                       # asked a third time: no more nudges; its papers end as needs_check
+                            emit("challenge", {"host": host, "state": "failed", "msg": "%s asked for a check a third time; its papers need a check later "
+                                               "(select them and press Download again)." % SITE_NAMES.get(pub, host)})
+                        first = host not in deferred and host not in given_up
+                        set_aside(p, host, pub)
+                        if first and not stop.is_set():
+                            nudge(host, state, pub)
+                        run.save()
+                        continue
                     else:
-                        sleep(min(1.0, max(0.0, due - clock())))
-                if stop.is_set():
-                    break
-            current["pub"] = pub
-            p["dl_status"] = "downloading"
-            emit("download", {"id": p["id"], "dl_status": "downloading"})
-            ok, path, note = dl.download_paper(dict(p), env, browser=br)
-            if ok:
-                p.update(dl_status="ok", file=os.path.relpath(path, ROOT), dl_note=note)
-                got.append(p)
-            else:
-                own = re.sub(r"wrong paper via [^|]*", "", note)           # what the routes said, without what a refused PDF said about itself (its headline is not a status)
-                p.update(dl_status="needs_library" if ("needs_library_login" in own or "library_setup:" in own) else
-                         "unavailable" if "not_in_library" in own else
-                         "needs_login" if "needs_login" in own else           # (before "not yet in EBSCO": EBSCO is now asked for any paper, so its "not found" must not hide a sign-in the paper needs)
-                         "not_yet" if "not found in library EBSCO" in own else
-                         "needs_check" if "challenge:" in own else
-                         "wrong_paper" if "wrong paper" in note else "failed",
-                         dl_note=note, manual_url=dl.browser_pdf_url(p))
-            emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
-            emit("progress", {"stage": "downloading", "label": "Downloading", "done": n, "total": total})
-            last_at[pub] = clock()
-            run.save()
+                        own = re.sub(r"wrong paper via [^|]*", "", note)           # what the routes said, without what a refused PDF said about itself (its headline is not a status)
+                        p.update(dl_status="needs_library" if ("needs_library_login" in own or "library_setup:" in own) else
+                                 "unavailable" if "not_in_library" in own else
+                                 "needs_login" if "needs_login" in own else           # (before "not yet in EBSCO": EBSCO is now asked for any paper, so its "not found" must not hide a sign-in the paper needs)
+                                 "not_yet" if "not found in library EBSCO" in own else
+                                 "needs_check" if "challenge:" in own else
+                                 "wrong_paper" if "wrong paper" in note else "failed",
+                                 dl_note=note, manual_url=dl.browser_pdf_url(p))
+                    emit_dl(p)
+                    finished(p)
+                    run.save()
+                if ask and not stop.is_set():
+                    serve(br)                                        # a press made during the last paper is still served
+                    if todo_q:
+                        continue
+                # the rest is done. Papers set aside: when nothing else was being downloaded (say, a retry of papers that need a check), the user started this
+                # for them, so their check opens at once (the window then stays for that site's papers); otherwise they end as needs_check, without waiting.
+                waiting = [h for h in deferred if h not in given_up]
+                if ask and waiting and not stop.is_set() and count["final"] == 0 and br is not None:
+                    for h in waiting:
+                        nudged[h] = max(nudged.get(h, 0), 2)
+                        open_one(br, h, stay=True)
+                    if todo_q:
+                        continue
+                break
+    finally:                                                # (also after an error: no paper is left 'waiting for you')
+        for host, ps in deferred.items():
+            for p in ps:
+                p.update(dl_status="needs_check", dl_note=NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), host))
+                emit_dl(p)
+                finished(p)
+        if any(deferred.values()):
+            emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % sum(len(v) for v in deferred.values()), "level": "warn"})
+            emit("challenge", {"host": "", "state": "done", "msg": ""})
+    run.save()
     todo = [p for p in got if not p.get("summary")]
     for n, p in enumerate(todo, 1):
         if stop.is_set():
