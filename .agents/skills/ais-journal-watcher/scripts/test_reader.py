@@ -4270,6 +4270,13 @@ print("OK")
                  "/ssrn-other": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code1.pdf?abstractid=9999999&mirid=1'>Download another</a><a href='/sol3/Delivery.cfm/SSRN_ID47233851_code1.pdf?abstractid=47233851'>a longer number</a>",
                  "/ssrn-stray": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/SSRN_ID9999999_code4723385.pdf?abstractid=9999999'>another paper, whose code field equals our number</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=4723385&mirid=1'>This paper</a>",
                  "/ssrn-bare": "<h1>A paper</h1><a href='/sol3/Delivery.cfm/file_4723385.pdf'>a link with the number but no identifier</a><a href='/sol3/Delivery.cfm/SSRN_ID4723385_code7.pdf?abstractid=1111111'>names two papers</a>"}
+        PAGES["/ssrn-real"] = ("<h1>A paper</h1><div class='box-container'><a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1' class='button-link primary'>Download This Paper</a>"   # SSRN's real link (from a paper page, Nov 2026)
+                               "<a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1&type=2'>Open PDF in Browser</a></div>"
+                               "<div class='related-papers'><a href='/sol3/Delivery.cfm?abstractid=9999999&mirid=1'>Download</a></div>")
+        PAGES["/ssrn-real-other"] = "<h1>A paper</h1><div><a href='/sol3/Delivery.cfm?abstractid=9999999&mirid=1'>Download This Paper</a></div>"
+        PAGES["/ssrn-banner"] = "<h1>A paper</h1><div class='top-banner'><a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1'>Download This Paper</a></div>"
+        SSRN_PDF = b"%PDF-1.4\n" + b"0" * 50_000 + b"\n%%EOF\n"
+        delivered = []
         PAGES["/oa-off"] = "<title>OpenAthens: 403 Forbidden</title><p>The redirector is not enabled for the specified customer domain. Please contact your OpenAthens administrator.</p>"
         REDIRECTS = {"/hop1": "/hop2", "/hop2": "/open", "/to-login": "/idp/login?x=1",
                      "/through": "/ShibAuth/institutionLogin?entityID=x", "/ShibAuth/institutionLogin": "/plain"}     # a silent pass through an institution-login step, back to the publisher
@@ -4277,6 +4284,10 @@ print("OK")
             def log_message(self, *a): pass
             def do_GET(self):
                 path = self.path.split("?")[0]
+                if path == "/sol3/Delivery.cfm":                                   # SSRN sends the PDF as a download
+                    delivered.append(self.path)
+                    self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Disposition", 'attachment; filename="SSRN-id4723385.pdf"')
+                    self.send_header("Content-Length", str(len(SSRN_PDF))); self.end_headers(); self.wfile.write(SSRN_PDF); return
                 if path in REDIRECTS:
                     self.send_response(302); self.send_header("Location", REDIRECTS[path]); self.end_headers(); return
                 body = ("<html><head><meta charset=utf-8></head><body>%s</body></html>" % PAGES[path]).encode() if path in PAGES else None
@@ -4348,6 +4359,20 @@ print("OK")
                 # the number alone is not an identifier, and a link naming two different papers is refused
                 pg_.goto(base3 + "/ssrn-bare"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-bare", "10.2139/ssrn.4723385") is None
                 pg_.goto(base3 + "/ssrn-own"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-own", "10.1287/mnsc.2024.0001") is None         # another paper's DOI: the rule does not apply
+                # SSRN's real button: Delivery.cfm?abstractid=<n>&mirid=1, no ".pdf" in it (1.2.5 and before never looked at it: every SSRN download failed)
+                pg_.goto(base3 + "/ssrn-real"); real_ = brw.Browser._pdf_link(pg_, base3 + "/ssrn-real", "10.2139/ssrn.4723385")
+                assert real_ and "Delivery.cfm?abstractid=4723385" in real_, real_
+                pg_.goto(base3 + "/ssrn-real-other"); assert brw.Browser._pdf_link(pg_, base3 + "/ssrn-real-other", "10.2139/ssrn.4723385") is None   # another paper's button: never
+                pg_.goto(base3 + "/ssrn-banner"); bn_ = brw.Browser._pdf_link(pg_, base3 + "/ssrn-banner", "10.2139/ssrn.4723385")
+                assert bn_ and "abstractid=4723385" in bn_, bn_                                                                                   # this paper's number decides, whatever box holds the button
+            prof_ = brw.PROFILE
+            brw.PROFILE = os.path.join(TMP, "ssrn-profile")                                                                                       # (a profile of its own: this sandbox's Chromium mishandles a second PDF in one profile)
+            try:
+                with brw.Browser(interactive=False) as b_:
+                    d_, n_ = b_.fetch_pdf(base3 + "/ssrn-real", wait_s=10, doi="10.2139/ssrn.4723385")
+                assert d_ == SSRN_PDF and n_ == "browser" and delivered and "abstractid=4723385" in delivered[0], (n_, delivered)                  # the paper's page, its button, the PDF
+            finally:
+                brw.PROFILE = prof_
             brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}
             brw.si.probe_url = lambda: "http://127.0.0.1:1/x"                                                                          # nobody listens
             buf = io.StringIO()

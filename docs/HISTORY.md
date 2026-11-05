@@ -845,6 +845,18 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** How long 1000+ papers take to draw on the author's Mac (the tests count cards, they do not time them). The browser's own Ctrl+F finds only the papers drawn (the list's search box searches all of them).
 
+### Item 29. SSRN downloads: the real "Download This Paper" link (2026-11-05, the author's report)
+
+**Reported.** "There appears to be an issue with SSRN downloads": they said "Couldn't download", while opening the page and downloading by hand worked, without being signed in to SSRN.
+
+**Found.** The author's Papers/_index.csv (read from Dropbox, read-only): 111 SSRN papers; 16 downloaded, all of them from arXiv or another free copy; 95 failed with "browser: no PDF at papers.ssrn.com/…abstract_id=…". The author copied the button's address from one of them: `https://papers.ssrn.com/sol3/Delivery.cfm?abstractid=7115195&mirid=1`. `browser.PDF_LINK_SEL` only selected links with ".pdf" (or /doi/pdf/, pdfft, viewcontent.cgi), so `_pdf_link` never saw the button. The SSRN rule added in 1.2.x (item 2p) was written for `Delivery.cfm/SSRN_ID<n>….pdf` addresses and was never checked against the site, which this sandbox cannot reach.
+
+**Changed.** `PDF_LINK_SEL` also selects `a[href*="Delivery.cfm"]`. In `_pdf_link`, for an SSRN DOI, a Delivery.cfm link is taken when its identifiers name exactly this paper (as before), whatever box the button sits in (the page's layout is not known here; another paper's button carries another number and is refused); for other DOIs such links are not followed (unchanged generic rule).
+
+**Tests.** `t_library_test` (real Chromium, local pages): the real link shape is found; another paper's button is refused; this paper's button inside a "banner" box is found; and a full `fetch_pdf` from an SSRN-style page follows the button and gets the PDF that the local server sends as a download. On the code before the change the first assertion fails (no link found).
+
+**Not verified.** SSRN itself (unreachable from the sandbox): its page may ask for a human check (the app's "Open the check" handles it) or change its layout. Papers SSRN has removed are not yet recognised; they still end as "Couldn't download" until an example page is seen.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
