@@ -2195,6 +2195,12 @@ bks.crossref_books = lambda title, rows=3: []
             json.dump({"id": rid_, "kind": "weekly", "params": {"topics": [], "query": ""}, "created": "2025-01-13T10:00:00+00:00", "stage": "ready", "status": "done",
                        "usage": {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}, "week": "2025-W03", "checks": ["2025-01-13T10:00:00+00:00"], "errors": [], "jstate": {}, "papers": pp_}, open(fx_, "w"))
             ncards = lambda: page.locator("#papers > .paper").count()
+            more = lambda: (page.evaluate("document.querySelector('#moremore').click()"), page.wait_for_timeout(300))     # ('Show more' itself: a click that does not scroll the button into view, where the scroll trigger would draw too)
+            def wait_cards(cond, timeout=10000):
+                try:
+                    page.wait_for_function("(c) => { const n = document.querySelectorAll('#papers > .paper').length; return eval(c); }", arg=cond, timeout=timeout); return True
+                except Exception:  # noqa: BLE001
+                    return False
             def open_batch(width):
                 page.set_viewport_size({"width": width, "height": 950}); page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_timeout(400)
                 page.evaluate("document.body.classList.remove('sb-folded')")
@@ -2213,19 +2219,20 @@ bks.crossref_books = lambda title, rows=3: []
                 check("a run with 1000 papers draws the first 60 (none built and hidden), with a 'Show more' button below",
                       ncards() == 60 and page.locator("#papers .paper.hide").count() == 0 and page.locator("#moremore").is_visible() and "more" in page.inner_text("#moremore"), "%d cards, %s" % (ncards(), page.inner_text("#papersmore")))
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_function("document.querySelectorAll('#papers > .paper').length > 60", timeout=10000); page.wait_for_timeout(300)
+                wait_cards("n > 60"); page.wait_for_timeout(300)
                 n1 = ncards()
                 check("…scrolling near the end draws the next 60", 60 < n1 <= 120, str(n1))
-                page.evaluate("window.scrollTo(0, 0)"); page.wait_for_timeout(200); page.click("#moremore"); page.wait_for_timeout(300)
+                page.evaluate("window.scrollTo(0, 0)"); page.wait_for_timeout(200); more()
                 n2 = ncards()
-                check("…'Show more' draws 60 more and says how many are left", n1 < n2 <= n1 + 60 and "left" in page.inner_text("#moremore"), "%d → %d, %s" % (n1, n2, page.inner_text("#moremore")))
+                check("…'Show more' draws exactly 60 more and says how many are left", n2 == n1 + 60 and "left" in page.inner_text("#moremore"), "%d → %d, %s" % (n1, n2, page.inner_text("#moremore")))
                 page.click('#vfilter button[data-v="skip"]'); page.wait_for_timeout(600)
                 check("a filter starts again with its own first 60 (Skipped: 60 of 200, none hidden)", ncards() == 60 and page.locator("#papers > .paper.skip").count() == 60, str(ncards()))
+                more()                                                                                  # (120 drawn: a search must still start again)
                 page.fill("#q", "Batch paper 0999"); page.wait_for_timeout(600)
                 check("…a search finds a paper beyond the first batch, and nothing more is offered", ncards() == 1 and "0999" in page.inner_text("#papers") and not page.locator("#moremore").is_visible(), str(ncards()))
                 page.fill("#q", ""); page.wait_for_timeout(600)
                 check("…clearing it starts again at 60", ncards() == 60, str(ncards()))
-                page.click('#vfilter button[data-v="borderline"]'); page.wait_for_timeout(600); page.click("#moremore"); page.wait_for_timeout(300)
+                page.click('#vfilter button[data-v="borderline"]'); page.wait_for_timeout(600); more()
                 nb_ = ncards()
                 card_ = page.locator("#papers > .paper").nth(70); card_.scroll_into_view_if_needed(); page.wait_for_timeout(200)
                 y0 = page.evaluate("window.scrollY")
@@ -2233,11 +2240,13 @@ bks.crossref_books = lambda title, rows=3: []
                 y1 = page.evaluate("window.scrollY")
                 check("moving a paper to the download queue keeps what is drawn and where you are (no jump back to the first 60 at the top)", nb_ == 100 and ncards() == 99 and abs(y1 - y0) < 950, "%d → %d cards, scroll %d → %d" % (nb_, ncards(), y0, y1))
                 page.click('#vfilter button[data-v="download"]'); page.wait_for_timeout(600)
+                page.click("#selnone"); page.wait_for_timeout(300)                                       # (a weekly run selects its download papers when it opens: start from none)
+                more(); n_sel = ncards()
                 page.click("#selrec"); page.wait_for_timeout(300)
-                check("'Select all' selects every download paper, drawn or not (701: one was just moved to the queue), while only the first batch is drawn",
-                      page.inner_text("#selcount").strip() == "701 selected" and ncards() == 60, "%s, %d cards" % (page.inner_text("#selcount"), ncards()))
-                page.click("#moremore"); page.wait_for_timeout(300)
-                later_ = page.evaluate("[...document.querySelectorAll('#papers > .paper')].slice(60).map(c => c.querySelector('input[type=checkbox]').checked)")
+                check("'Select all' selects every download paper, drawn or not (701: one was just moved to the queue), and keeps what is drawn",
+                      page.inner_text("#selcount").strip() == "701 selected" and ncards() == n_sel == 120, "%s, %d → %d cards" % (page.inner_text("#selcount"), n_sel, ncards()))
+                more()
+                later_ = page.evaluate("[...document.querySelectorAll('#papers > .paper')].slice(120).map(c => c.querySelector('input[type=checkbox]').checked)")
                 check("…and the papers drawn after it come ticked", later_ and all(later_), str(later_[:5]))
                 page.click("#selnone"); page.click('#vfilter button[data-v="download"]'); page.wait_for_timeout(600)
                 left0 = int(re.search(r"\((\d+) left\)", page.inner_text("#moremore")).group(1))

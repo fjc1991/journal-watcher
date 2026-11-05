@@ -1041,8 +1041,9 @@ function renderList(o) {
   VIS = sorted().filter(p => visible(p, f));
   if (!o.keep) {
     SHOWN = LIST_STEP;
-    const top = $("#listview").getBoundingClientRect().top;
-    if (top < 0) window.scrollTo({top: window.scrollY + top - 10});     // (back to the list's start, so a short new list does not leave you below it)
+    const nb = $("#navbar"), bars = (nb && nb.offsetParent && getComputedStyle(nb).position === "sticky" ? nb : $(".topbar")).getBoundingClientRect().bottom + 8,
+          top = $("#listview").getBoundingClientRect().top;
+    if (top < bars) window.scrollTo({top: window.scrollY + top - bars});   // (back to the list's start, below the bars that stay at the top, so a short new list does not leave you below it)
   }
   box.innerHTML = "";
   VIS.slice(0, SHOWN).forEach(p => box.append(card(p)));
