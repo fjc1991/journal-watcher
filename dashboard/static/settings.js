@@ -47,6 +47,11 @@ function render() {
 const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); };
 
 // ---------------------------------------------------------------- AI & privacy
+function srcText(au) {               // where an automatic price comes from, in words
+  const when = au.checked ? new Date(au.checked + "T12:00:00").toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"}) : "";
+  const t = au.source === "openrouter" ? `OpenRouter's list${when ? ", read " + when : ""}` : au.source === "built-in" ? `built into the app${when ? ", checked " + when : ""}` : au.source === "free" ? "free (runs on this computer)" : esc(au.source || "");
+  return esc(t) + (au.stale ? ` <span class="warn">· possibly out of date</span>` : "");
+}
 function renderAI(body) {
   const A = D.ai; if (!A) { body.innerHTML = `<div class="card st-card">AI features aren’t installed. Run <code>pip install -r requirements.txt</code>.</div>`; return; }
   const provs = Object.entries(A.providers), pnames = provs.map(([n]) => n);
@@ -82,10 +87,12 @@ function renderAI(body) {
     <label class="chk"><input type="checkbox" id="st-local"${A.privacy.local_only ? " checked" : ""}> <b>Local-only mode</b> — never send paper text to a provider outside this computer (only Ollama works; Ask and Explain need an Ollama model)</label>
     <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd ?? ""}" placeholder="no limit" style="width:110px"> <small>calls stop when the month's spend reaches it; a warning shows at 80%</small></label>
     <label class="chk">Reuse earlier screening verdicts for <input type="number" id="st-reuse" min="0" max="3650" step="1" value="${(A.screening || {}).reuse_days ?? 90}" style="width:80px"> days <small>0 = always ask the AI again. A verdict is reused only for the same paper text and the same question (topics, method and focus phrase), so searching again does not pay for papers it already judged</small></label></div>
-  <div class="card st-card"><h2>Prices <small>USD per million tokens — only for cost figures</small></h2>
-    <table class="st-table"><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th></tr>
-    ${used.map(m => `<tr data-m="${esc(m)}"><td>${esc(m)}</td>${["in", "out", "cache_write", "cache_read"].map(k => `<td><input type="number" step="0.01" min="0" data-k="${k}" aria-label="${esc(m)}: ${({in: "input", out: "output", cache_write: "cache write", cache_read: "cache read"})[k]} price per million tokens" value="${price(m)[k] ?? ""}" style="width:90px"></td>`).join("")}</tr>`).join("")}</table>
-    <p class="hint">Without a price a model's calls show “—” and don't count towards the budget. Look the numbers up on the provider's pricing page.</p></div>
+  <div class="card st-card"><h2>Prices <small>USD per million tokens — for cost figures and the budget</small></h2>
+    <table class="st-table" id="st-prices"><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th><th>Where the price comes from</th></tr>
+    ${used.map(m => { const au = (A.price_auto || {})[m] || {}, mine = Object.keys(price(m)).length > 0;
+      const src = mine ? "yours" + (au.source ? ` <small>(without it: ${srcText(au)})</small>` : "") : au.source ? srcText(au) : `<span class="warn">not known — type it, or calls count as “price unknown”</span>`;
+      return `<tr data-m="${esc(m)}"><td>${esc(au.name && au.name !== m ? au.name + " · " : "")}<code>${esc(m)}</code></td>${["in", "out", "cache_write", "cache_read"].map(k => `<td><input type="number" step="0.01" min="0" data-k="${k}" aria-label="${esc(m)}: ${({in: "input", out: "output", cache_write: "cache write", cache_read: "cache read"})[k]} price per million tokens" value="${price(m)[k] ?? ""}" placeholder="${au.source && au[k] != null ? +(+au[k]).toFixed(4) : ""}" style="width:90px"></td>`).join("")}<td class="psrc">${src}</td></tr>`; }).join("")}</table>
+    <p class="hint">A price you type always wins; empty boxes use the price shown in grey. OpenRouter models get OpenRouter's current price by themselves (read once a day from openrouter.ai: nothing about you or your papers is sent); Claude models a price list built into the app; a model on this computer is free. Clear a row to go back to the automatic price. Without any price a model's calls are counted as “price unknown”, and the run's cost says “at least”.</p></div>
   <div class="st-actions"><button class="btn primary" id="st-save">Save</button> <span id="st-msg" class="st-msg"></span></div>`;
   const msg = $("#st-msg", body);
   const WEB_ONLY = ["events"];          // the Ideas Lab's current events searches the web: only some providers can, so "everything" leaves it alone on one that cannot
@@ -118,7 +125,7 @@ function renderAI(body) {
   $("#st-save", body).onclick = async () => {
     const features = {}; $$("tr[data-f]", body).forEach(tr => { const k = tr.dataset.f; if (k === "emb") return; features[k] = {provider: $(".fp", tr).value, model: $(".fm", tr).value.trim(), effort: $(".fe", tr).value}; });
     const provider_models = {}; $$("tr[data-p]", body).forEach(tr => { provider_models[tr.dataset.p] = $(".pm", tr).value.split(",").map(s => s.trim()).filter(Boolean); });
-    const prices = {}; $$("tr[data-m]", body).forEach(tr => { const v = {}; let any = false; $$("input", tr).forEach(i => { v[i.dataset.k] = i.value === "" ? 0 : +i.value; any = any || i.value !== ""; }); if (any) prices[tr.dataset.m] = v; });
+    const prices = {}; $$("tr[data-m]", body).forEach(tr => { const v = {}; let any = false; $$("input", tr).forEach(i => { v[i.dataset.k] = i.value === "" ? 0 : +i.value; any = any || i.value !== ""; }); prices[tr.dataset.m] = any ? v : null; });      // (an empty row: back to the automatic price)
     const emb = $('tr[data-f="emb"]', body);
     try {
       D.ai = await api("/api/ai/config", {features, provider_models, prices, embeddings: {provider: $(".fp", emb).value, model: $(".fm", emb).value.trim()},

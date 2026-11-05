@@ -780,6 +780,22 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** The speed on a real Mac (measured on a four-core Linux machine only; please read the tray and `index_timing.jsonl`), Dropbox with two real Macs writing the same index folder, and how much space a real library takes.
 
+### Item 25. The run's cost names its models, with prices found automatically (2026-11-05, the author's request)
+
+**Asked.** The top bar said "Sonnet cost this run" while the author used an OpenRouter model (`scaledown/summarize`, $0.04 per million input tokens, $0 output). The name must follow the settings, and the cost should come from the model actually used, with a way to supply what is missing. Decided with the author: read OpenRouter's prices automatically; a built-in table for providers without a readable list, which the author can override; name every model in the top bar; a lower bound ("at least") when a price is missing.
+
+**Found.** `index.html` hard-coded the label. `pipeline.Usage.add_result` put only `anthropic`/`claude-sonnet-5-5` tokens into buckets priced by the constant `PRICE`, and every other model into `extra` at `ai.cost_of(model)`, which read only the typed table in `ai.json` and returned None (added as 0) for any model without a row. The screening estimate (`EST_SCREEN_COST_PER_PAPER`) was Sonnet's, and the card heading named Sonnet.
+
+**Changed.**
+- New `prices.py`. `lookup(provider, model)` goes in this order: the typed price ("yours"); OpenRouter's list for a provider whose `base_url` is openrouter.ai (`parse_openrouter` turns per-token strings into per-million numbers, drops negative router prices; `refresh()` reads https://openrouter.ai/api/v1/models at most once a day into this computer's lookup folder and keeps the old list when a read fails; `refresh_soon()` runs it in the background at start-up, after Settings are saved and on a miss); `BUILTIN` (Anthropic's first-party prices from the model table dated 2026-10-06; cache writes 1.25x input, cache reads as published or 0.1x); "free" for a local address that needs no key; else None. `stale()` flags a built-in price older than 120 days or an OpenRouter one older than two days. `name()` gives "Claude Sonnet 5.5" for Claude ids and the model id otherwise.
+- `ai.cost_of(model, usage, searches, provider)` uses the lookup, with the model's own per-search price when its list has one. `ai.estimate` passes the provider, and `ai.config()` adds `price_auto` (each used model's automatic price, source, date, stale flag).
+- `pipeline.Usage` counts each provider and model apart (`models`: calls, tokens, cost, unpriced); `cost()` adds the old buckets for runs saved before. `detail()` returns the per-model rows that `to_dict` and the `cost` event carry. `est_screen_cost_per_paper()` prices one paper (1500 characters in, 60 tokens out, which is the old $0.0015 at Sonnet's price) with the screening model.
+- The page: `setCost(cost, detail)` shows "AI cost this run: [at least] $X · names", the per-model tooltip and a link to Settings → AI. The estimates say when the price is not known. Settings → AI → Prices shows the automatic price as a placeholder and a "Where the price comes from" column, and an emptied row goes back to automatic (saved as null).
+
+**Tests.** `t_prices` (parsing with a local fake price list, read once a day, a failed read keeps the list, the lookup order including a local proxy with a key not being free, stale dates, names, `cost_of` through each source, OpenRouter's per-search price), `t_run_cost_detail` (per-model rows, unpriced calls, saved answers not counted, an old run, the screening estimate following the model). Twelve single-rule mutations are each caught; the per-search one needed the test's price to differ from the $0.01 default. Five existing assertions that read `usage.d["extra"]` now read the run's cost. UI: "costs say which models ran and where their prices come from".
+
+**Not verified.** Prices for OpenAI and Google used directly (not through OpenRouter) are not built in: their prices could not be checked from here, so such models stay "price unknown" until typed (or are reached through OpenRouter). Live OpenRouter reads were checked once from the sandbox (455 models, the author's model at $0.04/$0); the tests use a local fake list. Haiku 5.5's price above 100K-token prompts is not modelled.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

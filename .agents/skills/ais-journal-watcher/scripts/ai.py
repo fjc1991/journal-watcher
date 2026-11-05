@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import activity as act  # noqa: E402
 import download as dl  # noqa: E402
 import keychain  # noqa: E402
+import prices as pricing  # noqa: E402
 
 BASE, STATE = dl.BASE, dl.STATE
 CONFIG = os.path.join(BASE, "ai.json")
@@ -257,10 +258,10 @@ def feature_model(feature):
 
 def estimate(feature, in_chars, out_tokens, searches=0):
     """Rough USD for one call before it is made (about 3.3 characters per token, as measured on real papers); None when the model has no price."""
-    _, model = feature_model(feature)
+    prov, model = feature_model(feature)
     if not model:
         return None
-    return cost_of(model, {"in": int(in_chars / 3.3), "out": int(out_tokens)}, searches)
+    return cost_of(model, {"in": int(in_chars / 3.3), "out": int(out_tokens)}, searches, prov)
 
 
 def config():
@@ -270,7 +271,23 @@ def config():
                  "configured": not p.get("key_env") or bool(_key(p["key_env"])), "key_where": key_where(p.get("key_env")), "local": is_local(p),
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
     return {"providers": provs, "keychain": keychain.available(), "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
-            "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
+            "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
+
+
+def price_auto(c=None):
+    """For each model a feature or the embeddings use: the price the app finds without one you typed ({in, out, cache_write, cache_read, source, checked, stale,
+    name}, or {"source": None} when none is known), so that Settings can show it and where it comes from."""
+    c = c or config_data()
+    pairs = [(f.get("provider"), f.get("model")) for f in c["features"].values() if isinstance(f, dict)]
+    if c["embeddings"].get("provider") != "local":
+        pairs.append((c["embeddings"].get("provider"), c["embeddings"].get("model")))
+    out = {}
+    for prov, model in pairs:
+        if not model or model in out:
+            continue
+        e = pricing.lookup(prov, model, c, yours=False)
+        out[model] = {**e, "stale": pricing.stale(e), "name": pricing.name(prov, model), "provider": prov} if e else {"source": None, "name": pricing.name(prov, model), "provider": prov}
+    return out
 
 
 def save_config(patch):
@@ -317,6 +334,7 @@ def save_config(patch):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(c, f, ensure_ascii=False, indent=2)
     os.replace(tmp, CONFIG)
+    pricing.refresh_soon()               # (an OpenRouter model just chosen: its price is read now, not tomorrow)
     return config()
 
 
@@ -327,16 +345,17 @@ class Result:
         self.text, self.provider, self.model, self.stop = text, provider, model, stop
         self.usage = {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0, **(usage or {})}
         self.sources, self.searches, self.cached = sources or [], searches, cached
-        self.cost = cost if cost is not None else cost_of(model, self.usage, searches)
+        self.cost = cost if cost is not None else cost_of(model, self.usage, searches, provider)
 
 
-def cost_of(model, usage, searches=0):
-    """USD from the price table in ai.json (per million tokens, plus "_web_search" per search), or None when the model has no price."""
-    prices = config_data().get("prices", {})
-    p = prices.get(model)
+def cost_of(model, usage, searches=0, provider=None):
+    """USD for these tokens of `model` at `provider` (prices.lookup: your price, OpenRouter's list, the built-in table, free on this computer), plus web searches
+    (the model's own price per search when its list has one, else ai.json "_web_search"); None when the price is not known, never a silent 0."""
+    p = pricing.lookup(provider, model)
     if not p:
         return None
-    return sum(usage.get(k, 0) * p.get(k, 0) for k in ("in", "out", "cache_write", "cache_read")) / 1e6 + searches * (prices.get("_web_search") or {}).get("per_search", 0.01)
+    per_search = p["web_search"] if p.get("web_search") is not None else (config_data().get("prices", {}).get("_web_search") or {}).get("per_search", 0.01)
+    return sum(usage.get(k, 0) * p.get(k, 0) for k in ("in", "out", "cache_write", "cache_read")) / 1e6 + searches * per_search
 
 
 def _sent(messages, system):

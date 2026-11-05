@@ -39,9 +39,20 @@ RUNS = os.path.join(STATE, "runs")
 
 MODEL = "claude-sonnet-5-5"
 BETAS = ["server-side-fallback-2026-07-01"]
-# $ per million tokens (Claude Sonnet 5.5)
+# $ per million tokens (Claude Sonnet 5.5): only for the tokens of runs made before each model was counted on its own (Usage.d's top-level buckets), and the direct
+# Anthropic path used when the AI layer is not installed
 PRICE = {"in": 2.00, "out": 10.00, "cache_write": 2.50, "cache_read": 0.20}
-EST_SCREEN_COST_PER_PAPER = 0.0015  # measured-ish; shown in the UI before a search
+EST_SCREEN_COST_PER_PAPER = 0.0015  # Claude Sonnet 5.5's price for what one paper sends and gets back (EST_SCREEN_CHARS, EST_SCREEN_OUT); see est_screen_cost_per_paper()
+EST_SCREEN_CHARS, EST_SCREEN_OUT = 1500, 60      # one paper in a screening batch: its share of the prompt and the abstract (characters), and its verdict (tokens)
+
+
+def est_screen_cost_per_paper():
+    """What screening one paper costs with the model chosen for screening (Settings → AI), or None when its price is not known."""
+    try:
+        import ai
+        return ai.estimate("screen", EST_SCREEN_CHARS, EST_SCREEN_OUT)
+    except Exception:  # noqa: BLE001      (the AI layer is not installed: the direct Anthropic path screens with Claude Sonnet 5.5)
+        return EST_SCREEN_COST_PER_PAPER
 
 for _k, _v in dl.load_env().items():
     os.environ.setdefault(_k, _v)
@@ -107,18 +118,43 @@ class Usage:
             self.d["cache_read"] += u.cache_read_input_tokens or 0
 
     def add_result(self, r):
-        """Add an ai.Result (any provider). Claude Sonnet 5.5 tokens go in the usual buckets; anything else is added as dollars."""
+        """Add an ai.Result (any provider): counted per model ("models": {"provider · model": {calls, in, out, cost, unpriced}}), at that model's price; a call whose
+        price is not known is counted in "unpriced", never as $0. An answer from the saved answers cost nothing and is not counted."""
         if getattr(r, "cached", False):
             return
         with self.lock:
-            if r.provider == "anthropic" and r.model == MODEL:
-                for k in ("in", "out", "cache_write", "cache_read"):
-                    self.d[k] += r.usage.get(k, 0)
+            m = self.d.setdefault("models", {}).setdefault("%s · %s" % (r.provider, r.model), {"provider": r.provider, "model": r.model, "calls": 0, "in": 0, "out": 0, "cost": 0.0, "unpriced": 0})
+            m["calls"] += 1
+            m["in"] += int(r.usage.get("in", 0)) + int(r.usage.get("cache_read", 0)) + int(r.usage.get("cache_write", 0))
+            m["out"] += int(r.usage.get("out", 0))
+            if r.cost is None:
+                m["unpriced"] += 1
             else:
-                self.d["extra"] = self.d.get("extra", 0) + (r.cost or 0)
+                m["cost"] += r.cost
+
+    def _legacy(self):
+        """USD of the top-level buckets: tokens of Claude Sonnet 5.5 (runs from before models were counted apart, and the direct Anthropic path)."""
+        return sum(self.d.get(k, 0) * PRICE[k] for k in PRICE) / 1e6
 
     def cost(self):
-        return sum(self.d[k] * PRICE[k] for k in PRICE) / 1e6 + self.d.get("extra", 0)
+        """USD of every call whose price is known (see detail() for the calls without one)."""
+        return self._legacy() + self.d.get("extra", 0) + sum(m.get("cost", 0) for m in (self.d.get("models") or {}).values())
+
+    def detail(self):
+        """What the top bar says about the run: {"cost", "unpriced" (calls without a known price), "models": [{name, provider, model, calls, in, out, cost, unpriced}]},
+        the costliest first. A run from before models were counted apart shows its tokens as Claude Sonnet 5.5's, which they were."""
+        import prices as pricing
+        rows = []
+        if any(self.d.get(k) for k in PRICE):
+            rows.append({"name": pricing.name("anthropic", MODEL), "provider": "anthropic", "model": MODEL, "calls": None, "in": self.d.get("in", 0) + self.d.get("cache_read", 0) + self.d.get("cache_write", 0),
+                         "out": self.d.get("out", 0), "cost": round(self._legacy(), 6), "unpriced": 0})
+        if self.d.get("extra"):
+            rows.append({"name": "other models", "provider": "", "model": "", "calls": None, "in": 0, "out": 0, "cost": round(self.d["extra"], 6), "unpriced": 0})
+        for m in (self.d.get("models") or {}).values():
+            rows.append({"name": pricing.name(m.get("provider"), m.get("model")), "provider": m.get("provider"), "model": m.get("model"), "calls": m.get("calls", 0),
+                         "in": m.get("in", 0), "out": m.get("out", 0), "cost": round(m.get("cost", 0), 6), "unpriced": m.get("unpriced", 0)})
+        rows.sort(key=lambda x: -x["cost"])
+        return {"cost": round(self.cost(), 4), "unpriced": sum(x["unpriced"] for x in rows), "models": rows}
 
 
 # ---------------------------------------------------------------- downloaded files
@@ -246,7 +282,7 @@ class Run:
     def to_dict(self, full=True):
         d = {"id": self.id, "kind": self.kind, "params": self.params, "title": self.title(),
              "created": self.created, "stage": self.stage, "status": self.status,
-             "usage": self.usage.d, "cost": round(self.usage.cost(), 4),
+             "usage": self.usage.d, "cost": round(self.usage.cost(), 4), "cost_detail": self.usage.detail(),
              "week": self.week, "checks": self.checks,
              "updated": max(self.checks) if self.checks else self.created,
              "n_papers": len(self.order), "errors": self.errors[-20:], "jstate": self.jstate,
@@ -902,7 +938,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                 emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
         todo = [p for p in todo if p["id"] not in known]
         run.reused += len(known)
-        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question (about $%.2f not paid for again)" % (len(known), len(known) * EST_SCREEN_COST_PER_PAPER)})
+        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question%s" % (len(known), " (about $%.2f not paid for again)" % (len(known) * est) if (est := est_screen_cost_per_paper()) is not None else "")})
         run.save(force=True)
     batches = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
     done, blocked = 0, None
@@ -964,7 +1000,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             done += len(batch)
             emit("progress", {"stage": "screening", "label": "Screening",
                               "done": done, "total": len(todo)})
-            emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d})
+            emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
             remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
             run.save()
     if blocked is not None:
@@ -1087,7 +1123,7 @@ def _summarize_one(run, p, emit):
     except Exception as e:
         p["dl_status"], p["dl_note"] = "ok", "summary failed: %s" % str(e)[:100]
     emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "summary")})
-    emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d})
+    emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
     run.save()
 
 
