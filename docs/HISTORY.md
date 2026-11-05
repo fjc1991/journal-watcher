@@ -796,6 +796,23 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** Prices for OpenAI and Google used directly (not through OpenRouter) are not built in: their prices could not be checked from here, so such models stay "price unknown" until typed (or are reached through OpenRouter). Live OpenRouter reads were checked once from the sandbox (455 models, the author's model at $0.04/$0); the tests use a local fake list. Haiku 5.5's price above 100K-token prompts is not modelled.
 
+### Item 26. Deleting what you added (2026-11-05, the author's request)
+
+**Asked.** "There is no way to delete a book after adding it to the library - please check that all added material can be manually deleted by the user." Decided with the author: delete for good after a confirmation (no trash); a deleted paper is kept out of later runs; past runs and AI provider keys can be deleted too.
+
+**Found.** Notes, highlights, cards, conversations and folders could already be deleted one by one. A paper or a book could only be "removed and downloaded again" (moved to Papers/_removed). A run's record and an API key could not be deleted from the app.
+
+**Changed.**
+- New `deletion.py`. `delete_item(file)`: the file must be a PDF under Papers/ (real path, no folder starting with "_"), listed with status ok in Papers/_index.csv. The row is written first (file emptied, status "deleted", a dated note), then the PDF and its sidecars (`notes_store.sidecars`: notes, summary, card, skim, conversation; for a book its EPUB and .book.json) and its search-index files (state/index/<sha1>.*) are deleted; it leaves every folder, loses its reading status, and the page forgets where reading stopped. `deleted_keys()` gives the index keys of deleted papers. `delete_run(id)` deletes a run's record.
+- `pipeline.mark_downloaded` shows a deleted paper as "deleted"; `download_and_summarize` skips it. Adding the paper yourself replaces the row, as for any paper.
+- `ai.remove_key(provider)`: from the Keychain and the data folder's .env, and from this process.
+- `server.py`: `POST /api/library/delete {files}` (409 while a download runs), `POST /api/runs/delete {id}` (409 for the running run), `/api/ai/key {provider, remove: true}`.
+- The page: "Delete this paper/book…" in each row's ⋯ menu and "Delete…" for a selection, each with a confirmation that names what goes; × on each past run; "Remove" next to a saved key (hidden while its key is being changed). A deleted paper in a run reads "Deleted by you" and cannot be ticked.
+
+**Tests.** `t_delete_items` (a paper and a book with all their files, folders, reading status and page choices; refused paths, including a damaged index row pointing into Papers/_removed; deleted papers kept out of a run and its download loop; re-adding; deleting a run; removing a key, twice, and a provider with no key). 11 single-rule mutations each caught (the _removed guard needed the damaged row to be caught). UI: deleting a paper from its menu with the confirmation's words and its files gone, deleting a run, the Remove button.
+
+**Not verified.** Deleting in the Mac app itself (the Keychain part is covered with the Keychain switched off in tests, JW_NO_KEYCHAIN). Dropbox keeps deleted files for 30 days; the confirmation says so.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
