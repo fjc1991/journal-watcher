@@ -88,6 +88,10 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .banner { padding: 14px 16px; border-radius: 12px; background: var(--bl-soft); color: var(--ink); border: 1px solid var(--bl);
   display: flex; gap: 12px; align-items: flex-start; }
 .banner b { color: var(--bl); }
+.authlist { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.authc { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 13px; }
+.authc small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+.authc input { margin-top: 3px; }
 .banner .chk { margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .runhead { padding: 16px 18px; }
 .runhead h1 { font: 600 22px var(--serif); margin: 0 0 4px; }
@@ -266,6 +270,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <button class="on" data-tab="weekly">This week</button>
         <button data-tab="search">Search archive</button>
         <button data-tab="terms">Search terms</button>
+        <button data-tab="authors">Authors</button>
       </div>
       <div class="pane on" id="pane-weekly">
         <p>Fetch the newest papers from every journal, skip anything seen before, and let the AI screen them against all your interests (Sonnet 5.5 unless you chose another model in Settings → AI).
@@ -287,6 +292,14 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <div class="est" id="est"></div>
         <button class="btn primary full" id="searchbtn">Search &amp; screen</button>
         <div class="est">Starts a new run. To narrow the list you’re viewing, use the filters above the results.</div>
+      </div>
+      <div class="pane" id="pane-authors">
+        <p>Every journal article, conference paper and working paper of one author (from OpenAlex), downloaded into a folder named after them. No screening: each paper gets a summary, as any download does.</p>
+        <label class="lbl" for="authname">Author <span>(a name, or an ORCID iD)</span></label>
+        <div class="row"><input type="text" id="authname" placeholder="e.g. Ann Lee" autocomplete="off"><button class="btn small" id="authgo" type="button">Find</button></div>
+        <div id="authlist" class="authlist"></div>
+        <div class="est hide" id="authhint">Tick more than one if they are the same person: OpenAlex sometimes lists one person twice (after a move, say).</div>
+        <button class="btn primary full hide" id="authdl" type="button">Download all</button>
       </div>
       <div class="pane" id="pane-terms">
         <p>Every paper of the chosen journals and years whose title, abstract or keywords contain <b>any</b> of your terms. No AI and no cost: the matches are listed as they are found. You can still rank them with AI afterwards.</p>
@@ -700,6 +713,35 @@ $("#searchbtn").onclick = async () => {
   };
   try { const r = await api("/api/run/search", body); startedRun(r.run); } catch (e) { toast(e.message); }
 };
+// ---------- Authors: an author's works (OpenAlex) into a folder named after them (authors.py)
+let AUTH = [];
+const authPicked = () => [...document.querySelectorAll("#authlist [data-ai]:checked")].map(c => AUTH[+c.dataset.ai]);
+function paintAuthBtn() {
+  const p = authPicked(), b = $("#authdl");
+  b.classList.toggle("hide", !p.length); $("#authhint").classList.toggle("hide", AUTH.length < 2);
+  if (p.length) b.textContent = `Download all into the folder “${p[0].name}”`;
+  b.disabled = BUSY;
+}
+$("#authgo").onclick = async () => {
+  const name = $("#authname").value.trim(); if (!name) return;
+  AUTH = []; $("#authlist").innerHTML = `<div class="est">Looking on OpenAlex…</div>`; paintAuthBtn();
+  try { AUTH = (await api("/api/authors/search", {name})).authors || []; }
+  catch (e) { $("#authlist").innerHTML = `<div class="est">${esc(e.message)}</div>`; return; }
+  $("#authlist").innerHTML = AUTH.length ? AUTH.map((a, i) => `<label class="authc"><input type="checkbox" data-ai="${i}"><span><b>${esc(a.name)}</b>
+      <small>${esc((a.institutions || []).join(", ") || "institution not known")} · ${a.works} works${(a.topics || []).length ? " · " + esc(a.topics.join(", ")) : ""}${a.orcid ? ` · <a href="https://orcid.org/${esc(a.orcid)}" target="_blank" rel="noopener">ORCID</a>` : ""}</small></span></label>`).join("")
+    : `<div class="est">No author of that name on OpenAlex.</div>`;
+  paintAuthBtn();
+};
+$("#authname").onkeydown = e => { if (e.key === "Enter") $("#authgo").click(); };
+$("#authlist").onchange = paintAuthBtn;
+$("#authdl").onclick = async () => {
+  const p = authPicked(); if (!p.length) return;
+  try {
+    const r = await api("/api/authors/download", {ids: p.map(a => a.id), name: p[0].name, institution: (p[0].institutions || [])[0] || ""});
+    toast(`Listing ${p[0].name}'s works, then downloading them into the folder “${r.run.params.folder_name}”…`);
+    startedRun(r.run); go({view: "run", j: "~queue"});
+  } catch (e) { notifyError(e); }
+};
 function startedRun(run) {
   SEL.clear(); FILTER = "relevant"; JST = {};
   document.querySelectorAll("#vfilter button").forEach(b => b.classList.toggle("on", b.dataset.v === FILTER));
@@ -722,7 +764,7 @@ $("#againbtn").onclick = () => {
 // "Retry screening" on any other run: the papers whose screening failed (verdict "error") and those it never reached (stopped by the budget, a key, a model that cannot
 // screen) are asked again; /api/rescreen clears the failed verdicts first. A weekly check never asks about them again by itself: they are already "seen".
 function screenPending() {
-  if (!RUN || RUN.kind === "picks") return {failed: 0, waiting: 0, n: 0};
+  if (!RUN || RUN.kind === "picks" || RUN.kind === "author") return {failed: 0, waiting: 0, n: 0};
   const ps = [...papers.values()], failed = ps.filter(p => p.verdict === "error").length, waiting = ps.filter(p => !p.verdict).length;
   return {failed, waiting, n: failed + waiting};
 }
@@ -878,7 +920,9 @@ function renderMeta() {
   const pending = ps.filter(p => !p.verdict).length;
   const pr = RUN.params || {};
   const nc = (RUN.checks || []).length;
+  const li = pr.listing || {};
   const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
+    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "")
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
       (RUN.updated ? `, last ${fmtWhen(RUN.updated)}` : "")
@@ -1312,7 +1356,7 @@ function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
   $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
   $("#status").classList.toggle("busy", busy);
-  ["#weeklybtn", "#searchbtn", "#termsbtn"].forEach(s => $(s).disabled = busy);
+  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl"].forEach(s => $(s).disabled = busy);
   updateScreenBtn();
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
