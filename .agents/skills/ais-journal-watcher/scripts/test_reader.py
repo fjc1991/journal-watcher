@@ -3508,7 +3508,7 @@ print("OK")
         """fetch_pdf, the reader, the full-text page and EBSCO each answer from a dict of (bytes, note); the calls are recorded."""
         def __init__(self, data=None, note="browser", reader=None, page=None, ebsco=None, renew=False, via=None):
             self.data, self.note, self.reader, self.page, self.ebsco, self.renew, self.calls, self.via, self.urls = data, note, reader, page, ebsco, renew, [], via, []
-        def fetch_pdf(self, url, wait_s=25, doi=None):
+        def fetch_pdf(self, url, wait_s=25, doi=None, own=False):
             self.calls.append("fetch_pdf"); self.urls.append(url)
             if self.via and url.startswith(self.via[0]):            # asked for through the library's sign-in
                 return self.via[1]
@@ -3857,11 +3857,22 @@ print("OK")
             def __exit__(self, *a): return False
             def open_check(self, host, stay=False):
                 self.opened.append((host, stay, [i for k, i, _ in log if k == "dl"]))
+                mode = S.get("open_mode")
+                if mode == "raise":
+                    raise RuntimeError("the window was closed")
+                if mode == "stop":                                         # the user presses Stop while the check window is open
+                    S["ev"].set(); self.ch(host, "failed"); return False
+                if mode == "stop_after_pass":
+                    S["ev"].set()
                 if len(self.opened) in S["fail_open"]:
                     self.ch(host, "failed"); return False
                 self.cleared.add(host); self.ch(host, "passed"); return True
         def fake_dl(p, env, browser=None, dry=False):
             log.append(("dl", p["id"], t[0])); t[0] += 10
+            if S.get("stop_in") == p["id"]:
+                S["ev"].set()                                              # Stop pressed while this paper downloads
+            if S.get("raise_in") == p["id"]:
+                raise RuntimeError("something broke")
             if p["id"] in S["press_at"]:
                 S["q"].put(S["press_at"].pop(p["id"]))                 # the user presses "Open the check" while this paper downloads
             if p["publisher"] in S["gated"]:
@@ -3877,12 +3888,15 @@ print("OK")
             log.append(("sum", p["id"], t[0])); tick(1)
             return "summary"
         pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize, pl_.NOTIFY = fake_dl, _Br, fake_sum, (lambda title, text: notes.append(text))
-        def go(papers, press_at=None, again=0, fail_open=(), stop=None, checks=True, press_t=None, gated=("elsevier",)):
+        def go(papers, press_at=None, again=0, fail_open=(), stop=None, checks=True, press_t=None, gated=("elsevier",), open_mode=None, stop_in=None, raise_in=None):
             si.save_profile({"pace": "careful"}); log.clear(); notes.clear(); events.clear(); t[0] = 0.0
-            S.update(again=again, fail_open=set(fail_open), press_at=dict(press_at or {}), q=queue_mod.Queue() if checks else None, press_t=press_t, gated=set(gated))
+            S.update(again=again, fail_open=set(fail_open), press_at=dict(press_at or {}), q=queue_mod.Queue() if checks else None, press_t=press_t, gated=set(gated),
+                     open_mode=open_mode, stop_in=stop_in, raise_in=raise_in, ev=stop if stop is not None else threading.Event())
+            stop = S["ev"]
             run = pl_.Run("picks", {"label": "ask"})
             for pid, pub in papers:
                 run.add_paper({"id": pid, "doi": "10.1/ask%s" % pid, "title": pid, "verdict": "download", "publisher": pub, "abbr": "X", "journal": "J"})
+            S["run"] = run
             pl_.download_and_summarize(run, [pid for pid, _ in papers], lambda ev, d: events.append((ev, d)), stop or threading.Event(), sleep=sleep, clock=clock, checks=S["q"])
             return run
         st = lambda run, i: run.papers[i].get("dl_status")
@@ -3936,6 +3950,37 @@ print("OK")
             assert _Br.last.opened == [] and all(st(run, i) != "downloading" for i in run.papers), {i: st(run, i) for i in run.papers}
             assert _Br.last.stop is ev                                                                 # Stop also reaches the browser (it ends a wait for the user's tick)
             pl_.summarize = fake_sum
+            # 7) a press during the batch's last paper is still served (the page said the window would open)
+            run = go([("E1", "elsevier"), ("W1", "wiley")], press_at={"W1": SD})
+            assert len(_Br.last.opened) == 1 and st(run, "E1") == "ok", (_Br.last.opened, {i: st(run, i) for i in run.papers})
+            # 8) Stop while the check window is open: the next paper (a new site, no pace wait) is not downloaded
+            run = go([("E1", "elsevier"), ("I1", "informs"), ("W1", "wiley")], press_at={"I1": SD}, open_mode="stop")
+            assert "W1" not in dls() and st(run, "W1") is None and st(run, "E1") == "needs_check", (log, {i: st(run, i) for i in run.papers})
+            # 9) Stop just after a passed check: the papers that came back are not left 'waiting for you'
+            run = go([("E1", "elsevier"), ("E2", "elsevier"), ("W1", "wiley")], press_at={"W1": SD}, open_mode="stop_after_pass")
+            assert all(run.papers[i].get("dl_note") != pl_.WAITING_NOTE for i in run.papers), {i: (st(run, i), run.papers[i].get("dl_note")) for i in run.papers}
+            # 10) Stop in a batch of checked papers only: nothing opens at the end, they need a check
+            run = go([("E1", "elsevier"), ("E2", "elsevier")], stop_in="E1")
+            assert _Br.last.opened == [] and st(run, "E1") == "needs_check" and st(run, "E2") is None, (_Br.last.opened, {i: st(run, i) for i in run.papers})   # (E2: never tried)
+            assert notes == [] and "pending" not in chs(), (notes, chs())                              # Stop was pressed: no nudge, no notification
+            # 11) a check window that fails (closed, the browser gone): that site's papers need a check, the batch goes on
+            run = go([("E1", "elsevier"), ("W1", "wiley"), ("W2", "wiley")], press_at={"W1": SD}, open_mode="raise")
+            assert st(run, "E1") == "needs_check" and st(run, "W2") == "ok", {i: st(run, i) for i in run.papers}
+            # 12) another publisher meets the site's check while the second nudge waits: it waits too, and the second press still opens
+            run = go([("E1", "elsevier"), ("E2", "elsevier"), ("I1", "informs"), ("W1", "wiley"), ("W2", "wiley")], press_at={"W1": SD, "W2": SD}, again=2,
+                     gated=("elsevier", "informs"))
+            assert [o[1] for o in _Br.last.opened] == [False, True] and all(st(run, i) == "ok" for i in run.papers) and len(notes) == 2, (_Br.last.opened, {i: st(run, i) for i in run.papers}, notes)
+            # 14) an error during the batch: the papers set aside do not stay 'waiting for you'
+            try:
+                go([("E1", "elsevier"), ("W1", "wiley")], raise_in="W1"); raise AssertionError("the error was swallowed")
+            except RuntimeError:
+                pass
+            assert S["run"].papers["E1"]["dl_status"] == "needs_check" and "press Download again" in S["run"].papers["E1"]["dl_note"], S["run"].papers["E1"]
+            # 13) the app quit while papers waited: a run opened later says they need a check (not "press Open the check")
+            run = pl_.Run("picks", {"label": "quit"})
+            run.add_paper({"id": "Q1", "doi": "10.1/q1", "title": "Q1", "verdict": "download", "publisher": "elsevier", "abbr": "X", "journal": "J", "dl_status": "needs_check", "dl_note": pl_.WAITING_NOTE})
+            run.save(force=True)
+            assert "press Download again" in pl_.Run.load(run.id).papers["Q1"]["dl_note"]
             # 6) without a checks queue (the command line), ask mode is off and nothing is set aside
             go([("W1", "wiley")], checks=False)
             assert _Br.last.ask is False
@@ -3966,6 +4011,11 @@ print("OK")
                 state["hits"][path] = state["hits"].get(path, 0) + 1
                 if path == "/gate" and state["passed"]:
                     self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Length", str(len(PDF))); self.end_headers(); self.wfile.write(PDF); return
+                if path == "/slow":                                         # an ordinary page that goes on to its PDF after a moment
+                    body = b"<html><head><meta http-equiv='refresh' content='2;url=/pdf2'></head><body>Loading the PDF</body></html>"
+                    self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+                if path == "/pdf2":
+                    self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Length", str(len(PDF))); self.end_headers(); self.wfile.write(PDF); return
                 if path == "/passed":
                     body = b"1" if state["passed"] else b"0"
                     self.send_response(200); self.send_header("Content-Type", "text/plain"); self.send_header("Content-Length", "1"); self.end_headers(); self.wfile.write(body); return
@@ -3981,8 +4031,13 @@ print("OK")
         brw.Browser._launch = lambda self, visible: (rec.append(visible), orig(self, False))[1]        # (no screen here: always headless, but the asked-for visibility is recorded)
         brw.PROFILE, brw.SESSION_COOKIES = os.path.join(TMP, "ask-profile"), os.path.join(TMP, "ask-session.json")      # a browser profile of its own
         try:
+            with brw.Browser(ask=True, interactive=False, on_challenge=lambda h, s: said.append((h, s))) as b:     # AIS_BROWSER_INTERACTIVE=0: checks are skipped, never offered
+                d, n = b.fetch_pdf(base + "/gate", wait_s=4, own=True)
+                assert d is None and n.startswith("challenge:") and not b.pending and not said and b.open_check(host) is False and True not in rec, (n, said, rec)
             with brw.Browser(ask=True, on_challenge=lambda h, s: said.append((h, s))) as b:
-                d, n = b.fetch_pdf(base + "/gate", wait_s=4)
+                d, n = b.fetch_pdf(base + "/gate", wait_s=4)                                            # a check on another route (a free copy elsewhere): its note only
+                assert d is None and n.startswith("challenge:") and not b.pending and not said, (n, said)
+                d, n = b.fetch_pdf(base + "/gate", wait_s=4, own=True)
                 assert d is None and n.startswith("challenge:") and (host, "pending") in said and True not in rec and host in b.pending, (n, said, rec)
                 threading.Timer(3, lambda: state.update(passed=True)).start()                         # the user ticks the box (the server stands in for the user)
                 assert b.open_check(host) is True, said
@@ -3994,13 +4049,33 @@ print("OK")
                     d, n = None, "error: %s" % str(e_)[:80]
                 assert d and d.startswith(b"%PDF") and state["hits"]["/gate"] == hits, (n, state["hits"])          # the PDF the window got: the site is not asked twice
                 state["passed"] = False
-                d, n = b.fetch_pdf(base + "/gate", wait_s=4)                                           # it asks again: "again", still no window
+                d, n = b.fetch_pdf(base + "/gate", wait_s=4, own=True)                                 # it asks again: "again", still no window
                 assert d is None and said[-1] == (host, "again") and rec[-1] is False, (said, rec)
+                real_fetch = b._fetch
+                def closed(*a, **k):
+                    raise brw.PWError("Target page, context or browser has been closed")
+                b._fetch = closed                                                                          # the user closes the check window
+                assert b.open_check(host) is False and said[-1] == (host, "failed") and rec[-1] is False, (said, rec)   # a check not passed, back to the background
+                b._fetch = real_fetch
+                b.fetch_pdf(base + "/gate", wait_s=4, own=True)
                 b.stop = threading.Event()
                 threading.Timer(2, b.stop.set).start()
                 t0 = time.time()
-                assert b.open_check(host, stay=True) is False and time.time() - t0 < 20, time.time() - t0  # Stop ends the wait for the user (not 3 minutes)
+                assert b.open_check(host) is False and time.time() - t0 < 20, time.time() - t0            # Stop ends the wait for the user (not 3 minutes)
                 assert b.open_check("nowhere:1") is False                                              # a site with no check waiting: nothing opens
+            brw.PROFILE = os.path.join(TMP, "ask-profile-2")                                           # (a fresh profile for each further PDF: this sandbox's Chromium mishandles a second one)
+            state["passed"] = False
+            with brw.Browser(ask=True, on_challenge=lambda h, s: said.append((h, s))) as b:
+                b.fetch_pdf(base + "/gate", wait_s=4, own=True)
+                u_, d_, _ = b.pending[host]; b.pending[host] = (u_, d_, "doi.org")                     # (the paper had started at a resolver)
+                threading.Timer(3, lambda: state.update(passed=True)).start()
+                assert b.open_check(host, stay=True) is True and host in b.checked_hosts and rec[-1] is True, (rec, b.checked_hosts)   # the second time the window stays
+                assert "doi.org" not in b.checked_hosts, b.checked_hosts                                 # ...for the check's own site, never the address the paper started from
+            brw.PROFILE = os.path.join(TMP, "ask-profile-3")
+            with brw.Browser(ask=True) as b:
+                b.stop = threading.Event(); b.stop.set()
+                d, n = b.fetch_pdf(base + "/slow", wait_s=8)                                            # Stop does not cut short an ordinary page load (it would read as a paywall)
+                assert d and d.startswith(b"%PDF"), n
             assert "/clicked" not in state["hits"], state["hits"]                                      # the app never ticks the box
         finally:
             brw.Browser._launch = orig

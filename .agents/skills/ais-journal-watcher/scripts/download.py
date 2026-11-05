@@ -369,10 +369,10 @@ def download_paper(p, env, dry=False, browser=None):
                 if p.get("publisher") == "hbr":
                     data, note = vet(*browser.page_to_pdf(u))
                 else:
-                    data, note = vet(*browser.fetch_pdf(u, doi=doi))
+                    data, note = vet(*browser.fetch_pdf(u, doi=doi, own=True))
                     member = MEMBER_FOR.get(p.get("publisher"))
                     if not data and "needs_login" in note and member and browser.renew_member(member):
-                        data, note = vet(*browser.fetch_pdf(u, doi=doi))  # member session renewed silently: retry
+                        data, note = vet(*browser.fetch_pdf(u, doi=doi, own=True))  # member session renewed silently: retry
                     lib_ = signins.profile()
                     paywalled = "needs_login" in note or note.startswith("browser: no PDF at")
                     if not data and paywalled and lib_["signs_in"] and lib_["configured"]:
@@ -385,7 +385,7 @@ def download_paper(p, env, dry=False, browser=None):
                             note += "; needs_library_login"
                         else:
                             seen, plain = len(refused), note
-                            d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi)
+                            d4, n4 = browser.fetch_pdf(signins.via(u), doi=doi, own=True)
                             d4, _ = vet(d4, "browser (via your library)")
                             if d4:
                                 data, note = d4, "browser (via your library)"

@@ -155,6 +155,9 @@ def prefer_pdf_downloads():
         json.dump(prefs, f)
 
 
+USER_WAIT = 180         # seconds a visible check page waits for the user's tick
+
+
 class Browser:
     """Context manager around one persistent Chromium context.
 
@@ -281,8 +284,8 @@ class Browser:
                         if is_pdf(data):
                             return data
                 resps.clear()
-                if self.stop is not None and self.stop.is_set():
-                    break                                   # Stop pressed (a wait for the user's tick must not hold the app for minutes)
+                if wait_s >= USER_WAIT and self.stop is not None and self.stop.is_set():
+                    break                                   # Stop pressed during a wait for the user's tick (an ordinary page load is let finish: cut short, it would read as a paywall or a sign-in)
                 if is_challenge(page):
                     calm = None
                 else:
@@ -379,8 +382,10 @@ class Browser:
         finally:
             page.close()
 
-    def fetch_pdf(self, url, wait_s=25, doi=None):
-        """Returns (pdf_bytes | None, note). `doi`: the paper's DOI, when the page we land on should name it (the publishers' own routes); a free copy on some repository does not."""
+    def fetch_pdf(self, url, wait_s=25, doi=None, own=False):
+        """Returns (pdf_bytes | None, note). `doi`: the paper's DOI, when the page we land on should name it (the publishers' own routes); a free copy on some repository does not.
+        `own`: this is the paper's own page (its publisher, or the publisher through the library). In ask mode only such a page's check is noted for the user;
+        a check on another route (a free copy elsewhere) just gives its note, and nothing opens."""
         host = urllib.parse.urlsplit(url).netloc
         if url in self._prefetched:
             return self._prefetched.pop(url)
@@ -388,23 +393,24 @@ class Browser:
             # the user already verified this site in the visible window: stay there
             if not self.visible:
                 self._launch(visible=True)
-            data, note, again = self._fetch(url, wait_s=180, doi=doi)
+            data, note, again = self._fetch(url, wait_s=USER_WAIT, doi=doi)
             if again:
                 self._notify(again, "waiting")
             return data, note
         if self.visible and not self.start_visible:
             self._launch(visible=False)  # back to the background for other sites
         data, note, chall = self._fetch(url, wait_s, doi=doi)
-        if chall and self.ask:
+        if chall and self.ask and self.interactive:
             # nothing opens by itself: note the page, tell the app, and let the download go on with other sites
-            self.pending[chall] = (url, doi, host)
-            self._notify(chall, "again" if chall in self.cleared else "pending")
+            if own:
+                self.pending[chall] = (url, doi, host)
+                self._notify(chall, "again" if chall in self.cleared else "pending")
             return data, note
         if chall and self.interactive:
             # "Verify you are human": open this page in a window for the user
             self._notify(chall, "waiting")
             self._launch(visible=True)
-            data, note, still = self._fetch(url, wait_s=180, doi=doi)
+            data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
             self._notify(chall, "failed" if still else "passed")
             if not still:
                 self.checked_hosts.update({host, chall})
@@ -418,16 +424,19 @@ class Browser:
             return False
         url, doi, url_host = self.pending.pop(host)
         self._notify(host, "open")
-        self._launch(visible=True)
-        data, note, still = self._fetch(url, wait_s=180, doi=doi)
+        try:
+            self._launch(visible=True)
+            data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
+        except PWError:                                     # the user closed the window (or the browser went away): a check not passed, never a crash
+            data, still = None, True
         if data:
             self._prefetched[url] = (data, note)
         ok = not still and not (self.stop is not None and self.stop.is_set())
         self._notify(host, "passed" if ok else "failed")
         if ok:
-            self.cleared.update({host, url_host})
+            self.cleared.add(host)
             if stay:
-                self.checked_hosts.update({host, url_host})
+                self.checked_hosts.add(host)                # (the check's own site only: never a resolver or the library's address the paper started from)
         if not (ok and stay) and not self.start_visible:
             self._launch(visible=False)                     # back to the background
         return ok

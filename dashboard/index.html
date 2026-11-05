@@ -1258,12 +1258,12 @@ function paintChecks() {
 }
 $("#banner").addEventListener("click", async e => {
   const b = e.target.closest("[data-check]"); if (!b) return;
-  const h = b.dataset.check, was = CHECKS[h];
+  const h = b.dataset.check;
   delete CHECKS[h];                     // (said before the answer: the window's own news, or the end of the download, may arrive first and must have the last word)
   CHECKNOTE = "Opening as soon as the paper being downloaded is done: a Chromium window will show the check. Tick the box there yourself.";
   paintChecks();
   try { await api("/api/check", {host: h}); }
-  catch (er) { if (BUSY) { CHECKS[h] = was; CHECKNOTE = ""; paintChecks(); } toast(er.message); }
+  catch (er) { CHECKNOTE = ""; paintChecks(); toast(er.message); }       // (the button is not put back: the server's list is what waits; a reload shows it)
 });
 function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
@@ -1294,7 +1294,7 @@ function connect() {
   es.addEventListener("activity", e => { if (window.Activity) Activity.event(JSON.parse(e.data)); });
   es.addEventListener("hello", async () => {
     const st = await api("/api/state"); setBusy(st.busy, st.kind);
-    if (st.busy && (st.checks || []).length) { CHECKS = {}; st.checks.forEach(c => CHECKS[c.host] = c); paintChecks(); }   // (a reloaded page still offers the checks that wait)
+    if (st.busy) { CHECKS = {}; CHECKNOTE = ""; (st.checks || []).forEach(c => CHECKS[c.host] = c); paintChecks(); }   // (a reloaded or reconnected page shows what waits now, and nothing older)
     if (st.run && (!RUN || st.run.id === RUN.id)) { setRun(st.run); render(); }
   });
   es.addEventListener("job", e => {
