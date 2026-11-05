@@ -1143,10 +1143,8 @@ def _into_folder(p):
     if not fid:
         return
     try:
-        k = paper_key(p)
-        fo.add(fid, [k])
         import authors
-        authors.note_filed(fid, [k])
+        authors.file_new(fid, paper_key(p))          # (once: a paper you took out of the folder is not put back by a later retry)
     except Exception:  # noqa: BLE001      (the folder was deleted meanwhile: the paper stays in the library)
         pass
 

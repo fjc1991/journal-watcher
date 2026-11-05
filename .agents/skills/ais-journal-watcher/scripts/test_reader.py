@@ -4519,6 +4519,7 @@ print("OK")
             assert got[0] == {"id": "A5000000111", "name": "Ann Lee", "institutions": ["MIT"], "works": 42, "cited": 900, "topics": ["Platforms", "Pricing", "Labor"], "orcid": "0000-0002-1825-0097"}, got[0]
             au.search("Jürgen Müller"); assert urllib.parse.parse_qs(urllib.parse.urlsplit(seen[-1]).query)["search"] == ["Jürgen Müller"], seen[-1]
             assert len(au.search("0000-0002-1825-0097")) == 1 and "filter=orcid:0000-0002-1825-0097" in seen[-1]
+            au.search("A5000000111"); assert "filter=openalex:A5000000111" in seen[-1], seen[-1]                 # an id: the list endpoint (an unknown id is "none found", not "no answer")
             STATE["mode"] = "500"
             try:
                 au.search("Ann Lee"); raise AssertionError("no error")
@@ -4540,6 +4541,10 @@ print("OK")
             ws, complete, _ = au.works(["A5000000111"])
             assert len(ws) == 200 and complete is False, (len(ws), complete)                                   # what came is kept, and the list says it is incomplete
             STATE.clear()
+            stop_ = threading.Event(); seen.clear()
+            ws, complete, _ = au.works(["A5000000111"], progress=lambda n, t: stop_.set(), stop=stop_)          # Stop pressed after the first page
+            assert len(ws) == 200 and complete is False and len(seen) == 1, (len(ws), complete, seen)
+            assert not any("mailto" in x for x in seen), seen                                                   # no e-mail address goes to OpenAlex
             # which works are kept
             J = {"display_name": "Management Science", "type": "journal", "issn": ["0025-1909"]}
             ws = [W(1, "Platform Pricing and Entry", doi="10.1287/mnsc.2023.1", src=J),
@@ -4557,6 +4562,11 @@ print("OK")
             assert ids_ == ["W1", "W3", "W4", "W5", "W6", "W8", "W9"], ids_
             assert excl == {"book-chapter": 1, "working paper (published version listed)": 1}, excl
             assert [w["_kind"] for w in kept] == ["journal", "working", "journal", "journal", "conference", "conference", "journal"], [w["_kind"] for w in kept]
+            assert [au._short(w["id"]) for w in au.select([ws[1], ws[0]])[0]] == ["W1"]                         # the working paper listed first: still left out
+            cjk = [W(20, "中国经济增长", doi="10.9999/cjk.1", src=J), W(21, "数字平台研究", "preprint", doi="10.2139/ssrn.4000021", src={"display_name": "SSRN", "type": "repository"})]
+            assert [au._short(w["id"]) for w in au.select(cjk)[0]] == ["W20", "W21"]                              # titles in another script are not all "the same title"
+            twin = [W(30, "Introduction", src=None), W(31, "Introduction", src=None)]
+            assert len(au.to_papers(au.select(twin)[0], "x", "Ann Lee")) == 1                                    # two records without DOI, title or venue apart: one paper, one id
             jl = dl.load_json(os.path.join(dl.BASE, "journals.json"), {"journals": []})["journals"]
             ms = next((j for j in jl if j.get("issn") == "0025-1909"), None)
             ps = au.to_papers(kept, "ann-lee", "Ann Lee")
@@ -4575,6 +4585,7 @@ print("OK")
                 dl.save_index({"doi": "10.1111/isj.1", "title": "Editorial"}, os.path.relpath(pdf_, dl.ROOT), "ok")
                 dl.save_index({"doi": "10.9999/published-version", "title": "A Working Paper Only"}, "", "deleted")       # its published version was deleted: its preprint stays away too
                 dl.save_index({"doi": "", "title": "Conference Talk"}, "", "deleted")
+                dl.save_index({"doi": "10.2139/ssrn.5555", "title": "Platform Pricing and Entry"}, os.path.relpath(pdf_, dl.ROOT), "ok")   # its preprint is in the library: the published version still comes
                 new, have, gone = au.split(ps)
                 assert sorted(p_["openalex"] for p_ in new) == ["W1", "W5", "W6", "W9"] and [(p_["openalex"], k) for p_, k in have] == [("W4", "10.1111/isj.1")] \
                     and sorted(p_["openalex"] for p_ in gone) == ["W3", "W8"], ([p_["openalex"] for p_ in new], have, [p_["openalex"] for p_ in gone])
@@ -4595,14 +4606,21 @@ print("OK")
             fo_.create("Bo Chen")                                                                                               # a folder you made yourself
             f4, _ = au.folder_for(["A5000000444"], "Bo Chen", "")
             assert fo_.get(f4)["name"] == "Bo Chen (2)" and f4 != "bo-chen", fo_.get(f4)
+            au.file_have(f1, [(None, "10.1/x")])                                                                # filed into the first folder
             fo_.delete(f1)
             f5, _ = au.folder_for(["A5000000111"], "Ann Lee", "MIT")                                                                   # you deleted the folder: a new one
             assert fo_.get(f5) and json.load(open(store_))["authors"][0]["folder"] == f5
             assert au.file_have(f5, [(None, "10.1/x"), (None, "10.1/y")]) == ["10.1/x", "10.1/y"] and fo_.get(f5)["papers"] == ["10.1/x", "10.1/y"]
             fo_.remove(f5, ["10.1/y"])                                                                                          # you took one out
             assert au.file_have(f5, [(None, "10.1/x"), (None, "10.1/y")]) == [] and fo_.get(f5)["papers"] == ["10.1/x"]        # it stays out
+            assert au.file_new(f5, "10.1/y") is False and au.file_new(f5, "10.1/z") is True and fo_.get(f5)["papers"] == ["10.1/x", "10.1/z"]   # a download too
+            long_ = "Maria Fernanda Rodriguez-Gonzalez de la Vega y Montes Altos"[:50]
+            fl1, _ = au.folder_for(["A5000000771"], long_, "Universidad Autonoma de Barcelona")
+            fl2, _ = au.folder_for(["A5000000772"], long_, "Universidad Autonoma de Barcelona y Madrid")      # the same name and institution, cut to 60 characters
+            fl3, _ = au.folder_for(["A5000000773"], long_, "Universidad Autonoma de Barcelona y Madrid")
+            assert len({fl1, fl2, fl3}) == 3 and all(len(fo_.get(x)["name"]) <= 60 for x in (fl1, fl2, fl3)), [fo_.get(x)["name"] for x in (fl1, fl2, fl3)]
             for f in fo_.list_all():
-                if f["name"].startswith(("Ann Lee", "Bo Chen")):
+                if f["name"].startswith(("Ann Lee", "Bo Chen", "Maria Fernanda")):
                     fo_.delete(f["id"])
             os.remove(store_)
         finally:

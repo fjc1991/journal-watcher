@@ -217,6 +217,8 @@ class FakeOA(BaseHTTPRequestHandler):
         q = up.parse_qs(up.urlsplit(self.path).query)
         if self.path.startswith("/authors?") or (self.path.startswith("/works?") and q.get("filter", [""])[0].startswith("author.id:")):     # author search (authors.py)
             AUTHOR_ASKED.append(self.path)
+            if "A5000000222" in self.path and "A5000000111" not in self.path and self.path.startswith("/works?"):      # this person's works: OpenAlex does not answer
+                self.send_response(500); self.end_headers(); return
             if self.path.startswith("/authors?"):
                 res = [{"id": "https://openalex.org/A5000000111", "display_name": "Ann Lee", "orcid": "https://orcid.org/0000-0002-1825-0097", "works_count": 45, "cited_by_count": 300,
                         "last_known_institutions": [{"display_name": "MIT"}], "topics": [{"display_name": "Platforms"}]},
@@ -1390,7 +1392,7 @@ bks.crossref_books = lambda title, rows=3: []
             check("the Authors tab finds the people of that name on OpenAlex, each with institution, works, topics and ORCID", page.locator("#authlist .authc").count() == 2 and "MIT" in first_ and "45 works" in first_
                   and "Platforms" in first_ and page.locator('#authlist a[href="https://orcid.org/0000-0002-1825-0097"]').count() == 1 and page.locator("#authdl").is_hidden(), first_)
             page.check("#authlist [data-ai='0']")
-            check("…ticking one offers 'Download all into the folder “Ann Lee”'", page.locator("#authdl").is_visible() and "Ann Lee" in page.inner_text("#authdl"), page.inner_text("#authdl"))
+            check("…ticking one offers 'Download all into their folder'", page.locator("#authdl").is_visible() and page.inner_text("#authdl").strip() == "Download all into their folder", page.inner_text("#authdl"))
             if os.path.exists(marker): os.remove(marker)
             n_dlg = len(dialogs); n_asked = len(AUTHOR_ASKED)
             page.click("#authdl")
@@ -1404,9 +1406,15 @@ bks.crossref_books = lambda title, rows=3: []
                   len(ids_) == 45 and all(i.startswith("doi:10.7777/au.") for i in ids_) and len(dialogs) == n_dlg and "Ann Lee" in fnames_
                   and any("author.id:A5000000111" in a_ for a_ in AUTHOR_ASKED[n_asked:]), "%d ids, dialogs %s, folders %s" % (len(ids_), dialogs[n_dlg:], fnames_))
             page.wait_for_function("document.querySelector('#runtitle') && document.querySelector('#runtitle').textContent.includes('Author · Ann Lee')", timeout=10000)
-            check("…the run says whose works they are and which folder they go to", "Works by Ann Lee" in page.inner_text("#runmeta") and "Ann Lee" in page.inner_text("#runmeta"), page.inner_text("#runmeta"))
+            check("…the run says whose works they are, which folder they go to, and what the listing found", "Works by Ann Lee" in page.inner_text("#runmeta") and "45 works listed" in page.inner_text("#runmeta")
+                  and "45 to download" in page.inner_text("#runmeta"), page.inner_text("#runmeta"))
+            arun_ = next(r_ for r_ in api("/api/runs") if r_["kind"] == "author")
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_timeout(300)
+            page.evaluate("openRun({id: %s})" % json.dumps(arun_["id"])); page.wait_for_selector("#listview:not(.hide)", timeout=10000)
+            check("…opened again from Past runs it shows its papers (not tiles of the watched journals) with each paper's own journal", page.locator("#tilesview").is_hidden()
+                  and page.locator("#papers > .paper").count() > 0 and "Author Test Journal" in page.inner_text("#papers"), page.inner_text("#papers")[:200])
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
-            page.click('.tabs button[data-tab="authors"]'); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='0']")
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='0']")
             os.remove(marker); page.click("#authdl")
             for _ in range(80):
                 if os.path.exists(marker): break
@@ -1414,13 +1422,20 @@ bks.crossref_books = lambda title, rows=3: []
             fnames2_ = [json.load(open(os.path.join(fdir_, f_)))["name"] for f_ in os.listdir(fdir_) if f_.endswith(".json") and "." not in f_[:-5]]
             check("…searching the same person again fills the same folder (no second 'Ann Lee')", fnames2_.count("Ann Lee") == 1 and not any(n_.startswith("Ann Lee ·") for n_ in fnames2_), str(fnames2_))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='1']")
+            page.click("#authdl")
+            page.wait_for_function("document.querySelector('#runmeta').textContent.includes('listing failed')", timeout=20000)
+            check("…when OpenAlex does not answer for the works, the run says the listing failed and why (not just 'No papers in this run')",
+                  "didn't answer" in page.inner_text("#runmeta") and "could not be listed" in page.inner_text("#papers"), page.inner_text("#runmeta"))
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
             for f_ in os.listdir(fdir_):                                                                   # (leave the folders and runs the later checks count as they were)
-                if f_.endswith(".json") and "." not in f_[:-5] and json.load(open(os.path.join(fdir_, f_)))["name"] == "Ann Lee":
+                if f_.endswith(".json") and "." not in f_[:-5] and json.load(open(os.path.join(fdir_, f_)))["name"].startswith("Ann Lee"):
                     os.remove(os.path.join(fdir_, f_))
             rdir_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")
             for f_ in os.listdir(rdir_):
-                if f_.startswith("author_"):
+                if f_.endswith(".json") and json.load(open(os.path.join(rdir_, f_))).get("kind") == "author":
                     os.remove(os.path.join(rdir_, f_))
+            check("…(the test's author runs are gone again)", not any(r_["kind"] == "author" for r_ in api("/api/runs")))
             if os.path.exists(os.path.join(TMP, "Papers", "_authors.json")):
                 os.remove(os.path.join(TMP, "Papers", "_authors.json"))
             os.remove(marker)

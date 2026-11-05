@@ -1171,26 +1171,34 @@ class Handler(BaseHTTPRequestHandler):
             JOBS.run = run
 
             def prepare(emit):
-                emit("progress", {"stage": "listing", "label": "Listing %s's works on OpenAlex" % name, "done": 0, "total": 0})
+                lab = "Listing %s's works on OpenAlex" % name
+                emit("progress", {"stage": "listing", "label": lab, "done": 0, "total": 0})
+
+                def said(listing, msg, level):        # the run says what came of the listing (its page shows it at once, and after a reload)
+                    run.params["listing"] = listing
+                    run.save(force=True)
+                    emit("run", {"id": run.id, "params": run.params})
+                    emit("log", {"msg": msg, "level": level})
                 try:
-                    ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": "Listing %s's works on OpenAlex" % name, "done": n, "total": t}))
+                    ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": lab, "done": n, "total": t}), stop=JOBS.stop)
                 except authors.AuthorError as e:
-                    run.errors.append(str(e)); run.save(force=True)
-                    emit("log", {"msg": str(e), "level": "error"})
+                    run.errors.append(str(e))
+                    said({"error": str(e)}, "Listing %s's works failed: %s" % (name, e), "error")
+                    return []
+                if JOBS.stop.is_set():
+                    said({"stopped": True, "listed": len(ws)}, "Stopped while listing %s's works: nothing was downloaded or filed." % name, "warn")
                     return []
                 kept, excluded = authors.select(ws)
                 new, have, gone = authors.split(authors.to_papers(kept, fid, name))
                 authors.file_have(fid, have)
-                for p in new:
-                    run.add_paper(p)
+                added = [p for p in new if run.add_paper(p)]
+                for p in added:
                     emit("paper", pl.slim(p))
-                run.params["listing"] = {"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded,
-                                         "have": len(have), "deleted": len(gone), "new": len(new)}
-                run.save(force=True)
-                emit("log", {"msg": "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download." % (
-                    name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(new)),
-                    "level": "ok" if complete else "warn"})
-                return [p["id"] for p in new]
+                said({"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded, "have": len(have), "deleted": len(gone), "new": len(added)},
+                     "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download." % (
+                         name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(added)),
+                     "ok" if complete else "warn")
+                return [p["id"] for p in added]
             if not start_download([], prepare=prepare):
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
             return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})

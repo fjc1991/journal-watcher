@@ -714,19 +714,23 @@ $("#searchbtn").onclick = async () => {
   try { const r = await api("/api/run/search", body); startedRun(r.run); } catch (e) { toast(e.message); }
 };
 // ---------- Authors: an author's works (OpenAlex) into a folder named after them (authors.py)
-let AUTH = [];
+let AUTH = [], AUTHSEQ = 0;
 const authPicked = () => [...document.querySelectorAll("#authlist [data-ai]:checked")].map(c => AUTH[+c.dataset.ai]);
 function paintAuthBtn() {
   const p = authPicked(), b = $("#authdl");
   b.classList.toggle("hide", !p.length); $("#authhint").classList.toggle("hide", AUTH.length < 2);
-  if (p.length) b.textContent = `Download all into the folder “${p[0].name}”`;
+  if (p.length) b.textContent = "Download all into their folder";
   b.disabled = BUSY;
 }
 $("#authgo").onclick = async () => {
   const name = $("#authname").value.trim(); if (!name) return;
+  const seq = ++AUTHSEQ;
   AUTH = []; $("#authlist").innerHTML = `<div class="est">Looking on OpenAlex…</div>`; paintAuthBtn();
-  try { AUTH = (await api("/api/authors/search", {name})).authors || []; }
-  catch (e) { $("#authlist").innerHTML = `<div class="est">${esc(e.message)}</div>`; return; }
+  let got;
+  try { got = (await api("/api/authors/search", {name})).authors || []; }
+  catch (e) { if (seq === AUTHSEQ) $("#authlist").innerHTML = `<div class="est">${esc(e.message)}</div>`; return; }
+  if (seq !== AUTHSEQ) return;                  // (a newer search was started meanwhile: its answer is the one shown)
+  AUTH = got;
   $("#authlist").innerHTML = AUTH.length ? AUTH.map((a, i) => `<label class="authc"><input type="checkbox" data-ai="${i}"><span><b>${esc(a.name)}</b>
       <small>${esc((a.institutions || []).join(", ") || "institution not known")} · ${a.works} works${(a.topics || []).length ? " · " + esc(a.topics.join(", ")) : ""}${a.orcid ? ` · <a href="https://orcid.org/${esc(a.orcid)}" target="_blank" rel="noopener">ORCID</a>` : ""}</small></span></label>`).join("")
     : `<div class="est">No author of that name on OpenAlex.</div>`;
@@ -742,6 +746,7 @@ $("#authdl").onclick = async () => {
     startedRun(r.run); go({view: "run", j: "~queue"});
   } catch (e) { notifyError(e); }
 };
+const runWord = r => r.kind === "weekly" ? "weekly check" : r.kind === "author" ? "author's run" : r.kind === "picks" ? "download" : "search";   // (what the run is called in its menus)
 function startedRun(run) {
   SEL.clear(); FILTER = "relevant"; JST = {};
   document.querySelectorAll("#vfilter button").forEach(b => b.classList.toggle("on", b.dataset.v === FILTER));
@@ -858,7 +863,7 @@ const fmtWhen = ts => new Date(ts).toLocaleString(undefined, {day: "numeric", mo
 async function loadRuns() { RUNS = await api("/api/runs"); drawRuns(); drawResume(); if (CFG) updateEst(); }
 async function openRun(r) {
   if (BUSY && RUN && RUN.id !== r.id) return toast("Wait for the current task to finish.");
-  SEL.clear(); setRun(await api("/api/runs/" + r.id)); go({view: "run", j: null}); drawRuns();
+  SEL.clear(); const run = await api("/api/runs/" + r.id); setRun(run); go({view: "run", j: run.kind === "author" || run.kind === "picks" ? "~queue" : null}); drawRuns();   // (an author's or a Discover run: its papers, not tiles of the watched journals)
 }
 // nothing open (the app was just started, or you came back): the last few runs, so that what you found is one click away
 function drawResume() {
@@ -867,13 +872,13 @@ function drawResume() {
   $("#resumelist").innerHTML = "";
   last.forEach(r => {
     const d = document.createElement("div"); d.className = "runitem"; d.dataset.id = r.id;
-    d.innerHTML = `<b>${esc(r.title)}</b><span>${r.kind === "weekly" ? "Weekly" : (r.params || {}).terms ? "Search by terms" : "Archive search"} · ${fmtWhen(r.updated || r.created)} · ${r.n_papers} papers · ${r.n_download} to download</span>`;
+    d.innerHTML = `<b>${esc(r.title)}</b><span>${r.kind === "weekly" ? "Weekly" : r.kind === "author" ? "Author" : r.kind === "picks" ? "Picks" : (r.params || {}).terms ? "Search by terms" : "Archive search"} · ${fmtWhen(r.updated || r.created)} · ${r.n_papers} papers · ${r.n_download} to download</span>`;
     d.onclick = () => { RUNTAB = r.kind === "weekly" ? "weekly" : "search"; openRun(r); };
     $("#resumelist").append(d);
   });
 }
 async function deleteRun(r) {
-  if (!confirm(`Delete “${r.title}”?\n\nThe record of this ${r.kind === "weekly" ? "weekly check" : "search"} (its list of papers, verdicts and cost) is deleted. The papers it downloaded stay in your library.`)) return;
+  if (!confirm(`Delete “${r.title}”?\n\nThe record of this ${runWord(r)} (its list of papers, verdicts and cost) is deleted. The papers it downloaded stay in your library.`)) return;
   try {
     await api("/api/runs/delete", {id: r.id});
     if (RUN && RUN.id === r.id) { RUN = null; go({view: "home"}); }
@@ -896,7 +901,7 @@ function drawRuns() {
       : r.updated && r.updated !== r.created ? `${fmtWhen(r.created)}, updated ${fmtWhen(r.updated)}` : fmtWhen(r.created);
     d.innerHTML = `<b>${esc(r.title)}${r.week === CFG.this_week ? `<span class="now">This week</span>` : ""}</b>
       <span>${got} · ${r.n_papers} papers · ${r.n_download} to download · $${(r.cost || 0).toFixed(2)}</span>
-      <button class="rundel" data-rundel="${esc(r.id)}" aria-label="Delete the run ${esc(r.title)}" title="Delete this ${r.kind === "weekly" ? "weekly check" : "search"} (its papers stay in your library)">×</button>`;
+      <button class="rundel" data-rundel="${esc(r.id)}" aria-label="Delete the run ${esc(r.title)}" title="Delete this ${runWord(r)} (its papers stay in your library)">×</button>`;
     d.onclick = e => { if (e.target.closest("[data-rundel]")) { e.stopPropagation(); deleteRun(r); return; } openRun(r); };
     $("#runs").append(d);
   });
@@ -922,7 +927,7 @@ function renderMeta() {
   const nc = (RUN.checks || []).length;
   const li = pr.listing || {};
   const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
-    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "")
+    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "")
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
       (RUN.updated ? `, last ${fmtWhen(RUN.updated)}` : "")
@@ -1039,7 +1044,7 @@ function card(p) {
     <div>
       <div class="ptitle">${esc(p.title)}</div>
       ${p.authors && p.authors.length ? `<div class="pauth">${esc(shortAuthors(p.authors))}</div>` : ""}
-      <div class="pmeta">${esc(jinfo(p.abbr).name)} · ${esc(p.pub_date || "date unknown")}</div>
+      <div class="pmeta">${esc(p.journal || jinfo(p.abbr).name)} · ${esc(p.pub_date || "date unknown")}</div>
       ${p.reason ? `<div class="reason">${NAV.j === "~borderline" ? "<b>Why borderline:</b> " : ""}${esc(p.reason)}</div>` : ""}
       ${NAV.j === "~borderline" ? `<div class="abs" title="Click to expand">${p.abstract ? esc(p.abstract) : "<i>No abstract available — open the paper for details.</i>"}</div>` : ""}
       <div class="tags">${tags}${p.user_set ? `<span class="tag you">✋ ${p.verdict === "download" ? "moved to queue by you" : "your call"}</span>` : ""}</div>
@@ -1092,7 +1097,8 @@ function renderList(o) {
   box.innerHTML = "";
   VIS.slice(0, SHOWN).forEach(p => box.append(card(p)));
   if (!o.noFits) ensureFits(VIS.filter(p => p.verdict === "borderline" || p.verdict === "download" || !p.verdict));
-  if (!VIS.length) box.innerHTML = `<div class="card empty"><h2>${order.length ? "Nothing matches these filters" : (BUSY ? "Looking for papers…" : "No papers in this run")}</h2>${order.length ? "Try “All” to see skipped papers." : ""}</div>`;
+  const lerr = RUN && RUN.kind === "author" && ((RUN.params || {}).listing || {}).error;
+  if (!VIS.length) box.innerHTML = `<div class="card empty"><h2>${order.length ? "Nothing matches these filters" : lerr ? "The author's works could not be listed" : (BUSY ? "Looking for papers…" : "No papers in this run")}</h2>${order.length ? "Try “All” to see skipped papers." : lerr ? esc(lerr) : ""}</div>`;
   drawMore();
 }
 function drawMore() {
@@ -1388,6 +1394,7 @@ function connect() {
     const d = JSON.parse(e.data); setBusy(d.busy, d.kind);
     if (!d.busy) {
       loadRuns(); loadLibrary();
+      if (window.LibraryUI && LibraryUI.refreshFolders) LibraryUI.refreshFolders();      // (an author's new folder appears in the sidebar)
       if (d.run && RUN && d.run.id === RUN.id) api("/api/runs/" + RUN.id).then(r => { setRun(r); render(); });
     }
   });
@@ -1423,6 +1430,7 @@ function connect() {
     }
     paintChecks();
   });
+  es.addEventListener("run", e => { const d = JSON.parse(e.data); if (RUN && d.id === RUN.id) { RUN.params = d.params; metaSoon(); if (NAV.j !== null) renderList({keep: true}); } });   // (an author's listing summary, as soon as it is known)
   es.addEventListener("cost", e => { const m = JSON.parse(e.data); setCost(m.cost, m.detail); });
   es.addEventListener("signin", e => {
     const d = JSON.parse(e.data), who = d.name || (d.site || "").toUpperCase();

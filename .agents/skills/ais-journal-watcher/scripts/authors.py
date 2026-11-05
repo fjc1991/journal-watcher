@@ -74,9 +74,9 @@ def search(name):
     if m:
         r = _answer("authors?filter=orcid:%s&select=%s" % (m.group(1).upper(), SELECT_AUTHOR))
         return [_candidate(a) for a in r.get("results") or []]
-    if re.fullmatch(r"[Aa]\d{4,12}", q):
-        r = _answer("authors/%s?select=%s" % (q.upper(), SELECT_AUTHOR))
-        return [_candidate(r)] if r.get("id") else []
+    if re.fullmatch(r"[Aa]\d{4,12}", q):           # (the list endpoint: an id OpenAlex does not know is an empty list, not an error that reads as "no answer")
+        r = _answer("authors?filter=openalex:%s&select=%s" % (q.upper(), SELECT_AUTHOR))
+        return [_candidate(a) for a in r.get("results") or []]
     words = clean(q)
     if not words:
         return []
@@ -87,7 +87,7 @@ def search(name):
 SELECT_WORK = "id,doi,display_name,publication_date,publication_year,type,primary_location,best_oa_location,authorships"
 
 
-def works(ids, progress=None):
+def works(ids, progress=None, stop=None):
     """All works of these OpenAlex author ids (of the types asked), page by page. Returns (works, complete, total): complete is False when a page did not come
     (the daily allowance, the network) or the list is longer than MAX_PAGES pages; what came is returned either way."""
     ids = [i for i in (_short(x).upper() for x in ids) if re.fullmatch(r"A\d{4,12}", i)]
@@ -96,6 +96,8 @@ def works(ids, progress=None):
     flt = "author.id:%s,type:%s" % ("|".join(ids), TYPES)
     out, cursor, total = [], "*", 0
     for _ in range(MAX_PAGES):
+        if stop is not None and stop.is_set():
+            return out, False, total
         r = _fetch("works?filter=%s&per-page=%d&cursor=%s&select=%s" % (flt, PER_PAGE, urllib.parse.quote(cursor), SELECT_WORK))
         if r is None:
             if not out:
@@ -137,6 +139,13 @@ def _title(w):
     return re.sub(r"\s+", " ", str(w.get("display_name") or w.get("title") or "")).strip()
 
 
+def tkey(t):
+    """A title as the joins here compare it: letters and digits of any script (a title in Chinese or Greek is not the empty string), case and accents folded."""
+    s = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", str(t or "")).casefold())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[\W_]+", " ", s).strip()
+
+
 def is_preprint_doi(doi):
     return str(doi or "").lower().startswith(PREPRINT_PREFIXES)
 
@@ -158,10 +167,10 @@ def select(ws):
         if doi:
             seen_doi.add(doi)
         kept.append(dict(w, _kind=k))
-    published = {fx.norm_title(_title(w)) for w in kept if w["_kind"] != "working"}
+    published = {tkey(_title(w)) for w in kept if w["_kind"] != "working"} - {""}
     out = []
     for w in kept:
-        if w["_kind"] == "working" and fx.norm_title(_title(w)) in published:
+        if w["_kind"] == "working" and tkey(_title(w)) in published:
             excluded["working paper (published version listed)"] = excluded.get("working paper (published version listed)", 0) + 1
             continue
         out.append(w)
@@ -172,7 +181,7 @@ def to_papers(ws, fid, label):
     """Paper dicts for a run. The journal and its download route: a watched journal recognised by ISSN keeps its settings; any other gets the route of its
     DOI's publisher (fetch_new.venue_route). No Crossref call per paper (an author can have hundreds)."""
     journals = dl.load_json(os.path.join(dl.BASE, "journals.json"), {"journals": []})["journals"]
-    out = []
+    out, ids = [], set()
     for w in ws:
         doi, title, src = _doi(w), _title(w), _source(w)
         meta = {"issn": src.get("issn") or ([src["issn_l"]] if src.get("issn_l") else []), "container": src.get("display_name") or ""}
@@ -181,7 +190,11 @@ def to_papers(ws, fid, label):
         url = ("https://doi.org/" + doi) if doi else (oa or ((w.get("primary_location") or {}).get("landing_page_url") or ""))
         date = str(w.get("publication_date") or "")[:10] or ("%s-01-01" % w["publication_year"] if w.get("publication_year") else "")
         authors_ = [((a.get("author") or {}).get("display_name") or "") for a in (w.get("authorships") or [])]
-        out.append({"id": fx.key_for(doi, name, title), "title": title, "authors": [a for a in authors_ if a], "doi": doi, "url": url, "journal": name, "abbr": abbr,
+        pid = fx.key_for(doi, name, title)
+        if pid in ids:              # (two records without a DOI, same title, same venue: one paper for the run, which keys papers by this id)
+            continue
+        ids.add(pid)
+        out.append({"id": pid, "title": title, "authors": [a for a in authors_ if a], "doi": doi, "url": url, "journal": name, "abbr": abbr,
                     "pub_date": date, "topics": [], "publisher": publisher, "abstract": None, "keywords": None, "source": "author", "verdict": "download",
                     "reason": {"journal": "journal article", "conference": "conference paper", "working": "working paper"}[w["_kind"]] + " by " + str(label)[:60],
                     "openalex": _short(w.get("id")), "folder": fid})
@@ -198,15 +211,16 @@ def _index_rows():
 
 
 def _same(row, p):
-    """Is this index row this paper? The same DOI; or the same title when one side has no DOI, or when the two DOIs differ because one is a preprint's (SSRN, arXiv…)
-    and the other the published version's (a deleted published paper must keep its preprint away, and a downloaded one must not bring it in again)."""
+    """Is this index row this paper? The same DOI; or the same title when one side has no DOI, or when the row is a published version and the paper is its preprint
+    (SSRN, arXiv…): a published paper you have, or deleted, keeps its preprint away. Never the other way round: a preprint you have, or deleted, does not stop
+    the published version (you may have been waiting for it)."""
     d1, d2 = (row.get("doi") or "").strip().lower(), (p.get("doi") or "").strip().lower()
     if d1 and d2 and d1 == d2:
         return True
-    t1, t2 = fx.norm_title(row.get("title") or ""), fx.norm_title(p.get("title") or "")
+    t1, t2 = tkey(row.get("title") or ""), tkey(p.get("title") or "")
     if not t1 or t1 != t2:
         return False
-    return not (d1 and d2) or is_preprint_doi(d1) or is_preprint_doi(d2)
+    return not (d1 and d2) or (is_preprint_doi(d2) and not is_preprint_doi(d1))
 
 
 def split(papers):
@@ -217,10 +231,10 @@ def split(papers):
     for r in rows:
         if (r.get("doi") or "").strip():
             by_doi.setdefault(r["doi"].strip().lower(), []).append(r)
-        by_title.setdefault(fx.norm_title(r.get("title") or ""), []).append(r)
+        by_title.setdefault(tkey(r.get("title") or ""), []).append(r)
     new, have, gone = [], [], []
     for p in papers:
-        cands = by_doi.get((p.get("doi") or "").lower(), []) + by_title.get(fx.norm_title(p["title"]), [])
+        cands = by_doi.get((p.get("doi") or "").lower(), []) + (by_title.get(tkey(p["title"]), []) if tkey(p["title"]) else [])
         cands = [r for r in cands if _same(r, p)]
         ok = [r for r in cands if r.get("status") == "ok" and r.get("file") and os.path.exists(os.path.join(dl.ROOT, r["file"]))]
         if ok:
@@ -251,8 +265,9 @@ def _save(d):
     os.replace(tmp, _store_path())
 
 
-def _plain(s):
-    return unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower().strip()
+def _fkey(s):
+    """A folder name as folders.create compares it (spaces collapsed, case ignored)."""
+    return re.sub(r"\s+", " ", str(s or "")).strip().lower()
 
 
 def folder_for(ids, name, institution=""):
@@ -270,14 +285,21 @@ def folder_for(ids, name, institution=""):
             rec["ids"] = sorted(set(rec.get("ids") or []) | set(ids))
             _save(d)
             return rec["folder"], rec
-        names = {_plain(f["name"]) for f in fo.list_all()}
-        base = name if _plain(name) not in names else ("%s · %s" % (name, institution.strip()[:40]) if institution.strip() else name)
-        cand, n = base, 2
-        while _plain(cand) in names:
-            cand = "%s (%d)" % (base, n); n += 1
-        f = fo.create(cand)
+        names = {_fkey(f["name"]) for f in fo.list_all()}
+        base = name if _fkey(name) not in names else ("%s · %s" % (name, institution.strip()[:40]) if institution.strip() else name)
+        f, n = None, 1
+        while f is None:
+            suffix = "" if n == 1 else " (%d)" % n
+            cand = base[:60 - len(suffix)].rstrip() + suffix          # (as folders.create keeps it: at most 60 characters)
+            n += 1
+            if _fkey(cand) in names:
+                continue
+            try:
+                f = fo.create(cand)
+            except ValueError:            # (made meanwhile, or the same name once cut to 60 characters: the next number)
+                names.add(_fkey(cand))
         if rec:
-            rec.update(ids=sorted(set(rec.get("ids") or []) | set(ids)), folder=f["id"], name=name)
+            rec.update(ids=sorted(set(rec.get("ids") or []) | set(ids)), folder=f["id"], name=name, filed=[])       # (a new folder: filled again)
         else:
             rec = {"ids": ids, "name": name, "folder": f["id"], "filed": []}
             d["authors"].append(rec)
@@ -301,11 +323,17 @@ def file_have(rec_folder, have):
         return keys
 
 
-def note_filed(rec_folder, keys):
-    """Remember keys filed into the author's folder by a download (see file_have)."""
+def file_new(rec_folder, key):
+    """A paper of an author run is in the library: into the author's folder, unless it was filed there before (then you may have taken it out). A folder with
+    no author record (made by hand) just gets it."""
+    import folders as fo
     with _lock:
         d = load()
         rec = next((r for r in d["authors"] if r.get("folder") == rec_folder), None)
+        if rec is not None and key in (rec.get("filed") or []):
+            return False
+        fo.add(rec_folder, [key])
         if rec is not None:
-            rec["filed"] = sorted(set(rec.get("filed") or []) | {k for k in keys if k})
+            rec["filed"] = sorted(set(rec.get("filed") or []) | {key})
             _save(d)
+        return True
