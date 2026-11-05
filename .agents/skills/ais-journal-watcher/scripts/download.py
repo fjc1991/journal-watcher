@@ -529,9 +529,10 @@ def main():
 class open_browser:
     """Opens browser.Browser if Playwright is installed; yields None otherwise."""
 
-    def __init__(self, no_browser=False, on_challenge=None):
+    def __init__(self, no_browser=False, on_challenge=None, ask=False):
         self.no_browser = no_browser
         self.on_challenge = on_challenge
+        self.ask = ask              # the app: a human check opens nothing by itself (browser.Browser ask mode)
         self.b = None
 
     def __enter__(self):
@@ -540,7 +541,7 @@ class open_browser:
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from browser import Browser
-            self.b = Browser(on_challenge=self.on_challenge)
+            self.b = Browser(on_challenge=self.on_challenge, ask=self.ask)
             return self.b.__enter__()
         except Exception as e:
             print("(browser route unavailable: %s)" % str(e)[:80])

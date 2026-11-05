@@ -376,13 +376,21 @@ def main():
     # the server runs as usual, except that "download" only records what it was asked to fetch (no browser, no network)
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
             "import os\n"
-            "def fake(run, ids, emit, stop):\n    open(%r, 'w').write(','.join(ids))\n    for i in ids:\n        p = run.papers[i]\n"
+            "def fake(run, ids, emit, stop, checks=None, **k):\n    open(%r, 'w').write(','.join(ids))\n"
+            "    if checks is not None and os.path.exists(%r):      # a site wants a human check: wait (up to 20 s) for 'Open the check', write down which site was asked for\n"
+            "        emit('challenge', {'host': 'www.sciencedirect.com', 'state': 'pending', 'site': 'ScienceDirect', 'msg': 'ScienceDirect wants to check you are human. Press Open the check.'})\n"
+            "        import queue\n"
+            "        try:\n            h = checks.get(timeout=20)\n        except queue.Empty:\n            h = ''\n"
+            "        open(%r, 'w').write(h)\n"
+            "        emit('challenge', {'host': h, 'state': 'open', 'msg': 'A Chromium window is open on ' + h})\n"
+            "        emit('challenge', {'host': h, 'state': 'passed', 'msg': h + ' check passed'})\n"
+            "    for i in ids:\n        p = run.papers[i]\n"
             "        wrong = os.path.exists(%r)      # a second round: the publisher's route gave another work's PDF, which the app refused\n"
             "        p['dl_status'] = 'wrong_paper' if wrong else 'failed'\n"
             "        p['dl_note'] = ('wrong paper via browser: this PDF is titled \\u201cTwo-stage differences in differences\\u201d: its title is not on the first pages (0%% found)' if wrong else 'test: no real downloads')\n"
             "        p['manual_url'] = 'https://example.org/the-paper'\n"
             "        emit('download', {'id': i, 'dl_status': p['dl_status'], 'dl_note': p['dl_note'], 'manual_url': p['manual_url']})\n"
-            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".wrong"))
+            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".check", marker + ".checked", marker + ".wrong"))
     tail = "sys.argv = ['server.py', '--port', %r, '--no-open']\nrunpy.run_path(%r, run_name='__main__')\n" % (str(port), os.path.join(TMP, "dashboard", "server.py"))
     search_fakes = r"""
 import zlib, fetch_new as fx
@@ -1332,6 +1340,29 @@ bks.crossref_books = lambda title, rows=3: []
                   and card_.locator("input[type=checkbox]:not([disabled])").count() == 1 and card_.locator("a:has-text('Open in my browser')").count() == 1,
                   page.inner_text("#listview")[:300])
             os.remove(marker + ".wrong")
+            # a site wants a human check during a download: the page offers "Open the check" (a reload keeps it), the press reaches the running download
+            def post_code(path, body):
+                try:
+                    urllib.request.urlopen(urllib.request.Request(base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})); return 200
+                except urllib.error.HTTPError as e_:
+                    return e_.code
+            open(marker + ".check", "w").write("1")
+            page.click("#qbtn")
+            page.wait_for_selector("#banner:not(.hide) [data-check]", timeout=15000)
+            check("a human check during a download shows 'Open the check' in the banner, and nothing opens by itself", page.inner_text("#banner [data-check]").startswith("Open the check") and "ScienceDirect" in page.inner_text("#banner") and not os.path.exists(marker + ".checked"), page.inner_text("#banner"))
+            page.reload(); page.wait_for_selector("#banner:not(.hide) [data-check]", timeout=10000)
+            check("…a reloaded page still offers it", page.locator('#banner [data-check="www.sciencedirect.com"]').count() == 1)
+            check("…a press for a site with no check waiting is refused", post_code("/api/check", {"host": "elsewhere.example"}) == 400)
+            page.click("#banner [data-check]")
+            for _ in range(60):
+                if os.path.exists(marker + ".checked"):
+                    break
+                page.wait_for_timeout(250)
+            check("…pressing it asks the running download to open that site's check", os.path.exists(marker + ".checked") and open(marker + ".checked").read() == "www.sciencedirect.com", open(marker + ".checked").read() if os.path.exists(marker + ".checked") else "not asked")
+            page.wait_for_function("document.querySelector('#banner').classList.contains('hide')", timeout=15000)
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=15000)
+            check("…and once the check is passed and the download is over, the banner is gone; with no download running a press is refused", post_code("/api/check", {"host": "www.sciencedirect.com"}) == 409)
+            os.remove(marker + ".check"); os.remove(marker + ".checked")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs"); page.click('.fvtabs [data-ft="discover"]'); page.wait_for_selector(".dc-row", timeout=60000)
             page.select_option('[data-s="min"]', "1"); page.click("#dc-find"); page.wait_for_selector('[data-sel="W11"]', timeout=60000)
             check("'at least 1' also lists papers cited by only one of them", page.locator('[data-sel="W11"]').count() == 1)

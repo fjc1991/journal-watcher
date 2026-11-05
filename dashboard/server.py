@@ -127,6 +127,8 @@ class Jobs:
         self.stop = threading.Event()
         self.run = None        # the run currently shown / being worked on
         self.kind = None       # what the job is doing: fetch | download | login
+        self.checks = queue.Queue()     # a download: the hosts whose "verify you are human" check the user asked to open (pipeline.download_and_summarize)
+        self.waiting = {}      # a download: host -> its last 'challenge' event while that check waits for the user (a page opened or reloaded shows it again)
 
     def busy(self):
         return self.thread is not None and self.thread.is_alive()
@@ -136,6 +138,8 @@ class Jobs:
             if self.busy():
                 return False
             self.stop = threading.Event()
+            self.checks = queue.Queue()
+            self.waiting = {}
             self.kind = kind
             if run is not None:
                 self.run = run
@@ -168,6 +172,7 @@ class Jobs:
             if self.kind == "download" and indexer:
                 indexer.kick(3)                  # new papers: read them into the index for Ask (the local model only; see indexer.py)
             self.kind = None
+            self.waiting = {}
 
 
 JOBS = Jobs()
@@ -217,9 +222,20 @@ def start_fetch(run):
 
 def start_download(ids):
     run = JOBS.run
+    base = emit_for(run)
+
+    def emit(event, data):
+        if event == "challenge":                 # which checks wait for the user: kept so that a page opened (or reloaded) later still offers "Open the check"
+            if data.get("state") in ("pending", "again"):
+                JOBS.waiting[data["host"]] = data
+            elif data.get("state") == "done":
+                JOBS.waiting.clear()
+            elif data.get("state") in ("open", "passed", "failed"):
+                JOBS.waiting.pop(data.get("host"), None)
+        base(event, data)
 
     def job():
-        pl.download_and_summarize(run, ids, emit_for(run), JOBS.stop)
+        pl.download_and_summarize(run, ids, emit, JOBS.stop, checks=JOBS.checks)
         ok = sum(1 for i in ids if run.papers.get(i, {}).get("dl_status") == "ok")
         HUB.emit("log", {"msg": "Downloads finished: %d of %d" % (ok, len(ids)), "level": "ok"})
     return JOBS.start("download", job)
@@ -701,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(support.public())
         if path == "/api/state":
             run = JOBS.run
-            return self.send_json({"busy": JOBS.busy(), "kind": JOBS.kind,
+            return self.send_json({"busy": JOBS.busy(), "kind": JOBS.kind, "checks": list(JOBS.waiting.values()),
                                    "run": run.to_dict() if run else None})
         if path == "/api/runs":
             return self.send_json(pl.list_runs())
@@ -1647,6 +1663,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.started(ok, run)
         if path == "/api/stop":
             JOBS.stop.set()
+            return self.send_json({"ok": True})
+        if path == "/api/check":                 # "Open the check": the running download opens that site's check page in a window between two papers
+            host = str(b.get("host") or "")
+            if not (JOBS.busy() and JOBS.kind == "download"):
+                return self.send_json({"error": "No download is running."}, 409)
+            if host not in JOBS.waiting:
+                return self.send_json({"error": "No check is waiting for that site."}, 400)
+            JOBS.waiting.pop(host, None)         # (a second press while it opens is not queued twice)
+            JOBS.checks.put(host)
             return self.send_json({"ok": True})
         if path == "/api/login":
             which = b.get("which") or "publishers"
