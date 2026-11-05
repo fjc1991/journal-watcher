@@ -82,6 +82,7 @@ def login_pages():
 PDF_LINK_SEL = ", ".join(s + ':not([href*="upplement"]):not([href*="/suppl"]):not([href*="type=additional"])' for s in [
     'a[href*="/doi/pdf/"]', 'a[href*="/doi/pdfdirect/"]', 'a[href*="pdfft"]',
     'a[href*="viewcontent.cgi"]', 'a[href$=".pdf" i]', 'a[href*=".pdf?" i]',
+    'a[href*="Delivery.cfm" i]',        # SSRN's "Download This Paper": papers.ssrn.com/sol3/Delivery.cfm?abstractid=<n>&mirid=1 (no ".pdf" in it; seen on the site, Nov 2026)
 ])  # never a "supplementary materials" PDF
 # where on a page a PDF link is NOT this article's: its reference list, "cited by", related and recommended articles, banners, footers and menus
 # (a reference to another paper that happens to link its .pdf must never be mistaken for the article itself)
@@ -322,13 +323,16 @@ class Browser:
                 return u
         ssrn = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "")
         for u, l in links:
-            if l["other"] or site_of(u) != site_of(base):
+            if site_of(u) != site_of(base):
                 continue
             if ssrn and re.search(r"Delivery\.cfm", u, re.I):      # SSRN's own download link carries the paper's number (and no DOI), as SSRN_ID<n> and/or abstractid=<n>
                 ids = set(re.findall(r"SSRN_ID(\d+)|[?&;]abstract_?id=(\d+)", u, re.I))
                 ids = {a or b for a, b in ids}
-                if ids == {ssrn.group(1)}:          # explicit identifiers only, and none that names another paper (a stray "code" number that happens to match does not count)
-                    return u
+                if ids == {ssrn.group(1)}:          # explicit identifiers only, and none that names another paper (a stray "code" number that happens to match does not count);
+                    return u                        # the number decides, whatever box the button sits in (SSRN's page layout is not known here)
+                continue
+            if l["other"]:
+                continue
             if doi and ("/doi/" in u or not re.search(r"viewcontent\.cgi|pdfft", u)):
                 continue
             return u
