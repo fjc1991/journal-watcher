@@ -4467,6 +4467,218 @@ print("OK")
                 if v is None: os.environ.pop(k, None)
                 else: os.environ[k] = v
             srv_.shutdown()
+    def t_authors():
+        """Author search (authors.py) against a local fake OpenAlex: the name is sent as OpenAlex reads it, the candidates say who they are, every page of works
+        is fetched (or the list is marked incomplete), the right kinds are kept and a working paper only when no published version is listed, each paper gets its
+        publisher's route without a Crossref call, papers already in the library or deleted are not downloaded, and the author's folder is found again."""
+        import authors as au, fetch_new as fx_, folders as fo_, csv as _csv, importer as im_
+        seen, STATE = [], {}
+        def W(i, title, typ="article", doi=None, src=None, year=2023):
+            return {"id": "https://openalex.org/W%d" % i, "doi": ("https://doi.org/" + doi) if doi else None, "display_name": title, "publication_date": "%d-05-01" % year,
+                    "publication_year": year, "type": typ, "primary_location": {"source": src, "landing_page_url": "https://example.org/w%d" % i},
+                    "best_oa_location": {"pdf_url": "https://repo.example.org/w%d.pdf" % i}, "authorships": [{"author": {"display_name": "Ann Lee"}}]}
+        WORKS = {"big": [W(1000 + k, "Bulk paper %d" % k, doi="10.9999/bulk.%d" % k, src={"display_name": "Bulk Journal", "type": "journal"}) for k in range(450)]}
+        class OA(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                seen.append(self.path)
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                mode = STATE.get("mode")
+                if mode == "429":
+                    body = b'{"error":"Insufficient budget"}'
+                    self.send_response(429); self.send_header("Retry-After", "10200"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+                if mode == "500" or (mode == "page2" and q.get("cursor") == ["c1"]):
+                    self.send_response(500); self.end_headers(); return
+                if self.path.startswith("/authors?"):
+                    res = [{"id": "https://openalex.org/A5000000111", "display_name": "Ann Lee", "orcid": "https://orcid.org/0000-0002-1825-0097", "works_count": 42, "cited_by_count": 900,
+                            "last_known_institutions": [{"display_name": "MIT"}], "topics": [{"display_name": t} for t in ("Platforms", "Pricing", "Labor", "Extra")]},
+                           {"id": "https://openalex.org/A5000000222", "display_name": "Ann Lee", "works_count": 3, "last_known_institutions": [], "topics": []}]
+                    body = json.dumps({"results": res if "orcid" not in self.path else res[:1]}).encode()
+                elif self.path.startswith("/works?"):
+                    data = WORKS[STATE.get("set", "big")]
+                    per, cur = int(q["per-page"][0]), q.get("cursor", ["*"])[0]
+                    start = 0 if cur == "*" else int(cur[1:]) * per
+                    page = data[start:start + per]
+                    nxt = "c%d" % (start // per + 1) if start + per < len(data) else None
+                    body = json.dumps({"meta": {"count": len(data), "next_cursor": nxt}, "results": page}).encode()
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        srv_ = ThreadingHTTPServer(("127.0.0.1", 0), OA); threading.Thread(target=srv_.serve_forever, daemon=True).start()
+        old_url = os.environ.get("JW_OPENALEX_URL")
+        os.environ["JW_OPENALEX_URL"] = "http://127.0.0.1:%d/" % srv_.server_address[1]
+        saved = (im_.crossref_meta, fx_.openalex_key)
+        im_.crossref_meta = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no Crossref call per paper"))
+        fx_.openalex_key = lambda: None
+        try:
+            fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            # the name as OpenAlex's search reads it, encoded (a space or a ':' in the address used to make every name 'not answered')
+            got = au.search("O'Neil: J?")
+            q_ = urllib.parse.parse_qs(urllib.parse.urlsplit(seen[-1]).query)
+            assert q_["search"] == ["O Neil J"] and " " not in seen[-1] and "orcid" in q_["select"][0] and "last_known_institutions" in q_["select"][0], seen[-1]
+            assert got[0] == {"id": "A5000000111", "name": "Ann Lee", "institutions": ["MIT"], "works": 42, "cited": 900, "topics": ["Platforms", "Pricing", "Labor"], "orcid": "0000-0002-1825-0097"}, got[0]
+            au.search("Jürgen Müller"); assert urllib.parse.parse_qs(urllib.parse.urlsplit(seen[-1]).query)["search"] == ["Jürgen Müller"], seen[-1]
+            assert len(au.search("0000-0002-1825-0097")) == 1 and "filter=orcid:0000-0002-1825-0097" in seen[-1]
+            au.search("A5000000111"); assert "filter=openalex:A5000000111" in seen[-1], seen[-1]                 # an id: the list endpoint (an unknown id is "none found", not "no answer")
+            STATE["mode"] = "500"
+            try:
+                au.search("Ann Lee"); raise AssertionError("no error")
+            except au.AuthorError as e:
+                assert "didn't answer" in str(e), e
+            STATE["mode"] = "429"
+            try:
+                au.search("Ann Lee"); raise AssertionError("no error")
+            except au.AuthorError as e:
+                assert "daily allowance" in str(e) and "Settings → Paper sources" in str(e), e
+            STATE.clear(); fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            # every page of works, for both ids of the person, of the kinds asked
+            seen.clear(); calls = []
+            ws, complete, total = au.works(["A5000000111", "https://openalex.org/A5000000222"], progress=lambda n, t: calls.append((n, t)))
+            assert len(ws) == 450 and complete and total == 450 and calls[-1] == (450, 450), (len(ws), complete, total, calls[-1:])
+            qs = [urllib.parse.parse_qs(urllib.parse.urlsplit(x).query) for x in seen]
+            assert [x["cursor"][0] for x in qs] == ["*", "c1", "c2"] and qs[0]["filter"][0] == "author.id:A5000000111|A5000000222,type:article|preprint|report|review|book-chapter" and qs[0]["per-page"] == ["200"], qs[0]
+            STATE["mode"] = "page2"
+            ws, complete, _ = au.works(["A5000000111"])
+            assert len(ws) == 200 and complete is False, (len(ws), complete)                                   # what came is kept, and the list says it is incomplete
+            STATE.clear()
+            stop_ = threading.Event(); seen.clear()
+            ws, complete, _ = au.works(["A5000000111"], progress=lambda n, t: stop_.set(), stop=stop_)          # Stop pressed after the first page
+            assert len(ws) == 200 and complete is False and len(seen) == 1, (len(ws), complete, seen)
+            assert not any("mailto" in x for x in seen), seen                                                   # no e-mail address goes to OpenAlex
+            # which works are kept
+            J = {"display_name": "Management Science", "type": "journal", "issn": ["0025-1909"]}
+            ws = [W(1, "Platform Pricing and Entry", doi="10.1287/mnsc.2023.1", src=J),
+                  W(2, "Platform pricing and entry", "preprint", doi="10.2139/ssrn.4000001", src={"display_name": "SSRN Electronic Journal", "type": "repository"}),   # its working paper: left out
+                  W(3, "A Working Paper Only", "preprint", doi="10.2139/ssrn.4000002", src={"display_name": "SSRN Electronic Journal", "type": "repository"}),        # no published version: kept
+                  W(4, "Editorial", doi="10.1111/isj.1", src={"display_name": "Information Systems Journal", "type": "journal"}),
+                  W(5, "Editorial", doi="10.1111/isj.2", src={"display_name": "Information Systems Journal", "type": "journal"}),        # another work of the same title: kept
+                  W(6, "Deep Nets at Scale", "book-chapter", doi="10.1007/978-3-1", src={"display_name": "Lecture Notes in Computer Science", "type": "book series"}),   # a conference paper
+                  W(7, "A Chapter in a Handbook", "book-chapter", doi="10.4324/hb.1", src={"display_name": "Handbook of Platforms", "type": "book"}),                      # left out
+                  W(8, "Conference Talk", doi="10.5465/AMPROC.2023.1", src={"display_name": "Academy of Management Proceedings", "type": "conference"}),
+                  W(1, "Platform Pricing and Entry", doi="10.1287/mnsc.2023.1", src=J),                                                  # listed under the person's second id too
+                  W(9, "No DOI Here", src=None)]
+            kept, excl = au.select(ws)
+            ids_ = [au._short(w["id"]) for w in kept]
+            assert ids_ == ["W1", "W3", "W4", "W5", "W6", "W8", "W9"], ids_
+            assert excl == {"book-chapter": 1, "working paper (published version listed)": 1}, excl
+            assert [w["_kind"] for w in kept] == ["journal", "working", "journal", "journal", "conference", "conference", "journal"], [w["_kind"] for w in kept]
+            assert [au._short(w["id"]) for w in au.select([ws[1], ws[0]])[0]] == ["W1"]                         # the working paper listed first: still left out
+            cjk = [W(20, "中国经济增长", doi="10.9999/cjk.1", src=J), W(21, "数字平台研究", "preprint", doi="10.2139/ssrn.4000021", src={"display_name": "SSRN", "type": "repository"})]
+            assert [au._short(w["id"]) for w in au.select(cjk)[0]] == ["W20", "W21"]                              # titles in another script are not all "the same title"
+            twin = [W(30, "Introduction", src=None), W(31, "Introduction", src=None)]
+            assert len(au.to_papers(au.select(twin)[0], "x", "Ann Lee")) == 1                                    # two records without DOI, title or venue apart: one paper, one id
+            jl = dl.load_json(os.path.join(dl.BASE, "journals.json"), {"journals": []})["journals"]
+            ms = next((j for j in jl if j.get("issn") == "0025-1909"), None)
+            ps = au.to_papers(kept, "ann-lee", "Ann Lee")
+            by = {p_["openalex"]: p_ for p_ in ps}
+            assert all(p_["verdict"] == "download" and p_["folder"] == "ann-lee" and p_["source"] == "author" for p_ in ps)
+            assert by["W1"]["publisher"] == "informs" and by["W1"]["id"] == fx_.key_for("10.1287/mnsc.2023.1", by["W1"]["journal"], by["W1"]["title"]), by["W1"]
+            if ms:
+                assert by["W1"]["abbr"] == ms["abbr"], by["W1"]                                                           # a watched journal is recognised by its ISSN
+            assert by["W3"]["publisher"] == "ssrn" and by["W3"]["url"] == "https://doi.org/10.2139/ssrn.4000002"
+            assert by["W9"]["doi"] == "" and by["W9"]["url"] == "https://repo.example.org/w9.pdf", by["W9"]                   # no DOI: the free copy OpenAlex knows
+            # already in the library / deleted
+            pdf_ = os.path.join(dl.PAPERS, "2023-05", "AU", "have.pdf"); os.makedirs(os.path.dirname(pdf_), exist_ok=True); open(pdf_, "wb").write(b"%PDF")
+            idx_ = os.path.join(dl.PAPERS, "_index.csv")
+            saved_idx = open(idx_, encoding="utf-8").read() if os.path.exists(idx_) else None
+            try:
+                dl.save_index({"doi": "10.1111/isj.1", "title": "Editorial"}, os.path.relpath(pdf_, dl.ROOT), "ok")
+                dl.save_index({"doi": "10.9999/published-version", "title": "A Working Paper Only"}, "", "deleted")       # its published version was deleted: its preprint stays away too
+                dl.save_index({"doi": "", "title": "Conference Talk"}, "", "deleted")
+                dl.save_index({"doi": "10.2139/ssrn.5555", "title": "Platform Pricing and Entry"}, os.path.relpath(pdf_, dl.ROOT), "ok")   # its preprint is in the library: the published version still comes
+                new, have, gone = au.split(ps)
+                assert sorted(p_["openalex"] for p_ in new) == ["W1", "W5", "W6", "W9"] and [(p_["openalex"], k) for p_, k in have] == [("W4", "10.1111/isj.1")] \
+                    and sorted(p_["openalex"] for p_ in gone) == ["W3", "W8"], ([p_["openalex"] for p_ in new], have, [p_["openalex"] for p_ in gone])
+            finally:
+                if saved_idx is None:
+                    os.remove(idx_)
+                else:
+                    open(idx_, "w", encoding="utf-8").write(saved_idx)
+            # the author's folder: made, found again, never someone else's
+            store_ = os.path.join(dl.PAPERS, "_authors.json")
+            if os.path.exists(store_):
+                os.remove(store_)
+            f1, _ = au.folder_for(["A5000000111"], "Ann Lee", "MIT")
+            f2, rec2 = au.folder_for(["A5000000111", "A5000000222"], "Ann Lee", "MIT")
+            assert f1 == f2 and rec2["ids"] == ["A5000000111", "A5000000222"] and [f["name"] for f in fo_.list_all()].count("Ann Lee") == 1, (f1, f2, rec2)
+            f3, _ = au.folder_for(["A5000000999"], "Ann Lee", "Stanford")                                                            # another Ann Lee
+            assert fo_.get(f3)["name"] == "Ann Lee · Stanford", fo_.get(f3)
+            fo_.create("Bo Chen")                                                                                               # a folder you made yourself
+            f4, _ = au.folder_for(["A5000000444"], "Bo Chen", "")
+            assert fo_.get(f4)["name"] == "Bo Chen (2)" and f4 != "bo-chen", fo_.get(f4)
+            au.file_have(f1, [(None, "10.1/x")])                                                                # filed into the first folder
+            fo_.delete(f1)
+            f5, _ = au.folder_for(["A5000000111"], "Ann Lee", "MIT")                                                                   # you deleted the folder: a new one
+            assert fo_.get(f5) and json.load(open(store_))["authors"][0]["folder"] == f5
+            assert au.file_have(f5, [(None, "10.1/x"), (None, "10.1/y")]) == ["10.1/x", "10.1/y"] and fo_.get(f5)["papers"] == ["10.1/x", "10.1/y"]
+            fo_.remove(f5, ["10.1/y"])                                                                                          # you took one out
+            assert au.file_have(f5, [(None, "10.1/x"), (None, "10.1/y")]) == [] and fo_.get(f5)["papers"] == ["10.1/x"]        # it stays out
+            assert au.file_new(f5, "10.1/y") is False and au.file_new(f5, "10.1/z") is True and fo_.get(f5)["papers"] == ["10.1/x", "10.1/z"]   # a download too
+            long_ = "Maria Fernanda Rodriguez-Gonzalez de la Vega y Montes Altos"[:50]
+            fl1, _ = au.folder_for(["A5000000771"], long_, "Universidad Autonoma de Barcelona")
+            fl2, _ = au.folder_for(["A5000000772"], long_, "Universidad Autonoma de Barcelona y Madrid")      # the same name and institution, cut to 60 characters
+            fl3, _ = au.folder_for(["A5000000773"], long_, "Universidad Autonoma de Barcelona y Madrid")
+            assert len({fl1, fl2, fl3}) == 3 and all(len(fo_.get(x)["name"]) <= 60 for x in (fl1, fl2, fl3)), [fo_.get(x)["name"] for x in (fl1, fl2, fl3)]
+            for f in fo_.list_all():
+                if f["name"].startswith(("Ann Lee", "Bo Chen", "Maria Fernanda")):
+                    fo_.delete(f["id"])
+            os.remove(store_)
+        finally:
+            im_.crossref_meta, fx_.openalex_key = saved
+            fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            if old_url is None:
+                os.environ.pop("JW_OPENALEX_URL", None)
+            else:
+                os.environ["JW_OPENALEX_URL"] = old_url
+            srv_.shutdown()
+    check("author search: the name is sent as OpenAlex reads it, the candidates say who they are, every page of works (or 'incomplete'), journal/conference/working papers kept and a working paper only without its published version, each paper's route without a Crossref call, papers in the library or deleted not downloaded, the author's folder found again and never another's", t_authors)
+
+    def t_author_downloads():
+        """An author run: the run's name and file; a downloaded paper, or one already on disk, goes into the author's folder; and papers from publishers the app has
+        no route for are spaced out and set aside per site (their DOI prefix), so one site's human check does not hold up another's papers."""
+        import queue as queue_mod, pipeline as pl_, folders as fo_
+        r_ = pl_.Run("author", {"label": "Ann Lee", "author_ids": ["A5000000111"], "folder": "x"})
+        assert r_.title() == "Author · Ann Lee" and r_.slug().startswith("author_annlee_") and pl_.Run("author", {"label": "Ann Lee", "author_ids": ["A5000000999"]}).slug() != r_.slug()
+        assert pl_.site_key({"publisher": "wiley", "doi": "10.1002/x"}) == "wiley" and pl_.site_key({"doi": "10.1007/abc"}) == "prefix:10.1007" \
+            and pl_.site_key({"url": "https://repo.example.org/a.pdf"}) == "host:repo.example.org" and pl_.site_key({}) == "other"
+        saved = (pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize)
+        f = fo_.create("Author Test Folder")
+        hooks, log = {}, []
+        class _Br:
+            def __init__(self, on_challenge=None, ask=False, **k): hooks["ch"] = on_challenge
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def open_check(self, host, stay=False): return False
+        def fake_dl(p, env, browser=None, dry=False):
+            log.append(p["id"])
+            if p["doi"].startswith("10.1007/"):
+                hooks["ch"]("link.springer.com", "pending")
+                return False, None, "challenge:link.springer.com"
+            out = os.path.join(TMP, "Papers", "au_%s.pdf" % p["id"].replace(":", "_").replace("/", "_")); os.makedirs(os.path.dirname(out), exist_ok=True); open(out, "wb").write(b"%PDF")
+            return True, out, "browser"
+        pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize = fake_dl, _Br, (lambda p, path, usage: "summary")
+        try:
+            run = pl_.Run("author", {"label": "Ann Lee", "author_ids": ["A5000000111"], "folder": f["id"]})
+            have_ = os.path.join(pl_.ROOT, "Papers", "au_have.pdf"); os.makedirs(os.path.dirname(have_), exist_ok=True); open(have_, "wb").write(b"%PDF")
+            papers = [{"id": "doi:10.1007/s1", "doi": "10.1007/s1", "title": "Springer One", "publisher": "", "verdict": "download", "folder": f["id"], "journal": "J", "abbr": "J"},
+                      {"id": "doi:10.1007/s2", "doi": "10.1007/s2", "title": "Springer Two", "publisher": "", "verdict": "download", "folder": f["id"], "journal": "J", "abbr": "J"},
+                      {"id": "doi:10.1177/g1", "doi": "10.1177/g1", "title": "Sage One", "publisher": "", "verdict": "download", "folder": f["id"], "journal": "J", "abbr": "J"},
+                      {"id": "doi:10.9/have", "doi": "10.9/have", "title": "On Disk", "publisher": "", "verdict": "download", "folder": f["id"], "journal": "J", "abbr": "J",
+                       "file": os.path.relpath(have_, pl_.ROOT)}]
+            for p_ in papers:
+                run.add_paper(p_)
+            si.save_profile({"pace": "fast"})
+            pl_.download_and_summarize(run, [p_["id"] for p_ in papers], lambda *a, **k: None, threading.Event(), sleep=lambda d: None, checks=queue_mod.Queue())
+            st_ = {i: run.papers[i].get("dl_status") for i in run.papers}
+            assert st_["doi:10.1177/g1"] == "ok" and "doi:10.1177/g1" in log, (st_, log)                      # another publisher's site: not held up by Springer's check
+            assert log.count("doi:10.1007/s2") == 0 and st_["doi:10.1007/s2"] == "needs_check", (st_, log)      # the same site's next paper waits for the check
+            assert sorted(fo_.get(f["id"])["papers"]) == ["10.1177/g1", "10.9/have"] and "doi:10.9/have" not in log, (fo_.get(f["id"]), log)    # downloaded, and already on disk (not fetched again): into the author's folder
+        finally:
+            pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize = saved
+            si.save_profile({"pace": "careful"})
+            fo_.delete(f["id"])
+    check("an author run: its name and file; a paper downloaded, or already on disk, goes into the author's folder; publishers without a route are spaced out and set aside per site, so one site's check does not hold up another's papers", t_author_downloads)
+
     check("OpenAlex: many DOIs in one call (an NBER year: 26 calls instead of 1,300), the rest one by one; a used-up daily budget answers at once instead of waiting and stops only the paid calls; a key is sent in the header, never in the address", t_openalex_budget)
 
     def t_term_run():

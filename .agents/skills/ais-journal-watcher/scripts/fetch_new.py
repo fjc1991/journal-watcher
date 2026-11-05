@@ -346,6 +346,29 @@ def _crossref_title_query(title, flt):
     return None
 
 
+# ---------- which download route a paper from any journal gets (related papers, author search)
+
+PUBLISHER_BY_PREFIX = {"10.1287": "informs", "10.1111": "wiley", "10.1002": "wiley", "10.1016": "elsevier", "10.1080": "tandfonline", "10.1145": "acm", "10.1126": "aaas",
+                       "10.1073": "pnas", "10.25300": "aisel", "10.17705": "aisel", "10.3386": "nber", "10.2139": "ssrn"}      # which download route a DOI's publisher needs (download.py)
+SMALL = {"of", "the", "and", "in", "for", "on", "to", "a", "an", "at", "by", "&"}
+
+
+def venue_abbr(name):
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z]+", name) if w.lower() not in SMALL]
+    return ("".join(w[0].upper() for w in words)[:6] if len(words) >= 2 else (words[0][:5].upper() if words else "OTH")) or "OTH"
+
+
+def venue_route(meta, venue, doi, journals):
+    """(name, abbr, publisher) for a candidate. A watched journal is recognised by its ISSN only (a DOI prefix such as Wiley's 10.1111 covers hundreds of journals);
+    any other journal keeps its own name and gets the download route of its DOI prefix's publisher."""
+    issn = set((meta or {}).get("issn") or [])
+    j = next((x for x in journals if x.get("issn") and x["issn"] in issn), None)
+    if j:
+        return j["name"], j["abbr"], j["publisher"]
+    name = re.sub(r"[\\/:*?\"<>|]+", " ", ((meta or {}).get("container") or venue or "")).strip()[:80] or "Other"
+    return name, venue_abbr(name) if name != "Other" else "OTH", PUBLISHER_BY_PREFIX.get(doi.split("/")[0] if doi else "", "")
+
+
 def openalex_key():
     key = os.environ.get("OPENALEX_API_KEY")
     if key:

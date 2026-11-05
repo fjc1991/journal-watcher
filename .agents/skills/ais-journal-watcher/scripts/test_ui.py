@@ -204,6 +204,9 @@ OA = {w["id"]: w for w in (
     _work(30, "10.1234/thirty", "Platform governance and AI", cited=120, year=2025), _work(31, "10.1234/thirtyone", "Marketplace design", cited=20))}
 
 
+AUTHOR_ASKED = []
+
+
 class FakeOA(BaseHTTPRequestHandler):
     """A tiny OpenAlex: /works?filter=doi:a|b  or  openalex:W1|W2 (the dashboard is pointed here with JW_OPENALEX_URL)."""
     def log_message(self, *a):
@@ -211,7 +214,24 @@ class FakeOA(BaseHTTPRequestHandler):
 
     def do_GET(self):
         import urllib.parse as up
-        q = up.parse_qs(up.urlsplit(self.path).query); kind, vals = q["filter"][0].split(":", 1); vals = [up.unquote(v) for v in vals.split("|")]
+        q = up.parse_qs(up.urlsplit(self.path).query)
+        if self.path.startswith("/authors?") or (self.path.startswith("/works?") and q.get("filter", [""])[0].startswith("author.id:")):     # author search (authors.py)
+            AUTHOR_ASKED.append(self.path)
+            if "A5000000222" in self.path and "A5000000111" not in self.path and self.path.startswith("/works?"):      # this person's works: OpenAlex does not answer
+                self.send_response(500); self.end_headers(); return
+            if self.path.startswith("/authors?"):
+                res = [{"id": "https://openalex.org/A5000000111", "display_name": "Ann Lee", "orcid": "https://orcid.org/0000-0002-1825-0097", "works_count": 45, "cited_by_count": 300,
+                        "last_known_institutions": [{"display_name": "MIT"}], "topics": [{"display_name": "Platforms"}]},
+                       {"id": "https://openalex.org/A5000000222", "display_name": "Ann Lee", "works_count": 2, "last_known_institutions": [{"display_name": "Elsewhere University"}], "topics": []}]
+                body = {"results": res}
+            else:
+                body = {"meta": {"count": 45, "next_cursor": None}, "results": [
+                    {"id": "https://openalex.org/W77%03d" % k, "doi": "https://doi.org/10.7777/au.%d" % k, "display_name": "Author paper %d" % k, "publication_date": "2024-01-01",
+                     "publication_year": 2024, "type": "article", "primary_location": {"source": {"display_name": "Author Test Journal", "type": "journal"}},
+                     "authorships": [{"author": {"display_name": "Ann Lee"}}]} for k in range(45)]}
+            data = json.dumps(body).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+        kind, vals = q["filter"][0].split(":", 1); vals = [up.unquote(v) for v in vals.split("|")]
         hits = [w for w in OA.values() if ((w["doi"] or "").replace("https://doi.org/", "") in vals if kind == "doi" else w["id"].rsplit("/", 1)[-1] in vals)]
         if "referenced_works" not in q["select"][0]:
             hits = [{k: v for k, v in w.items() if k not in ("referenced_works", "related_works")} for w in hits]
@@ -1363,6 +1383,62 @@ bks.crossref_books = lambda title, rows=3: []
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=15000)
             check("…and once the check is passed and the download is over, the banner is gone; with no download running a press is refused", post_code("/api/check", {"host": "www.sciencedirect.com"}) == 409)
             os.remove(marker + ".check"); os.remove(marker + ".checked")
+            # author search: find the person, tick them, every work goes straight into a folder named after them (no confirmation, no screening)
+            print("author search: an author's works into their folder")
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector('.tabs button[data-tab="authors"]', state="attached")
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo")
+            page.wait_for_selector("#authlist .authc", timeout=10000)
+            first_ = page.inner_text("#authlist .authc >> nth=0")
+            check("the Authors tab finds the people of that name on OpenAlex, each with institution, works, topics and ORCID", page.locator("#authlist .authc").count() == 2 and "MIT" in first_ and "45 works" in first_
+                  and "Platforms" in first_ and page.locator('#authlist a[href="https://orcid.org/0000-0002-1825-0097"]').count() == 1 and page.locator("#authdl").is_hidden(), first_)
+            page.check("#authlist [data-ai='0']")
+            check("…ticking one offers 'Download all into their folder'", page.locator("#authdl").is_visible() and page.inner_text("#authdl").strip() == "Download all into their folder", page.inner_text("#authdl"))
+            if os.path.exists(marker): os.remove(marker)
+            n_dlg = len(dialogs); n_asked = len(AUTHOR_ASKED)
+            page.click("#authdl")
+            for _ in range(80):
+                if os.path.exists(marker): break
+                page.wait_for_timeout(250)
+            ids_ = open(marker).read().split(",") if os.path.exists(marker) else []
+            fdir_ = os.path.join(TMP, "Papers", "_folders")
+            fnames_ = [json.load(open(os.path.join(fdir_, f_)))["name"] for f_ in os.listdir(fdir_) if f_.endswith(".json") and "." not in f_[:-5]] if os.path.isdir(fdir_) else []
+            check("…pressing it lists every work (45, more than the 40 a Discover download takes) and downloads them all, with no question asked, as a run 'Author · Ann Lee' with a folder 'Ann Lee'",
+                  len(ids_) == 45 and all(i.startswith("doi:10.7777/au.") for i in ids_) and len(dialogs) == n_dlg and "Ann Lee" in fnames_
+                  and any("author.id:A5000000111" in a_ for a_ in AUTHOR_ASKED[n_asked:]), "%d ids, dialogs %s, folders %s" % (len(ids_), dialogs[n_dlg:], fnames_))
+            page.wait_for_function("document.querySelector('#runtitle') && document.querySelector('#runtitle').textContent.includes('Author · Ann Lee')", timeout=10000)
+            check("…the run says whose works they are, which folder they go to, and what the listing found", "Works by Ann Lee" in page.inner_text("#runmeta") and "45 works listed" in page.inner_text("#runmeta")
+                  and "45 to download" in page.inner_text("#runmeta"), page.inner_text("#runmeta"))
+            arun_ = next(r_ for r_ in api("/api/runs") if r_["kind"] == "author")
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_timeout(300)
+            page.evaluate("openRun({id: %s})" % json.dumps(arun_["id"])); page.wait_for_selector("#listview:not(.hide)", timeout=10000)
+            check("…opened again from Past runs it shows its papers (not tiles of the watched journals) with each paper's own journal", page.locator("#tilesview").is_hidden()
+                  and page.locator("#papers > .paper").count() > 0 and "Author Test Journal" in page.inner_text("#papers"), page.inner_text("#papers")[:200])
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='0']")
+            os.remove(marker); page.click("#authdl")
+            for _ in range(80):
+                if os.path.exists(marker): break
+                page.wait_for_timeout(250)
+            fnames2_ = [json.load(open(os.path.join(fdir_, f_)))["name"] for f_ in os.listdir(fdir_) if f_.endswith(".json") and "." not in f_[:-5]]
+            check("…searching the same person again fills the same folder (no second 'Ann Lee')", fnames2_.count("Ann Lee") == 1 and not any(n_.startswith("Ann Lee ·") for n_ in fnames2_), str(fnames2_))
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='1']")
+            page.click("#authdl")
+            page.wait_for_function("document.querySelector('#runmeta').textContent.includes('listing failed')", timeout=20000)
+            check("…when OpenAlex does not answer for the works, the run says the listing failed and why (not just 'No papers in this run')",
+                  "didn't answer" in page.inner_text("#runmeta") and "could not be listed" in page.inner_text("#papers"), page.inner_text("#runmeta"))
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            for f_ in os.listdir(fdir_):                                                                   # (leave the folders and runs the later checks count as they were)
+                if f_.endswith(".json") and "." not in f_[:-5] and json.load(open(os.path.join(fdir_, f_)))["name"].startswith("Ann Lee"):
+                    os.remove(os.path.join(fdir_, f_))
+            rdir_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")
+            for f_ in os.listdir(rdir_):
+                if f_.endswith(".json") and json.load(open(os.path.join(rdir_, f_))).get("kind") == "author":
+                    os.remove(os.path.join(rdir_, f_))
+            check("…(the test's author runs are gone again)", not any(r_["kind"] == "author" for r_ in api("/api/runs")))
+            if os.path.exists(os.path.join(TMP, "Papers", "_authors.json")):
+                os.remove(os.path.join(TMP, "Papers", "_authors.json"))
+            os.remove(marker)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs"); page.click('.fvtabs [data-ft="discover"]'); page.wait_for_selector(".dc-row", timeout=60000)
             page.select_option('[data-s="min"]', "1"); page.click("#dc-find"); page.wait_for_selector('[data-sel="W11"]', timeout=60000)
             check("'at least 1' also lists papers cited by only one of them", page.locator('[data-sel="W11"]').count() == 1)

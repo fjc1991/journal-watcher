@@ -45,6 +45,7 @@ import importer  # noqa: E402
 import library_search as ls  # noqa: E402
 import notes_store as ns  # noqa: E402
 import pipeline as pl  # noqa: E402
+import authors  # noqa: E402
 import prefs  # noqa: E402
 import signins  # noqa: E402
 import identity  # noqa: E402
@@ -220,7 +221,9 @@ def start_fetch(run):
     return JOBS.start("fetch", job, run)
 
 
-def start_download(ids):
+def start_download(ids, prepare=None):
+    """Download these papers of the open run in the background. `prepare(emit)`, when given, runs first inside the same job and returns the ids (an author's works
+    are listed there: it can take a while, and a "verify you are human" check during the downloads works as for any download)."""
     run = JOBS.run
     base = emit_for(run)
 
@@ -235,9 +238,12 @@ def start_download(ids):
         base(event, data)
 
     def job():
-        pl.download_and_summarize(run, ids, emit, JOBS.stop, checks=JOBS.checks)
-        ok = sum(1 for i in ids if run.papers.get(i, {}).get("dl_status") == "ok")
-        HUB.emit("log", {"msg": "Downloads finished: %d of %d" % (ok, len(ids)), "level": "ok"})
+        todo = prepare(emit) if prepare else ids
+        if not todo:
+            return
+        pl.download_and_summarize(run, todo, emit, JOBS.stop, checks=JOBS.checks)
+        ok = sum(1 for i in todo if run.papers.get(i, {}).get("dl_status") == "ok")
+        HUB.emit("log", {"msg": "Downloads finished: %d of %d" % (ok, len(todo)), "level": "ok"})
     return JOBS.start("download", job)
 
 
@@ -1146,6 +1152,56 @@ class Handler(BaseHTTPRequestHandler):
             if rows is None:
                 return self.send_json({"error": "no such folder"}, 404)
             return self.stream_ndjson(related.scope_stream(rows, lib, max(1, min(10, int(b.get("min") or 2)))))
+        if path == "/api/authors/search":    # {name}: OpenAlex authors of that name (or ORCID iD, or OpenAlex id), for you to pick the right person
+            try:
+                return self.send_json({"authors": authors.search(b.get("name"))})
+            except authors.AuthorError as e:
+                return self.send_json({"error": str(e)}, 502)
+        if path == "/api/authors/download":  # {ids: [A…], name, institution}: every work of those ids (journal, conference, working papers) into the author's folder
+            if JOBS.busy():
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            ids = [authors._short(x).upper() for x in (b.get("ids") or []) if re.fullmatch(r"[Aa]\d{4,12}", authors._short(x))][:10]
+            name = re.sub(r"\s+", " ", str(b.get("name") or "")).strip()[:60]
+            if not ids or not name:
+                return self.send_json({"error": "Pick the author first."}, 400)
+            fid, _ = authors.folder_for(ids, name, str(b.get("institution") or ""))
+            run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name)})
+            run.stage, run.status = "ready", "stopped"
+            run.save(force=True)
+            JOBS.run = run
+
+            def prepare(emit):
+                lab = "Listing %s's works on OpenAlex" % name
+                emit("progress", {"stage": "listing", "label": lab, "done": 0, "total": 0})
+
+                def said(listing, msg, level):        # the run says what came of the listing (its page shows it at once, and after a reload)
+                    run.params["listing"] = listing
+                    run.save(force=True)
+                    emit("run", {"id": run.id, "params": run.params})
+                    emit("log", {"msg": msg, "level": level})
+                try:
+                    ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": lab, "done": n, "total": t}), stop=JOBS.stop)
+                except authors.AuthorError as e:
+                    run.errors.append(str(e))
+                    said({"error": str(e)}, "Listing %s's works failed: %s" % (name, e), "error")
+                    return []
+                if JOBS.stop.is_set():
+                    said({"stopped": True, "listed": len(ws)}, "Stopped while listing %s's works: nothing was downloaded or filed." % name, "warn")
+                    return []
+                kept, excluded = authors.select(ws)
+                new, have, gone = authors.split(authors.to_papers(kept, fid, name))
+                authors.file_have(fid, have)
+                added = [p for p in new if run.add_paper(p)]
+                for p in added:
+                    emit("paper", pl.slim(p))
+                said({"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded, "have": len(have), "deleted": len(gone), "new": len(added)},
+                     "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download." % (
+                         name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(added)),
+                     "ok" if complete else "warn")
+                return [p["id"] for p in added]
+            if not start_download([], prepare=prepare):
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})
         if path == "/api/related/download":   # {items: [{id, doi, title, authors, year, venue, date, reason}], label}: straight into the download pipeline
             if not related:
                 return self.send_json({"error": "AI features aren't installed"}, 501)

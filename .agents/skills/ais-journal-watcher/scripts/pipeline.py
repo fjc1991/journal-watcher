@@ -10,6 +10,8 @@ Run kinds:
 import base64
 import csv
 import hashlib
+import unicodedata
+import urllib.parse
 import json
 import os
 import re
@@ -246,6 +248,10 @@ class Run:
             return "weekly"
         if self.kind == "picks":
             return "picks"
+        if self.kind == "author":         # the author's name, and their ids (two people of the same name get two files)
+            p = self.params
+            return "author_" + (re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKD", p.get("label") or "").encode("ascii", "ignore").decode().lower())[:20] or "x") \
+                + "_" + hashlib.sha1("|".join(sorted(p.get("author_ids") or [])).encode()).hexdigest()[:6]
         p = self.params
         bits = ["%s-%s" % (p.get("year_from"), p.get("year_to"))]
         bits += [re.sub(r"[^a-z0-9]+", "", t.lower())[:12]
@@ -257,6 +263,8 @@ class Run:
             return week_label(self.week or week_of(self.created))
         if self.kind == "picks":        # papers chosen from the Discover lists (related.py), downloaded like any other
             return "Picks · " + (self.params.get("label") or "related papers")
+        if self.kind == "author":       # an author's works (authors.py), downloaded into their folder
+            return "Author · " + (self.params.get("label") or "an author")
         p = self.params
         yrs = str(p["year_from"]) if p["year_from"] == p["year_to"] else "%s–%s" % (p["year_from"], p["year_to"])
         parts = [yrs]
@@ -1116,6 +1124,31 @@ SITE_NAMES = {"elsevier": "ScienceDirect", "wiley": "Wiley", "tandfonline": "Tay
               "aisel": "AIS eLibrary", "acm": "ACM", "nber": "NBER", "hbr": "HBR", "ssrn": "SSRN"}
 
 
+def site_key(p):
+    """Which site a paper's download goes to, for spacing papers out and for setting a site's papers aside while its human check waits: its publisher; for a
+    publisher the app has no route for (papers from any journal: related papers, author search), its DOI prefix (one prefix, one publisher's site), else the
+    host of its address. Before, all of those shared one key, so one site's check held up every other unknown site."""
+    if p.get("publisher"):
+        return p["publisher"]
+    doi = str(p.get("doi") or "")
+    if "/" in doi:
+        return "prefix:" + doi.split("/", 1)[0]
+    host = urllib.parse.urlsplit(str(p.get("url") or "")).netloc
+    return ("host:" + host) if host else "other"
+
+
+def _into_folder(p):
+    """A paper of an author run is filed into the author's folder once it is in the library."""
+    fid = p.get("folder")
+    if not fid:
+        return
+    try:
+        import authors
+        authors.file_new(fid, paper_key(p))          # (once: a paper you took out of the folder is not put back by a later retry)
+    except Exception:  # noqa: BLE001      (the folder was deleted meanwhile: the paper stays in the library)
+        pass
+
+
 def pace_gap(publisher, pace, challenged=False, rnd=None):
     """Seconds to wait before the next paper from `publisher`: the pace's base gap, times 0.75–1.35 at random (a fixed rhythm is itself robot-like), doubled for a
     site that has already asked for a human check in this batch."""
@@ -1276,6 +1309,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     p = todo_q.popleft()
                     if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])):
                         got.append(p)
+                        _into_folder(p)
                         finished(p, final=False)
                         continue
                     if paper_key(p) in gone:                         # you deleted it: never fetched again by a run
@@ -1283,7 +1317,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         emit_dl(p)
                         finished(p, final=False)
                         continue
-                    pub = p.get("publisher") or "other"
+                    pub = site_key(p)
                     if pub in waiting_pub:                           # its site's check waits for the user
                         set_aside(p, waiting_pub[pub], pub)
                         continue
@@ -1291,7 +1325,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         due = last_at[pub] + pace_gap(pub, pace, pub in challenged)
                         if clock() < due:
                             emit("log", {"msg": "Waiting %d s before the next %s paper (%s download pace, so the site does not take Journal Watcher for a robot)." % (
-                                round(due - clock()), SITE_NAMES.get(pub, pub), pace)})
+                                round(due - clock()), SITE_NAMES.get(pub, p.get("journal") or pub), pace)})
                         while clock() < due and not stop.is_set():
                             serve(br)                                # a press is served while waiting
                             ready = next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
@@ -1311,6 +1345,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     if ok:
                         p.update(dl_status="ok", file=os.path.relpath(path, ROOT), dl_note=note)
                         got.append(p)
+                        _into_folder(p)
                     elif ask and chall and hasattr(br, "open_check"):
                         host, state = chall
                         if host not in given_up and state == "again" and nudged.get(host, 0) >= 2 and host not in deferred:
