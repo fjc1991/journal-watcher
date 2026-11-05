@@ -753,9 +753,17 @@ bks.crossref_books = lambda title, rows=3: []
             fh = page.locator(".bd-fh").bounding_box(); page.mouse.move(fh["x"] + 400, fh["y"] + 8); page.mouse.down(); page.mouse.move(fh["x"] + 460, fh["y"] + 8, steps=5); page.mouse.up(); page.wait_for_timeout(400)
             lefts1 = page.evaluate("[...document.querySelectorAll('.nc-card.note')].map(e => e.offsetLeft)")
             check("moving a frame carries the cards inside it", all(abs((b - a) - 60) <= 3 for a, b in zip(lefts0, lefts1)), str((lefts0, lefts1, page.evaluate("[[...document.querySelectorAll('.bd-frame')].map(e => [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight]), [...document.querySelectorAll('.nc-card')].map(e => [e.className.split(' ')[1], e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight])]"))))
-            page.fill("#nc-pn", "Overall: a solid paper about platforms."); page.wait_for_timeout(1500)
-            saved = json.load(open(sidecar(2, ".notes.json")))
-            check("frames, arrows and the note on the paper as a whole are saved with the notes", saved["frames"][0]["label"] == "Key ideas" and saved["links"][0]["label"] == "refines" and saved["paper_note"].startswith("Overall"), json.dumps({k: saved.get(k) for k in ("frames", "links", "paper_note")})[:300])
+            page.fill("#nc-pn", "Overall: a solid paper about platforms.")
+            saved = {}
+            for _ in range(50):          # (typing → 0.5 s → the note is set → 0.8 s → saved, after any save already under way: wait for the file rather than a fixed time)
+                try:
+                    saved = json.load(open(sidecar(2, ".notes.json")))
+                except (OSError, ValueError):
+                    saved = {}
+                if str(saved.get("paper_note") or "").startswith("Overall"):
+                    break
+                time.sleep(0.2)
+            check("frames, arrows and the note on the paper as a whole are saved with the notes", (saved.get("frames") or [{}])[0].get("label") == "Key ideas" and (saved.get("links") or [{}])[0].get("label") == "refines" and str(saved.get("paper_note") or "").startswith("Overall"), json.dumps({k: saved.get(k) for k in ("frames", "links", "paper_note")})[:300])
             page.click('[data-k="view"][data-v="outline"]'); page.wait_for_selector(".ol-g")
             titles_ = [t.strip().lower() for t in page.locator(".ol-g h4").all_inner_texts()]
             check("the outline lists your frame first (with its cards), then the rest by page, with the arrow and the note on the paper", titles_[0].startswith("key ideas") and page.locator(".ol-g.frame .ol-item").count() >= 2 and "refines" in page.inner_text(".ol-lks") and "solid paper" in page.inner_text(".ol-pn"), str(titles_))
