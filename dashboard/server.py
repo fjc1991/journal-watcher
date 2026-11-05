@@ -370,7 +370,8 @@ def config():
                     for m in pl.methods()],
         "years": list(range(y, 1999, -1)),
         "openalex_key": bool(pl.fx.openalex_key()),
-        "est_cost_per_paper": pl.EST_SCREEN_COST_PER_PAPER,
+        "est_cost_per_paper": pl.est_screen_cost_per_paper(),          # with the model chosen for screening; None when its price is not known (the page says so)
+        "screen_model": ai.pricing.name(*ai.feature_model("screen")) if ai else "Claude Sonnet 5.5",
         "model": pl.MODEL,
         "this_week": pl.week_of(),
         "this_week_label": pl.week_label(pl.week_of()),
@@ -1833,6 +1834,8 @@ def start(port=8765, quiet=False):
         syncinfo.tidy_caches() # copies Dropbox made of search-index or saved-answer files when two computers wrote the same one at once: they are regenerable, so they are simply removed
     except Exception:  # noqa: BLE001
         pass
+    if ai:
+        ai.pricing.refresh_soon()  # OpenRouter's price list, read again when it is a day old (only when an OpenRouter model is in use)
     importer.sweep()           # dropped PDFs nobody confirmed or cancelled within a day are forgotten (a confirmation of an older one is refused anyway)
     updater.start_background()
     threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)

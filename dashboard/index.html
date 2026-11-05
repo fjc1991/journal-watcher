@@ -590,9 +590,9 @@ function updateEst() {
   const y0 = +$("#y0").value, y1 = +$("#y1").value, yrs = Math.abs(y1 - y0) + 1;
   const js = selectedJournals();
   const n = js.reduce((a, j) => a + (jinfo(j).needs_query ? (jinfo(j).limit || 200) : (jinfo(j).per_year || 80) * yrs), 0);       // (SSRN: the best matches of your focus phrase, not every year)
-  const cost = n * CFG.est_cost_per_paper;
+  const per = CFG.est_cost_per_paper, cost = per == null ? null : n * per;
   const big = js.filter(j => (jinfo(j).per_year || 0) > 1000);
-  $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · est. <b>$${cost.toFixed(2)}</b>` +
+  $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · ` + (cost == null ? `cost not known: no price for ${esc(CFG.screen_model || "the screening model")} (Settings → AI → Prices)` : `est. <b>$${cost.toFixed(2)}</b>`) +
     (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
     (js.some(j => jinfo(j).needs_query) ? `<br>SSRN is searched by words: only the ${jinfo("SSRN").limit || 200} best matches of your focus phrase are looked at${$("#focus").value.trim() ? "" : " — <b>type a focus phrase</b> to use it"}.` : "") +
     (CFG.openalex_key ? "" : `<br>JMIS/DSS/NBER abstracts need a free OpenAlex key; otherwise screened by title.`);
@@ -724,7 +724,7 @@ function updateScreenBtn() {
   const b = $("#screenbtn"); if (!b) return;
   const terms = !!(RUN && RUN.params && RUN.params.terms), {failed, waiting, n} = screenPending();
   b.classList.toggle("hide", !n || BUSY);
-  const est = `≈ $${(n * CFG.est_cost_per_paper).toFixed(2)}`;
+  const est = CFG.est_cost_per_paper == null ? "price not known" : `≈ $${(n * CFG.est_cost_per_paper).toFixed(2)}`;
   b.textContent = terms ? `Screen with AI (${n} · ${est})` : `Retry screening (${n} · ${est})`;
   b.title = terms ? "Ask the AI to add topics, the method and a relevance order to the matches. Every match stays a download: the card says when the AI would have skipped it. Costs a little; stopped by your monthly budget."
     : `Ask the AI again about ${[failed ? failed + " paper" + (failed === 1 ? "" : "s") + " whose screening failed" : "", waiting ? waiting + " not screened yet" : ""].filter(Boolean).join(" and ")}. Uses the model in Settings → AI → Screening new papers (its Test button checks it can screen). Papers already judged are not asked again; stopped by your monthly budget.`;
@@ -853,7 +853,7 @@ function setRun(run) {
   (run.papers || []).forEach(p => { papers.set(p.id, p); order.push(p.id); });
   if (!SEL.size && run.kind === "weekly") papers.forEach(p => { if (p.verdict === "download" && p.dl_status !== "ok") SEL.add(p.id); });
   $("#runtitle").textContent = run.title;
-  setCost(run.cost);
+  setCost(run.cost, run.cost_detail);
 }
 function renderMeta() {
   if (!RUN) return;
@@ -1198,7 +1198,7 @@ function openPaper(id) {
       p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">Open PDF</a>` : "",
       p.doi ? `<a class="btn small" target="_blank" href="https://doi.org/${esc(p.doi)}">DOI ↗</a>` : (p.url ? `<a class="btn small" target="_blank" href="${esc(p.url)}">Article page ↗</a>` : ""),
       !p.file ? `<button class="btn small" id="dsel">${SEL.has(id) ? "✓ Selected — click to deselect" : "Select for download"}</button>` : ""],
-    body: (p.reason ? `<h3>Why Sonnet flagged it</h3><p>${esc(p.reason)}</p>` : "") +
+    body: (p.reason ? `<h3>Why the AI flagged it</h3><p>${esc(p.reason)}</p>` : "") +
       (p.summary ? `<h3>Summary</h3><div class="md" id="dsum">Loading…</div>` : "") +
       `<h3>Abstract</h3><p>${p.abstract ? esc(p.abstract) : "<i>No abstract available.</i>"}</p>` +
       (p.keywords && p.keywords.length ? `<h3>Keywords</h3><p>${esc(p.keywords.join(", "))}</p>` : "") +
@@ -1243,7 +1243,17 @@ function setBusy(busy, kind) {
   if (!busy) { $("#prog").classList.remove("on"); $("#banner").classList.add("hide"); }
   updateSel(); renderTilesSoon();
 }
-function setCost(c) { $("#cost").textContent = c ? `Sonnet cost this run: $${(+c).toFixed(2)}` : ""; }
+function setCost(c, d) {            // the run's AI cost, naming the models that ran; a call whose price is not known makes it "at least", with a way to add the price
+  const el = $("#cost"); if (!el) return;
+  d = d || {cost: c, unpriced: 0, models: []};
+  const used = (d.models || []).filter(m => m.calls || m.cost);
+  if (!(+d.cost) && !d.unpriced) { el.textContent = ""; el.title = ""; return; }
+  const names = used.map(m => m.name), shown = names.length > 2 ? names.slice(0, 2).join(", ") + ` +${names.length - 2}` : names.join(", ");
+  el.innerHTML = `AI cost this run: ${d.unpriced ? "at least " : ""}$${(+d.cost).toFixed(2)}${shown ? ` · ${esc(shown)}` : ""}` +
+    (d.unpriced ? ` · <a href="#" data-costprices>${d.unpriced} call${d.unpriced === 1 ? "" : "s"} without a price</a>` : "");
+  el.title = used.map(m => `${m.name}${m.calls ? ` · ${m.calls} call${m.calls === 1 ? "" : "s"}` : ""} · ${(+m.in || 0).toLocaleString()} tokens in, ${(+m.out || 0).toLocaleString()} out · $${(+m.cost).toFixed(4)}${m.unpriced ? ` (and ${m.unpriced} without a price)` : ""}`).join("\n");
+  const a = $("[data-costprices]", el); if (a) a.onclick = e => { e.preventDefault(); window.Settings ? Settings.open("ai") : toast("Settings are still loading."); };
+}
 
 function connect() {
   const es = new EventSource("/api/events");
@@ -1293,7 +1303,7 @@ function connect() {
     $("#banner").classList.toggle("hide", d.state === "passed");
     if (d.state === "waiting") toast("Action needed: tick “Verify you are human” in the browser window.");
   });
-  es.addEventListener("cost", e => setCost(JSON.parse(e.data).cost));
+  es.addEventListener("cost", e => { const m = JSON.parse(e.data); setCost(m.cost, m.detail); });
   es.addEventListener("signin", e => {
     const d = JSON.parse(e.data), who = d.name || (d.site || "").toUpperCase();
     if (d.state === "opened") { if (SI) { SI.pending = d.site; paintSignins(); } return; }

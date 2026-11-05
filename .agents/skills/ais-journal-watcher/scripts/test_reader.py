@@ -642,6 +642,112 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
                 except OSError:
                     pass
     check("settings follow you: the page's choices (theme, view modes, reading positions) are kept in the data folder, only the named keys travel, a key at a time, nothing is rewritten when nothing changed, an unreadable file is kept aside, old positions are pruned", t_ui_prefs)
+    def t_prices():
+        """What a model costs and where the number comes from: a price you typed wins, OpenRouter models get OpenRouter's list (read at most once a day, kept when a read
+        fails), Claude models the built-in table, a keyless model on this computer is free, anything else is unknown (never a silent $0)."""
+        import prices as pr_
+        from datetime import date
+        from http.server import BaseHTTPRequestHandler as BH
+        payload = {"data": [
+            {"id": "scaledown/summarize", "pricing": {"prompt": "0.00000004", "completion": "0"}},
+            {"id": "anthropic/claude-sonnet-5.5", "pricing": {"prompt": "0.000002", "completion": "0.00001", "web_search": "0.004", "input_cache_read": "0.0000001", "input_cache_write": "0.0000025"}},
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "broken", "pricing": {"prompt": "x"}}, {"pricing": {}}]}
+        hits = []
+
+        class H(BH):
+            fail = False
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                hits.append(self.path)
+                if H.fail:
+                    self.send_response(500); self.end_headers(); return
+                b = json.dumps(payload).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        saved = (pr_.OR_URL, pr_.CACHE)
+        pr_.OR_URL, pr_.CACHE = "http://127.0.0.1:%d/api/v1/models" % srv.server_address[1], os.path.join(TMP, "openrouter_prices.json")
+        pr_._mem["data"] = None
+        try:
+            if os.path.exists(pr_.CACHE):
+                os.remove(pr_.CACHE)
+            parsed = pr_.parse_openrouter(payload)
+            assert parsed["scaledown/summarize"] == {"in": 0.04, "out": 0.0, "cache_write": 0.04, "cache_read": 0.04}, parsed
+            assert parsed["anthropic/claude-sonnet-5.5"]["cache_read"] == 0.1 and parsed["anthropic/claude-sonnet-5.5"]["web_search"] == 0.004, parsed
+            assert "openrouter/auto" not in parsed and "broken" not in parsed and len(parsed) == 2, "a router's -1 price and a broken entry are left out"
+            assert pr_.refresh() == 2 and len(hits) == 1
+            assert pr_.refresh() == 2 and len(hits) == 1, "a list read less than a day ago is not read again"
+            H.fail = True
+            assert pr_.refresh(force=True) == 2 and len(hits) == 2, "a failed read keeps the list it had"
+            H.fail = False
+            cfg = {"providers": {"anthropic": {"type": "anthropic"}, "openrouter": {"type": "openai_compat", "base_url": "https://openrouter.ai/api/v1", "key_env": "K"},
+                                 "ollama": {"type": "openai_compat", "base_url": "http://localhost:11434/v1"}, "proxy": {"type": "openai_compat", "base_url": "http://127.0.0.1:4000/v1", "key_env": "P"},
+                                 "openai": {"type": "openai_compat", "base_url": "https://api.openai.com/v1", "key_env": "O"}},
+                   "prices": {"gpt-mine": {"in": 1, "out": 3}, "scaledown/summarize": {"in": 0, "out": 0}}, "features": {}}
+            src = lambda p, m: (pr_.lookup(p, m, cfg) or {}).get("source")  # noqa: E731
+            assert src("openrouter", "scaledown/summarize") == "openrouter" and pr_.lookup("openrouter", "scaledown/summarize", cfg)["in"] == 0.04, "an all-empty typed row does not hide the automatic price"
+            assert src("anthropic", "claude-sonnet-5-5") == "built-in" and pr_.lookup("anthropic", "claude-sonnet-5-5", cfg)["out"] == 10.0
+            assert src("ollama", "llama3") == "free" and src("proxy", "llama3") is None, "free only on this computer and without a key (a local proxy may forward to a paid service)"
+            assert src("openai", "gpt-mine") == "yours" and src("openai", "gpt-x") is None and src("openrouter", "no/such") is None
+            cfg["prices"]["claude-sonnet-5-5"] = {"in": 9, "out": 9}
+            assert src("anthropic", "claude-sonnet-5-5") == "yours" and pr_.lookup("anthropic", "claude-sonnet-5-5", cfg, yours=False)["source"] == "built-in", "your price wins; Settings still shows the automatic one"
+            assert pr_.stale({"source": "built-in", "checked": "2026-01-01"}, date(2026, 11, 5)) and not pr_.stale({"source": "built-in", "checked": "2026-10-06"}, date(2026, 11, 5))
+            assert pr_.stale({"source": "openrouter", "checked": "2026-11-01"}, date(2026, 11, 5)) and not pr_.stale({"source": "yours", "checked": ""})
+            assert pr_.name("anthropic", "claude-sonnet-5-5") == "Claude Sonnet 5.5" and pr_.name("openrouter", "anthropic/claude-sonnet-5.5") == "Claude Sonnet 5.5"
+            assert pr_.name("openrouter", "scaledown/summarize") == "scaledown/summarize" and pr_.name("anthropic", "claude-opus-5") == "Claude Opus 5"
+            # through ai.cost_of: the provider decides where the price comes from
+            saved_cfg = dict(CFG)
+            write_cfg(dict(CFG, providers=dict(CFG["providers"], openrouter=cfg["providers"]["openrouter"], anthropic=cfg["providers"]["anthropic"]), prices={}))
+            try:
+                assert abs(ai.cost_of("scaledown/summarize", {"in": 1_000_000, "out": 500_000}, provider="openrouter") - 0.04) < 1e-9
+                assert abs(ai.cost_of("claude-sonnet-5-5", {"in": 1_000_000, "out": 100_000}, provider="anthropic") - 3.0) < 1e-9
+                assert ai.cost_of("m1", {"in": 1000}, provider="fake") is None, "a model with no price is unknown, not $0"
+                assert abs(ai.cost_of("anthropic/claude-sonnet-5.5", {"in": 0, "out": 0}, searches=3, provider="openrouter") - 0.012) < 1e-9, "OpenRouter's own price per search (not the $0.01 default)"
+                pa = ai.price_auto()
+                assert pa["m1"]["source"] is None and pa["m1"]["provider"] == "fake", pa
+            finally:
+                write_cfg(saved_cfg)
+        finally:
+            srv.shutdown()
+            pr_.OR_URL, pr_.CACHE = saved
+            pr_._mem["data"] = None
+    check("prices: a typed price wins; OpenRouter models get OpenRouter's list (once a day, kept when a read fails), Claude models the built-in table, a keyless local model is free, anything else is unknown", t_prices)
+    def t_run_cost_detail():
+        """A run's cost names every model that ran, at that model's price; a call without a price is counted as such (the total is 'at least'), an answer from the saved
+        answers costs nothing, an old run still shows its Claude Sonnet 5.5 tokens, and the screening estimate follows the screening model's price."""
+        class R_:
+            def __init__(s, prov, model, cost, i=1000, o=100, cached=False):
+                s.provider, s.model, s.cost, s.usage, s.cached = prov, model, cost, {"in": i, "out": o}, cached
+        import pipeline as pl
+        u = pl.Usage()
+        u.add_result(R_("anthropic", "claude-sonnet-5-5", 0.012)); u.add_result(R_("anthropic", "claude-sonnet-5-5", 0.008))
+        u.add_result(R_("openrouter", "scaledown/summarize", 0.0002)); u.add_result(R_("openai", "gpt-x", None)); u.add_result(R_("openai", "gpt-x", 5.0, cached=True))
+        d = u.detail()
+        names = [m["name"] for m in d["models"]]
+        assert names[0] == "Claude Sonnet 5.5" and set(names) == {"Claude Sonnet 5.5", "scaledown/summarize", "gpt-x"}, names
+        assert abs(d["cost"] - 0.0202) < 1e-9 and d["unpriced"] == 1, d
+        son = d["models"][0]
+        assert son["calls"] == 2 and son["in"] == 2000 and son["out"] == 200, son
+        assert [m for m in d["models"] if m["name"] == "gpt-x"][0]["calls"] == 1, "the saved answer was not counted"
+        json.dumps(u.d)
+        old = pl.Usage({"in": 100000, "out": 5000, "cache_write": 0, "cache_read": 0}).detail()
+        assert old["cost"] == 0.25 and old["models"][0]["name"] == "Claude Sonnet 5.5" and old["unpriced"] == 0, old
+        assert pl.Usage().detail() == {"cost": 0.0, "unpriced": 0, "models": []}
+        saved_cfg = dict(CFG)
+        try:
+            write_cfg(dict(CFG, features=dict(CFG["features"], screen={"provider": "fake", "model": "m1"}), prices={"m1": {"in": 2.0, "out": 10.0}}))
+            assert abs(pl.est_screen_cost_per_paper() - pl.EST_SCREEN_COST_PER_PAPER) < 0.0001, "the old constant was Sonnet's price for one paper"
+            write_cfg(dict(CFG, features=dict(CFG["features"], screen={"provider": "fake", "model": "m1"}), prices={"m1": {"in": 0.2, "out": 1.0}}))
+            assert abs(pl.est_screen_cost_per_paper() - pl.EST_SCREEN_COST_PER_PAPER / 10) < 0.00002, pl.est_screen_cost_per_paper()
+            write_cfg(dict(CFG, features=dict(CFG["features"], screen={"provider": "fake", "model": "m1"}), prices={}))
+            assert pl.est_screen_cost_per_paper() is None, "no price: unknown, not $0"
+        finally:
+            write_cfg(saved_cfg)
+    check("a run's cost names every model that ran at its own price, counts calls without a price as such, skips saved answers, keeps old runs right, and the screening estimate follows the screening model", t_run_cost_detail)
 
 
     print("library: folders, status, search, import, exports")
@@ -1613,7 +1719,7 @@ print("OK")
         assert text.startswith("# Summary") and open(target[:-4] + ".md").read().startswith("# Summary")
         sent = SEEN[-1][1]["messages"][-1]["content"]; flat = " ".join(x.get("text", "") for x in sent)
         assert "Full text of the paper" in flat and "Summarize Platforms for" in flat and SEEN[-1][1]["max_completion_tokens" if "max_completion_tokens" in SEEN[-1][1] else "max_tokens"] == 16000
-        assert usage.cost() > 0 and usage.d.get("extra", 0) > 0                      # a non-Claude model is added as dollars
+        assert usage.cost() > 0 and sum(m["cost"] for m in usage.d.get("models", {}).values()) > 0 and usage.detail()["models"][0]["provider"] == "fake"     # a non-Claude model is counted at its own price, under its own name
         assert pl.summarize({"title": "Platforms"}, target, usage).strip() == text          # an existing summary is never overwritten
         Fake.pieces = ["The sample has ", "120 firms (2)."]
     check("pipeline summaries go through the AI layer: your template, any provider, cost added to the run", t_summary)
@@ -4275,7 +4381,7 @@ print("OK")
             judged = [i for i in r.order if r.papers[i].get("verdict")]
             assert len(calls) == 2 and len(judged) == 2 and not any(r.papers[i].get("verdict") == "error" for i in r.order), (calls, judged)
             assert any(e == "log" and d.get("level") == "warn" and "budget" in d["msg"] and "1 papers not screened" in d["msg"] for e, d in events), events[-3:]
-            assert abs(r.usage.d.get("extra", 0) - 2.0) < 1e-6, r.usage.d                                                               # the run's cost counts what was paid
+            assert abs(r.usage.cost() - 2.0) < 1e-6, r.usage.d                                                               # the run's cost counts what was paid
             rows = [x for x in ai.usage_log(10) if x["feature"] == "screen"]
             u = ai.usage_summary()
             assert len(rows) == 2 and u["by_feature"]["screen"]["calls"] == 2 and abs(u["by_feature"]["screen"]["cost"] - 2.0) < 1e-6 and u["warn"], u["by_feature"]   # Settings → Usage shows it
@@ -4297,9 +4403,9 @@ print("OK")
             assert len(calls) == 2 and all(r5.papers[i]["verdict"] in ("download", "skip") for i in r5.order), calls
             # 6. four batches at once (the default) all work, and every one is counted
             config(screen={"provider": "fake", "model": "m1"}); calls.clear()
-            r6 = new_run(query="parallel", titles=["Platform %d" % k for k in range(12)]); base_extra = r6.usage.d.get("extra", 0)
+            r6 = new_run(query="parallel", titles=["Platform %d" % k for k in range(12)]); base_extra = r6.usage.cost()
             pl_.screen(r6, emit, stop, batch_size=1, workers=4)
-            assert len(calls) == 12 and all(r6.papers[i].get("verdict") == "download" for i in r6.order) and abs(r6.usage.d.get("extra", 0) - base_extra - 12.0) < 1e-6, (len(calls), r6.usage.d)
+            assert len(calls) == 12 and all(r6.papers[i].get("verdict") == "download" for i in r6.order) and abs(r6.usage.cost() - base_extra - 12.0) < 1e-6, (len(calls), r6.usage.d)
             # 6b. a refusal is billed: Claude's (stop_reason "refusal" still reports its tokens) and an OpenAI-style one (delta.refusal) both reach the ledger and the run's cost, and neither is asked again
             ai._compat = real_compat
             class _Msg:                                              # what the Anthropic SDK hands back for a refused answer
@@ -4317,7 +4423,7 @@ print("OK")
                 r7 = new_run(query="claude refuses"); pl_.screen(r7, emit, stop, batch_size=3, workers=1)
                 rows = ai.usage_log(100000)[:len(ai.usage_log(100000)) - n0]
                 assert len(asked_a) == 1 and {r7.papers[i]["verdict"] for i in r7.order} == {"error"}, len(asked_a)
-                assert len(rows) == 1 and rows[0]["feature"] == "screen" and abs(rows[0]["cost"] - 1.0) < 1e-6 and abs(r7.usage.d.get("extra", 0) - 1.0) < 1e-6, (rows, r7.usage.d)
+                assert len(rows) == 1 and rows[0]["feature"] == "screen" and abs(rows[0]["cost"] - 1.0) < 1e-6 and abs(r7.usage.cost() - 1.0) < 1e-6, (rows, r7.usage.d)
             finally:
                 ai._clients.pop("a", None)
             config(screen={"provider": "fake", "model": "m1"}); n0 = len(ai.usage_log(100000)); n_seen = len(SEEN)
@@ -4328,7 +4434,7 @@ print("OK")
                 Fake.refusal = None
             rows = ai.usage_log(100000)[:len(ai.usage_log(100000)) - n0]
             assert len(SEEN) == n_seen + 1 and {r8.papers[i]["verdict"] for i in r8.order} == {"error"}, (len(SEEN) - n_seen)
-            assert len(rows) == 1 and rows[0]["feature"] == "screen" and rows[0]["cost"] > 0 and r8.usage.d.get("extra", 0) > 0, (rows, r8.usage.d)
+            assert len(rows) == 1 and rows[0]["feature"] == "screen" and rows[0]["cost"] > 0 and r8.usage.cost() > 0, (rows, r8.usage.d)
             ai._compat = fake_compat
             # 7. once the budget is used up, the batches still waiting are dropped instead of each being refused in turn (each refusal reads the whole ledger)
             config(screen={"provider": "fake", "model": "m1"}); ai.save_config({"budget": {"monthly_usd": max(ai.month_spend(), 0.000001)}})
