@@ -162,7 +162,7 @@ body.sb-open .sb-scrim { display: block; }
 /* ---- a large screen: the page grows with the window instead of staying a 1200 px column between empty margins. Below 1500 px nothing here applies; above it the width is a share of the
    space beside the sidebar, never less than before (so the change is smooth at the edge) and capped so that lines of text do not run across a whole 5K screen. */
 @media (min-width: 1500px) {
-  .layout { max-width: clamp(1200px, calc((100vw - var(--sbw)) * .78), 2200px); }
+  .layout { max-width: clamp(1200px, calc(100vw - var(--sbw)), 2200px); }      /* the Watch page: all the space beside the sidebar (the Library keeps its share below) */
   .layout[data-view="lib"] { max-width: clamp(1160px, calc((100vw - var(--sbw)) * .8), 2400px); }
   .st:not(.au) { --stw: clamp(1100px, calc((100vw - var(--sbw)) * .7), 1800px); }
   .abs, .reason, .take, .snip { max-width: 110ch; }      /* a paragraph keeps a readable line even when the column around it is wide */
@@ -309,6 +309,15 @@ body.sb-open .sb-scrim { display: block; }
 .tname { font: 600 15px/1.3 var(--sans); }
 .tcounts { margin-top: 2px; } .tcounts b { font: 700 17px var(--sans); }
 .tbar { background: var(--sk-soft); }
+/* a run's journal tiles (Watch page) are bigger and grow with the column: about two per row on a 1600 px window; the Library's tiles keep their size */
+#tiles { grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 16px; }
+#tiles .tile.card { padding: 22px; gap: 14px; }
+#tiles .mono { width: 60px; height: 60px; font-size: 16px; }
+#tiles .tname { font-size: 17px; }
+#tiles .tpub, #tiles .tstatus, #tiles .tile .open { font-size: 13px; }
+#tiles .tcounts b { font-size: 22px; }
+#tiles .tbar { height: 10px; }
+.papersmore { display: flex; justify-content: center; margin: 14px 0 4px; }
 .drawer { background: var(--panel); border-left: 1px solid var(--line); box-shadow: var(--shadow-raised); }
 .authors { background: var(--well); border-color: var(--well-line); }
 
