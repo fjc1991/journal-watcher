@@ -2,6 +2,12 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.7
+
+- **Author search.** A new **Authors** tab on the Watch page finds the people of a name (or an ORCID iD) on OpenAlex, each with institution, number of works, topics and ORCID. Tick the right person (or two entries of the same person: OpenAlex sometimes lists someone twice after a move) and press **Download all into their folder**: every journal article, conference paper and working paper goes into a folder named after them, with no question asked and no screening; each paper gets a summary, as any download does. A working paper is left out when its published version is listed. Papers already in your library go into the folder instead of downloading again, and papers you deleted are not fetched again (nor the preprint of a published paper you deleted). Searching the same person again fills the same folder; another person of the same name gets "name · institution". If OpenAlex stops answering, the run says so and what it listed.
+- Papers from publishers the app has no special route for are now spaced out and set aside per site, so one site's "verify you are human" check no longer holds up papers from other sites.
+- Paper cards show the paper's own journal name (papers from journals you do not watch showed an abbreviation).
+
 ## 1.2.6
 
 - **The run's cost names the models that ran, at their own prices.** The top bar said “Sonnet cost this run” whatever model you used, and priced only Claude Sonnet 5.5's calls: a call to any other model without a price you had typed counted as $0, silently. It now says, for example, “AI cost this run: $0.12 · Claude Sonnet 5.5, scaledown/summarize”; hovering it shows each model's calls, tokens and cost. When a call has no known price it says “at least $0.12 · 3 calls without a price”, with a link to where you can add one.
