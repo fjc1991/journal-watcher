@@ -1932,10 +1932,20 @@ fx.fetch_journal = lambda j: []                                                 
             check("'printed page 1 is file page 5' is kept (offset 4) and the page now says how printed pages relate to file pages", api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 4 and "printed page = file page − 4" in page.inner_text("#bk-list .chaplist") and page.input_value("[data-chap-offv]") == "5")
 
             print("book chapters: ask and summary")
+            def open_chap_list():                                       # (the Library can redraw its list once more after loading, closing the panel just opened: open it again then)
+                for _try in range(2):
+                    page.click("#bk-list [data-chap]")
+                    try:
+                        page.wait_for_selector("#bk-list .chap-ol li", timeout=6000); return
+                    except Exception:  # noqa: BLE001
+                        if _try:
+                            raise
+                        if page.locator("#bk-list .chaplist:not(.hide)").count():      # (still open, only slow: wait longer rather than click it shut)
+                            page.wait_for_selector("#bk-list .chap-ol li", timeout=10000); return
             chat_calls = lambda marker: [b_ for pth_, b_ in SEEN if pth_.endswith("/chat/completions") and b_["messages"] and b_["messages"][0]["role"] == "system" and b_["messages"][0]["content"].startswith(marker)]
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
-            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li", timeout=10000)
+            open_chap_list()
             n_sum0 = len(chat_calls("You summarise ONE chapter"))
             page.click('#bk-list [data-chap-sum="1"]'); page.wait_for_selector("#bk-list .sum-est", timeout=10000)
             est_txt = page.inner_text("#bk-list .sum-est")
@@ -1948,7 +1958,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("…and the button now says Summary", page.inner_text('[data-chap-sum="1"]').strip() == "Summary")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
-            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li"); n_sum1 = len(chat_calls("You summarise ONE chapter"))
+            open_chap_list(); n_sum1 = len(chat_calls("You summarise ONE chapter"))
             try:                                                                    # (the Library can redraw its list once more after loading: wait for the chapter list to settle)
                 page.wait_for_function("(() => { const b = document.querySelector('#bk-list [data-chap-sum=\"1\"]'); return b && b.textContent.trim() === 'Summary'; })()", timeout=10000)
             except Exception:  # noqa: BLE001
@@ -1974,7 +1984,7 @@ fx.fetch_journal = lambda j: []                                                 
             def open_chapters_():
                 page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
                 page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
-                page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li"); page.wait_for_selector("#bk-list [data-chap-whole]")
+                open_chap_list(); page.wait_for_selector("#bk-list [data-chap-whole]")
             open_chapters_()
             n_ch0, n_ov0 = len(chat_calls("You summarise ONE chapter")), len(chat_calls("You write an OVERVIEW"))
             saved_ = sum(1 for c_ in api("/api/book?file=" + urllib.parse.quote(ep_row["file"]))["chapters"] if c_.get("summary"))
