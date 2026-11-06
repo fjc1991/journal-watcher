@@ -78,6 +78,8 @@ class Fake(BaseHTTPRequestHandler):
             out = "FIGURE: this box shows a table of numbers."
         elif system.startswith("You write the script of a short spoken briefing"):
             out = "Here is the paper in two minutes. The authors ask how open rules change who joins a platform.\n\nThey study one hundred and twenty firms. Open rules attract more entrants. The effect is strongest for small firms.\n\nBe careful: it is one platform only. What would happen elsewhere?"
+        elif system.startswith("You write an OVERVIEW"):
+            out = "**The book's argument.** FAKE BOOK OVERVIEW from %d summaries (location 5)." % text.count("FAKE CHAPTER SUMMARY")
         elif system.startswith("You summarise ONE chapter"):
             out = "**Argument.** FAKE CHAPTER SUMMARY of %s.\n\n**Key points.**\n- A point about rules (p. 5).\n- Another point (pp. 6-7).\n" % text.split("\n")[1][:40]
         elif system.startswith("You write the RELATED WORK"):
@@ -1878,6 +1880,10 @@ bks.crossref_books = lambda title, rows=3: []
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
             page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li"); n_sum1 = len(chat_calls("You summarise ONE chapter"))
+            try:                                                                    # (the Library can redraw its list once more after loading: wait for the chapter list to settle)
+                page.wait_for_function("(() => { const b = document.querySelector('#bk-list [data-chap-sum=\"1\"]'); return b && b.textContent.trim() === 'Summary'; })()", timeout=10000)
+            except Exception:  # noqa: BLE001
+                pass
             check("after a reload the summary is still there (kept with the book) and is shown without asking again", page.inner_text('[data-chap-sum="1"]').strip() == "Summary" and "FAKE CHAPTER SUMMARY" in page.inner_text('[data-sumbox="1"]') and page.locator('[data-sumbox="1"].hide').count() == 0 and len(chat_calls("You summarise ONE chapter")) == n_sum1)
             page.click('#bk-list [data-chap-sum="1"]'); page.click('#bk-list [data-chap-sum="1"]')
             check("opening and closing it again sends nothing", len(chat_calls("You summarise ONE chapter")) == n_sum1)
@@ -1894,6 +1900,45 @@ bks.crossref_books = lambda title, rows=3: []
             turn_html = page.locator(".ask-turn").first.inner_html()
             check("…and the answer's sources say where they are in words (chapter · location) and that only the chapter was read", "Only “Chapter 2” was read" in turn_html and "Chapter 2 · location " in turn_html, turn_html[-400:])
             page.click('.rd-bar [data-a="back"]'); page.wait_for_selector("#bk-add")
+
+            print("book: summarise the whole book")
+            def open_chapters_():
+                page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
+                page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
+                page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li"); page.wait_for_selector("#bk-list [data-chap-whole]")
+            open_chapters_()
+            n_ch0, n_ov0 = len(chat_calls("You summarise ONE chapter")), len(chat_calls("You write an OVERVIEW"))
+            saved_ = sum(1 for c_ in api("/api/book?file=" + urllib.parse.quote(ep_row["file"]))["chapters"] if c_.get("summary"))
+            check("the Chapters panel offers 'Summarise the whole book…'", "Summarise the whole book" in page.inner_text("#bk-list [data-chap-whole]") and saved_ >= 1, page.inner_text("#bk-list .chap-h"))
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("#bk-list .whole-est", timeout=15000)
+            we_ = page.inner_text("#bk-list .whole-est")
+            check("…pressing it shows what it would do and what it costs BEFORE anything is sent (parts to do, those already done, one overview, provider and model)",
+                  "fake · m1" in we_ and "Cost:" in we_ and ("%d parts" % (3 - saved_) in we_ or "1 part" in we_) and "%d of 3 already" % saved_ in we_ and "one overview" in we_
+                  and len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0, we_)
+            page.click("[data-whole-no]"); page.wait_for_function("document.querySelector('#bk-list [data-whole]').classList.contains('hide')")
+            check("…Cancel sends nothing", len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0)
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("[data-whole-go]"); page.click("[data-whole-go]")
+            ok_ = False
+            for _ in range(160):
+                st_ = api("/api/book/whole?file=%s&status=1" % urllib.parse.quote(ep_row["file"]))["status"]
+                if not st_["running"] and st_.get("ended"):
+                    ok_ = True; break
+                time.sleep(0.25)
+            check("…'Summarise' runs in the background: the parts without a summary once each, then one overview", ok_ and len(chat_calls("You summarise ONE chapter")) - n_ch0 == 3 - saved_
+                  and len(chat_calls("You write an OVERVIEW")) - n_ov0 == 1 and st_["overview"] is True and not st_["failed"], str(st_))
+            try:
+                page.wait_for_selector("#bk-list .chap-overview:not(.hide)", timeout=15000)
+            except Exception:  # noqa: BLE001
+                pass
+            check("…the panel then shows the overview, every part says 'Summary', and it says it finished",
+                  "FAKE BOOK OVERVIEW from 3 summaries" in page.inner_text("#bk-list .chap-overview") and all(t_.strip() == "Summary" for t_ in page.locator("#bk-list [data-chap-sum]").all_inner_texts())
+                  and "Finished" in page.inner_text("#bk-list [data-whole]"), page.inner_text("#bk-list .chaplist")[:500])
+            check("…and it was one job in the AI activity tray", any(j_["kind"] == "summary" and j_["label"].startswith("Book summary") for j_ in api("/api/activity")["jobs"]), str([j_["label"] for j_ in api("/api/activity")["jobs"]])[:300])
+            open_chapters_()
+            check("after a reload the overview is still there and the button says 'Book summary' (nothing left to do; pressing it sends nothing)",
+                  "FAKE BOOK OVERVIEW" in page.inner_text("#bk-list .chap-overview") and page.inner_text("#bk-list [data-chap-whole]").strip() == "Book summary")
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("#bk-list [data-whole] .ok", timeout=10000)
+            check("…pressing it says everything is done, and asks nothing", len(chat_calls("You write an OVERVIEW")) - n_ov0 == 1 and "up to date" in page.inner_text("#bk-list [data-whole]"))
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")

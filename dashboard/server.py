@@ -79,10 +79,11 @@ try:   # the reader's AI features; the dashboard still runs without them
     import reviewer  # noqa: E402
     import skim  # noqa: E402
     import summaries  # noqa: E402
+    import bookjob  # noqa: E402
     import synthesis  # noqa: E402
     import workspace  # noqa: E402
 except ImportError as _e:
-    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = summaries = synthesis = workspace = personal = None
+    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = summaries = synthesis = workspace = personal = bookjob = None
     print("AI features unavailable (%s) — run: pip install -r requirements.txt" % _e)
 
 STATIC = os.path.join(HERE, "static")
@@ -960,7 +961,17 @@ class Handler(BaseHTTPRequestHandler):
             if not info:
                 return self.send_json({"error": "that is not a book in your library"}, 404)
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
-                                   "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)]})
+                                   "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)],
+                                   "overview": info.get("overview"), "overview_stale": books.overview_stale(info)})
+        if path == "/api/book/whole":   # ?file=: what summarising the whole book would cost (no AI call) and the job's state; &status=1: only the job's state
+            if not bookjob:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if one("status"):
+                return self.send_json({"status": bookjob.status()})
+            try:
+                return self.send_json({**books.whole_estimate(one("file")), "status": bookjob.status()})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         if path == "/api/uiprefs":      # the page's own choices (theme, view modes, where you stopped reading…) kept in the data folder; static/prefsync.js asks for them before anything else
             return self.send_json(uiprefs.get())
         if path == "/api/sync":         # Settings → Computers & sync: which computers use this data folder, which are open now, what Dropbox had to duplicate
@@ -1763,6 +1774,17 @@ class Handler(BaseHTTPRequestHandler):
             if which in ("library", "nova") and not signins.profile()["signs_in"]:
                 return self.send_json({"error": "Set up your library first (Settings → Library access): it has no sign-in of its own yet.", "setup": True}, 400)
             return self.started(start_login(which), None)
+        if path == "/api/book/whole":            # {file, title}: summarise every chapter and section of a book that has no summary yet, then write its overview (in the background)
+            if not bookjob:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if bookjob.status()["running"]:
+                return self.send_json({"error": "A book is already being summarised: see the AI activity tray."}, 409)
+            try:
+                if not bookjob.start(str(b.get("file") or ""), str(b.get("title") or "")[:200]):
+                    return self.send_json({"error": "Every chapter and section has its summary, and the overview is up to date."}, 400)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"ok": True, "status": bookjob.status()})
         if path == "/api/summaries":             # {files}: summarise these papers (the list the estimate showed; one already summarised meanwhile is skipped) in the background
             if not summaries:
                 return self.send_json({"error": "AI features aren't installed"}, 501)

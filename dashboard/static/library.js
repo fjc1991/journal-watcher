@@ -238,7 +238,11 @@ const BSCOPE = {file: "", from: 0, to: 0, title: "", book: ""};                 
 const placeOf = (R, p) => R.source === "epub" ? "location " + p : R.offset ? (p > R.offset ? "p. " + (p - R.offset) : "front matter") : "file page " + p;
 function drawChapters(box, file, R) {
   box._R = R;
-  box.innerHTML = `<div class="chap-h"><b>Chapters and sections</b> <small>${R.source === "epub" ? "an EPUB has no printed pages: a place is “location N” in the reading copy" : R.offset ? `printed page = file page − ${R.offset}` : "file pages (set where printed page 1 is below to cite printed pages)"}</small></div>
+  const allDone = R.chapters.length && R.chapters.every(c => c.summary) && R.overview && !R.overview_stale;
+  box.innerHTML = `<div class="chap-h"><b>Chapters and sections</b> <small>${R.source === "epub" ? "an EPUB has no printed pages: a place is “location N” in the reading copy" : R.offset ? `printed page = file page − ${R.offset}` : "file pages (set where printed page 1 is below to cite printed pages)"}</small>
+      ${R.chapters.length ? ` <button class="btn small${allDone ? "" : " primary"}" data-chap-whole title="${allDone ? "Every chapter and section has its summary, and the overview of the book is written" : "Summarise every chapter and section that has no summary yet, then write an overview of the whole book from those summaries (you see what it costs first)"}">${allDone ? "Book summary" : "Summarise the whole book…"}</button>` : ""}</div>
+    <div class="whole-box hide" data-whole></div>
+    <div class="chap-overview${R.overview && R.overview.text ? "" : " hide"}" data-overview>${R.overview && R.overview.text ? overviewHtml(R) : ""}</div>
     ${R.chapters.length ? `<ol class="chap-ol">${R.chapters.map(c => `<li style="margin-left:${(c.level - 1) * 18}px"><span class="chap-t">${esc(c.title)}</span> <small>${esc(placeOf(R, c.start))}${c.end > c.start ? " – " + esc(placeOf(R, c.end)) : ""}</small>
       <button class="btn small" data-chap-open="${c.start}">Open</button>${F.tab === "books" ? ` <button class="btn small" data-chap-find="${c.i}" title="Look for words only inside this part (type them in the search box above)">Search in it</button>` : ""}
       <button class="btn small" data-chap-ask="${c.i}" title="Open the book's Ask tab limited to this part: the AI reads only these pages">Ask about it</button>
@@ -246,16 +250,56 @@ function drawChapters(box, file, R) {
       <div class="chap-sum${c.summary ? "" : " hide"}" data-sumbox="${c.i}">${c.summary ? sumHtml(c.summary) : ""}</div></li>`).join("")}</ol>` : `<p class="pmeta">This book has no outline: the file carries no chapter list.</p>`}
     ${R.source === "epub" ? "" : `<div class="row chap-off"><label>Printed page 1 is file page <input type="number" min="1" max="${R.pages}" value="${R.offset + 1}" data-chap-offv aria-label="File page where printed page 1 is" style="width:5.5em"></label> <button class="btn small" data-chap-off>Save</button> <span class="st-msg" role="status"></span></div>`}`;
 }
+const overviewHtml = R => `<div class="chap-h"><b>The whole book</b> <small>an overview written from the summaries of its chapters and sections${R.overview.cut ? " (the book is long: " + (R.overview.cut === "sections" ? "the sections' summaries were left out" : "each summary was shortened") + ")" : ""}</small></div>
+  ${R.overview_stale ? `<p class="pmeta warn">A chapter's summary has changed since this overview was written: “Summarise the whole book…” writes it again.</p>` : ""}
+  <div class="of-md">${md(R.overview.text)}</div><small class="pmeta">Written by ${esc(R.overview.model || "the AI")}${R.overview.cost ? " · " + esc(money(R.overview.cost)) : ""}</small>`;
+async function wholeBook(card, box, b) {                        // the estimate first; only "Summarise" starts the job (in the background, in the activity tray)
+  const file = card.dataset.file, out = $("[data-whole]", box), title = (lib()[byFile(file)] || {}).title || "";
+  if (!out.classList.contains("hide") && !out.dataset.running) { out.classList.add("hide"); return; }
+  out.classList.remove("hide"); out.innerHTML = `<div class="pmeta">Working out what it would cost…</div>`;
+  let e; try { e = await api("/api/book/whole?file=" + encodeURIComponent(file)); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
+  if (e.status && e.status.running) { follow(card, box, out, file, e.status); return; }
+  if (!e.todo && !e.overview) { out.innerHTML = `<p class="pmeta ok">✓ Every chapter and section (${e.parts}) has its summary, and the overview is up to date. “Write it again” on a chapter changes it.</p>`; return; }
+  out.innerHTML = `<div class="sum-est whole-est"><p>${e.todo ? `This summarises the <b>${e.todo} part${e.todo === 1 ? "" : "s"}</b> of the book that have no summary yet (${e.done} of ${e.parts} already have one: they are not asked again)` : `Every part has its summary`}${e.overview ? `, then writes <b>one overview</b> of the whole book from those summaries` : ""}, with <b>${esc(e.provider)} · ${esc(e.model)}</b>.
+      ${e.nested && e.todo ? " Sections are summarised as well as the chapters that hold them, so their pages are sent twice." : ""}${e.left_out ? ` ${e.left_out} long part${e.left_out === 1 ? " is" : "s are"} read from the start and the end only.` : ""}</p>
+    <p>Cost: <b>${esc(money(e.cost))}</b>${e.cost != null && e.todo && e.overview ? ` (${esc(money(e.parts_cost))} for the parts, ${esc(money(e.overview_cost))} for the overview)` : ""}. It runs in the background (the AI activity tray can cancel it), one part at a time, and your monthly budget applies.</p>
+    <div class="row" style="gap:8px"><button class="btn primary small" data-whole-go>Summarise</button><button class="btn small" data-whole-no>Cancel</button></div></div>`;
+  $("[data-whole-no]", out).onclick = () => { out.innerHTML = ""; out.classList.add("hide"); };
+  $("[data-whole-go]", out).onclick = async () => {
+    try { const r = await api("/api/book/whole", {file, title}); follow(card, box, out, file, r.status); } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }
+  };
+}
+function follow(card, box, out, file, st) {                    // the job's progress, every 3 s, until it ends; then the chapters again, with what it did
+  out.dataset.running = "1";
+  const show = s => { out.innerHTML = `<div class="pmeta" role="status">Summarising the book: ${s.done} of ${s.total}${s.failed.length ? ` · ${s.failed.length} failed` : ""}…</div>`; };
+  show(st);
+  const tick = async () => {
+    let s; try { s = (await api("/api/book/whole?file=" + encodeURIComponent(file) + "&status=1")).status; } catch (er) { setTimeout(tick, 3000); return; }
+    if (s.running) { show(s); setTimeout(tick, 3000); return; }
+    delete out.dataset.running;
+    let R; try { R = await api("/api/book?file=" + encodeURIComponent(file)); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
+    drawChapters(box, file, R);
+    const o = $("[data-whole]", box); o.classList.remove("hide");
+    o.innerHTML = s.stopped === "cancelled" ? `<p class="pmeta">Cancelled: ${s.made} part${s.made === 1 ? "" : "s"} summarised before that are kept.</p>`
+      : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(money(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
+  };
+  setTimeout(tick, 1500);
+}
 async function chapClick(e) {
   if (e._chapDone) return; e._chapDone = true;            // (this handler can be registered more than once: a toggle must run once per click)
-  const b = e.target.closest("[data-chap], [data-chap-open], [data-chap-find], [data-chap-off], [data-chap-ask], [data-chap-sum], [data-chap-redo]"); if (!b) return;
+  const b = e.target.closest("[data-chap], [data-chap-open], [data-chap-find], [data-chap-off], [data-chap-ask], [data-chap-sum], [data-chap-redo], [data-chap-whole]"); if (!b) return;
   const card = b.closest(".librow"), file = card && card.dataset.file, box = card && $(".chaplist", card); if (!file || !box) return;
   const row0 = lib()[byFile(file)];
   if (b.dataset.chap !== undefined) {
     if (!box.classList.contains("hide")) { box.classList.add("hide"); b.setAttribute("aria-expanded", "false"); return; }
     box.classList.remove("hide"); b.setAttribute("aria-expanded", "true"); box.innerHTML = `<div class="pmeta">Reading the outline…</div>`;
-    try { drawChapters(box, file, await api("/api/book?file=" + encodeURIComponent(file))); } catch (er) { box.innerHTML = `<div class="pmeta">${esc(er.message)}</div>`; }
-  } else if (b.dataset.chapOpen !== undefined) { if (row0) ctx.readPaper(row0, {goto: {page: +b.dataset.chapOpen}}); }
+    try {
+      drawChapters(box, file, await api("/api/book?file=" + encodeURIComponent(file)));
+      const st = (await api("/api/book/whole?file=" + encodeURIComponent(file) + "&status=1").catch(() => ({}))).status;       // a job already running for this book: show it again
+      if (st && st.running && st.file === file) { const o = $("[data-whole]", box); o.classList.remove("hide"); follow(card, box, o, file, st); }
+    } catch (er) { box.innerHTML = `<div class="pmeta">${esc(er.message)}</div>`; }
+  } else if (b.dataset.chapWhole !== undefined) { wholeBook(card, box, b); }
+  else if (b.dataset.chapOpen !== undefined) { if (row0) ctx.readPaper(row0, {goto: {page: +b.dataset.chapOpen}}); }
   else if (b.dataset.chapAsk !== undefined) { const c = box._R.chapters[+b.dataset.chapAsk]; window.__askChapter = {file, i: c.i}; if (row0) ctx.readPaper(row0, {goto: {page: c.start}, tab: "ask"}); }
   else if (b.dataset.chapSum !== undefined) {
     const i = +b.dataset.chapSum, c = box._R.chapters[i], out = $(`[data-sumbox="${i}"]`, box);

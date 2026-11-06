@@ -63,6 +63,11 @@
 .chap-ol .chap-t { font-weight: 500; } .chap-off { gap: 8px; align-items: center; margin-top: 6px; } .chap-off input { padding: 3px 6px; }
 .chap-sum { margin: 6px 0 8px 12px; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--panel-2); border-radius: 0 8px 8px 0; max-width: 78ch; } .chap-sum.hide { display: none; }
 .chap-sum .of-md { font-size: 14px; line-height: 1.55; } .chap-sum .bad { color: var(--err); } .chap-sum .sum-est p { margin: 0 0 8px; }
+.chap-h [data-chap-whole] { margin-left: 8px; }
+.whole-box { margin: 6px 0 8px; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--panel-2); border-radius: 0 8px 8px 0; max-width: 78ch; } .whole-box.hide { display: none; }
+.whole-box p { margin: 0 0 8px; } .whole-box .bad { color: var(--err); } .whole-box .ok { color: var(--dl); }
+.chap-overview { margin: 6px 0 10px; padding: 10px 14px; border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; max-width: 78ch; } .chap-overview.hide { display: none; }
+.chap-overview .of-md { font-size: 14px; line-height: 1.55; } .chap-overview .warn { color: var(--bl); }
 
 /* Summarise N papers…: the estimate, the progress and what came of it (library.js sumBox) */
 .lf-sumbox { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-size: 14px; line-height: 1.5; }

@@ -452,6 +452,130 @@ def main():
                 except OSError:
                     pass
     check("books: Ask can be limited to one chapter (only its pages; a book's passages say where they are), and a chapter summary is estimated for free, asked for through the budgeted layer, worded with your pages, kept, and not asked twice", t_chapter_ai)
+    def t_whole_book():
+        """Summarise a whole book: the estimate is free; every chapter and section without a summary is summarised once (a part with the same pages once, a part
+        saved meanwhile skipped), in the tray, then one overview written from those summaries only; nothing twice; Cancel, a refused key, the budget and three
+        failures in a row stop it; no overview while a part is missing; an empty answer is never saved or cached."""
+        import time as _t
+        import books as bk, bookjob as bj, activity as act_
+        bpdf = os.path.join(d, "wb.pdf"); shutil.copy(pdf, bpdf); brel = rel.replace("x.pdf", "wb.pdf")
+        toc = [[1, "Part I", 1], [2, "Ch 1", 1], [1, "Part II", 3], [2, "Sec 2.1", 4]]           # keys 1-3, 1-3 (the same pages: once), 3-4, 4-4
+        pre = {"title": "Part II", "start": 3, "end": 4, "text": "PRESAVED part two (p. 2).", "provider": "fake", "model": "m1", "cost": 0.0}
+        def reset(t=toc, sums=None):
+            json.dump({"source": "pdf", "pages": 4, "offset": 1, "toc": t, "summaries": {"3-4": dict(pre)} if sums is None else sums}, open(bpdf[:-4] + ".book.json", "w"))
+            ai.cache_clear()
+        def wait():
+            for _ in range(400):
+                st = bj.status()
+                if not st["running"]:
+                    return st
+                _t.sleep(0.05)
+            raise AssertionError("the book job did not end")
+        sysof = lambda body: body["messages"][0]["content"] if body["messages"][0]["role"] == "system" else (body.get("system") or "")      # noqa: E731
+        chap = lambda body: re.search(r"Chapter: (.+?) \(pages", body["messages"][-1]["content"]).group(1)                                 # noqa: E731
+        def answers(chapter=lambda b: ["S-%s (p. 3)." % chap(b)], overview=lambda b: ["OV (p. 2)."]):
+            Fake.responder = lambda body: overview(body) if sysof(body).startswith("You write an OVERVIEW") else chapter(body)
+        mine = lambda: [b for (path, b, _) in SEEN if path.endswith("/chat/completions") and (sysof(b).startswith("You write an OVERVIEW") or sysof(b).startswith("You summarise ONE chapter"))]  # noqa: E731
+        saved_cfg = dict(CFG)
+        write_cfg(dict(CFG, features={"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}))
+        try:
+            reset()
+            # --- the estimate: free, and it counts each part once
+            n0 = len(SEEN)
+            e = bk.whole_estimate(brel)
+            assert len(SEEN) == n0 and e["parts"] == 3 and e["done"] == 1 and e["todo"] == 2 and e["nested"] is True and e["overview"] is True, e
+            exp = sum(ai.estimate("summarize", bk.chapter_text(bpdf, c)[1] + len(bk.SUMMARY_SYSTEM) + 300, bk.SUMMARY_OUT_TOKENS) for c in bk.parts(bk.info_at(bpdf)) if bk.chapter_key(c) != "3-4")
+            assert abs(e["parts_cost"] - exp) < 1e-12 and e["overview_cost"] > 0 and abs(e["cost"] - exp - e["overview_cost"]) < 1e-12 and e["provider"] == "fake" and e["model"] == "m1", e
+            for bad in (rel, ):
+                try:
+                    bk.whole_estimate(bad); raise AssertionError("a paper is not a book")
+                except ValueError as ex:
+                    assert "not a book" in str(ex)
+            json.dump({"source": "pdf", "pages": 4}, open(bpdf[:-4] + ".book.json", "w"))
+            try:
+                bj.start(brel); raise AssertionError("a book with no outline")
+            except ValueError as ex:
+                assert "no outline" in str(ex)
+            # --- the job: the two parts without a summary, in the book's order, then one overview from the summaries; the saved one is kept
+            reset(); answers(); n0 = len(mine())
+            assert bj.start(brel, "A Test Book") is True and bj.start(brel, "A Test Book") is False          # one at a time
+            st = wait()
+            new = mine()[n0:]
+            assert [chap(b) if not sysof(b).startswith("You write an OVERVIEW") else "OVERVIEW" for b in new] == ["Part I", "Sec 2.1", "OVERVIEW"], [sysof(b)[:30] for b in new]
+            info = bk.info_at(bpdf); sums = info["summaries"]
+            assert sums["1-3"]["text"] == "S-Part I (p. 2)." and sums["4-4"]["text"] == "S-Sec 2.1 (p. 2)." and sums["3-4"]["text"] == pre["text"], sums
+            ov_body = new[-1]["messages"][-1]["content"]
+            assert "S-Part I (p. 2)." in ov_body and "PRESAVED part two" in ov_body and "S-Sec 2.1" in ov_body and "[3] " not in ov_body and "Book: A Test Book" in ov_body, ov_body[:400]
+            assert ov_body.index("S-Part I") < ov_body.index("PRESAVED") < ov_body.index("S-Sec 2.1"), "the summaries in the book's order"
+            assert info["overview"]["text"] == "OV (p. 2)." and info["overview"]["parts"] == 3 and info["overview"]["model"] == "m1", info["overview"]     # (its references copied as written: not relabelled)
+            assert st["made"] == 2 and st["overview"] is True and not st["failed"] and st["stopped"] == "" and st["total"] == 3, st
+            js = [j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary")]
+            assert js and js[0]["status"] == "done" and js[0]["scope"] == {"library": True, "ltab": "books"}, js[:1]
+            # --- nothing twice; a chapter summary written again makes the overview out of date, and only the overview is asked for again
+            e = bk.whole_estimate(brel); assert e["todo"] == 0 and e["overview"] is False and e["cost"] == 0.0, e
+            n1 = len(mine()); assert bj.start(brel) is False and len(mine()) == n1
+            answers(chapter=lambda b: ["REWRITTEN (p. 3)."])
+            list(bk.summary_stream(brel, 0, "A Test Book", fresh=True))
+            assert bk.overview_pending(bk.info_at(bpdf)) and bk.overview_stale(bk.info_at(bpdf))
+            n1 = len(mine()); assert bj.start(brel, "A Test Book") is True; wait()
+            assert len(mine()) - n1 == 1 and sysof(mine()[-1]).startswith("You write an OVERVIEW") and "REWRITTEN" in mine()[-1]["messages"][-1]["content"]
+            assert not bk.overview_pending(bk.info_at(bpdf)) and not bk.overview_stale(bk.info_at(bpdf))
+            # --- a part summarised meanwhile (the per-chapter button, another computer) is skipped, and its text kept
+            reset()
+            def chapter_inject(b):
+                if chap(b) == "Part I":
+                    i_ = bk.info_at(bpdf); i_["summaries"]["4-4"] = {"title": "Sec 2.1", "start": 4, "end": 4, "text": "WRITTEN ELSEWHERE (p. 3)."}; bk._write_info(bpdf, i_)
+                return ["S-%s (p. 3)." % chap(b)]
+            answers(chapter=chapter_inject); n1 = len(mine())
+            assert bj.start(brel, "A Test Book") is True; st = wait()
+            assert [chap(b) if not sysof(b).startswith("You write") else "OV" for b in mine()[n1:]] == ["Part I", "OV"] and bk.info_at(bpdf)["summaries"]["4-4"]["text"] == "WRITTEN ELSEWHERE (p. 3).", st
+            # --- Cancel (from the tray) during the first part: nothing saved, no overview, one request
+            reset()
+            def cancel_now(b):
+                j_ = next(j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary") and not j.get("ended"))
+                act_.cancel(j_["id"]); return ["Some ", "words (p. 3)."]
+            answers(chapter=cancel_now); n1 = len(mine())
+            assert bj.start(brel) is True; st = wait()
+            assert st["stopped"] == "cancelled" and len(mine()) - n1 == 1 and set(bk.info_at(bpdf)["summaries"]) == {"3-4"} and "overview" not in bk.info_at(bpdf), st
+            js = [j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary")]
+            assert js[0]["status"] == "cancelled", js[:1]
+            # --- a refused key stops it at the first part
+            reset(); Fake.responder = None; Fake.http_error = lambda body: (401, "User not found."); n1 = len(SEEN)
+            assert bj.start(brel) is True; st = wait()
+            assert len(SEEN) - n1 == 1 and len(st["failed"]) == 1 and "HTTP 401" in st["stopped"] and "overview" not in bk.info_at(bpdf), st
+            Fake.http_error = None
+            # --- three parts in a row with an empty answer: it stops, nothing is saved (an empty summary is never saved)
+            reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""]); n1 = len(mine())
+            assert bj.start(brel) is True; st = wait()
+            assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and st["made"] == 0 and "empty" in st["failed"][0]["error"] and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            # --- one part fails, the others are made: the job goes on, but no overview is written while a part is missing; pressing again does only that part, then the overview
+            reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""] if chap(b) == "B2" else ["S-%s (p. 3)." % chap(b)])
+            assert bj.start(brel) is True; st = wait()
+            assert st["made"] == 3 and len(st["failed"]) == 1 and st["failed"][0]["title"] == "B2" and st["overview"] is False and "overview" not in bk.info_at(bpdf), st
+            answers(); n1 = len(mine())
+            assert bj.start(brel) is True; st = wait()
+            assert [chap(b) if not sysof(b).startswith("You write") else "OV" for b in mine()[n1:]] == ["B2", "OV"] and st["overview"] is True, [sysof(b)[:20] for b in mine()[n1:]]
+            # --- the budget: nothing may be asked, so it stops at once and says why
+            reset(); answers(); ai.save_config({"budget": {"monthly_usd": 0.000001}}); n1 = len(SEEN)
+            assert bj.start(brel) is True; st = wait()
+            assert len(SEEN) == n1 and "budget" in st["stopped"] and "overview" not in bk.info_at(bpdf), st
+            write_cfg(dict(CFG, features={"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}))
+            # --- the per-chapter button: an empty answer is an error, nothing is saved, and asking again really asks (it was not cached)
+            reset(); answers(chapter=lambda b: [""]); n1 = len(mine())
+            out = list(bk.summary_stream(brel, 0, "A Test Book"))
+            assert out[-1]["type"] == "error" and "empty" in out[-1]["error"] and "1-3" not in bk.info_at(bpdf)["summaries"], out[-1]
+            answers(chapter=lambda b: ["Fine now (p. 3)."])
+            out = list(bk.summary_stream(brel, 0, "A Test Book"))
+            assert len(mine()) - n1 == 2 and out[-1]["type"] == "done" and bk.info_at(bpdf)["summaries"]["1-3"]["text"] == "Fine now (p. 2).", (out[-1], len(mine()) - n1)
+        finally:
+            Fake.responder = None; Fake.http_error = None
+            write_cfg(saved_cfg)
+            for ext in (".pdf", ".book.json"):
+                try:
+                    os.remove(bpdf[:-4] + ext)
+                except OSError:
+                    pass
+    check("books: summarise the whole book: a free estimate, every chapter and section once (one already saved, or saved meanwhile, is skipped), in the tray, then one overview from the summaries; Cancel, a refused key, the budget and three failures in a row stop it; no overview while a part is missing; an empty answer is never saved", t_whole_book)
     def t_parallel_embeddings():
         """The local model embeds several small pieces of text at once (about one per core): the vectors come out in the same order and equal to one-at-a-time, progress and Cancel work across pieces,
         and a model that cannot be used from several threads falls back to one piece at a time."""
