@@ -957,7 +957,7 @@ Kept as decided with the author, and flagged in the PR: the backup model screens
 
 **Changed.** New `kinds.py` (vocabulary, Crossref type → kind, the PDF's own stamp or footer, venue abbreviations); the kind is kept in a `<stem>.paper.json` sidecar, not in `_index.csv` (an older version's `DictWriter(INDEX_COLS)` raises on an unknown column; the writers now keep unknown columns anyway). `importer.journal_for/_paper/_read/analyse_pdf/confirm`; a strong preprint stamp beats a title-only journal record (no record is picked, and the dialog says why). Library: Type filter, tag, menu and selection action (`/api/library/kind` writes sidecars only).
 
-**Tests.** `t_kinds`. A bug this introduced was found by the UI suite: the search loop over highlights reused the name `kind` and hid every later paper; renamed, with an offline check that fails on the old code.
+**Tests.** `t_kinds`. The full offline suite later caught that a new journal you add got an abbreviation from an acronym inside its name ("Test Journal of IS" → IS) instead of the initials the app always used (TJI); journals keep the old rule, the acronym rule is for the other kinds. A bug this introduced was found by the UI suite: the search loop over highlights reused the name `kind` and hid every later paper; renamed, with an offline check that fails on the old code.
 
 ### Item 40. Large tool tiles, journals first on the Library's home, progress bars, "&amp;" (2026-11-06, the author's requests)
 

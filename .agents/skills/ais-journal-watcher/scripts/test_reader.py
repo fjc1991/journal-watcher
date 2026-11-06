@@ -1772,8 +1772,8 @@ print("JSON" + json.dumps(out))
             tok = importer.analyse_pdf(pdf("Concurrent Confirmation Of A Staged Paper"), "c.pdf")["token"]
             calls, out = [], []
 
-            def slow(p, data, note):
-                calls.append(1); time.sleep(0.3); return orig_file(p, data, note)
+            def slow(p, data, note, after=None):
+                calls.append(1); time.sleep(0.3); return orig_file(p, data, note, after=after)
             importer._file = slow
             go = threading.Barrier(2)
 
@@ -1791,7 +1791,7 @@ print("JSON" + json.dumps(out))
             # a filing that fails puts the PDF back, so it can be tried again
             tok2 = importer.analyse_pdf(pdf("A Paper Whose Filing Fails Once"), "f.pdf")["token"]
 
-            def boom(p, data, note):
+            def boom(p, data, note, after=None):
                 raise OSError("disk full")
             importer._file = boom
             try:

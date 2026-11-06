@@ -156,6 +156,8 @@ def venue_abbr(name, kind="journal", taken=()):
     name = str(name or "").strip()
     taken = {str(t).upper() for t in taken if t}
     a = SERIES_ABBR.get(name, "") or {v: FALLBACK_ABBR[k] for k, v in FALLBACK_VENUE.items()}.get(name, "")      # (a kind's own folder keeps its own: CONF, PRE, OTH)
+    if not a and kind == "journal":                # a journal: the initials of its capitalised words, as the app has always made them ("Test Journal of IS" → TJI)
+        a = "".join(w[0] for w in re.findall(r"[A-Za-z][A-Za-z]+", _ascii(name)) if w[0].isupper() and w.lower() not in ("of", "the", "and"))[:6].upper()
     if not a:
         for rx, short in _CONF_NAMES:
             if rx.search(name) or re.fullmatch(r"%s(\s+\d{4})?(\s+proceedings)?" % short, name, re.I):
