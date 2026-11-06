@@ -78,6 +78,8 @@ class Fake(BaseHTTPRequestHandler):
             out = "FIGURE: this box shows a table of numbers."
         elif system.startswith("You write the script of a short spoken briefing"):
             out = "Here is the paper in two minutes. The authors ask how open rules change who joins a platform.\n\nThey study one hundred and twenty firms. Open rules attract more entrants. The effect is strongest for small firms.\n\nBe careful: it is one platform only. What would happen elsewhere?"
+        elif system.startswith("You write an OVERVIEW"):
+            out = "**The book's argument.** FAKE BOOK OVERVIEW from %d summaries (location 5)." % text.count("FAKE CHAPTER SUMMARY")
         elif system.startswith("You summarise ONE chapter"):
             out = "**Argument.** FAKE CHAPTER SUMMARY of %s.\n\n**Key points.**\n- A point about rules (p. 5).\n- Another point (pp. 6-7).\n" % text.split("\n")[1][:40]
         elif system.startswith("You write the RELATED WORK"):
@@ -205,6 +207,7 @@ OA = {w["id"]: w for w in (
 
 
 AUTHOR_ASKED = []
+AUTHOR_EXTRA = [0]          # works OpenAlex lists for Ann Lee beyond the 45 (a new work, for the weekly check of a followed author)
 
 
 class FakeOA(BaseHTTPRequestHandler):
@@ -225,10 +228,10 @@ class FakeOA(BaseHTTPRequestHandler):
                        {"id": "https://openalex.org/A5000000222", "display_name": "Ann Lee", "works_count": 2, "last_known_institutions": [{"display_name": "Elsewhere University"}], "topics": []}]
                 body = {"results": res}
             else:
-                body = {"meta": {"count": 45, "next_cursor": None}, "results": [
+                body = {"meta": {"count": 45 + AUTHOR_EXTRA[0], "next_cursor": None}, "results": [
                     {"id": "https://openalex.org/W77%03d" % k, "doi": "https://doi.org/10.7777/au.%d" % k, "display_name": "Author paper %d" % k, "publication_date": "2024-01-01",
                      "publication_year": 2024, "type": "article", "primary_location": {"source": {"display_name": "Author Test Journal", "type": "journal"}},
-                     "authorships": [{"author": {"display_name": "Ann Lee"}}]} for k in range(45)]}
+                     "authorships": [{"author": {"display_name": "Ann Lee"}}]} for k in range(45 + AUTHOR_EXTRA[0])]}
             data = json.dumps(body).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         kind, vals = q["filter"][0].split(":", 1); vals = [up.unquote(v) for v in vals.split("|")]
@@ -397,11 +400,11 @@ def main():
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
             "import os\n"
             "def fake(run, ids, emit, stop, checks=None, **k):\n    open(%r, 'w').write(','.join(ids))\n"
-            "    if checks is not None and os.path.exists(%r):      # a site wants a human check: wait (up to 20 s) for 'Open the check', write down which site was asked for\n"
+            "    if checks is not None and os.path.exists(%r):      # a site wants a human check: wait (up to 60 s: a slow CI runner) for 'Open the check', write down which site was asked for\n"
             "        emit('challenge', {'host': 'www.sciencedirect.com', 'state': 'pending', 'site': 'ScienceDirect', 'msg': 'ScienceDirect wants to check you are human. Press Open the check.'})\n"
             "        import queue\n"
-            "        try:\n            h = checks.get(timeout=20)\n        except queue.Empty:\n            h = ''\n"
-            "        open(%r, 'w').write(h)\n"
+            "        try:\n            h = checks.get(timeout=60)\n        except queue.Empty:\n            h = ''\n"
+            "        open(%r + '.tmp', 'w').write(h); os.replace(%r + '.tmp', %r)      # (written whole: a reader never sees it empty)\n"
             "        emit('challenge', {'host': h, 'state': 'open', 'msg': 'A Chromium window is open on ' + h})\n"
             "        emit('challenge', {'host': h, 'state': 'passed', 'msg': h + ' check passed'})\n"
             "    for i in ids:\n        p = run.papers[i]\n"
@@ -410,7 +413,7 @@ def main():
             "        p['dl_note'] = ('wrong paper via browser: this PDF is titled \\u201cTwo-stage differences in differences\\u201d: its title is not on the first pages (0%% found)' if wrong else 'test: no real downloads')\n"
             "        p['manual_url'] = 'https://example.org/the-paper'\n"
             "        emit('download', {'id': i, 'dl_status': p['dl_status'], 'dl_note': p['dl_note'], 'manual_url': p['manual_url']})\n"
-            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".check", marker + ".checked", marker + ".wrong"))
+            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".check", marker + ".checked", marker + ".checked", marker + ".checked", marker + ".wrong"))
     tail = "sys.argv = ['server.py', '--port', %r, '--no-open']\nrunpy.run_path(%r, run_name='__main__')\n" % (str(port), os.path.join(TMP, "dashboard", "server.py"))
     search_fakes = r"""
 import zlib, fetch_new as fx
@@ -423,7 +426,7 @@ def fake_ssrn(query, y0, y1, limit=200, progress=None):                         
     open(SSRNLOG, 'a').write('%s|%s|%s|%s\n' % (query, y0, y1, limit))
     return [{'title': 'Platform governance on SSRN %d' % i, 'doi': '10.2139/ssrn.99000%d%d' % (y0, i), 'pub_date': '%d-01' % y0, 'abstract': 'We study platform governance on SSRN.', 'keywords': None, 'authors': ['A. Author']} for i in range(2)]
 fx.crossref_ssrn = fake_ssrn
-def fake_screen(system, batch, usage):                                            # what the model is asked, one line per batch (the test counts them)
+def fake_screen(system, batch, usage, override=None):                                          # what the model is asked, one line per batch (the test counts them)
     open(SCREENLOG, 'a').write('%d\n' % len(batch))
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen
@@ -445,6 +448,7 @@ def fake_ol(title='', authors=None, isbn='', rows=4):                           
     return []
 bks.openlibrary_search = fake_ol
 bks.crossref_books = lambda title, rows=3: []
+fx.fetch_journal = lambda j: []                                                   # the weekly check reads no real feed (only the followed authors bring papers)
 """.replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1428,6 +1432,77 @@ bks.crossref_books = lambda title, rows=3: []
             check("…when OpenAlex does not answer for the works, the run says the listing failed and why (not just 'No papers in this run')",
                   "didn't answer" in page.inner_text("#runmeta") and "could not be listed" in page.inner_text("#papers"), page.inner_text("#runmeta"))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            print("follow an author: all their works now, then the new ones with the weekly check")
+            store_p = os.path.join(TMP, "Papers", "_authors.json")
+            rdir_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")
+            st_dir = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state")
+            saved_state = {n_: (open(os.path.join(st_dir, n_)).read() if os.path.exists(os.path.join(st_dir, n_)) else None) for n_ in ("seen.json", "judged.json", "new_papers.json")}
+            runs_before = set(os.listdir(rdir_))
+            ann = lambda: next(r_ for r_ in json.load(open(store_p))["authors"] if "A5000000111" in r_["ids"])      # noqa: E731
+            if os.path.exists(marker): os.remove(marker)
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='0']")
+            check("ticking an author offers Follow beside Download all", page.is_visible("#authfollow") and "Follow" in page.inner_text("#authfollow"))
+            page.click("#authfollow")
+            for _ in range(80):
+                if os.path.exists(marker): break
+                page.wait_for_timeout(250)
+            fids_ = open(marker).read().split(",") if os.path.exists(marker) else []
+            check("…Follow downloads all their works now, as Download all does, and notes what was listed (only newer works are new)",
+                  len(fids_) == 45 and ann().get("follow") is True and len(ann().get("follow_known") or []) == 45 and "followed" in page.inner_text("#runmeta"), "%d ids, %s" % (len(fids_), {k_: (v_ if not isinstance(v_, list) else len(v_)) for k_, v_ in ann().items()}))
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            ffid = ann()["folder"]
+            page.click('.tabs button[data-tab="search"]'); page.click('.tabs button[data-tab="authors"]'); page.wait_for_selector('#authsaved [data-follow="%s"]' % ffid, timeout=10000)
+            check("'Your authors' lists them, with Follow ticked", page.is_checked('#authsaved [data-follow="%s"]' % ffid) and "Ann Lee" in page.inner_text("#authsaved"), page.inner_text("#authsaved"))
+            os.remove(marker)
+            page.uncheck('#authsaved [data-follow="%s"]' % ffid)
+            for _ in range(40):
+                if ann().get("follow") is False: break
+                page.wait_for_timeout(250)
+            check("…unticking stops following: no job starts, and the folder stays", ann().get("follow") is False and api("/api/state")["busy"] is False and not os.path.exists(marker))
+            page.check('#authsaved [data-follow="%s"]' % ffid)
+            for _ in range(40):
+                if ann().get("follow") is True: break
+                page.wait_for_timeout(250)
+            page.wait_for_timeout(500)
+            check("…ticking it again follows again without downloading everything again", ann().get("follow") is True and api("/api/state")["busy"] is False and not os.path.exists(marker))
+            AUTHOR_EXTRA[0] = 1                                                                            # OpenAlex now lists a 46th work
+            open(marker + ".check", "w").write("1")                                                        # (and its download meets a human check)
+            t_click = time.time()
+            page.click('.tabs button[data-tab="weekly"]'); page.click("#weeklybtn")
+            t_clicked = time.time()
+            st_ = {}
+            for _ in range(160):
+                st_ = api("/api/state")
+                if st_.get("checks"): break
+                time.sleep(0.25)
+            check("the weekly check downloads the followed author's new work as a download: its human check is offered with 'Open the check' (it does not open by itself)",
+                  st_.get("busy") and st_.get("kind") == "download" and any(c_["host"] == "www.sciencedirect.com" for c_ in st_.get("checks") or []), str({k_: st_.get(k_) for k_ in ("busy", "kind", "checks")}))
+            t_seen = time.time()
+            ok_chk = api("/api/check", {"host": "www.sciencedirect.com"}).get("ok")
+            for _ in range(240):
+                if os.path.exists(marker + ".checked") and open(marker + ".checked").read(): break
+                time.sleep(0.25)
+            t_got = time.time()
+            chk_txt = open(marker + ".checked").read() if os.path.exists(marker + ".checked") else "(not written)"
+            check("…'Open the check' reaches that download", ok_chk is True and chk_txt == "www.sciencedirect.com", "ok=%r checked=%r clicks %.1fs, check seen after %.1fs, answered after %.1fs, state=%s" % (ok_chk, chk_txt, t_clicked - t_click, t_seen - t_clicked, t_got - t_seen, str({k_: v_ for k_, v_ in api("/api/state").items() if k_ != "run"})[:300]))
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=30000)
+            wk_ = api("/api/runs/" + api("/api/state")["run"]["id"])
+            fp_ = [p_ for p_ in wk_["papers"] if p_.get("openalex") == "W77045"]
+            check("…only the new work (the 46th) was downloaded, into their folder, without screening, and the run says so",
+                  open(marker).read() == "doi:10.7777/au.45" and wk_["kind"] == "weekly" and fp_ and fp_[0]["verdict"] == "download" and fp_[0]["folder"] == ffid and fp_[0]["reason"].startswith("followed author")
+                  and "W77045" not in (ann().get("follow_known") or []), str((open(marker).read() if os.path.exists(marker) else "no marker", [(p_.get("id"), p_.get("verdict"), p_.get("reason")) for p_ in wk_["papers"]][:3])))
+            check("…and the page knows its summary comes from the Library (the queue does not count it for a summary)", bool(fp_) and fp_[0].get("summary_by_hand") is True, str(fp_[:1])[:300])
+            AUTHOR_EXTRA[0] = 0
+            for x_ in (marker + ".check", marker + ".checked"):
+                if os.path.exists(x_): os.remove(x_)
+            for f_ in set(os.listdir(rdir_)) - runs_before:                                                # (this week's run and the state files back as they were, for the checks after this one)
+                os.remove(os.path.join(rdir_, f_))
+            for n_, txt_ in saved_state.items():
+                if txt_ is None:
+                    os.path.exists(os.path.join(st_dir, n_)) and os.remove(os.path.join(st_dir, n_))
+                else:
+                    open(os.path.join(st_dir, n_), "w").write(txt_)
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached")
             for f_ in os.listdir(fdir_):                                                                   # (leave the folders and runs the later checks count as they were)
                 if f_.endswith(".json") and "." not in f_[:-5] and json.load(open(os.path.join(fdir_, f_)))["name"].startswith("Ann Lee"):
                     os.remove(os.path.join(fdir_, f_))
@@ -1861,10 +1936,20 @@ bks.crossref_books = lambda title, rows=3: []
             check("'printed page 1 is file page 5' is kept (offset 4) and the page now says how printed pages relate to file pages", api("/api/book?file=" + urllib.parse.quote(pdf_row["file"]))["offset"] == 4 and "printed page = file page − 4" in page.inner_text("#bk-list .chaplist") and page.input_value("[data-chap-offv]") == "5")
 
             print("book chapters: ask and summary")
+            def open_chap_list():                                       # (the Library can redraw its list once more after loading, closing the panel just opened: open it again then)
+                for _try in range(2):
+                    page.click("#bk-list [data-chap]")
+                    try:
+                        page.wait_for_selector("#bk-list .chap-ol li", timeout=6000); return
+                    except Exception:  # noqa: BLE001
+                        if _try:
+                            raise
+                        if page.locator("#bk-list .chaplist:not(.hide)").count():      # (still open, only slow: wait longer rather than click it shut)
+                            page.wait_for_selector("#bk-list .chap-ol li", timeout=10000); return
             chat_calls = lambda marker: [b_ for pth_, b_ in SEEN if pth_.endswith("/chat/completions") and b_["messages"] and b_["messages"][0]["role"] == "system" and b_["messages"][0]["content"].startswith(marker)]
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
-            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li", timeout=10000)
+            open_chap_list()
             n_sum0 = len(chat_calls("You summarise ONE chapter"))
             page.click('#bk-list [data-chap-sum="1"]'); page.wait_for_selector("#bk-list .sum-est", timeout=10000)
             est_txt = page.inner_text("#bk-list .sum-est")
@@ -1877,7 +1962,11 @@ bks.crossref_books = lambda title, rows=3: []
             check("…and the button now says Summary", page.inner_text('[data-chap-sum="1"]').strip() == "Summary")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
-            page.click("#bk-list [data-chap]"); page.wait_for_selector("#bk-list .chap-ol li"); n_sum1 = len(chat_calls("You summarise ONE chapter"))
+            open_chap_list(); n_sum1 = len(chat_calls("You summarise ONE chapter"))
+            try:                                                                    # (the Library can redraw its list once more after loading: wait for the chapter list to settle)
+                page.wait_for_function("(() => { const b = document.querySelector('#bk-list [data-chap-sum=\"1\"]'); return b && b.textContent.trim() === 'Summary'; })()", timeout=10000)
+            except Exception:  # noqa: BLE001
+                pass
             check("after a reload the summary is still there (kept with the book) and is shown without asking again", page.inner_text('[data-chap-sum="1"]').strip() == "Summary" and "FAKE CHAPTER SUMMARY" in page.inner_text('[data-sumbox="1"]') and page.locator('[data-sumbox="1"].hide').count() == 0 and len(chat_calls("You summarise ONE chapter")) == n_sum1)
             page.click('#bk-list [data-chap-sum="1"]'); page.click('#bk-list [data-chap-sum="1"]')
             check("opening and closing it again sends nothing", len(chat_calls("You summarise ONE chapter")) == n_sum1)
@@ -1894,6 +1983,45 @@ bks.crossref_books = lambda title, rows=3: []
             turn_html = page.locator(".ask-turn").first.inner_html()
             check("…and the answer's sources say where they are in words (chapter · location) and that only the chapter was read", "Only “Chapter 2” was read" in turn_html and "Chapter 2 · location " in turn_html, turn_html[-400:])
             page.click('.rd-bar [data-a="back"]'); page.wait_for_selector("#bk-add")
+
+            print("book: summarise the whole book")
+            def open_chapters_():
+                page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
+                page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
+                open_chap_list(); page.wait_for_selector("#bk-list [data-chap-whole]")
+            open_chapters_()
+            n_ch0, n_ov0 = len(chat_calls("You summarise ONE chapter")), len(chat_calls("You write an OVERVIEW"))
+            saved_ = sum(1 for c_ in api("/api/book?file=" + urllib.parse.quote(ep_row["file"]))["chapters"] if c_.get("summary"))
+            check("the Chapters panel offers 'Summarise the whole book…'", "Summarise the whole book" in page.inner_text("#bk-list [data-chap-whole]") and saved_ >= 1, page.inner_text("#bk-list .chap-h"))
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("#bk-list .whole-est", timeout=15000)
+            we_ = page.inner_text("#bk-list .whole-est")
+            check("…pressing it shows what it would do and what it costs BEFORE anything is sent (parts to do, those already done, one overview, provider and model)",
+                  "fake · m1" in we_ and "Cost:" in we_ and ("%d parts" % (3 - saved_) in we_ or "1 part" in we_) and "%d of 3 already" % saved_ in we_ and "one overview" in we_
+                  and len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0, we_)
+            page.click("[data-whole-no]"); page.wait_for_function("document.querySelector('#bk-list [data-whole]').classList.contains('hide')")
+            check("…Cancel sends nothing", len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0)
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("[data-whole-go]"); page.click("[data-whole-go]")
+            ok_ = False
+            for _ in range(160):
+                st_ = api("/api/book/whole?file=%s&status=1" % urllib.parse.quote(ep_row["file"]))["status"]
+                if not st_["running"] and st_.get("ended"):
+                    ok_ = True; break
+                time.sleep(0.25)
+            check("…'Summarise' runs in the background: the parts without a summary once each, then one overview", ok_ and len(chat_calls("You summarise ONE chapter")) - n_ch0 == 3 - saved_
+                  and len(chat_calls("You write an OVERVIEW")) - n_ov0 == 1 and st_["overview"] is True and not st_["failed"], str(st_))
+            try:
+                page.wait_for_selector("#bk-list .chap-overview:not(.hide)", timeout=15000)
+            except Exception:  # noqa: BLE001
+                pass
+            check("…the panel then shows the overview, every part says 'Summary', and it says it finished",
+                  "FAKE BOOK OVERVIEW from 3 summaries" in page.inner_text("#bk-list .chap-overview") and all(t_.strip() == "Summary" for t_ in page.locator("#bk-list [data-chap-sum]").all_inner_texts())
+                  and "Finished" in page.inner_text("#bk-list [data-whole]"), page.inner_text("#bk-list .chaplist")[:500])
+            check("…and it was one job in the AI activity tray", any(j_["kind"] == "summary" and j_["label"].startswith("Book summary") for j_ in api("/api/activity")["jobs"]), str([j_["label"] for j_ in api("/api/activity")["jobs"]])[:300])
+            open_chapters_()
+            check("after a reload the overview is still there and the button says 'Book summary' (nothing left to do; pressing it sends nothing)",
+                  "FAKE BOOK OVERVIEW" in page.inner_text("#bk-list .chap-overview") and page.inner_text("#bk-list [data-chap-whole]").strip() == "Book summary")
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("#bk-list [data-whole] .ok", timeout=10000)
+            check("…pressing it says everything is done, and asks nothing", len(chat_calls("You write an OVERVIEW")) - n_ov0 == 1 and "up to date" in page.inner_text("#bk-list [data-whole]"))
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")
@@ -2751,6 +2879,28 @@ bks.crossref_books = lambda title, rows=3: []
             page.wait_for_function("document.querySelector('#screenbtn').classList.contains('hide') && document.querySelector('#screenerr').classList.contains('hide')", timeout=8000)
             check("…then the button and the reason are gone, and 'Screening failed' is no longer counted", "SCREENING FAILED" not in page.inner_text("#stats").upper())
             page.evaluate("go({j: null})")
+            # a run screened by a backup model (the chosen one cannot answer in a JSON schema): the page says which and why; one click makes it the screening model
+            rid_b = "2025-W03_weekly"
+            bk_ = {"provider": "openrouter", "model": "cheap/json", "name": "cheap/json", "price": 0.1, "current_price": 0.04, "within": False, "instead_of": "m1",
+                   "why": "openrouter: m1: response_format is not supported by this model (HTTP 400)", "at": "2025-01-13T10:00:00+00:00"}
+            json.dump({"id": rid_b, "kind": "weekly", "params": {"topics": [], "query": ""}, "created": "2025-01-13T10:00:00+00:00", "stage": "ready", "status": "done",
+                       "usage": {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}, "week": "2025-W03", "checks": ["2025-01-13T10:00:00+00:00"], "errors": [], "jstate": {},
+                       "screen_error": "", "screen_backup": bk_, "papers": [dict(p_, id="bk-%d" % k, verdict="download", relevance=70, reason="fits", topics=[]) for k, p_ in enumerate(pp)]},
+                      open(os.path.join(runs_dir, rid_b + ".json"), "w"))
+            aij = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "ai.json"); aij_saved = open(aij).read(); ask_before = json.load(open(aij))["features"].get("ask")
+            page.evaluate("openRun({id: %s})" % json.dumps(rid_b)); page.wait_for_selector("#screenbackup:not(.hide)", timeout=8000)
+            nt_ = page.inner_text("#screenbackup")
+            check("a run screened by a backup model says so: which model, instead of which, why, and that the setting is unchanged; the price note when it costs more than twice as much",
+                  "cheap/json" in nt_ and "m1" in nt_ and "response_format" in nt_ and "unchanged" in nt_ and "twice its price" in nt_ and page.locator("#screenerr.hide").count() == 1
+                  and page.is_visible("#makebackup") and "Make cheap/json the screening model" in page.inner_text("#makebackup"), nt_)
+            page.click("#makebackup")
+            page.wait_for_function("document.querySelector('#makebackup').classList.contains('hide')", timeout=8000)
+            scr_ = json.load(open(aij))["features"].get("screen") or {}
+            check("…'Make it the screening model' sets Settings → AI → Screening new papers to that provider and model (nothing else changes), and the note then says so",
+                  scr_.get("provider") == "openrouter" and scr_.get("model") == "cheap/json" and "is now your screening model" in page.inner_text("#screenbackup")
+                  and json.load(open(aij))["features"].get("ask") == ask_before, str((scr_, page.inner_text("#screenbackup")[-120:], json.load(open(aij))["features"].get("ask"), ask_before)))
+            open(aij, "w").write(aij_saved); os.remove(os.path.join(runs_dir, rid_b + ".json"))
+            page.evaluate("go({j: null})")
             # Settings → AI: the screening Test sends a real screening request (the fake model answers that one with other JSON: it cannot screen)
             page.evaluate("window.Settings.open('ai')"); page.wait_for_selector('tr[data-f="screen"] [data-testf]')
             page.click('tr[data-f="screen"] [data-testf]'); page.wait_for_function("(() => { const t = document.querySelector('tr[data-f=\"screen\"] .tres'); return t && t.textContent && t.textContent !== '…'; })()", timeout=15000)
@@ -2786,10 +2936,11 @@ bks.crossref_books = lambda title, rows=3: []
             check("'Write the summaries' writes each summary beside its PDF in the background (the fake model's summary)", done_ and "FAKE SUMMARY" in open(os.path.join(sumdir, "sumtest.md")).read(), str(api("/api/summaries")["status"]))
             try:
                 page.wait_for_function("/Summaries finished/.test(document.querySelector('#lf-sumbox').innerText)", timeout=15000)
+                page.wait_for_selector("#lf-sum.hide", state="attached", timeout=10000)      # (the button goes once the Library has reloaded its list, a moment after the message)
             except Exception:  # noqa: BLE001  (the check below says what is wrong)
                 pass
             check("…the Library says what came of it, and the button is gone once nothing is left", "Summaries finished" in page.inner_text("#lf-sumbox") and api("/api/summaries")["n"] == 0
-                  and page.locator("#lf-sum.hide").count() == 1, page.inner_text("#lf-sumbox"))
+                  and page.locator("#lf-sum.hide").count() == 1, "%s · n=%s · button hidden=%s" % (page.inner_text("#lf-sumbox"), api("/api/summaries")["n"], page.locator("#lf-sum.hide").count()))
             check("…and the job was listed in the AI activity tray", any(j["kind"] == "summary" for j in api("/api/activity")["jobs"]), str([j["kind"] for j in api("/api/activity")["jobs"]][:8]))
             open(idxp, "w", newline="").write(saved_idx); shutil.rmtree(sumdir, ignore_errors=True)
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")

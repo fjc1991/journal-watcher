@@ -873,6 +873,76 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** OpenAlex's live answers (shapes, types, costs per call) were not read from here; the tests use a fake built from its documentation. Real downloads of papers from journals the app does not watch.
 
+### Item 31. SSRN downloads, second fix: the button, not citation_pdf_url, followed from its page (2026-11-05, the author's report)
+
+**Reported.** After 1.2.6 (item 29) SSRN papers still ended as "Couldn't download" while the author's browser downloaded them. The index note was unchanged: "browser: no PDF at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7115195".
+
+**Found.** The author saved the paper's page from their browser (not signed in to SSRN). It carries `<meta name="citation_pdf_url" content="https://papers.ssrn.com/sol3/Delivery.cfm?abstractid=7115195">`, without `&mirid=1`, and the buttons `Delivery.cfm?abstractid=7115195&mirid=1` (Download This Paper) and `…&type=2` (Open PDF in Browser). `_pdf_link` looks at the page's citation_pdf_url first, and on SSRN's own host that meta tag counts as the page's PDF, so the app always went to the address without `&mirid=1`, which ends on the paper page again. Run against the saved page served under SSRN's address (intercepted locally, nothing sent), the link finder chose `Delivery.cfm?abstractid=7115195`; item 29's tests used local pages on another host, where the meta tag did not count, so they never met this. A second difference: `page.goto` sends no referrer, while a click on the button sends the paper page; SSRN may refuse a download without it.
+
+**Changed.** For an SSRN DOI, `_pdf_link` takes the page's own Delivery.cfm button naming exactly this paper before the meta tag (`_ssrn_ids`, the identifier rule of item 29). `_fetch` opens a link it followed from a landing page with that page as the referrer (`_try(referer=)`), as a browser does on a click; it says where the request comes from and hides nothing.
+
+**Tests.** `t_library_test`: a local SSRN-shaped page at /sol3/papers.cfm with the meta tag and the buttons, whose server sends Delivery.cfm without `&mirid=1`, or without a referrer from the site, back to the paper page: the link finder picks the button, and `fetch_pdf` gets the PDF. On the code before, it fails with the author's note ("no PDF at …/sol3/papers.cfm…"); without the referrer only, the same; without the button rule only, no link. The saved page itself is not in the repository (it holds the author's address and session).
+
+**Not verified.** SSRN itself (unreachable from the sandbox): whether the referrer is needed, and whether SSRN asks for a human check (the app's "Open the check" handles it).
+
+### Item 32. The app names itself to the scholarly databases (2026-11-06, from the bot-check review)
+
+**Asked.** The review of human checks (items 27, 29, 31) found that every request, OpenAlex and Crossref included, carried a Chrome User-Agent. The author's rule: never disguise the client to get past a check. Public APIs should be told who is asking.
+
+**Changed.** `updater.user_agent()` ("JournalWatcher/<version> (an open-source tool for reading academic papers; <project page>)", never an e-mail address) and `updater.api_headers(url, h)`, which sets it for `API_HOSTS` (api.openalex.org, api.crossref.org, api.unpaywall.org, api.semanticscholar.org, openlibrary.org). `fetch_new.http_get` and `download.http_get` call it, so feeds and publisher or repository downloads keep the browser User-Agent. `_openalex` sets it also for a mirror or test address. Open Library's `_ua`, the OpenRouter price list, `_check_openalex` and the update feed use the same string.
+
+**Tests.** `t_api_identity` (urlopen faked): six API requests named, a feed, a publisher PDF and a look-alike host not. It fails on the code before, and without the mirror line.
+
+### Item 33. The OpenAlex and Elsevier keys in the Keychain (2026-11-06, the author's rule on keys)
+
+**Asked.** API keys stay out of Dropbox (the Keychain on each computer). Settings → Paper sources still wrote the OpenAlex key, the Elsevier key and the Elsevier institutional token into the `.env` file of the synced data folder.
+
+**Changed.** `download.SOURCE_KEYS` joins `key_names()`, so `load_env` reads them from the Keychain, `move_keys_to_keychain` moves them and `ai.config()["keys_in_env"]` counts them (the Sync card's "N keys are still in the .env file"). `server.sources_save` puts these keys in the Keychain where there is one (read back before the line leaves the file; a key the helper cannot hold stays in the file; an empty field deletes it there too); the Unpaywall e-mail stays in `.env`. `fetch_new.openalex_key` looks in the Keychain after the environment. Nothing moves by itself: another computer sharing the folder may still read the line, which is why moving stays the explicit button.
+
+**Tests.** `t_source_keys_keychain` (fake Keychain in a child process; the same child without a Keychain writes `.env` as before). Four single-rule mutations, each caught.
+
+### Item 34. Human checks: HBR/ACM page checks, and no nudge just before a check opens by itself (2026-11-06, from the bot-check review)
+
+**Found.** (1) `page_to_pdf` (HBR, ACM's full text) met a check page but never noted it, so the paper was never set aside and "Open the check" was never offered. (2) In a batch of only papers that need a check, the app nudged ("press Open the check", banner and Mac notification) and seconds later opened the check by itself.
+
+**Changed.** (1) `page_to_pdf` notes the check like `fetch_pdf(own=True)`, unless that site already has one noted (ACM's PDF address is asked first and its check is the one to open). `open_check` then waits in the window for the user's tick (never clicked by the app; Stop ends the wait) and saves the page in the background (`_page_check`, `_page_pdf`). (2) `download_and_summarize` keeps a check met before any paper got a final answer in `quiet`, and tells it once one does; the end-of-batch auto-open clears it. New `auto_open` and `summarize` switches (item 37 uses both). The card's tooltip and `WAITING_NOTE` no longer promise a button that is not there yet.
+
+**Tests.** `t_check_ask_browser` (real headless Chromium against a local check page): an HBR-like page noted, opened, passed and saved, and not asked twice; ACM's earlier check kept; nothing noted without ask mode. `t_check_ask`: no nudge before the auto-open; in a mixed batch the nudge follows the first answer; `auto_open=False` nudges at once and opens nothing; `summarize=False` asks no summary. Eight mutations, each caught.
+
+### Item 35. A backup model for screening (2026-11-06, the author's request)
+
+**Asked.** "For such an issue, I think it would be good to have a backup list of models from the same API provider that can replace it, which are a similar cost" (screening stopped: OpenRouter's scaledown/summarize refuses response_format). Decided with the author: switch for the run and say so (one click makes it the default); the cheapest model that can screen, up to twice the current price, else the cheapest, and say so.
+
+**Changed.** `prices.FORMAT = 2`: the saved OpenRouter list keeps `json`, `ctx` and `max_out` for models listing `structured_outputs` (not `response_format` alone, which is often only JSON mode) without a per-request charge; an older list is read again. `structured_models` (OpenRouter: those models, without `:free`, at least 40,000 tokens of context and 8,000 out; Claude: every built-in Claude model; else None) and `backup_for` (never the model itself). `ai.cannot_structure` (a 400/404/422 that names response_format, structured outputs, json_schema, output_config.format or "handle the requested parameters"). `pipeline.screen` runs the old pass, and when it stopped on such an error, once more over the papers without a verdict with `override` (its own verdict fingerprint, its own halt), never a third model; `Run.screen_backup` is shown on the run's page with "Make … the screening model" (`/api/ai/config`, compared by provider and model through `/api/config`'s `screen_feature`).
+
+**The rule, as decided.** The cheapest candidate is chosen whether or not it is within twice the price, so the cap decides only what the run says ("no model at no more than twice its price can, so the cheapest that can was chosen"). The size limits keep a model too small for a batch out. Listed in the PR for the author to change.
+
+**Tests.** `t_prices` (flags, old list read again, the rule at 2x exactly, never itself, unknown price, Claude, other providers, offline), `t_screen_errors` (the backup screens the rest, the setting untouched, saved and reloaded, its own verdicts; four workers; not for a refused key or a too-long request; both refused: one request each and both names; no list), UI (the note and the button). Twelve mutations, each caught.
+
+### Item 36. Summarise a whole book (2026-11-06, the author's request)
+
+**Asked.** "A way to summarize the whole book in one go, which will then summarize chapters one-by-one." Decided: every chapter and section, then an overview of the whole book written from the summaries; the cost estimate first.
+
+**Changed.** `books.py`: `_summarise` (a generator that raises; an empty answer is an error, never saved and never kept in the answer cache), `summary_stream` wraps it; `parts` (the outline, an entry with the same page range once), `whole_plan`, `whole_estimate` (no AI call), `OVERVIEW_SYSTEM`, `write_overview` (from the stored summaries only, in the book's order, sections left out first when too long; not relabelled: the summaries already give printed pages), a fingerprint so the overview is out of date when a summary is written again. New `bookjob.py` (one job in the tray, Cancel, a part saved meanwhile skipped, a refused key or the budget stop at once, three failures in a row stop, no overview while a part is missing). `server.py`: `GET`/`POST /api/book/whole`; `/api/book` gives the overview. `library.js`: the button, the estimate, progress, the overview box.
+
+**Tests.** `t_whole_book` (estimate free and counted once; two parts and one overview in order; nothing twice; a stale overview redone alone; a part saved meanwhile skipped; Cancel; 401; three empty answers; one failed part; the budget; an empty per-chapter answer not cached), UI (estimate, Cancel sends nothing, the job, the overview, after a reload). Thirteen mutations: eleven caught (one after an assertion was added); two are equivalent (a guard that another guard already covers).
+
+### Item 37. Follow an author in the weekly check (2026-11-06, the author's request)
+
+**Asked.** Item 30's second part: "Download all, then watch"; new papers downloaded with no screening.
+
+**Changed.** `authors.py`: `set_follow`, `followed`, `follow_mark` (a union of OpenAlex work ids dealt with), `set_follow_warn`, `add_ids`, `resolve` (`_openalex(..., missing={})` tells "no such author" from "no answer"), `saved`. `pipeline.follow_list` (before the feeds): each followed author's full list minus what was dealt with; not a kind that is downloaded, already in the library (filed) or deleted: dealt with at once; a feed paper of the same work (same id, or same title and journal when one side has no DOI) is marked for download in place; the keys go into `seen.json` (with the no-DOI alias) so the feeds do not add them; a follow with no record yet is set up silently; a deleted folder pauses it. `follow_settle`: only papers that came (or that you deleted) are dealt with. `server.py`: `_download_emit`, `Jobs.set_kind`, the weekly order (follow_list, feeds, screening in try/except, `follow_download` with `auto_open=False, summarize=False`, then a screening error is raised again), `author_download(follow=)` (followed once its listing worked; what it listed is dealt with), `GET /api/authors`, `POST /api/authors/follow`. `index.html`: Follow, Your authors.
+
+**Tests.** `t_follow` (fake OpenAlex: the union; upgrade in place by id and by title; added papers; dealt with at once; seen.json; only what came; next week only the rest; a new preprint of a paper you have left out; a merged id; 404 and 500 told apart; set up silently; a deleted folder; nothing on the run). UI: Follow downloads all and notes 45 works; Your authors; untick and tick again start nothing; the weekly check downloads only the 46th work, as a download whose check is offered with Open the check. Thirteen mutations, each caught (one after a case was added).
+
+**Not verified.** OpenAlex's live answers (merged ids, how fast new works appear) and the cost of a full listing per followed author each week (one call per 200 works).
+
+### Review of items 32–37 (2026-11-06)
+
+A review workflow (four reviewers by area, a skeptic for each) kept 18 of 26 findings; 17 are fixed in the same PR. Keys: a line in the older layout's `.env` stayed after a move and the page said none was left (both files are now cleaned, and a key still in a file is reported as such; a move no longer overwrites a Keychain key with an old line; Elsevier's API is named as the app). Human checks: a page saved as a PDF could not use the kept window of the second "Open the check" (it now waits there); with `auto_open=False` a notification asked for a press when nothing could wait for it (now only once another site's paper starts); 1.2.6's "waiting for you" note was no longer cleaned on load; "Summarise N papers" was refused during a download that writes no summaries. Backup model: a $0 model without ":free" could be chosen; a batch that failed counted as screened by the backup; the savings of reused verdicts were priced at the wrong model; the page did not follow a Settings change. Whole book: a part with no body text (a bibliography, an index) failed every time, so no overview could ever be written (it is now noted as empty and left out); when the overview input was cut, the chapters of a book whose top level is Parts were dropped (now the deepest level goes first, and the note says what); another book's job showed under this one. Follow: a deleted folder's warning never showed and following silently went on in a new folder (now paused and listed); a co-authored work went into one folder only; the run said "followed" after a failed listing; "Download whole queue" summarised the followed works without the Library's estimate (they are now downloaded only). Each fix's test fails on the code before it, except four small UI-only ones (the summaries refusal, the Settings listener, the savings figure, the other book's job), checked by reading.
+
+Kept as decided with the author, and flagged in the PR: the backup model screens the rest of the run by itself (the run says so afterwards) rather than asking first; a reviewer rated that high because the cost shown before the run was the configured model's.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

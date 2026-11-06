@@ -54,6 +54,7 @@ import support  # noqa: E402
 import syncinfo  # noqa: E402
 import uiprefs  # noqa: E402
 import updater  # noqa: E402
+import keychain  # noqa: E402
 import smart  # noqa: E402
 import readstate as rs  # noqa: E402
 import refs as rf  # noqa: E402
@@ -78,10 +79,11 @@ try:   # the reader's AI features; the dashboard still runs without them
     import reviewer  # noqa: E402
     import skim  # noqa: E402
     import summaries  # noqa: E402
+    import bookjob  # noqa: E402
     import synthesis  # noqa: E402
     import workspace  # noqa: E402
 except ImportError as _e:
-    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = summaries = synthesis = workspace = personal = None
+    ai = ask = audio = citeuse = claims = explain = evidence = flashcards = fulltext = ideas = indexer = papercard = matrix = multiask = related = relatedwork = reviewer = skim = summaries = synthesis = workspace = personal = bookjob = None
     print("AI features unavailable (%s) — run: pip install -r requirements.txt" % _e)
 
 STATIC = os.path.join(HERE, "static")
@@ -130,9 +132,15 @@ class Jobs:
         self.kind = None       # what the job is doing: fetch | download | login
         self.checks = queue.Queue()     # a download: the hosts whose "verify you are human" check the user asked to open (pipeline.download_and_summarize)
         self.waiting = {}      # a download: host -> its last 'challenge' event while that check waits for the user (a page opened or reloaded shows it again)
+        self.summarizing = True    # a download: whether it writes its papers' summaries itself (the weekly check's followed authors do not)
 
     def busy(self):
         return self.thread is not None and self.thread.is_alive()
+
+    def set_kind(self, kind):
+        """What the running job does now (the weekly check downloads its followed authors' works as a download: "Open the check" works then)."""
+        self.kind = kind
+        HUB.emit("job", {"busy": True, "kind": kind, "run": self.run.to_dict(full=False) if self.run else None})
 
     def start(self, kind, fn, run=None):
         with self.lock:
@@ -201,7 +209,16 @@ def start_fetch(run):
                 run.checks.append(datetime.now(timezone.utc).isoformat())
             emit("log", {"msg": ("Started: %s" % run.title()) if len(run.checks) < 2 else
                          "Continuing your saved search: %s (%d papers are already in it; only papers without a verdict are screened)" % (run.title(), len(run.order))})
+        follow_ids = []
         if run.kind == "weekly":
+            try:
+                follow_ids = pl.follow_list(run, emit, JOBS.stop)         # the authors you follow: their new works (before the feeds, which then do not add them again)
+            except Exception as e:  # noqa: BLE001      (a problem with one of them must not stop the week's check)
+                traceback.print_exc()
+                run.errors.append("followed authors: %s" % str(e)[:200])
+                emit("log", {"msg": "The followed authors could not be checked: %s" % str(e)[:200], "level": "warn"})
+            if JOBS.stop.is_set():
+                return
             pl.fetch_weekly(run, emit, JOBS.stop)
         else:
             pl.fetch_search(run, emit, JOBS.stop)
@@ -212,8 +229,16 @@ def start_fetch(run):
                 return
             emit("log", {"msg": "Finished: %d papers contain your terms. Tick the ones you want and press Download, or press “Screen with AI” to rank them against your interests." % len(run.order), "level": "ok"})
             return
+        failed = None
         if not JOBS.stop.is_set() and run.order:
-            pl.screen(run, emit, JOBS.stop)
+            try:
+                pl.screen(run, emit, JOBS.stop)
+            except Exception as e:  # noqa: BLE001      (the followed authors' works are downloaded all the same; the error is raised again after them)
+                failed = e
+        if follow_ids and not JOBS.stop.is_set():
+            follow_download(run, follow_ids, emit)
+        if failed is not None:
+            raise failed
         n_dl = sum(1 for p in run.papers.values() if p.get("verdict") == "download")
         n_bl = sum(1 for p in run.papers.values() if p.get("verdict") == "borderline")
         emit("log", {"msg": "Finished: %d papers, %d to download, %d borderline · $%.2f"
@@ -221,14 +246,10 @@ def start_fetch(run):
     return JOBS.start("fetch", job, run)
 
 
-def start_download(ids, prepare=None):
-    """Download these papers of the open run in the background. `prepare(emit)`, when given, runs first inside the same job and returns the ids (an author's works
-    are listed there: it can take a while, and a "verify you are human" check during the downloads works as for any download)."""
-    run = JOBS.run
-    base = emit_for(run)
-
+def _download_emit(base):
+    """emit for a download: it also keeps which checks wait for the user, so that a page opened (or reloaded) later still offers "Open the check"."""
     def emit(event, data):
-        if event == "challenge":                 # which checks wait for the user: kept so that a page opened (or reloaded) later still offers "Open the check"
+        if event == "challenge":
             if data.get("state") in ("pending", "again"):
                 JOBS.waiting[data["host"]] = data
             elif data.get("state") == "done":
@@ -236,6 +257,33 @@ def start_download(ids, prepare=None):
             elif data.get("state") in ("open", "passed", "failed"):
                 JOBS.waiting.pop(data.get("host"), None)
         base(event, data)
+    return emit
+
+
+def follow_download(run, ids, emit):
+    """The weekly check, after the screening: download the followed authors' new works into their folders. A human check never opens by itself here (you started
+    the check for the feeds, not for these papers): the page offers "Open the check", as for any download. No summary is written (no AI call): the Library's
+    "Summarise N papers…" does that, with its estimate first. A work that does not come is tried again next week (pipeline.follow_settle)."""
+    JOBS.summarizing = False
+    JOBS.set_kind("download")
+    try:
+        pl.download_and_summarize(run, ids, _download_emit(emit), JOBS.stop, checks=JOBS.checks, auto_open=False, summarize=False)
+    finally:
+        JOBS.summarizing = True
+        ok, again = pl.follow_settle(run, ids)
+        JOBS.waiting.clear()
+        JOBS.set_kind("fetch")
+        emit("log", {"msg": "Followed authors: %d new work%s downloaded into their folders%s. Their summaries are not written by themselves: Library → “Summarise N papers…”." % (
+            ok, "" if ok == 1 else "s", ", %d to try again next week" % again if again else ""), "level": "ok"})
+        if ok and indexer:
+            indexer.kick(3)
+
+
+def start_download(ids, prepare=None):
+    """Download these papers of the open run in the background. `prepare(emit)`, when given, runs first inside the same job and returns the ids (an author's works
+    are listed there: it can take a while, and a "verify you are human" check during the downloads works as for any download)."""
+    run = JOBS.run
+    emit = _download_emit(emit_for(run))
 
     def job():
         todo = prepare(emit) if prepare else ids
@@ -285,6 +333,7 @@ def start_pdfcheck():
 # ---------------------------------------------------------------- where papers come from: OpenAlex, Unpaywall, Elsevier (Settings → Paper sources)
 
 SOURCES = {"openalex_key": "OPENALEX_API_KEY", "unpaywall_email": "UNPAYWALL_EMAIL", "elsevier_key": "ELSEVIER_API_KEY", "elsevier_insttoken": "ELSEVIER_INSTTOKEN"}
+SECRET_SOURCES = set(pl.dl.SOURCE_KEYS)          # the keys among them: kept in this Mac's Keychain where there is one (the data folder is synced), as the AI keys are
 
 
 def _env_get(name):
@@ -295,12 +344,22 @@ def sources_state():
     """What is set (keys are never sent back: only whether there is one; the Unpaywall email is shown, it is yours and not a secret)."""
     return {"openalex_key": bool(_env_get("OPENALEX_API_KEY")), "unpaywall_email": _env_get("UNPAYWALL_EMAIL"),
             "elsevier_key": bool(_env_get("ELSEVIER_API_KEY")), "elsevier_insttoken": bool(_env_get("ELSEVIER_INSTTOKEN")),
-            "openalex_spent": pl.fx.openalex_spent()}
+            "openalex_spent": pl.fx.openalex_spent(), "keychain": keychain.available(),
+            "where": {f: _key_where(n) for f, n in SOURCES.items() if n in SECRET_SOURCES}}
+
+
+def _key_where(name):
+    """".env file", "Keychain", "environment" or "" (as ai.key_where, without needing the AI modules)."""
+    if pl.dl.read_dotenv().get(name):
+        return ".env file"
+    if keychain.values([name]).get(name):
+        return "Keychain"
+    return "environment" if os.environ.get(name) else ""
 
 
 def _check_openalex(key):
     """Ask OpenAlex whether the key is good: one free lookup (by ID) with the key. 401/403 = a key OpenAlex does not know. None when OpenAlex cannot be reached."""
-    req = urllib.request.Request("https://api.openalex.org/works/W2741809807", headers={"Authorization": "Bearer " + key, "User-Agent": "JournalWatcher"})
+    req = urllib.request.Request("https://api.openalex.org/works/W2741809807", headers={"Authorization": "Bearer " + key, "User-Agent": updater.user_agent()})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return r.status == 200
@@ -311,7 +370,9 @@ def _check_openalex(key):
 
 
 def sources_save(b):
-    """Save the fields sent ({openalex_key, unpaywall_email, elsevier_key, elsevier_insttoken}; "" removes one) in the data home's .env (mode 600)."""
+    """Save the fields sent ({openalex_key, unpaywall_email, elsevier_key, elsevier_insttoken}; "" removes one). A key goes to this Mac's Keychain where there is
+    one (and its line leaves the synced .env file); without a Keychain, or for a key it cannot hold, it goes into the data home's .env (mode 600), as before.
+    The Unpaywall email, which is not a secret, always goes into .env."""
     new = {}
     for field, name in SOURCES.items():
         if field not in b:
@@ -324,7 +385,21 @@ def sources_save(b):
         if v and field == "openalex_key" and _check_openalex(v) is False:
             raise ValueError("OpenAlex does not recognise that key. Copy it again from openalex.org/settings/api.")
         new[name] = v
-    gone = [n for n, v in new.items() if not v]
+    in_kc = set()
+    for name in sorted(SECRET_SOURCES & set(new)):
+        if not keychain.available():
+            break
+        v = new[name]
+        try:
+            if v:
+                keychain.set(name, v)
+                if keychain.get(name) == v:            # (read back before its line leaves the file)
+                    in_kc.add(name)
+            elif keychain.get(name):
+                keychain.delete(name)
+        except ValueError:                     # a key the Keychain helper cannot take safely: the file, as before
+            pass
+    gone = [n for n, v in new.items() if not v] + sorted(in_kc)          # (a key now in the Keychain leaves the older layout's file too)
     old_env = os.path.join(paths.BASE, ".env")                  # (the older layout kept keys in the settings folder: a removed key must go from there too)
     if gone and os.path.exists(old_env) and os.path.abspath(old_env) != os.path.abspath(os.path.join(ROOT, ".env")):
         keep_ = [l for l in open(old_env, encoding="utf-8").read().splitlines() if not any(re.match(r"\s*%s\s*=" % re.escape(n), l) for n in gone)]
@@ -332,7 +407,7 @@ def sources_save(b):
             f.write("\n".join(keep_) + ("\n" if keep_ else ""))
     path = os.path.join(ROOT, ".env")
     lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
-    lines = [l for l in lines if not any(re.match(r"\s*%s\s*=" % re.escape(n), l) for n in new)] + ["%s=%s" % (n, v) for n, v in new.items() if v]
+    lines = [l for l in lines if not any(re.match(r"\s*(export\s+)?%s\s*=" % re.escape(n), l) for n in new)] + ["%s=%s" % (n, v) for n, v in new.items() if v and n not in in_kc]
     tmp = path + ".sources.tmp"                                    # (not ai.set_key's .env.tmp: two saves at once must not write the same scratch file)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -395,6 +470,7 @@ def config():
         "openalex_key": bool(pl.fx.openalex_key()),
         "est_cost_per_paper": pl.est_screen_cost_per_paper(),          # with the model chosen for screening; None when its price is not known (the page says so)
         "screen_model": ai.pricing.name(*ai.feature_model("screen")) if ai else "Claude Sonnet 5.5",
+        "screen_feature": dict(zip(("provider", "model"), ai.feature_model("screen"))) if ai else {},     # (which provider and model: a backup on a run's page is compared with it)
         "model": pl.MODEL,
         "this_week": pl.week_of(),
         "this_week_label": pl.week_label(pl.week_of()),
@@ -525,6 +601,57 @@ class Handler(BaseHTTPRequestHandler):
             want = set(q["file"])
             return [r for r in rows if r["file"] in want]
         return rows
+
+    def author_download(self, b, follow=False):
+        """Every work of the author ids in b (journal, conference, working papers) into the author's folder, as one download job. follow=True also follows the
+        author: what this listing found counts as dealt with, and the weekly check brings the works OpenAlex lists after it."""
+        ids = [authors._short(x).upper() for x in (b.get("ids") or []) if re.fullmatch(r"[Aa]\d{4,12}", authors._short(x))][:10]
+        name = re.sub(r"\s+", " ", str(b.get("name") or "")).strip()[:60]
+        if not ids or not name:
+            return self.send_json({"error": "Pick the author first."}, 400)
+        fid, _ = authors.folder_for(ids, name, str(b.get("institution") or ""))
+        run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name)})
+        run.stage, run.status = "ready", "stopped"
+        run.save(force=True)
+        JOBS.run = run
+
+        def prepare(emit):
+            lab = "Listing %s's works on OpenAlex" % name
+            emit("progress", {"stage": "listing", "label": lab, "done": 0, "total": 0})
+
+            def said(listing, msg, level):        # the run says what came of the listing (its page shows it at once, and after a reload)
+                run.params["listing"] = listing
+                run.save(force=True)
+                emit("run", {"id": run.id, "params": run.params})
+                emit("log", {"msg": msg, "level": level})
+            try:
+                ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": lab, "done": n, "total": t}), stop=JOBS.stop)
+            except authors.AuthorError as e:
+                run.errors.append(str(e))
+                said({"error": str(e)}, "Listing %s's works failed: %s" % (name, e), "error")
+                return []
+            if JOBS.stop.is_set():
+                said({"stopped": True, "listed": len(ws)}, "Stopped while listing %s's works: nothing was downloaded or filed." % name, "warn")
+                return []
+            if follow:                            # followed once the listing worked; what it listed (complete or not) is not new next week (it would all be downloaded again)
+                authors.set_follow(fid, True)
+                authors.follow_mark(fid, [w.get("id") for w in ws], seed=True)
+                run.params["follow"] = True                    # (said on the run's page only now: a listing that failed follows no one)
+            kept, excluded = authors.select(ws)
+            new, have, gone = authors.split(authors.to_papers(kept, fid, name))
+            authors.file_have(fid, have)
+            added = [p for p in new if run.add_paper(p)]
+            for p in added:
+                emit("paper", pl.slim(p))
+            said({"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded, "have": len(have), "deleted": len(gone), "new": len(added)},
+                 "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download.%s" % (
+                     name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(added),
+                     " Followed: the weekly check brings their new works into the folder." if follow else ""),
+                 "ok" if complete else "warn")
+            return [p["id"] for p in added]
+        if not start_download([], prepare=prepare):
+            return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+        return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})
 
     def folder_rows(self, fid):
         f = fo.get(fid)
@@ -931,7 +1058,20 @@ class Handler(BaseHTTPRequestHandler):
             if not info:
                 return self.send_json({"error": "that is not a book in your library"}, 404)
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
-                                   "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)]})
+                                   "chapters": [dict(c, summary=s_ if s_ and s_.get("text") else None, empty=bool(s_ and s_.get("empty")))
+                                                for c in books.chapters(info) for s_ in [(info.get("summaries") or {}).get(books.chapter_key(c))]],
+                                   "overview": info.get("overview"), "overview_stale": books.overview_stale(info)})
+        if path == "/api/authors":      # the Authors tab's "Your authors": each author with a folder, whether you follow them, when the weekly check last listed them
+            return self.send_json({"authors": authors.saved()})
+        if path == "/api/book/whole":   # ?file=: what summarising the whole book would cost (no AI call) and the job's state; &status=1: only the job's state
+            if not bookjob:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if one("status"):
+                return self.send_json({"status": bookjob.status()})
+            try:
+                return self.send_json({**books.whole_estimate(one("file")), "status": bookjob.status()})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         if path == "/api/uiprefs":      # the page's own choices (theme, view modes, where you stopped reading…) kept in the data folder; static/prefsync.js asks for them before anything else
             return self.send_json(uiprefs.get())
         if path == "/api/sync":         # Settings → Computers & sync: which computers use this data folder, which are open now, what Dropbox had to duplicate
@@ -1160,48 +1300,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/authors/download":  # {ids: [A…], name, institution}: every work of those ids (journal, conference, working papers) into the author's folder
             if JOBS.busy():
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
-            ids = [authors._short(x).upper() for x in (b.get("ids") or []) if re.fullmatch(r"[Aa]\d{4,12}", authors._short(x))][:10]
-            name = re.sub(r"\s+", " ", str(b.get("name") or "")).strip()[:60]
-            if not ids or not name:
-                return self.send_json({"error": "Pick the author first."}, 400)
-            fid, _ = authors.folder_for(ids, name, str(b.get("institution") or ""))
-            run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name)})
-            run.stage, run.status = "ready", "stopped"
-            run.save(force=True)
-            JOBS.run = run
-
-            def prepare(emit):
-                lab = "Listing %s's works on OpenAlex" % name
-                emit("progress", {"stage": "listing", "label": lab, "done": 0, "total": 0})
-
-                def said(listing, msg, level):        # the run says what came of the listing (its page shows it at once, and after a reload)
-                    run.params["listing"] = listing
-                    run.save(force=True)
-                    emit("run", {"id": run.id, "params": run.params})
-                    emit("log", {"msg": msg, "level": level})
-                try:
-                    ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": lab, "done": n, "total": t}), stop=JOBS.stop)
-                except authors.AuthorError as e:
-                    run.errors.append(str(e))
-                    said({"error": str(e)}, "Listing %s's works failed: %s" % (name, e), "error")
-                    return []
-                if JOBS.stop.is_set():
-                    said({"stopped": True, "listed": len(ws)}, "Stopped while listing %s's works: nothing was downloaded or filed." % name, "warn")
-                    return []
-                kept, excluded = authors.select(ws)
-                new, have, gone = authors.split(authors.to_papers(kept, fid, name))
-                authors.file_have(fid, have)
-                added = [p for p in new if run.add_paper(p)]
-                for p in added:
-                    emit("paper", pl.slim(p))
-                said({"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded, "have": len(have), "deleted": len(gone), "new": len(added)},
-                     "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download." % (
-                         name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(added)),
-                     "ok" if complete else "warn")
-                return [p["id"] for p in added]
-            if not start_download([], prepare=prepare):
+            return self.author_download(b, follow=False)
+        if path == "/api/authors/follow":    # {folder, on: false} stops following; {ids, name, institution, on: true} (or {folder, on: true}): download all now, then new works each week
+            on = bool(b.get("on"))
+            fid0 = str(b.get("folder") or "")
+            if not on:
+                if not authors.set_follow(fid0, False):
+                    return self.send_json({"error": "No author has that folder."}, 404)
+                return self.send_json({"ok": True, "authors": authors.saved()})
+            if JOBS.busy():
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
-            return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})
+            if fid0 and not b.get("ids"):
+                rec = next((r for r in authors.load()["authors"] if r.get("folder") == fid0), None)
+                if rec is None:
+                    return self.send_json({"error": "No author has that folder."}, 404)
+                if fo.get(fid0) and "follow_known" in rec:      # followed before, folder still there: just on again (the weekly check picks up what is new since)
+                    authors.set_follow(fid0, True)
+                    return self.send_json({"ok": True, "authors": authors.saved()})
+                b = {"ids": rec.get("ids") or [], "name": rec.get("name") or "", "institution": ""}
+            return self.author_download(b, follow=True)
         if path == "/api/related/download":   # {items: [{id, doi, title, authors, year, venue, date, reason}], label}: straight into the download pipeline
             if not related:
                 return self.send_json({"error": "AI features aren't installed"}, 501)
@@ -1669,6 +1786,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(e)}, 400)
         if path == "/api/download":
             ids = [i for i in b.get("ids") or [] if JOBS.run and i in JOBS.run.papers]
+            ids = [i for i in ids if not (JOBS.run.papers[i].get("summary_by_hand") and JOBS.run.papers[i].get("dl_status") == "ok")]    # (a followed author's work is downloaded: its summary comes from the Library, with its estimate)
             if not ids:
                 return self.send_json({"error": "nothing selected"}, 400)
             return self.started(start_download(ids), JOBS.run)
@@ -1734,6 +1852,17 @@ class Handler(BaseHTTPRequestHandler):
             if which in ("library", "nova") and not signins.profile()["signs_in"]:
                 return self.send_json({"error": "Set up your library first (Settings → Library access): it has no sign-in of its own yet.", "setup": True}, 400)
             return self.started(start_login(which), None)
+        if path == "/api/book/whole":            # {file, title}: summarise every chapter and section of a book that has no summary yet, then write its overview (in the background)
+            if not bookjob:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if bookjob.status()["running"]:
+                return self.send_json({"error": "A book is already being summarised: see the AI activity tray."}, 409)
+            try:
+                if not bookjob.start(str(b.get("file") or ""), str(b.get("title") or "")[:200]):
+                    return self.send_json({"error": "Every chapter and section has its summary, and the overview is up to date."}, 400)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"ok": True, "status": bookjob.status()})
         if path == "/api/summaries":             # {files}: summarise these papers (the list the estimate showed; one already summarised meanwhile is skipped) in the background
             if not summaries:
                 return self.send_json({"error": "AI features aren't installed"}, 501)
@@ -1742,7 +1871,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "files must be a list"}, 400)
             if summaries.status()["running"]:
                 return self.send_json({"error": "Summaries are already being written: see the AI activity tray."}, 409)
-            if JOBS.busy() and JOBS.kind == "download":         # that job summarises what it downloads: two jobs on the same paper would pay for it twice
+            if JOBS.busy() and JOBS.kind == "download" and JOBS.summarizing:         # that job summarises what it downloads: two jobs on the same paper would pay for it twice
                 return self.send_json({"error": "A download is running and writes its papers’ summaries itself. Press this again when it has finished."}, 409)
             if not summaries.start([str(f) for f in files] if files is not None else None):
                 return self.send_json({"error": "Every one of these papers has a summary already."}, 400)

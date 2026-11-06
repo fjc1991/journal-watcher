@@ -159,6 +159,11 @@ def prefer_pdf_downloads():
 USER_WAIT = 180         # seconds a visible check page waits for the user's tick
 
 
+def _ssrn_ids(u):
+    """The paper numbers an SSRN download address names: SSRN_ID<n> and/or abstractid=<n> (explicit identifiers only: a stray "code" number does not count)."""
+    return {a or b for a, b in re.findall(r"SSRN_ID(\d+)|[?&;]abstract_?id=(\d+)", u, re.I)}
+
+
 class Browser:
     """Context manager around one persistent Chromium context.
 
@@ -184,6 +189,7 @@ class Browser:
         self.pending = {}       # ask mode: host of a check page -> (url asked for, doi, host of that url), until the user opens it
         self.cleared = set()    # ask mode: hosts whose check the user passed in this batch
         self._prefetched = {}   # url -> (pdf, note) a check window already got: the paper's retry takes it instead of asking the site again
+        self._page_checks = {}  # url -> min_chars: a noted check that page_to_pdf met (open_check then saves that web page, it has no PDF link to wait for)
         self.stop = None
         self.ctx = None
         self._ua = None
@@ -252,9 +258,10 @@ class Browser:
             self._ua = ua.replace("HeadlessChrome", "Chrome")
         return self._ua
 
-    def _try(self, page, url, wait_s, settle_s=5):
+    def _try(self, page, url, wait_s, settle_s=5, referer=None):
         """Navigate to url; return PDF bytes if the browser ends up with one.
-        Gives up `settle_s` after the page stops being a challenge page."""
+        Gives up `settle_s` after the page stops being a challenge page. `referer`: the page a followed link was on (sent as a browser does when you click it;
+        SSRN, for one, sends a download that does not come from its paper page back to that page)."""
         resps, dls = [], []
         on_resp = lambda r: resps.append(r)
         on_dl = lambda d: dls.append(d)
@@ -262,7 +269,7 @@ class Browser:
         page.on("download", on_dl)
         try:
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000, referer=referer)
             except PWError:
                 pass  # "Download is starting" or a slow challenge page
             deadline, calm = time.time() + wait_s, None
@@ -313,23 +320,23 @@ class Browser:
         base = page.url
         doi = (doi or doi_in_url(url) or doi_in_url(base) or "").lower().rstrip("/") or None
         names = lambda u: bool(doi) and bool(re.search(re.escape(doi) + r"(?=$|[?#&/])", urllib.parse.unquote(u).lower()))
+        links = [(urllib.parse.urljoin(base, l["href"]), l) for l in found["links"]]
+        ssrn = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "")
+        if ssrn:                    # SSRN: its "Download This Paper" button first. The page's citation_pdf_url (Delivery.cfm?abstractid=<n>, without &mirid=1) is sent back to the
+            for u, l in links:      # paper page instead of giving the PDF (seen on the site, Nov 2026); the button's address is the one that downloads.
+                if site_of(u) == site_of(base) and re.search(r"Delivery\.cfm", u, re.I) and _ssrn_ids(u) == {ssrn.group(1)}:
+                    return u
         for m in found["meta"]:
             u = urllib.parse.urljoin(base, m)
             if names(u) or site_of(u) == site_of(base):
                 return u
-        links = [(urllib.parse.urljoin(base, l["href"]), l) for l in found["links"]]
         for u, l in links:
             if names(u) and not l["ref"]:
                 return u
-        ssrn = re.fullmatch(r"10\.2139/ssrn\.(\d+)", doi or "")
         for u, l in links:
             if site_of(u) != site_of(base):
                 continue
-            if ssrn and re.search(r"Delivery\.cfm", u, re.I):      # SSRN's own download link carries the paper's number (and no DOI), as SSRN_ID<n> and/or abstractid=<n>
-                ids = set(re.findall(r"SSRN_ID(\d+)|[?&;]abstract_?id=(\d+)", u, re.I))
-                ids = {a or b for a, b in ids}
-                if ids == {ssrn.group(1)}:          # explicit identifiers only, and none that names another paper (a stray "code" number that happens to match does not count);
-                    return u                        # the number decides, whatever box the button sits in (SSRN's page layout is not known here)
+            if ssrn and re.search(r"Delivery\.cfm", u, re.I):      # (another paper's SSRN button, or one naming two papers: never)
                 continue
             if l["other"]:
                 continue
@@ -354,7 +361,7 @@ class Browser:
             if not cand and not is_challenge(page):
                 cand = self._pdf_link(page, url, doi)
             if cand and cand != url:
-                data = self._try(page, cand, wait_s)
+                data = self._try(page, cand, wait_s, referer=page.url)
                 if data:
                     return data, "browser", None
             host = urllib.parse.urlsplit(page.url).netloc
@@ -430,7 +437,10 @@ class Browser:
         self._notify(host, "open")
         try:
             self._launch(visible=True)
-            data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
+            if url in self._page_checks:
+                data, note, still = self._page_check(url, self._page_checks.pop(url))
+            else:
+                data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
         except PWError:                                     # the user closed the window (or the browser went away): a check not passed, never a crash
             data, still = None, True
         if data:
@@ -451,7 +461,55 @@ class Browser:
             self._launch(visible=False)
 
     def page_to_pdf(self, url, min_chars=5000):
-        """Save an article web page (HBR) as a PDF. Needs the headless browser."""
+        """Save an article web page (HBR, ACM's full text) as a PDF. Needs the headless browser. Both callers pass the paper's own page, so in ask mode a check
+        page met here is noted for "Open the check", as fetch_pdf(own=True) does (unless that site already has a check noted: ACM's PDF address is asked first,
+        and its check is the one to open)."""
+        if url in self._prefetched:
+            return self._prefetched.pop(url)
+        host = urllib.parse.urlsplit(url).netloc
+        if host in self.checked_hosts and self.interactive:
+            # the user passed this site's check and chose to keep its window (the second "Open the check"): the page is shown there, a check it asks again is
+            # waited for in the window (never ticked here), and the page is then saved in the background, where Chromium can print it
+            if not self.visible:
+                self._launch(visible=True)
+            data, note, still = self._page_check(url, min_chars)
+            if still:
+                self._notify(host, "waiting")
+            return data, note
+        data, note, chall = self._page_pdf(url, min_chars)
+        if chall and self.ask and self.interactive and chall not in self.pending:
+            self.pending[chall] = (url, None, urllib.parse.urlsplit(url).netloc)
+            self._page_checks[url] = min_chars
+            self._notify(chall, "again" if chall in self.cleared else "pending")
+        return data, note
+
+    def _page_check(self, url, min_chars):
+        """open_check for a page that is saved as a PDF: show it in the window and wait (up to USER_WAIT; Stop ends the wait) until the user's tick has cleared
+        the check (the app never ticks it), then save the page in the background, where Chromium can print it. Returns (pdf | None, note, still a check)."""
+        page = self.ctx.new_page()
+        try:
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            except PWError:
+                pass
+            deadline = time.time() + USER_WAIT
+            while time.time() < deadline and is_challenge(page):
+                if self.stop is not None and self.stop.is_set():
+                    break
+                page.wait_for_timeout(1000)
+            still = is_challenge(page)
+        finally:
+            try:
+                page.close()
+            except PWError:
+                pass
+        if still:
+            return None, "challenge:%s" % urllib.parse.urlsplit(url).netloc, True
+        data, note, chall = self._page_pdf(url, min_chars)
+        return data, note, bool(chall)
+
+    def _page_pdf(self, url, min_chars):
+        """page_to_pdf's work: (pdf | None, note, host of a check page met, or None)."""
         if self.visible:
             self._launch(visible=False)
         page = self.ctx.new_page()
@@ -462,7 +520,8 @@ class Browser:
                 pass
             page.wait_for_timeout(2000)
             if is_challenge(page):
-                return None, "challenge:%s" % urllib.parse.urlsplit(url).netloc
+                h = urllib.parse.urlsplit(url).netloc
+                return None, "challenge:%s" % h, h
             # keep cookie/consent overlays out of the saved copy
             page.evaluate("""() => {
                 document.querySelectorAll("#onetrust-consent-sdk, .fc-consent-root, .fc-dialog-overlay,"
@@ -478,10 +537,10 @@ class Browser:
                 document.body.style.setProperty("overflow", "visible", "important");
             }""")
             if len(page.inner_text("body")) < min_chars:
-                return None, "page too short to be the full article (paywall?)"
+                return None, "page too short to be the full article (paywall?)", None
             data = page.pdf(format="A4", print_background=False,
                             margin={"top": "15mm", "bottom": "15mm", "left": "12mm", "right": "12mm"})
-            return (data, "page saved as PDF") if is_pdf(data) else (None, "page too short (paywall?)")
+            return (data, "page saved as PDF", None) if is_pdf(data) else (None, "page too short (paywall?)", None)
         finally:
             page.close()
 

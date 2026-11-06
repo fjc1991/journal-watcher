@@ -276,7 +276,8 @@ const ago = s => s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + " minutes
 async function renderSync(body) {
   body.innerHTML = `<div class="card st-card"><span class="ask-status">Looking…</span></div>`;
   let R, AI = D.ai; try { R = await api("/api/sync"); AI = await api("/api/ai/config"); D.ai = AI; } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
-  const inEnv = Object.values(AI.providers).filter(p => p.key_env && p.key_where === ".env file").length;
+  const inEnvN = A => (A.keys_in_env || Object.values(A.providers).filter(p => p.key_env && p.key_where === ".env file").map(p => p.key_env)).length;     // (AI keys and the paper sources' keys: OpenAlex, Elsevier)
+  let inEnv = inEnvN(AI);
   const draw = () => {
     body.innerHTML = `
     <div class="card st-card"><h2>This computer</h2>
@@ -297,7 +298,7 @@ async function renderSync(body) {
     <div class="card st-card"><h2>API keys</h2>
       ${AI.keychain ? `<p class="hint">API keys can live in this Mac’s Keychain instead of the <code>.env</code> file in your data folder, so a synced folder never carries them to another computer. You paste each key once on each computer. A key you paste in Settings is saved there from now on.</p>
       ${inEnv ? `<p class="hint warn">${inEnv} key${inEnv === 1 ? " is" : "s are"} still in the <code>.env</code> file inside the data folder (readable in Dropbox).</p><div class="row" style="gap:8px"><button class="btn primary" id="sy-keys">Move ${inEnv === 1 ? "it" : "them"} to the Keychain</button><span class="st-msg" id="sy-kmsg"></span></div>
-      <p class="hint">Each key is read back from the Keychain before its line is removed from the file. Dropbox keeps earlier versions of files, so after moving, create new keys at your AI providers and delete the old ones.</p>` : `<p class="hint ok">✓ No key is stored in a file in your data folder.</p>`}`
+      <p class="hint">Each key is read back from the Keychain before its line is removed from the file. Dropbox keeps earlier versions of files, so after moving, create new keys at your AI providers (and at OpenAlex or Elsevier) and delete the old ones.</p>` : `<p class="hint ok">✓ No key is stored in a file in your data folder.</p>`}`
       : `<p class="hint">Keys are saved in the <code>.env</code> file of your data folder. The Keychain is only available in the Mac app.</p>`}</div>`;
   };
   draw();
@@ -307,7 +308,7 @@ async function renderSync(body) {
       if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); draw(); toast("Name saved."); }
       else if (b.dataset.merge) { const r = await api("/api/sync", {action: "merge", path: b.dataset.merge}); R = r; draw(); toast(`Joined: ${r.papers} papers in the list (${r.added} from the other copy). The copy was set aside.`); window.dispatchEvent(new Event("jw-library-changed")); }
       else if (b.dataset.aside) { if (!confirm("Set this copy aside?\n\n" + b.dataset.aside + "\n\nIt moves to Papers/_conflicts/ and is not deleted.")) return; R = await api("/api/sync", {action: "set_aside", path: b.dataset.aside}); draw(); toast("Set aside."); }
-      else if (b.id === "sy-keys") { const r = await api("/api/ai/keys/move", {}); D.ai = r.config; AI = r.config; R = await api("/api/sync"); draw(); toast(r.moved.length ? `Moved ${r.moved.length} key${r.moved.length === 1 ? "" : "s"} to the Keychain.` : "Nothing was moved."); if (Object.keys(r.kept).length) { const m = $("#sy-kmsg", body); if (m) m.textContent = "Not moved: " + Object.entries(r.kept).map(([k, v]) => k + " (" + v + ")").join("; "); } }
+      else if (b.id === "sy-keys") { const r = await api("/api/ai/keys/move", {}); D.ai = r.config; AI = r.config; inEnv = inEnvN(AI); R = await api("/api/sync"); draw(); toast(r.moved.length ? `Moved ${r.moved.length} key${r.moved.length === 1 ? "" : "s"} to the Keychain.` : "Nothing was moved."); if (Object.keys(r.kept).length) { const m = $("#sy-kmsg", body); if (m) m.textContent = "Not moved: " + Object.entries(r.kept).map(([k, v]) => k + " (" + v + ")").join("; "); } }
     } catch (er) { if (msg) note(msg, er.message, true); else notifyError(er); }
   };
 }
@@ -464,7 +465,7 @@ async function renderSources(body, flash) {
     <label class="chk">Elsevier API key <input type="password" id="ps-el" placeholder="${S.elsevier_key ? "•••••••• (saved)" : "optional"}" autocomplete="off" style="flex:1"> ${set(S.elsevier_key)}</label>
     <label class="chk">Institutional token <input type="password" id="ps-et" placeholder="${S.elsevier_insttoken ? "•••••••• (saved)" : "optional, from your library"}" autocomplete="off" style="flex:1"> ${set(S.elsevier_insttoken)}</label></div>
   <div class="card st-card"><div class="st-actions"><button class="btn primary" id="ps-save">Save</button>${S.openalex_key || S.elsevier_key || S.elsevier_insttoken ? `<button class="btn" id="ps-clear">Remove saved keys…</button>` : ""}<span class="st-msg" id="ps-msg" role="status"></span></div>
-    <p class="hint">Saved in the <code>.env</code> file of your data folder (readable only by you). Keys are never shown again, and each is sent only to its own service.</p></div>`;
+    <p class="hint">${S.keychain ? "Keys are saved in this Mac’s Keychain, not in your data folder, so a synced folder never carries them to another computer: paste them once on each computer. The Unpaywall email is saved in the <code>.env</code> file of your data folder." : "Saved in the <code>.env</code> file of your data folder (readable only by you)."} Keys are never shown again, and each is sent only to its own service.${S.keychain && Object.values(S.where || {}).includes(".env file") ? ` <span class="warn">A key is still in the <code>.env</code> file: Settings → Computers &amp; sync can move it to the Keychain.</span>` : ""}</p></div>`;
   const msg = $("#ps-msg", body);
   if (flash) note(msg, flash);
   $("#ps-save", body).onclick = async () => {

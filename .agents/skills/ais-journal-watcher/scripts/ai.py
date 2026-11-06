@@ -66,6 +66,16 @@ def retryable(e):
     return not isinstance(e, (Blocked, Declined)) and getattr(e, "status", None) not in NOT_RETRYABLE
 
 
+_NO_STRUCTURE = re.compile(r"response_format|structured[ _-]?outputs?|json[ _]schema|output_config\.format|handle the requested parameters", re.I)
+
+
+def cannot_structure(e):
+    """Whether the provider refused the request because this model cannot answer in a JSON schema (what screening asks for): a 400, 404 or 422 whose words say so
+    (OpenRouter: "response_format is not supported", "No endpoints found that can handle the requested parameters"). A refused key, credit, the budget, a request
+    that is too long or any other error is not this."""
+    return isinstance(e, AIError) and not isinstance(e, (Blocked, Declined)) and getattr(e, "status", None) in (400, 404, 422) and bool(_NO_STRUCTURE.search(str(e)))
+
+
 class Blocked(AIError):
     """The call was not made, and trying again now cannot help: this month's budget is used up, local-only mode forbids the provider, no key or no provider is set.
     A job that makes many calls (screening) stops on it instead of retrying and instead of marking every paper as failed."""
@@ -212,30 +222,34 @@ def _write_env_file(name, key):
 
 
 def _drop_from_env_file(name):
-    """Remove the line for `name` from the data home's .env (a key now lives in the Keychain). Other lines stay as they are. True if a line was removed."""
-    path = _env_path()
-    if not os.path.exists(path):
-        return False
-    lines = open(path, encoding="utf-8").read().splitlines()
-    kept = [l for l in lines if not re.match(r"\s*(export\s+)?%s\s*=" % re.escape(name), l)]
-    if len(kept) == len(lines):
-        return False
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(kept) + ("\n" if kept else ""))
-    os.replace(tmp, path)
-    return True
+    """Remove the line for `name` from every .env file the app reads (the data home's, and the settings folder's of the older layout; both are inside the
+    synced data folder): a key now lives in the Keychain. Other lines stay as they are. True if a line was removed."""
+    removed = False
+    for path in dict.fromkeys(os.path.abspath(p) for p in dl.env_files()):
+        if not os.path.exists(path):
+            continue
+        lines = open(path, encoding="utf-8").read().splitlines()
+        kept = [l for l in lines if not re.match(r"\s*(export\s+)?%s\s*=" % re.escape(name), l)]
+        if len(kept) == len(lines):
+            continue
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+        os.replace(tmp, path)
+        removed = True
+    return removed
 
 
 def key_where(name):
-    """Where a provider's key is kept: "Keychain", ".env file", "environment" (set outside the app) or ""."""
+    """Where a provider's key is kept: ".env file" (also when the Keychain has it too: the line is still in the synced folder, and moving it removes it),
+    "Keychain", "environment" (set outside the app) or ""."""
     if not name:
         return ""
-    if keychain.values([name]).get(name):
-        return "Keychain"
     if dl.read_dotenv().get(name):
         return ".env file"
+    if keychain.values([name]).get(name):
+        return "Keychain"
     return "environment" if os.environ.get(name) else ""
 
 
@@ -250,6 +264,10 @@ def move_keys_to_keychain():
     for name in sorted(names):
         val = env.get(name)
         if not val:
+            continue
+        if keychain.get(name):                 # the Keychain has one already (it is the key in use: it wins over a line): only the old line goes
+            _drop_from_env_file(name)
+            moved.append(name)
             continue
         try:
             keychain.set(name, val)
@@ -293,7 +311,8 @@ def config():
     provs = {n: {"type": p.get("type"), "base_url": p.get("base_url", ""), "models": p.get("models", []), "key_env": p.get("key_env", ""),
                  "configured": not p.get("key_env") or bool(_key(p["key_env"])), "key_where": key_where(p.get("key_env")), "local": is_local(p),
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
-    return {"providers": provs, "keychain": keychain.available(), "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
+    in_env = [n for n in dl.key_names() if key_where(n) == ".env file"]          # every key still in the synced .env file: the AI providers' and the paper sources'
+    return {"providers": provs, "keychain": keychain.available(), "keys_in_env": in_env, "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
             "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
 
 

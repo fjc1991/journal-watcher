@@ -452,6 +452,157 @@ def main():
                 except OSError:
                     pass
     check("books: Ask can be limited to one chapter (only its pages; a book's passages say where they are), and a chapter summary is estimated for free, asked for through the budgeted layer, worded with your pages, kept, and not asked twice", t_chapter_ai)
+    def t_whole_book():
+        """Summarise a whole book: the estimate is free; every chapter and section without a summary is summarised once (a part with the same pages once, a part
+        saved meanwhile skipped), in the tray, then one overview written from those summaries only; nothing twice; Cancel, a refused key, the budget and three
+        failures in a row stop it; no overview while a part is missing; an empty answer is never saved or cached."""
+        import time as _t
+        import books as bk, bookjob as bj, activity as act_
+        bpdf = os.path.join(d, "wb.pdf"); shutil.copy(pdf, bpdf); brel = rel.replace("x.pdf", "wb.pdf")
+        toc = [[1, "Part I", 1], [2, "Ch 1", 1], [1, "Part II", 3], [2, "Sec 2.1", 4]]           # keys 1-3, 1-3 (the same pages: once), 3-4, 4-4
+        pre = {"title": "Part II", "start": 3, "end": 4, "text": "PRESAVED part two (p. 2).", "provider": "fake", "model": "m1", "cost": 0.0}
+        def reset(t=toc, sums=None):
+            json.dump({"source": "pdf", "pages": 4, "offset": 1, "toc": t, "summaries": {"3-4": dict(pre)} if sums is None else sums}, open(bpdf[:-4] + ".book.json", "w"))
+            ai.cache_clear()
+        def wait():
+            for _ in range(400):
+                st = bj.status()
+                if not st["running"]:
+                    return st
+                _t.sleep(0.05)
+            raise AssertionError("the book job did not end")
+        sysof = lambda body: body["messages"][0]["content"] if body["messages"][0]["role"] == "system" else (body.get("system") or "")      # noqa: E731
+        chap = lambda body: re.search(r"Chapter: (.+?) \(pages", body["messages"][-1]["content"]).group(1)                                 # noqa: E731
+        def answers(chapter=lambda b: ["S-%s (p. 3)." % chap(b)], overview=lambda b: ["OV (p. 2)."]):
+            Fake.responder = lambda body: overview(body) if sysof(body).startswith("You write an OVERVIEW") else chapter(body)
+        mine = lambda: [b for (path, b, _) in SEEN if path.endswith("/chat/completions") and (sysof(b).startswith("You write an OVERVIEW") or sysof(b).startswith("You summarise ONE chapter"))]  # noqa: E731
+        saved_cfg = dict(CFG)
+        write_cfg(dict(CFG, features={"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}))
+        try:
+            reset()
+            # --- the estimate: free, and it counts each part once
+            n0 = len(SEEN)
+            e = bk.whole_estimate(brel)
+            assert len(SEEN) == n0 and e["parts"] == 3 and e["done"] == 1 and e["todo"] == 2 and e["nested"] is True and e["overview"] is True, e
+            exp = sum(ai.estimate("summarize", bk.chapter_text(bpdf, c)[1] + len(bk.SUMMARY_SYSTEM) + 300, bk.SUMMARY_OUT_TOKENS) for c in bk.parts(bk.info_at(bpdf)) if bk.chapter_key(c) != "3-4")
+            assert abs(e["parts_cost"] - exp) < 1e-12 and e["overview_cost"] > 0 and abs(e["cost"] - exp - e["overview_cost"]) < 1e-12 and e["provider"] == "fake" and e["model"] == "m1", e
+            for bad in (rel, ):
+                try:
+                    bk.whole_estimate(bad); raise AssertionError("a paper is not a book")
+                except ValueError as ex:
+                    assert "not a book" in str(ex)
+            json.dump({"source": "pdf", "pages": 4}, open(bpdf[:-4] + ".book.json", "w"))
+            try:
+                bj.start(brel); raise AssertionError("a book with no outline")
+            except ValueError as ex:
+                assert "no outline" in str(ex)
+            # --- the job: the two parts without a summary, in the book's order, then one overview from the summaries; the saved one is kept
+            reset(); answers(); n0 = len(mine())
+            assert bj.start(brel, "A Test Book") is True and bj.start(brel, "A Test Book") is False          # one at a time
+            st = wait()
+            new = mine()[n0:]
+            assert [chap(b) if not sysof(b).startswith("You write an OVERVIEW") else "OVERVIEW" for b in new] == ["Part I", "Sec 2.1", "OVERVIEW"], [sysof(b)[:30] for b in new]
+            info = bk.info_at(bpdf); sums = info["summaries"]
+            assert sums["1-3"]["text"] == "S-Part I (p. 2)." and sums["4-4"]["text"] == "S-Sec 2.1 (p. 2)." and sums["3-4"]["text"] == pre["text"], sums
+            ov_body = new[-1]["messages"][-1]["content"]
+            assert "S-Part I (p. 2)." in ov_body and "PRESAVED part two" in ov_body and "S-Sec 2.1" in ov_body and "[3] " not in ov_body and "Book: A Test Book" in ov_body, ov_body[:400]
+            assert ov_body.index("S-Part I") < ov_body.index("PRESAVED") < ov_body.index("S-Sec 2.1"), "the summaries in the book's order"
+            assert info["overview"]["text"] == "OV (p. 2)." and info["overview"]["parts"] == 3 and info["overview"]["model"] == "m1", info["overview"]     # (its references copied as written: not relabelled)
+            assert st["made"] == 2 and st["overview"] is True and not st["failed"] and st["stopped"] == "" and st["total"] == 3, st
+            js = [j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary")]
+            assert js and js[0]["status"] == "done" and js[0]["scope"] == {"library": True, "ltab": "books"}, js[:1]
+            # --- nothing twice; a chapter summary written again makes the overview out of date, and only the overview is asked for again
+            e = bk.whole_estimate(brel); assert e["todo"] == 0 and e["overview"] is False and e["cost"] == 0.0, e
+            n1 = len(mine()); assert bj.start(brel) is False and len(mine()) == n1
+            answers(chapter=lambda b: ["REWRITTEN (p. 3)."])
+            list(bk.summary_stream(brel, 0, "A Test Book", fresh=True))
+            assert bk.overview_pending(bk.info_at(bpdf)) and bk.overview_stale(bk.info_at(bpdf))
+            n1 = len(mine()); assert bj.start(brel, "A Test Book") is True; wait()
+            assert len(mine()) - n1 == 1 and sysof(mine()[-1]).startswith("You write an OVERVIEW") and "REWRITTEN" in mine()[-1]["messages"][-1]["content"]
+            assert not bk.overview_pending(bk.info_at(bpdf)) and not bk.overview_stale(bk.info_at(bpdf))
+            # --- a part summarised meanwhile (the per-chapter button, another computer) is skipped, and its text kept
+            reset()
+            def chapter_inject(b):
+                if chap(b) == "Part I":
+                    i_ = bk.info_at(bpdf); i_["summaries"]["4-4"] = {"title": "Sec 2.1", "start": 4, "end": 4, "text": "WRITTEN ELSEWHERE (p. 3)."}; bk._write_info(bpdf, i_)
+                return ["S-%s (p. 3)." % chap(b)]
+            answers(chapter=chapter_inject); n1 = len(mine())
+            assert bj.start(brel, "A Test Book") is True; st = wait()
+            assert [chap(b) if not sysof(b).startswith("You write") else "OV" for b in mine()[n1:]] == ["Part I", "OV"] and bk.info_at(bpdf)["summaries"]["4-4"]["text"] == "WRITTEN ELSEWHERE (p. 3).", st
+            # --- Cancel (from the tray) during the first part: nothing saved, no overview, one request
+            reset()
+            def cancel_now(b):
+                j_ = next(j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary") and not j.get("ended"))
+                act_.cancel(j_["id"]); return ["Some ", "words (p. 3)."]
+            answers(chapter=cancel_now); n1 = len(mine())
+            assert bj.start(brel) is True; st = wait()
+            assert st["stopped"] == "cancelled" and not st["failed"] and len(mine()) - n1 == 1 and set(bk.info_at(bpdf)["summaries"]) == {"3-4"} and "overview" not in bk.info_at(bpdf), st     # (a cancel is not a failure)
+            js = [j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary")]
+            assert js[0]["status"] == "cancelled", js[:1]
+            # --- a refused key stops it at the first part
+            reset(); Fake.responder = None; Fake.http_error = lambda body: (401, "User not found."); n1 = len(SEEN)
+            assert bj.start(brel) is True; st = wait()
+            assert len(SEEN) - n1 == 1 and len(st["failed"]) == 1 and "HTTP 401" in st["stopped"] and "overview" not in bk.info_at(bpdf), st
+            Fake.http_error = None
+            # --- three parts in a row with an empty answer: it stops, nothing is saved (an empty summary is never saved)
+            reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""]); n1 = len(mine())
+            assert bj.start(brel) is True; st = wait()
+            assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and st["made"] == 0 and "empty" in st["failed"][0]["error"] and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            # --- one part fails, the others are made: the job goes on, but no overview is written while a part is missing; pressing again does only that part, then the overview
+            reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""] if chap(b) == "B2" else ["S-%s (p. 3)." % chap(b)])
+            assert bj.start(brel) is True; st = wait()
+            assert st["made"] == 3 and len(st["failed"]) == 1 and st["failed"][0]["title"] == "B2" and st["overview"] is False and st["stopped"] == "" and "overview" not in bk.info_at(bpdf), st      # (no overview is even tried)
+            answers(); n1 = len(mine())
+            assert bj.start(brel) is True; st = wait()
+            assert [chap(b) if not sysof(b).startswith("You write") else "OV" for b in mine()[n1:]] == ["B2", "OV"] and st["overview"] is True, [sysof(b)[:20] for b in mine()[n1:]]
+            # --- the budget: nothing may be asked, so it stops at once and says why
+            reset(); answers(); ai.save_config({"budget": {"monthly_usd": 0.000001}}); n1 = len(SEEN)
+            assert bj.start(brel) is True; st = wait()
+            assert len(SEEN) == n1 and "budget" in st["stopped"] and "overview" not in bk.info_at(bpdf), st
+            write_cfg(dict(CFG, features={"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}))
+            # --- a part with no body text (a bibliography, an index): left out, with nothing asked; the overview is still written
+            real_extract = bk.bl.extract
+            bk.bl.extract = lambda p_, force=False: [dict(b_, kind="ref") if b_["page"] == 3 else b_ for b_ in real_extract(p_)]       # (page 4 is all references)
+            try:
+                reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "References", 4]], sums={}); answers(); n1 = len(mine())
+                e = bk.whole_estimate(brel)
+                assert e["todo"] == 3 and e["empty"] == 1 and e["overview"] is True, e
+                assert bj.start(brel, "A Test Book") is True; st = wait()
+                info = bk.info_at(bpdf)
+                assert st["made"] == 3 and st["skipped"] == 1 and not st["failed"] and st["overview"] is True and info["summaries"]["4-4"].get("empty") and len(mine()) - n1 == 4, st
+                assert "References" not in mine()[-1]["messages"][-1]["content"], "the overview leaves out a part with no text"
+                assert bj.start(brel) is False and bk.whole_estimate(brel)["todo"] == 0, "nothing left to do"
+            finally:
+                bk.bl.extract = real_extract
+            # --- a long book: the overview drops the deepest level first (sections, then chapters), never the parts, and says what it left out
+            info_ = {"source": "pdf", "pages": 9, "offset": 0, "toc": [[1, "Part One", 1], [2, "Chapter A", 2], [3, "Section A.1", 3], [1, "Part Two", 5], [2, "Chapter B", 6], [3, "Section B.1", 7]]}
+            info_["summaries"] = {bk.chapter_key(c): {"text": ("%s says something. " % c["title"]) * 30} for c in bk.parts(info_)}
+            old_max = bk.OVERVIEW_MAX_CHARS
+            try:
+                bk.OVERVIEW_MAX_CHARS = 5000
+                body_, cut_ = bk._overview_input(info_, bk.parts(info_))
+                assert "Chapter A says" in body_ and "Part One says" in body_ and "Section A.1 says" not in body_ and cut_ == "sections" and "below outline level 2" in body_, body_[:300]
+                bk.OVERVIEW_MAX_CHARS = 2500
+                body_, cut_ = bk._overview_input(info_, bk.parts(info_))
+                assert "Part One says" in body_ and "Chapter A says" not in body_ and cut_ == "sections", body_[:300]
+            finally:
+                bk.OVERVIEW_MAX_CHARS = old_max
+            # --- the per-chapter button: an empty answer is an error, nothing is saved, and asking again really asks (it was not cached)
+            reset(); answers(chapter=lambda b: [""]); n1 = len(mine())
+            out = list(bk.summary_stream(brel, 0, "A Test Book"))
+            assert out[-1]["type"] == "error" and "empty" in out[-1]["error"] and "1-3" not in bk.info_at(bpdf)["summaries"], out[-1]
+            answers(chapter=lambda b: ["Fine now (p. 3)."])
+            out = list(bk.summary_stream(brel, 0, "A Test Book"))
+            assert len(mine()) - n1 == 2 and out[-1]["type"] == "done" and bk.info_at(bpdf)["summaries"]["1-3"]["text"] == "Fine now (p. 2).", (out[-1], len(mine()) - n1)
+        finally:
+            Fake.responder = None; Fake.http_error = None
+            write_cfg(saved_cfg)
+            for ext in (".pdf", ".book.json"):
+                try:
+                    os.remove(bpdf[:-4] + ext)
+                except OSError:
+                    pass
+    check("books: summarise the whole book: a free estimate, every chapter and section once (one already saved, or saved meanwhile, is skipped), in the tray, then one overview from the summaries; Cancel, a refused key, the budget and three failures in a row stop it; no overview while a part is missing; an empty answer is never saved", t_whole_book)
     def t_parallel_embeddings():
         """The local model embeds several small pieces of text at once (about one per core): the vectors come out in the same order and equal to one-at-a-time, progress and Cancel work across pieces,
         and a model that cannot be used from several threads falls back to one piece at a time."""
@@ -645,6 +796,7 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
     def t_prices():
         """What a model costs and where the number comes from: a price you typed wins, OpenRouter models get OpenRouter's list (read at most once a day, kept when a read
         fails), Claude models the built-in table, a keyless model on this computer is free, anything else is unknown (never a silent $0)."""
+        import time
         import prices as pr_
         from datetime import date
         from http.server import BaseHTTPRequestHandler as BH
@@ -652,7 +804,18 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
             {"id": "scaledown/summarize", "pricing": {"prompt": "0.00000004", "completion": "0"}},
             {"id": "anthropic/claude-sonnet-5.5", "pricing": {"prompt": "0.000002", "completion": "0.00001", "web_search": "0.004", "input_cache_read": "0.0000001", "input_cache_write": "0.0000025"}},
             {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
-            {"id": "broken", "pricing": {"prompt": "x"}}, {"pricing": {}}]}
+            {"id": "broken", "pricing": {"prompt": "x"}}, {"pricing": {}},
+            # (models that can answer in a JSON schema, and some that cannot or may not be picked: for the backup screening model)
+            {"id": "cheap/json", "pricing": {"prompt": "0.00000005", "completion": "0.00000005"}, "supported_parameters": ["response_format", "structured_outputs"], "context_length": 131072, "top_provider": {"max_completion_tokens": 16384}},
+            {"id": "so/json", "pricing": {"prompt": "0.000001", "completion": "0.000001"}, "supported_parameters": ["structured_outputs"], "context_length": 200000},
+            {"id": "mid/json", "pricing": {"prompt": "0.000003", "completion": "0.000003"}, "supported_parameters": ["tools", "structured_outputs"]},
+            {"id": "rf/only", "pricing": {"prompt": "0.00000001", "completion": "0.00000001"}, "supported_parameters": ["response_format"]},           # JSON mode only, no schema
+            {"id": "x/json:free", "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["structured_outputs"]},
+            {"id": "tiny/json", "pricing": {"prompt": "0.000000001", "completion": "0.000000001"}, "supported_parameters": ["structured_outputs"], "context_length": 8192},
+            {"id": "short/json", "pricing": {"prompt": "0.000000001", "completion": "0.000000001"}, "supported_parameters": ["structured_outputs"], "top_provider": {"max_completion_tokens": 2048}},
+            {"id": "fee/json", "pricing": {"prompt": "0", "completion": "0", "request": "0.01"}, "supported_parameters": ["structured_outputs"]},
+            {"id": "half/x", "pricing": {"prompt": "0.00000002", "completion": "0.00000003"}},
+            {"id": "openrouter/stealth-json", "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["structured_outputs"], "context_length": 200000}]}     # $0 without ":free"
         hits = []
 
         class H(BH):
@@ -678,11 +841,15 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
             parsed = pr_.parse_openrouter(payload)
             assert parsed["scaledown/summarize"] == {"in": 0.04, "out": 0.0, "cache_write": 0.04, "cache_read": 0.04}, parsed
             assert parsed["anthropic/claude-sonnet-5.5"]["cache_read"] == 0.1 and parsed["anthropic/claude-sonnet-5.5"]["web_search"] == 0.004, parsed
-            assert "openrouter/auto" not in parsed and "broken" not in parsed and len(parsed) == 2, "a router's -1 price and a broken entry are left out"
-            assert pr_.refresh() == 2 and len(hits) == 1
-            assert pr_.refresh() == 2 and len(hits) == 1, "a list read less than a day ago is not read again"
+            assert "openrouter/auto" not in parsed and "broken" not in parsed and len(parsed) == 12, "a router's -1 price and a broken entry are left out"
+            assert parsed["cheap/json"]["json"] is True and parsed["cheap/json"]["ctx"] == 131072 and parsed["cheap/json"]["max_out"] == 16384 and parsed["so/json"]["json"] is True, parsed
+            assert not any("json" in parsed[m] for m in ("rf/only", "half/x", "fee/json", "anthropic/claude-sonnet-5.5")), "JSON mode alone, or a charge per request: not a schema model"
+            open(pr_.CACHE, "w").write(json.dumps({"fetched": "2026-11-06T00:00:00+00:00", "fetched_ts": time.time(), "models": {"scaledown/summarize": parsed["scaledown/summarize"]}}))
+            pr_._mem["data"] = None                                                                           # a list from before the JSON flags, read an hour ago: read again now
+            assert pr_.refresh() == 12 and len(hits) == 1 and json.load(open(pr_.CACHE))["format"] == pr_.FORMAT and json.load(open(pr_.CACHE))["models"]["cheap/json"]["json"]
+            assert pr_.refresh() == 12 and len(hits) == 1, "a list read less than a day ago is not read again"
             H.fail = True
-            assert pr_.refresh(force=True) == 2 and len(hits) == 2, "a failed read keeps the list it had"
+            assert pr_.refresh(force=True) == 12 and len(hits) == 2, "a failed read keeps the list it had"
             H.fail = False
             cfg = {"providers": {"anthropic": {"type": "anthropic"}, "openrouter": {"type": "openai_compat", "base_url": "https://openrouter.ai/api/v1", "key_env": "K"},
                                  "ollama": {"type": "openai_compat", "base_url": "http://localhost:11434/v1"}, "proxy": {"type": "openai_compat", "base_url": "http://127.0.0.1:4000/v1", "key_env": "P"},
@@ -699,6 +866,29 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
             assert pr_.stale({"source": "openrouter", "checked": "2026-11-01"}, date(2026, 11, 5)) and not pr_.stale({"source": "yours", "checked": ""})
             assert pr_.name("anthropic", "claude-sonnet-5-5") == "Claude Sonnet 5.5" and pr_.name("openrouter", "anthropic/claude-sonnet-5.5") == "Claude Sonnet 5.5"
             assert pr_.name("openrouter", "scaledown/summarize") == "scaledown/summarize" and pr_.name("anthropic", "claude-opus-5") == "Claude Opus 5"
+            # the backup screening model: same provider, can answer in a JSON schema, the cheapest at no more than twice the price (else the cheapest, said); never itself
+            assert set(pr_.structured_models("openrouter", cfg)) == {"cheap/json", "so/json", "mid/json"}, pr_.structured_models("openrouter", cfg)   # (no free model (":free" or $0), no small or per-request model)
+            b = pr_.backup_for("openrouter", "scaledown/summarize", cfg)
+            assert b == {"provider": "openrouter", "model": "cheap/json", "name": "cheap/json", "price": 0.1, "current_price": 0.04, "within": False}, b       # 0.1 > 2 x 0.04
+            b = pr_.backup_for("openrouter", "anthropic/claude-sonnet-5.5", cfg)
+            assert b["model"] == "cheap/json" and b["within"] is True and b["current_price"] == 12.0, b
+            assert pr_.backup_for("openrouter", "half/x", cfg)["within"] is True, "exactly twice the price is within"
+            b = pr_.backup_for("openrouter", "cheap/json", cfg)
+            assert b["model"] == "so/json" and b["within"] is False, b                                         # never the model itself
+            b = pr_.backup_for("openrouter", "no/such", cfg)
+            assert b["model"] == "cheap/json" and b["current_price"] is None and b["within"] is False, b      # its price unknown: the cheapest, and said
+            b = pr_.backup_for("anthropic", "claude-sonnet-5-5", dict(cfg, prices={}))
+            assert b["model"] == "claude-haiku-5-5" and b["name"] == "Claude Haiku 5.5" and b["within"] is True, b
+            assert pr_.backup_for("openai", "gpt-x", cfg) is None and pr_.structured_models("ollama", cfg) is None, "no list for other providers: no backup"
+            n_hits, off0 = len(hits), os.environ.get("JW_OFFLINE")
+            open(pr_.CACHE, "w").write(json.dumps({"fetched_ts": time.time(), "models": {"cheap/json": {"in": 0.05, "out": 0.05}}})); pr_._mem["data"] = None
+            os.environ["JW_OFFLINE"] = "1"
+            try:
+                assert pr_.structured_models("openrouter", cfg) == {} and len(hits) == n_hits, "offline (JW_OFFLINE): an old list is not read again, and gives no backup"
+                os.environ.pop("JW_OFFLINE")
+                assert set(pr_.structured_models("openrouter", cfg)) == {"cheap/json", "so/json", "mid/json"} and len(hits) == n_hits + 1, "an old list is read again when a backup is needed"
+            finally:
+                os.environ.pop("JW_OFFLINE", None) if off0 is None else os.environ.__setitem__("JW_OFFLINE", off0)
             # through ai.cost_of: the provider decides where the price comes from
             saved_cfg = dict(CFG)
             write_cfg(dict(CFG, providers=dict(CFG["providers"], openrouter=cfg["providers"]["openrouter"], anthropic=cfg["providers"]["anthropic"]), prices={}))
@@ -1542,6 +1732,47 @@ print("OK")
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("books: the outline as chapter page ranges, where a page is in words you could cite (chapter and printed page; location for an EPUB), the printed-page offset (checked, kept), and a search inside one chapter", t_book_chapters)
+    def t_api_identity():
+        """The scholarly databases (OpenAlex, Crossref, Unpaywall, Semantic Scholar, Open Library, the price list) are told plainly who is asking: the app's name, version
+        and project page, never an e-mail address. Publisher pages and feeds are asked as before (a browser's User-Agent): only the listed API hosts change."""
+        import urllib.request as ur_
+        import fetch_new as fx_, download as dl_, updater as up_
+        seen = []
+        class R:
+            headers = {}
+            status = 200
+            def __init__(s, req): s.req = req
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+            def read(s): return b'{"message": {"items": []}, "results": [], "data": []}'
+            def geturl(s): return s.req.full_url
+        real, old_url, old_v = ur_.urlopen, os.environ.get("JW_OPENALEX_URL"), os.environ.get("JW_VERSION")
+        ur_.urlopen = lambda req, timeout=None: (seen.append((req.full_url, req.get_header("User-agent"))), R(req))[1]
+        os.environ["JW_OPENALEX_URL"] = "http://127.0.0.1:9/"; os.environ["JW_VERSION"] = "9.8.7"
+        try:
+            fx_.http_get("https://api.crossref.org/works?query.bibliographic=x")
+            fx_.http_get("https://api.openalex.org/works?search=x")
+            fx_._openalex("works?search=y")                          # through the mirror/test address: still named
+            dl_.http_get("https://api.crossref.org/works/10.1/x")
+            dl_.try_unpaywall("10.1/x", "me@example.org")
+            dl_.http_get("https://api.semanticscholar.org/graph/v1/paper/DOI:10.1/x")
+            dl_.http_get("https://api.elsevier.com/content/article/doi/10.1/x")               # Elsevier's keyed API (not its web pages)
+            fx_.http_get("https://www.example-journal.org/rss.xml")      # a feed
+            dl_.http_get("https://www.publisher.example/doi/pdf/10.1/x")    # a publisher's PDF
+            dl_.http_get("https://api.crossref.org.evil.example/x")          # (not a listed host, only a look-alike)
+        finally:
+            ur_.urlopen = real
+            for k, v in (("JW_OPENALEX_URL", old_url), ("JW_VERSION", old_v)):
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        ua = dict(seen)
+        api = [u for u, _ in seen if "example" not in urllib.parse.urlsplit(u).hostname]
+        assert len(api) == 7, seen
+        for u in api:
+            assert ua[u].startswith("JournalWatcher/9.8.7 (") and "github.com/fjc1991/journal-watcher" in ua[u] and "@" not in ua[u] and "Mozilla" not in ua[u], (u, ua[u])
+        for u in ("https://www.example-journal.org/rss.xml", "https://www.publisher.example/doi/pdf/10.1/x", "https://api.crossref.org.evil.example/x"):
+            assert ua[u].startswith("Mozilla/5.0"), (u, ua[u])
+        assert "@" not in up_.user_agent() and up_.user_agent().startswith("JournalWatcher/")
+    check("identity: the scholarly databases (OpenAlex, Crossref, Unpaywall, Semantic Scholar) are told the app's name, version and project page (never an e-mail address); feeds and publisher pages are asked as before", t_api_identity)
     def t_keychain_keys():
         """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain
         key wins over an old line; what cannot be held there stays in the file."""
@@ -1619,6 +1850,66 @@ print("OK")
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True); shutil.rmtree(os.path.dirname(fake), ignore_errors=True)
     check("keys: a pasted key goes to this Mac's Keychain and leaves the file, keys in the file can be moved there (read back first), a Keychain key wins over an old line, a key it cannot hold stays in the file, no Keychain = as before", t_keychain_keys)
+    def t_source_keys_keychain():
+        """The paper sources' keys (OpenAlex, Elsevier key and token) are kept like the AI keys: a key saved in Settings → Paper sources goes to this Mac's Keychain
+        and not into the synced .env file; one already in the file is moved with the same button as the AI keys; OpenAlex reads it from there. The Unpaywall email,
+        not a secret, stays in the file. Without a Keychain nothing changes."""
+        import subprocess
+        home, loc, fake = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-"), os.path.join(tempfile.mkdtemp(prefix="jw-kc-"), "kc.json")
+        child = r'''
+import importlib.util, json, os, sys
+sys.path.insert(0, %r)
+import paths; paths.seed_home()
+import keychain, ai, fetch_new as fx, download as dl
+spec = importlib.util.spec_from_file_location("jw_server", os.path.join(paths.DASHBOARD, "server.py")); sv = importlib.util.module_from_spec(spec); spec.loader.exec_module(sv)
+sv._check_openalex = lambda k: True            # (no network)
+env_path = os.path.join(paths.ROOT, ".env")
+open(env_path, "w").write("UNPAYWALL_EMAIL=old@example.org\nELSEVIER_INSTTOKEN=tok-in-file-1\n")
+keyc = keychain.available()
+assert keyc == bool(os.environ.get("JW_EXPECT_KC")), keyc
+st = sv.sources_save({"openalex_key": "oa-key-123", "elsevier_key": "els-key-456", "unpaywall_email": "me@example.org"})
+txt = open(env_path).read()
+if keyc:
+    assert keychain.get("OPENALEX_API_KEY") == "oa-key-123" and keychain.get("ELSEVIER_API_KEY") == "els-key-456", "the keys go to the Keychain"
+    assert "oa-key-123" not in txt and "els-key-456" not in txt and "UNPAYWALL_EMAIL=me@example.org" in txt and "old@example.org" not in txt, txt
+    assert st["keychain"] is True and st["where"] == {"openalex_key": "Keychain", "elsevier_key": "Keychain", "elsevier_insttoken": ".env file"}, st
+    assert st["openalex_key"] and st["elsevier_key"] and st["elsevier_insttoken"] and st["unpaywall_email"] == "me@example.org", st
+    # OpenAlex reads its key from the Keychain (nothing in the environment, nothing in the file)
+    os.environ.pop("OPENALEX_API_KEY", None); keychain._cache.clear()
+    assert fx.openalex_key() == "oa-key-123"
+    # the token still in the file is counted with the AI keys and moved by the same button; the Elsevier download reads it from there
+    assert "ELSEVIER_INSTTOKEN" in ai.config()["keys_in_env"], ai.config()["keys_in_env"]
+    # an old line of the OpenAlex key in the older layout's file (the settings folder, also in the data folder): counted as in a file, and removed by the move
+    old_env = os.path.join(dl.BASE, ".env"); assert os.path.abspath(old_env) != os.path.abspath(env_path)
+    open(old_env, "a").write("OPENALEX_API_KEY=oa-old-line\n")
+    assert "OPENALEX_API_KEY" in ai.config()["keys_in_env"] and sv.sources_state()["where"]["openalex_key"] == ".env file"
+    r = ai.move_keys_to_keychain()
+    assert r["moved"] == ["ELSEVIER_INSTTOKEN", "OPENALEX_API_KEY"], r
+    assert "ELSEVIER_INSTTOKEN" not in open(env_path).read() and keychain.get("ELSEVIER_INSTTOKEN") == "tok-in-file-1" and ai.config()["keys_in_env"] == []
+    assert "OPENALEX_API_KEY" not in open(old_env).read() and keychain.get("OPENALEX_API_KEY") == "oa-key-123", "the old line goes; the newer key in the Keychain is kept"
+    sv.sources_save({"openalex_key": "oa-key-124"}); open(old_env, "a").write("OPENALEX_API_KEY=oa-old-again\n")
+    sv.sources_save({"openalex_key": "oa-key-125"}); assert "OPENALEX_API_KEY" not in open(old_env).read() and keychain.get("OPENALEX_API_KEY") == "oa-key-125"
+    os.environ.pop("ELSEVIER_API_KEY", None)
+    assert dl.load_env()["ELSEVIER_INSTTOKEN"] == "tok-in-file-1" and dl.load_env()["ELSEVIER_API_KEY"] == "els-key-456"
+    # removing a key removes it from the Keychain too
+    sv.sources_save({"openalex_key": ""}); assert keychain.get("OPENALEX_API_KEY") == "" and not sv.sources_state()["openalex_key"]
+    # a key the Keychain helper cannot take safely goes into the file, as before
+    sv.sources_save({"elsevier_key": "els$dollar"}); assert "ELSEVIER_API_KEY=els$dollar" in open(env_path).read()
+else:
+    assert "OPENALEX_API_KEY=oa-key-123" in txt and "ELSEVIER_API_KEY=els-key-456" in txt and st["keychain"] is False, txt
+print("OK")
+''' % HERE
+        try:
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "JW_NO_KEYCHAIN", "JW_KEYCHAIN", "OPENALEX_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INSTTOKEN")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_FAKE_KEYCHAIN=fake, JW_EXPECT_KC="1"), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+            home2 = tempfile.mkdtemp(prefix="jw-home-")
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home2, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=120)
+            shutil.rmtree(home2, ignore_errors=True)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True); shutil.rmtree(os.path.dirname(fake), ignore_errors=True)
+    check("keys: the OpenAlex and Elsevier keys go to this Mac's Keychain (not the synced .env file), one in the file is moved with the AI keys, OpenAlex reads it from there, the Unpaywall email stays in the file; no Keychain = as before", t_source_keys_keychain)
 
     def t_real_keychain():
         """The real macOS `security` tool, in a temporary keychain: the key goes in on standard input, comes back, is replaced, and is deleted."""
@@ -3888,7 +4179,7 @@ print("OK")
             log.append(("sum", p["id"], t[0])); tick(1)
             return "summary"
         pl_.dl.download_paper, pl_.dl.open_browser, pl_.summarize, pl_.NOTIFY = fake_dl, _Br, fake_sum, (lambda title, text: notes.append(text))
-        def go(papers, press_at=None, again=0, fail_open=(), stop=None, checks=True, press_t=None, gated=("elsevier",), open_mode=None, stop_in=None, raise_in=None):
+        def go(papers, press_at=None, again=0, fail_open=(), stop=None, checks=True, press_t=None, gated=("elsevier",), open_mode=None, stop_in=None, raise_in=None, **kw):
             si.save_profile({"pace": "careful"}); log.clear(); notes.clear(); events.clear(); t[0] = 0.0
             S.update(again=again, fail_open=set(fail_open), press_at=dict(press_at or {}), q=queue_mod.Queue() if checks else None, press_t=press_t, gated=set(gated),
                      open_mode=open_mode, stop_in=stop_in, raise_in=raise_in, ev=stop if stop is not None else threading.Event())
@@ -3897,7 +4188,7 @@ print("OK")
             for pid, pub in papers:
                 run.add_paper({"id": pid, "doi": "10.1/ask%s" % pid, "title": pid, "verdict": "download", "publisher": pub, "abbr": "X", "journal": "J"})
             S["run"] = run
-            pl_.download_and_summarize(run, [pid for pid, _ in papers], lambda ev, d: events.append((ev, d)), stop or threading.Event(), sleep=sleep, clock=clock, checks=S["q"])
+            pl_.download_and_summarize(run, [pid for pid, _ in papers], lambda ev, d: events.append((ev, d)), stop or threading.Event(), sleep=sleep, clock=clock, checks=S["q"], **kw)
             return run
         st = lambda run, i: run.papers[i].get("dl_status")
         chs = lambda: [d["state"] for ev, d in events if ev == "challenge"]
@@ -3930,9 +4221,23 @@ print("OK")
             run = go([("E1", "elsevier"), ("E2", "elsevier"), ("W1", "wiley")])
             assert _Br.last.opened == [] and dls() == ["E1", "W1"], (log, _Br.last.opened)
             assert st(run, "W1") == "ok" and st(run, "E1") == st(run, "E2") == "needs_check" and "press Download again" in run.papers["E2"]["dl_note"], {i: run.papers[i].get("dl_note") for i in run.papers}
+            k_pend = next(n for n, (ev, d) in enumerate(events) if ev == "challenge" and d["state"] == "pending")
+            k_w1 = next(n for n, (ev, d) in enumerate(events) if ev == "download" and d["id"] == "W1" and d["dl_status"] == "ok")
+            assert k_w1 < k_pend and len(notes) == 1, (k_w1, k_pend, notes)        # told once another paper got its answer (before that, the end of the batch might have opened it by itself)
             # 3) nothing else to download (a retry of papers that need a check): the check opens at once, its window staying for the site's papers
             run = go([("E1", "elsevier"), ("E2", "elsevier")])
             assert len(_Br.last.opened) == 1 and _Br.last.opened[0][:2] == (SD, True) and st(run, "E1") == st(run, "E2") == "ok", (_Br.last.opened, log)
+            assert notes == [] and "pending" not in chs(), (notes, chs())             # ...and the user is not first told to press "Open the check" (no banner, no notification)
+            # 3b) the same batch where checks must not open by themselves (the weekly check's followed authors): told at once, nothing opens, they need a check
+            run = go([("E1", "elsevier"), ("E2", "elsevier")], auto_open=False)
+            assert _Br.last.opened == [] and notes == [] and "pending" not in chs() and st(run, "E1") == st(run, "E2") == "needs_check", (_Br.last.opened, notes, chs())   # (nothing left that could wait for a press: nobody is told to press a button)
+            run = go([("E1", "elsevier"), ("W1", "wiley")], auto_open=False)
+            k_pend = next((n for n, (ev, d) in enumerate(events) if ev == "challenge" and d["state"] == "pending"), None)
+            k_w1 = next(n for n, (ev, d) in enumerate(events) if ev == "download" and d["id"] == "W1" and d["dl_status"] == "downloading")
+            assert _Br.last.opened == [] and len(notes) == 1 and k_pend is not None and k_pend < k_w1, (notes, k_pend, k_w1)     # ...but told as soon as another site's paper starts
+            # 3c) download only: no summary is asked for (neither during a pace wait nor at the end)
+            run = go([("W1", "wiley"), ("W2", "wiley"), ("W3", "wiley")], summarize=False)
+            assert st(run, "W1") == st(run, "W3") == "ok" and not [x for x in log if x[0] == "sum"], log
             # 4) the site asks again after a pass: one more nudge (nothing opens by itself), the second press keeps its window for the rest; then no third nudge
             run = go([("E1", "elsevier"), ("E2", "elsevier"), ("W1", "wiley"), ("W2", "wiley"), ("W3", "wiley")], press_at={"W1": SD, "W2": SD}, again=1)
             br = _Br.last
@@ -3979,8 +4284,10 @@ print("OK")
             # 13) the app quit while papers waited: a run opened later says they need a check (not "press Open the check")
             run = pl_.Run("picks", {"label": "quit"})
             run.add_paper({"id": "Q1", "doi": "10.1/q1", "title": "Q1", "verdict": "download", "publisher": "elsevier", "abbr": "X", "journal": "J", "dl_status": "needs_check", "dl_note": pl_.WAITING_NOTE})
+            run.add_paper({"id": "Q2", "doi": "10.1/q2", "title": "Q2", "verdict": "download", "publisher": "elsevier", "abbr": "X", "journal": "J", "dl_status": "needs_check",
+                           "dl_note": "waiting for you: press “Open the check” at the top of the page"})                 # (the note of version 1.2.6)
             run.save(force=True)
-            assert "press Download again" in pl_.Run.load(run.id).papers["Q1"]["dl_note"]
+            assert "press Download again" in pl_.Run.load(run.id).papers["Q1"]["dl_note"] and "press Download again" in pl_.Run.load(run.id).papers["Q2"]["dl_note"]
             # 6) without a checks queue (the command line), ask mode is off and nothing is set aside
             go([("W1", "wiley")], checks=False)
             assert _Br.last.ask is False
@@ -4016,6 +4323,13 @@ print("OK")
                     self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
                 if path == "/pdf2":
                     self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Length", str(len(PDF))); self.end_headers(); self.wfile.write(PDF); return
+                if path == "/article":                                      # a web page saved as a PDF (HBR, ACM's full text), behind a check
+                    if state["passed"]:
+                        body = ("<html><body><article>" + "".join("<p>Paragraph %d on platform pricing, entry and governance in two-sided markets.</p>" % i for i in range(1500)) + "</article></body></html>").encode()
+                    else:                                                   # (polls slowly enough for the page to go quiet, and reloads itself once passed)
+                        body = (b"<html><head><title>Just a moment...</title></head><body><p>Checking your browser</p><input type=checkbox onclick=\"fetch('/clicked')\">"
+                                b"<script>setInterval(() => fetch('/passed').then(r => r.text()).then(t => { if (t === '1') location.reload(); }), 1500)</script></body></html>")
+                    self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
                 if path == "/passed":
                     body = b"1" if state["passed"] else b"0"
                     self.send_response(200); self.send_header("Content-Type", "text/plain"); self.send_header("Content-Length", "1"); self.end_headers(); self.wfile.write(body); return
@@ -4076,6 +4390,39 @@ print("OK")
                 b.stop = threading.Event(); b.stop.set()
                 d, n = b.fetch_pdf(base + "/slow", wait_s=8)                                            # Stop does not cut short an ordinary page load (it would read as a paywall)
                 assert d and d.startswith(b"%PDF"), n
+            # a web page saved as a PDF (HBR): its check is noted too, and "Open the check" waits for the tick, then saves that page (it has no PDF link)
+            brw.PROFILE = os.path.join(TMP, "ask-profile-4"); state["passed"] = False
+            with brw.Browser(ask=True, on_challenge=lambda h, s: said.append((h, s))) as b:
+                n_rec = len(rec)
+                d, n = b.page_to_pdf(base + "/article")
+                assert d is None and n.startswith("challenge:") and said[-1] == (host, "pending") and b.pending.get(host, ("",))[0] == base + "/article" and True not in rec[n_rec:], (n, said[-2:], b.pending, rec[n_rec:])
+                threading.Timer(3, lambda: state.update(passed=True)).start()
+                assert b.open_check(host) is True and said[-1] == (host, "passed") and True in rec[n_rec:] and rec[-1] is False, (said[-3:], rec[n_rec:])     # a window, then the page saved in the background
+                hits = state["hits"]["/article"]
+                d, n = b.page_to_pdf(base + "/article")
+                assert d and d.startswith(b"%PDF") and n == "page saved as PDF" and state["hits"]["/article"] == hits, (n, state["hits"])     # the copy the check got: not asked twice
+            # ACM: its PDF address is asked first; a check met there stays the one to open (the full-text page met next does not replace it or ask a second time)
+            brw.PROFILE = os.path.join(TMP, "ask-profile-5"); state["passed"] = False
+            with brw.Browser(ask=True, on_challenge=lambda h, s: said.append((h, s))) as b:
+                b.fetch_pdf(base + "/gate", wait_s=4, own=True); n_said = len(said)
+                d, n = b.page_to_pdf(base + "/article", min_chars=12000)
+                assert d is None and n.startswith("challenge:") and b.pending[host][0] == base + "/gate" and len(said) == n_said and not b._page_checks, (b.pending, said[n_said:])
+            # the second "Open the check" keeps the window for the site: a web page saved as a PDF waits there for the tick too (it is not noted again, nor given up)
+            brw.PROFILE = os.path.join(TMP, "ask-profile-7"); state["passed"] = False
+            with brw.Browser(ask=True, on_challenge=lambda h, s: said.append((h, s))) as b:
+                b.page_to_pdf(base + "/article")
+                threading.Timer(3, lambda: state.update(passed=True)).start()
+                assert b.open_check(host, stay=True) is True and host in b.checked_hosts
+                b.page_to_pdf(base + "/article")                                                      # (the copy the check got)
+                state["passed"] = False; n_said = len(said); n_rec = len(rec)
+                threading.Timer(3, lambda: state.update(passed=True)).start()                         # the site asks again: the user ticks it in the window
+                d, n = b.page_to_pdf(base + "/article")
+                assert d and d.startswith(b"%PDF") and host not in b.pending and True in rec[n_rec:] and (host, "pending") not in said[n_said:], (n, said[n_said:], rec[n_rec:])
+            # without ask mode (or with checks switched off) nothing is noted, as before
+            brw.PROFILE = os.path.join(TMP, "ask-profile-6"); state["passed"] = False
+            with brw.Browser(ask=True, interactive=False) as b:
+                d, n = b.page_to_pdf(base + "/article")
+                assert d is None and n.startswith("challenge:") and not b.pending, b.pending
             assert "/clicked" not in state["hits"], state["hits"]                                      # the app never ticks the box
         finally:
             brw.Browser._launch = orig
@@ -4274,6 +4621,9 @@ print("OK")
                                "<a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1&type=2'>Open PDF in Browser</a></div>"
                                "<div class='related-papers'><a href='/sol3/Delivery.cfm?abstractid=9999999&mirid=1'>Download</a></div>")
         PAGES["/ssrn-real-other"] = "<h1>A paper</h1><div><a href='/sol3/Delivery.cfm?abstractid=9999999&mirid=1'>Download This Paper</a></div>"
+        PAGES["/sol3/papers.cfm"] = ("<meta name='citation_pdf_url' content='/sol3/Delivery.cfm?abstractid=4723385'>"                        # SSRN's paper page as it is (Nov 2026): a citation_pdf_url
+                                     "<h1>A paper</h1><div class='abstract-buttons'><a href='Delivery.cfm?abstractid=4723385&mirid=1' class='button-link primary'>Download This Paper</a>"   # without &mirid=1,
+                                     "<a href='Delivery.cfm?abstractid=4723385&mirid=1&type=2'>Open PDF in Browser</a></div>")                                                    # and the buttons
         PAGES["/ssrn-banner"] = "<h1>A paper</h1><div class='top-banner'><a href='/sol3/Delivery.cfm?abstractid=4723385&mirid=1'>Download This Paper</a></div>"
         SSRN_PDF = b"%PDF-1.4\n" + b"0" * 50_000 + b"\n%%EOF\n"
         delivered = []
@@ -4284,8 +4634,10 @@ print("OK")
             def log_message(self, *a): pass
             def do_GET(self):
                 path = self.path.split("?")[0]
-                if path == "/sol3/Delivery.cfm":                                   # SSRN sends the PDF as a download
-                    delivered.append(self.path)
+                if path == "/sol3/Delivery.cfm":                                   # SSRN sends the PDF as a download: from its button (&mirid=1), clicked on a page of the site;
+                    delivered.append((self.path, self.headers.get("Referer") or ""))  # anything else is sent back to the paper page
+                    if "mirid=1" not in self.path or not (self.headers.get("Referer") or "").startswith(base3):
+                        self.send_response(302); self.send_header("Location", "/sol3/papers.cfm?abstract_id=4723385"); self.end_headers(); return
                     self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Disposition", 'attachment; filename="SSRN-id4723385.pdf"')
                     self.send_header("Content-Length", str(len(SSRN_PDF))); self.end_headers(); self.wfile.write(SSRN_PDF); return
                 if path in REDIRECTS:
@@ -4370,7 +4722,14 @@ print("OK")
             try:
                 with brw.Browser(interactive=False) as b_:
                     d_, n_ = b_.fetch_pdf(base3 + "/ssrn-real", wait_s=10, doi="10.2139/ssrn.4723385")
-                assert d_ == SSRN_PDF and n_ == "browser" and delivered and "abstractid=4723385" in delivered[0], (n_, delivered)                  # the paper's page, its button, the PDF
+                assert d_ == SSRN_PDF and n_ == "browser" and delivered and "abstractid=4723385" in delivered[0][0], (n_, delivered)               # the paper's page, its button, the PDF
+                brw.PROFILE = os.path.join(TMP, "ssrn-profile-2"); delivered.clear()
+                with brw.Browser(interactive=False) as b_:
+                    pg_ = b_.ctx.new_page(); pg_.goto(base3 + "/sol3/papers.cfm?abstract_id=4723385")
+                    btn_ = brw.Browser._pdf_link(pg_, base3 + "/sol3/papers.cfm?abstract_id=4723385", "10.2139/ssrn.4723385"); pg_.close()
+                    d_, n_ = b_.fetch_pdf(base3 + "/sol3/papers.cfm?abstract_id=4723385", wait_s=10, doi="10.2139/ssrn.4723385")
+                assert btn_ and btn_.endswith("/sol3/Delivery.cfm?abstractid=4723385&mirid=1"), btn_                                                # the button, not the citation_pdf_url
+                assert d_ == SSRN_PDF and delivered and "mirid=1" in delivered[0][0] and "/sol3/papers.cfm" in delivered[0][1], (n_, delivered)   # followed from the paper page: the PDF
             finally:
                 brw.PROFILE = prof_
             brw.library = lambda: {"signs_in": True, "home": "http://127.0.0.1:1/x", "mode": "openathens", "name": "T"}
@@ -4633,6 +4992,156 @@ print("OK")
             srv_.shutdown()
     check("author search: the name is sent as OpenAlex reads it, the candidates say who they are, every page of works (or 'incomplete'), journal/conference/working papers kept and a working paper only without its published version, each paper's route without a Crossref call, papers in the library or deleted not downloaded, the author's folder found again and never another's", t_authors)
 
+    def t_follow():
+        """Following an author (authors.py, pipeline.follow_list / follow_settle) against a local fake OpenAlex: the record is a union of works dealt with; the weekly
+        check adds only works not dealt with, marks a feed paper of the same work for download in place (no second copy) and keeps the feed from adding it again;
+        works that are not a kind that is downloaded, already in the library or deleted are dealt with at once; only works that came are dealt with after the
+        downloads (the others are tried next week); a merged OpenAlex id is followed to the new one; a follow with no record yet is set up silently; a deleted
+        folder pauses it; nothing about following is kept on the run."""
+        import copy, authors as au, fetch_new as fx_, folders as fo_, pipeline as pl_
+        asked = []
+        WORKS, MERGED = {}, {}
+        def W(i, title, doi=None, src=None, typ="article"):
+            return {"id": "https://openalex.org/W%d" % i, "doi": ("https://doi.org/" + doi) if doi else None, "display_name": title, "publication_date": "2026-10-01",
+                    "publication_year": 2026, "type": typ, "primary_location": {"source": src, "landing_page_url": "https://example.org/w%d" % i},
+                    "best_oa_location": {}, "authorships": [{"author": {"display_name": "Ann Lee"}}]}
+        class OA(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                asked.append(self.path)
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                m = re.match(r"/authors/(A\d+)\?select=id", self.path)
+                if m:
+                    to = MERGED.get(m.group(1))
+                    if to in (404, 500):
+                        self.send_response(to); self.end_headers(); return
+                    body = json.dumps({"id": "https://openalex.org/" + (to or m.group(1))}).encode()
+                elif self.path.startswith("/works?"):
+                    ids = re.match(r"author\.id:([A0-9|]+)", q["filter"][0]).group(1).split("|")
+                    data = [w for i in ids for w in WORKS.get(i, [])]
+                    body = json.dumps({"meta": {"count": len(data), "next_cursor": None}, "results": data}).encode()
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        srv_ = ThreadingHTTPServer(("127.0.0.1", 0), OA); threading.Thread(target=srv_.serve_forever, daemon=True).start()
+        old_url = os.environ.get("JW_OPENALEX_URL"); os.environ["JW_OPENALEX_URL"] = "http://127.0.0.1:%d/" % srv_.server_address[1]
+        saved_key = fx_.openalex_key; fx_.openalex_key = lambda: None
+        store_ = os.path.join(dl.PAPERS, "_authors.json"); seen_p = os.path.join(pl_.STATE, "seen.json"); idx_ = os.path.join(dl.PAPERS, "_index.csv")
+        saved_files = {p_: (open(p_, encoding="utf-8").read() if os.path.exists(p_) else None) for p_ in (store_, seen_p, idx_)}
+        made = []
+        events = []
+        emit = lambda ev, d=None: events.append((ev, d))     # noqa: E731
+        try:
+            fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            if os.path.exists(store_):
+                os.remove(store_)
+            j = next(x for x in pl_.journals() if x.get("issn"))
+            J = {"display_name": j["name"], "type": "journal", "issn": [j["issn"]]}
+            O = {"display_name": "Other Journal", "type": "journal", "issn": ["9999-0001"]}
+            fid, _ = au.folder_for(["A5000000111"], "Ann Lee", "MIT"); made.append(fid)
+            # --- the record: follow on, a union of works dealt with, read fresh every time
+            assert au.set_follow(fid, True)["follow"] is True and [r["folder"] for r in au.followed()] == [fid]
+            au.follow_mark(fid, ["W1", "https://openalex.org/W2"]); au.follow_mark(fid, ["W3"])
+            assert au.followed()[0]["follow_known"] == ["W1", "W2", "W3"], au.followed()[0]
+            d_ = json.load(open(store_)); d_["authors"][0]["follow_known"] = ["W0"]; json.dump(d_, open(store_, "w"))      # (changed on another computer)
+            assert au.followed()[0]["follow_known"] == ["W0"]
+            # --- the weekly check: a feed paper of a followed work is the same paper; new ones are added; the rest are dealt with
+            pdf_ = os.path.join(dl.PAPERS, "2026-10", "FW", "have.pdf"); os.makedirs(os.path.dirname(pdf_), exist_ok=True); open(pdf_, "wb").write(b"%PDF")
+            dl.save_index({"doi": "10.7/have", "title": "Already Have It"}, os.path.relpath(pdf_, dl.ROOT), "ok")
+            dl.save_index({"doi": "10.7/gone", "title": "You Deleted It"}, "", "deleted")
+            WORKS["A5000000111"] = [W(0, "Old Known Work", "10.7/old", O), W(1, "First Followed Paper", "10.7/a", J), W(2, "Second Followed Paper", "10.7/b", O),
+                                    W(3, "Third Followed Paper", None, J), W(5, "A Whole Book", "10.7/book", O, typ="book"),
+                                    W(6, "First followed paper", "10.2139/ssrn.777", {"display_name": "SSRN", "type": "repository"}, typ="preprint"),
+                                    W(7, "Already Have It", "10.7/have", O), W(8, "You Deleted It", "10.7/gone", O)]
+            run = pl_.Run("weekly", {"topics": [], "query": ""})
+            run.add_paper({"id": "doi:10.7/a", "doi": "10.7/a", "title": "First Followed Paper", "abbr": j["abbr"], "journal": j["name"], "pub_date": "2026-10-01"})
+            run.add_paper({"id": "doi:10.7/c", "doi": "10.7/c", "title": "Third Followed Paper", "abbr": j["abbr"], "journal": j["name"], "pub_date": "2026-10-01"})   # (OpenAlex has no DOI for it)
+            params0 = copy.deepcopy(run.params)
+            todo = pl_.follow_list(run, emit, threading.Event())
+            assert sorted(todo) == ["doi:10.7/a", "doi:10.7/b", "doi:10.7/c"], todo
+            assert len(run.papers) == 3 and run.papers["doi:10.7/a"]["verdict"] == "download" and run.papers["doi:10.7/a"]["folder"] == fid and run.papers["doi:10.7/a"]["openalex"] == "W1"
+            assert run.papers["doi:10.7/c"]["verdict"] == "download" and run.papers["doi:10.7/c"]["openalex"] == "W3", run.papers["doi:10.7/c"]                # the same work by its title
+            assert run.papers["doi:10.7/b"]["reason"].startswith("followed author · ") and run.papers["doi:10.7/b"]["folder"] == fid
+            assert any(ev == "verdict" and d["id"] == "doi:10.7/a" for ev, d in events) and any(ev == "paper" and d["id"] == "doi:10.7/b" for ev, d in events)
+            known = set(au.followed()[0]["follow_known"])
+            assert {"W0", "W5", "W6", "W7", "W8"} <= known and not known & {"W1", "W2", "W3"}, known       # the book, the preprint, the one you have, the one you deleted: dealt with
+            assert dl.index_key({"doi": "10.7/have"}) in fo_.get(fid)["papers"], fo_.get(fid)
+            seen = json.load(open(seen_p))
+            for k_ in ("doi:10.7/a", "doi:10.7/b", fx_.key_for(None, j["name"], "Third Followed Paper"), fx_.key_for(None, "Other Journal", "Second Followed Paper")):
+                assert k_ in seen and seen[k_].get("follow"), (k_, list(seen)[:8])                         # the feeds will not add them again
+            # --- after the downloads: only what came is dealt with; the rest comes back next week
+            run.papers["doi:10.7/a"]["dl_status"] = "ok"; run.papers["doi:10.7/b"]["dl_status"] = "needs_check"; run.papers["doi:10.7/c"]["dl_status"] = "deleted"
+            assert pl_.follow_settle(run, todo) == (2, 1)
+            known = set(au.followed()[0]["follow_known"])
+            assert {"W1", "W3"} <= known and "W2" not in known, known
+            WORKS["A5000000111"].append(W(60, "First Followed Paper", "10.2139/ssrn.888", {"display_name": "SSRN", "type": "repository"}, typ="preprint"))   # a new preprint of a paper you have
+            run2 = pl_.Run("weekly", {"topics": [], "query": ""})
+            assert pl_.follow_list(run2, emit, threading.Event()) == ["doi:10.7/b"], list(run2.papers)
+            assert "W60" in au.followed()[0]["follow_known"], "a new working paper whose published version is listed is not downloaded"
+            # --- nothing about following is kept on the run
+            assert run.params == params0 and not any(k_.startswith("follow") for k_ in run.to_dict()) and not any(k_.startswith("follow") for k_ in vars(run))
+            # --- an id that OpenAlex merged into another: followed to the new one
+            fid2, _ = au.folder_for(["A5000000333"], "Bo Chen", ""); made.append(fid2); au.set_follow(fid2, True); au.follow_mark(fid2, ["W90"])
+            MERGED["A5000000333"] = "A5000000444"; WORKS["A5000000444"] = [W(91, "Bo New One", "10.8/1", O), W(92, "Bo New Two", "10.8/2", O)]
+            au.set_follow(fid, False)
+            run3 = pl_.Run("weekly", {"topics": [], "query": ""}); n_ask = len(asked)
+            t3 = pl_.follow_list(run3, emit, threading.Event())
+            rec2 = next(r for r in au.followed() if r["folder"] == fid2)
+            assert rec2["ids"] == ["A5000000333", "A5000000444"] and sorted(t3) == ["doi:10.8/1", "doi:10.8/2"], (rec2, t3)
+            assert not any("A5000000111" in a_ for a_ in asked[n_ask:]), "an author not followed any more is not asked about"
+            # ...and when OpenAlex does not know the old id at all: a note on the Authors tab, nothing marked; when it does not answer: no note
+            fid3, _ = au.folder_for(["A5000000555"], "Cy Doe", ""); made.append(fid3); au.set_follow(fid3, True); au.follow_mark(fid3, ["W95"]); au.set_follow(fid2, False)
+            MERGED["A5000000555"] = 500; events.clear()
+            pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event())
+            rec3 = next(r for r in au.followed() if r["folder"] == fid3)
+            assert not rec3.get("follow_warn") and rec3["follow_known"] == ["W95"] and any("did not answer" in d["msg"] for ev, d in events if ev == "log"), rec3
+            MERGED["A5000000555"] = 404; events.clear()
+            pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event())
+            rec3 = next(r for r in au.followed() if r["folder"] == fid3)
+            assert "no works" in rec3["follow_warn"] and rec3["follow_known"] == ["W95"] and any(d.get("level") == "warn" for ev, d in events if ev == "log"), rec3
+            WORKS["A5000000555"] = [W(96, "Cy Back Again", "10.9/1", O)]
+            pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event())
+            assert not next(r for r in au.followed() if r["folder"] == fid3)["follow_warn"], "a listing that works clears the note"
+            # --- followed with no record of what was dealt with (another computer, an older record): set up silently, nothing downloaded
+            fid4, _ = au.folder_for(["A5000000666"], "Di Ng", ""); made.append(fid4); au.set_follow(fid4, True); au.set_follow(fid3, False)
+            WORKS["A5000000666"] = [W(97, "Di One", "10.10/1", O), W(98, "Di Two", "10.10/2", O)]
+            r5 = pl_.Run("weekly", {"topics": [], "query": ""})
+            assert pl_.follow_list(r5, emit, threading.Event()) == [] and not r5.papers and next(r for r in au.followed() if r["folder"] == fid4)["follow_known"] == ["W97", "W98"]
+            # --- the folder was deleted: following pauses, OpenAlex is not asked
+            fo_.delete(fid4); n_ask = len(asked)
+            assert pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event()) == [] and len(asked) == n_ask
+            rec4 = json.load(open(store_))["authors"][-1]
+            assert "folder was deleted" in rec4["follow_warn"] and rec4["follow"] is False, rec4                        # paused for real
+            assert [a_["name"] for a_ in au.saved()] == ["Ann Lee", "Bo Chen", "Cy Doe", "Di Ng"] and au.saved()[0]["follow"] is False and au.saved()[0]["known"] >= 7
+            assert au.saved()[3]["folder_name"] == "" and "folder was deleted" in au.saved()[3]["follow_warn"], au.saved()[3]   # (listed with its note, so it can be followed again)
+            # --- a work of two authors you follow: one paper, downloaded once, filed into both folders
+            fid5, _ = au.folder_for(["A5000000777"], "Ed Co", ""); fid6, _ = au.folder_for(["A5000000888"], "Flo Co", ""); made.extend([fid5, fid6])
+            for x_ in (fid5, fid6):
+                au.set_follow(x_, True); au.follow_mark(x_, ["W1"])
+            for x_ in (fid2, fid3):
+                au.set_follow(x_, False)
+            WORKS["A5000000777"] = [W(70, "A Joint Paper", "10.11/joint", O)]; WORKS["A5000000888"] = [W(70, "A Joint Paper", "10.11/joint", O)]
+            r6 = pl_.Run("weekly", {"topics": [], "query": ""})
+            t6 = pl_.follow_list(r6, emit, threading.Event())
+            assert t6 == ["doi:10.11/joint"] and r6.papers["doi:10.11/joint"]["summary_by_hand"] is True and pl_.slim(r6.papers["doi:10.11/joint"])["summary_by_hand"] is True, t6
+            r6.papers["doi:10.11/joint"]["dl_status"] = "ok"
+            pl_.follow_settle(r6, t6)
+            assert all("W70" in next(r for r in au.followed() if r["folder"] == x_)["follow_known"] for x_ in (fid5, fid6))
+            assert r6.papers["doi:10.11/joint"]["folder"] == fid5 and dl.index_key({"doi": "10.11/joint"}) in (fo_.get(fid6)["papers"] or []), [fo_.get(x_)["papers"] for x_ in (fid5, fid6)]   # (the first author's folder gets it when it is downloaded; the second's here)
+        finally:
+            fx_.openalex_key = saved_key; fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            os.environ.pop("JW_OPENALEX_URL", None) if old_url is None else os.environ.__setitem__("JW_OPENALEX_URL", old_url)
+            srv_.shutdown()
+            for x in made:
+                if fo_.get(x):
+                    fo_.delete(x)
+            for p_, txt in saved_files.items():
+                if txt is None:
+                    os.path.exists(p_) and os.remove(p_)
+                else:
+                    open(p_, "w", encoding="utf-8").write(txt)
+    check("following an author: a union of works dealt with; the weekly check adds only works not dealt with (a feed paper of the same work is marked for download, not copied; the feeds do not add it again), deals at once with what is not downloaded, in the library or deleted; only works that came are dealt with afterwards; a merged id is followed; set up silently with no record; a deleted folder pauses it; nothing on the run", t_follow)
+
     def t_author_downloads():
         """An author run: the run's name and file; a downloaded paper, or one already on disk, goes into the author's folder; and papers from publishers the app has
         no route for are spaced out and set aside per site (their DOI prefix), so one site's human check does not hold up another's papers."""
@@ -4784,7 +5293,7 @@ print("OK")
         import pipeline as pl_
         abbr = pl_.journals()[0]["abbr"]
         hit = [{"term": "DiD", "field": "abstract", "text": "DiD"}]
-        def fake_batch(system, batch, usage):
+        def fake_batch(system, batch, usage, override=None):
             return {n: {"n": n, "verdict": ["download", "borderline", "skip"][n % 3], "relevance": 10 * n, "topics": [], "reason": "r%d" % n, "method": "Econometrics (DiD)"}
                     for n, _ in enumerate(batch, 1)}
         def arts(with_hits):
@@ -4844,7 +5353,7 @@ print("OK")
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
         asked, fetched, events = [], [], []
-        def fake_batch(system, batch, usage):
+        def fake_batch(system, batch, usage, override=None):
             asked.extend(p["title"] for p in batch)
             return {n: {"n": n, "verdict": "download" if "Platform" in p["title"] else "skip", "relevance": 80, "topics": [topic], "reason": "because", "method": None} for n, p in enumerate(batch, 1)}
         real = (pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts)
@@ -4884,7 +5393,7 @@ print("OK")
             asked.clear(); r6 = run_with(); pl_.screen(r6, emit, stop)                           # older than the number of days: asked again, and remembered afresh
             assert len(asked) == 3 and r6.reused == 0
             asked.clear(); r7 = run_with(); pl_.screen(r7, emit, stop); assert not asked and r7.reused == 3
-            pl_._screen_batch = lambda system, batch, usage: {}                                  # a failure is an error verdict and is never remembered
+            pl_._screen_batch = lambda system, batch, usage, override=None: {}                                  # a failure is an error verdict and is never remembered
             asked.clear(); r8 = run_with(query="fails"); pl_.screen(r8, emit, stop)
             assert {r8.papers[i]["verdict"] for i in r8.papers} == {"error"}
             pl_._screen_batch = fake_batch
@@ -5183,10 +5692,83 @@ print("OK")
             assert any(e == "log" and d.get("level") == "warn" and "5 papers not screened" in d["msg"] and "Retry screening" in d["msg"] for e, d in events), events[-2:]
             assert len(ai.usage_log(100000)) == rows0                                                                       # a refused request costs nothing and is not in the ledger
             r.save(force=True); assert pl_.Run.load(r.id).screen_error == r.screen_error and pl_.Run.load(r.id).to_dict(full=False)["screen_error"] == r.screen_error
+            assert r.screen_backup == {} and {c["model"] for c in chat_calls()[n0:]} == {"m1"}, "a provider with no model list: no backup is tried"
             # 2. a key the provider refuses: the same, at once
             Fake.http_error = lambda body: (401, "User not found.") if body.get("response_format") else None
             n0 = len(chat_calls()); r2 = new_run("key"); pl_.screen(r2, emit, stop, batch_size=2, workers=1)
             assert len(chat_calls()) - n0 == 1 and not any(r2.papers[i].get("verdict") for i in r2.order) and "HTTP 401" in r2.screen_error and "structured JSON" not in r2.screen_error, r2.screen_error
+            # 2b. a backup model (OpenRouter, a model that cannot answer in a JSON schema): the rest of the run is screened once more with the cheapest model of the same
+            #     provider that can (from OpenRouter's list), for this run only (the setting is not changed); the run says which, and its verdicts are that model's
+            assert ai.cannot_structure(ai.AIError("scaledown/summarize: response_format is not supported by this model (HTTP 400)", status=400))
+            assert ai.cannot_structure(ai.AIError("No endpoints found that can handle the requested parameters.", status=404))
+            assert not ai.cannot_structure(ai.AIError("response_format is not supported", status=401)) and not ai.cannot_structure(ai.AIError("maximum context length exceeded", status=400))
+            assert not ai.cannot_structure(ai.AIError("output_config.effort: unknown value", status=400)) and not ai.cannot_structure(ai.Blocked("response_format"))
+            import prices as pr_
+            saved_pr = (pr_.CACHE, pr_.OR_URL, os.environ.get("JW_OFFLINE"))
+            pr_.CACHE, pr_.OR_URL = os.path.join(TMP, "or_backup_prices.json"), "http://127.0.0.1:9/api/v1/models"     # (never the real list)
+            os.environ["JW_OFFLINE"] = "1"
+            sd = {"in": 0.04, "out": 0.0, "cache_write": 0.04, "cache_read": 0.04}
+            json.dump({"format": pr_.FORMAT, "fetched": "2026-11-06T00:00:00+00:00", "fetched_ts": pl_.time.time(),
+                       "models": {"scaledown/summarize": sd, "cheap/json": {"in": 0.05, "out": 0.05, "cache_write": 0.05, "cache_read": 0.05, "json": True}}}, open(pr_.CACHE, "w"))
+            pr_._mem["data"] = None
+            orfake = dict(CFG["providers"]["fake"], base_url=CFG["providers"]["fake"]["base_url"].replace("/v1", "/openrouter.ai/v1"))     # (the fake server, at an address that reads as OpenRouter)
+            write_cfg({**CFG, "providers": dict(CFG["providers"], orfake=orfake), "features": {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "orfake", "model": "scaledown/summarize"}}})
+            cfg_text = open(ai.CONFIG).read()
+            no_schema = lambda models: (lambda body: (400, "%s: response_format is not supported by this model" % body["model"]) if body.get("response_format") and body.get("model") in models else None)
+            try:
+                Fake.http_error, Fake.responder = no_schema({"scaledown/summarize"}), verdicts
+                n0, events[:] = len(chat_calls()), []
+                r6 = new_run("backup"); pl_.screen(r6, emit, stop, batch_size=2, workers=1)
+                assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize", "cheap/json", "cheap/json", "cheap/json"], [c["model"] for c in chat_calls()[n0:]]
+                assert all(r6.papers[i]["verdict"] == "download" for i in r6.order) and r6.screen_error == "", (r6.screen_error, [r6.papers[i].get("verdict") for i in r6.order])
+                b6 = r6.screen_backup
+                assert b6["model"] == "cheap/json" and b6["provider"] == "orfake" and b6["instead_of"] == "scaledown/summarize" and b6["within"] is False and "response_format" in b6["why"], b6
+                assert open(ai.CONFIG).read() == cfg_text, "the screening setting is not changed"
+                logs = [d["msg"] for e, d in events if e == "log" and "backup" in d["msg"]]
+                assert len(logs) == 1 and "cheap/json" in logs[0] and "unchanged" in logs[0] and "twice its price" in logs[0], logs
+                r6.save(force=True); assert pl_.Run.load(r6.id).screen_backup == b6 and pl_.Run.load(r6.id).to_dict(full=False)["screen_backup"] == b6
+                system6 = pl_.screening_system(r6.params.get("topics"), r6.params.get("query"), r6.params.get("methods"))
+                vd = json.load(open(pl_.VERDICTS))
+                fp_b, fp_c = pl_.screen_fingerprint(system6, {"provider": "orfake", "model": "cheap/json"}), pl_.screen_fingerprint(system6)
+                assert set(r6.order) <= set(vd.get(fp_b) or {}) and not set(r6.order) & set(vd.get(fp_c) or {}), "the verdicts are the backup's, not the chosen model's"
+                # the chosen model works again: new papers are screened by it, and the run no longer names a backup
+                Fake.http_error = None
+                for k in (7, 8):
+                    r6.add_paper({"id": "backup-%d" % k, "title": "Paper %d about platforms" % k, "abbr": abbr, "pub_date": "2026-09-01", "abstract": "About platforms.", "keywords": ["x"]})
+                n0 = len(chat_calls()); pl_.screen(r6, emit, stop, batch_size=2, workers=1)
+                assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize"] and r6.screen_backup == {}, ([c["model"] for c in chat_calls()[n0:]], r6.screen_backup)
+                # four batches on their way at once: those already sent finish, then the rest goes to the backup; said once
+                Fake.http_error = no_schema({"scaledown/summarize"})
+                n0, events[:] = len(chat_calls()), []
+                r7 = new_run("backup4", n=6); pl_.screen(r7, emit, stop, batch_size=1, workers=4)
+                ms = [c["model"] for c in chat_calls()[n0:]]
+                assert 1 <= ms.count("scaledown/summarize") <= 4 and ms.count("cheap/json") == 6 and all(r7.papers[i]["verdict"] == "download" for i in r7.order), ms
+                assert len([1 for e, d in events if e == "log" and "backup" in d["msg"]]) == 1
+                # not for a refused key, nor a request that is too long: those stop as before, no backup
+                for err in ((401, "User not found."), (400, "This model's maximum context length is 8192 tokens.")):
+                    Fake.http_error = (lambda e_: (lambda body: e_ if body.get("response_format") else None))(err)
+                    n0 = len(chat_calls()); r8 = new_run("nobackup%d" % err[0]); pl_.screen(r8, emit, stop, batch_size=2, workers=1)
+                    assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize"] and r8.screen_backup == {} and r8.screen_error and not any(r8.papers[i].get("verdict") for i in r8.order), (err, r8.screen_error)
+                # the backup cannot either: one request to each, never a third model; the papers wait unscreened and the reason names both
+                Fake.http_error = no_schema({"scaledown/summarize", "cheap/json"})
+                n0 = len(chat_calls()); r9 = new_run("both"); pl_.screen(r9, emit, stop, batch_size=2, workers=1)
+                assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize", "cheap/json"], [c["model"] for c in chat_calls()[n0:]]
+                assert not any(r9.papers[i].get("verdict") for i in r9.order) and r9.screen_backup == {} and "scaledown/summarize" in r9.screen_error and "cheap/json" in r9.screen_error, r9.screen_error
+                # a backup that answers but never with verdicts (prose): its papers fail, and the run does not say it was screened by it
+                Fake.http_error = no_schema({"scaledown/summarize"}); Fake.responder = lambda body: ["Just a summary of the papers."]
+                r11 = new_run("backupfails", n=2); pl_.screen(r11, emit, stop, batch_size=2, workers=1)
+                assert r11.screen_backup == {} and {r11.papers[i]["verdict"] for i in r11.order} == {"error"}, (r11.screen_backup, [r11.papers[i].get("verdict") for i in r11.order])
+                Fake.responder = verdicts
+                # no list to choose from (offline, nothing saved): it stops as before and says that no backup could be chosen
+                os.remove(pr_.CACHE); pr_._mem["data"] = None
+                Fake.http_error = no_schema({"scaledown/summarize"})
+                n0 = len(chat_calls()); r10 = new_run("nolist"); pl_.screen(r10, emit, stop, batch_size=2, workers=1)
+                assert len(chat_calls()) - n0 == 1 and "No backup model could be chosen" in r10.screen_error and r10.screen_backup == {}, r10.screen_error
+            finally:
+                pr_.CACHE, pr_.OR_URL = saved_pr[:2]; pr_._mem["data"] = None
+                os.environ.pop("JW_OFFLINE", None) if saved_pr[2] is None else os.environ.__setitem__("JW_OFFLINE", saved_pr[2])
+                Fake.http_error = None; Fake.responder = None
+                write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "fake", "model": "m1"}}})
             # 3. a busy provider every time: each batch is asked three times, then its papers are marked as failed with the provider's words
             Fake.http_error = lambda body: (503, "upstream overloaded") if body.get("response_format") else None
             n0, events[:] = len(chat_calls()), []

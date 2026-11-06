@@ -241,6 +241,7 @@ class Run:
         self.checks = []   # weekly: timestamps of every check merged into this week; a search: every time it was run again
         self.reused = 0    # verdicts taken from earlier screening instead of asked for again (see screen)
         self.screen_error = ""     # why the last screening stopped early (budget, key, a model that cannot screen); "" once one finishes
+        self.screen_backup = {}    # the backup model that screened this run because the chosen one cannot answer in structured JSON (screen); {} when the chosen one did
         self._last_save = 0
 
     def slug(self):
@@ -294,7 +295,7 @@ class Run:
              "week": self.week, "checks": self.checks,
              "updated": max(self.checks) if self.checks else self.created,
              "n_papers": len(self.order), "errors": self.errors[-20:], "jstate": self.jstate,
-             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused, "screen_error": self.screen_error,
+             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused, "screen_error": self.screen_error, "screen_backup": self.screen_backup,
              "n_download": sum(1 for p in self.papers.values() if p.get("verdict") == "download"),
              "n_borderline": sum(1 for p in self.papers.values() if p.get("verdict") == "borderline")}
         if full:
@@ -327,12 +328,13 @@ class Run:
         r.checks = d.get("checks") or ([r.created] if r.kind == "weekly" else [])
         r.reused = int(d.get("reused") or 0)
         r.screen_error = str(d.get("screen_error") or "")
+        r.screen_backup = d.get("screen_backup") if isinstance(d.get("screen_backup"), dict) else {}
         for p in d.get("papers", []):
             if p.get("dl_status") in ("downloading", "summarizing"):
                 # interrupted (dashboard closed mid-download): ready to retry
                 p["dl_status"] = "ok" if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])) else None
                 p["dl_note"] = "interrupted — press Download again"
-            elif p.get("dl_status") == "needs_check" and p.get("dl_note") == WAITING_NOTE:
+            elif p.get("dl_status") == "needs_check" and str(p.get("dl_note") or "").startswith("waiting for you"):     # (this version's note, or an earlier one's)
                 p["dl_note"] = NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), p.get("publisher") or "Its site")     # (the app quit while it waited)
             terms_rule(r, p)                    # a search by terms screened before 1.2.1: its skipped and borderline matches become downloads (the model's word is kept)
             r.add_paper(p)
@@ -466,7 +468,7 @@ def slim(p):
     keys = ("id", "journal", "abbr", "title", "authors", "doi", "url", "pub_date", "abstract",
             "keywords", "publisher", "verdict", "relevance", "topics", "method", "reason", "dl_status",
             "ai_verdict", "user_set", "model_verdict",
-            "dl_note", "file", "summary", "manual_url", "term_hits")
+            "dl_note", "file", "summary", "manual_url", "term_hits", "summary_by_hand")
     return {k: p.get(k) for k in keys}
 
 
@@ -553,6 +555,135 @@ def fetch_weekly(run, emit, stop):
     with open(os.path.join(STATE, "new_papers.json"), "w") as f:
         json.dump(fresh_all, f, indent=1)
     emit("progress", {"stage": "fetching", "label": "Fetched", "done": len(js), "total": len(js)})
+
+
+def follow_list(run, emit, stop):
+    """The weekly check, before the feeds: the new works of every author you follow (Authors tab → Follow) go into this week's run as papers to download, into
+    the author's folder, without screening (you chose the author). Returns the run ids of the papers to download; nothing is downloaded here (follow_download,
+    after the screening). A work the feeds will bring too is the same paper: one already in the run is marked for download in place, and the followed papers'
+    keys go into state/seen.json so a feed read afterwards does not add them again.
+
+    For each author: their full OpenAlex list minus the works already dealt with (authors.follow_known). Those that are not a kind that is downloaded (books,
+    a preprint of a paper whose published version is listed), already in the library (filed into the folder) or deleted by you are dealt with at once; the
+    rest are new. An author followed with no record of what was dealt with yet (followed from another computer, an older record) is set up silently: everything
+    listed now counts as dealt with, and new works start from next week. A folder you deleted pauses following (with a note on the Authors tab)."""
+    import authors
+    import folders as fo
+    recs = authors.followed()
+    if not recs:
+        return []
+    seen_path = os.path.join(STATE, "seen.json")
+    todo, n_new = [], 0
+    for rec in recs:
+        if stop.is_set():
+            break
+        fid, name = rec["folder"], rec.get("name") or "an author"
+        if not fo.get(fid):
+            authors.set_follow(fid, False)                    # (paused for real: tick Follow on the Authors tab to start a new folder)
+            authors.set_follow_warn(fid, "Its folder was deleted, so following is paused. Tick Follow to start a new folder.")
+            emit("log", {"msg": "Followed author %s: the folder was deleted, so following is paused (Authors tab)." % name, "level": "warn"})
+            continue
+        ids = rec.get("ids") or []
+        try:
+            ws, complete, total = authors.works(ids, stop=stop)
+        except authors.AuthorError as e:
+            emit("log", {"msg": "Followed author %s: %s Trying again next week." % (name, e), "level": "warn"})
+            continue
+        if stop.is_set():
+            break
+        if "follow_known" not in rec:
+            authors.follow_mark(fid, [w.get("id") for w in ws], seed=True)
+            emit("log", {"msg": "Following %s is set up: %d works listed now; their new works come from next week." % (name, len(ws))})
+            continue
+        known = {str(k).upper() for k in rec.get("follow_known") or []}
+        if not ws and known:                                  # an id OpenAlex merged into another lists nothing any more: ask OpenAlex which id it is now
+            now = authors.resolve(ids)
+            if now is None or fx.openalex_spent():
+                emit("log", {"msg": "Followed author %s: OpenAlex did not answer; trying again next week." % name, "level": "warn"})
+                continue
+            if set(now) - set(ids):
+                authors.add_ids(fid, now)
+                try:
+                    ws, complete, total = authors.works(now, stop=stop)
+                except authors.AuthorError as e:
+                    emit("log", {"msg": "Followed author %s: %s Trying again next week." % (name, e), "level": "warn"})
+                    continue
+            if not ws:
+                msg = "OpenAlex lists no works for %s any more (the author's record may have been merged or removed). Search for them again and press Follow." % name
+                authors.set_follow_warn(fid, msg)
+                emit("log", {"msg": msg, "level": "warn"})
+                continue
+        kept_all, _ = authors.select(ws)                      # (on the full list: a new preprint of a paper whose published version is listed is still left out)
+        kept = [w for w in kept_all if authors._short(w.get("id")).upper() not in known]
+        kept_ids = {authors._short(w.get("id")).upper() for w in kept}
+        authors.follow_mark(fid, [w.get("id") for w in ws if authors._short(w.get("id")).upper() not in known | kept_ids])   # (not a kind that is downloaded: dealt with)
+        papers = authors.to_papers(kept, fid, name)
+        for p in papers:
+            p["reason"] = "followed author · " + p["reason"]
+        new, have, gone = authors.split(papers)
+        authors.file_have(fid, have)
+        authors.follow_mark(fid, [p["openalex"] for p, _ in have] + [p["openalex"] for p in gone])
+        by_title = {}
+        for q in run.papers.values():
+            by_title.setdefault((authors.tkey(q.get("title")), q.get("abbr")), []).append(q)
+        for p in new:
+            q = run.papers.get(p["id"])
+            if q is None and authors.tkey(p["title"]):
+                q = next((x for x in by_title.get((authors.tkey(p["title"]), p.get("abbr")), []) if not (x.get("doi") and p.get("doi"))), None)
+            if q is not None and q["id"] in todo:              # a work of two authors you follow: one download, filed into both folders (follow_settle)
+                if q.get("folder") != fid:
+                    q.setdefault("also_folders", []).append([fid, p["openalex"]])
+                continue
+            if q is not None:                                 # the feeds brought it already this week: the same paper, now one to download into the folder
+                if q.get("user_set"):                         # (unless you set its verdict yourself)
+                    authors.follow_mark(fid, [p["openalex"]])
+                    continue
+                q.update(verdict="download", folder=fid, openalex=p["openalex"], reason=p["reason"], source=q.get("source") or "author", summary_by_hand=True)
+                q.pop("model_verdict", None)
+                emit("verdict", {k: q.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
+                todo.append(q["id"])
+            else:
+                p["source_mode"] = "weekly"
+                p["summary_by_hand"] = True                   # (downloaded only: its summary comes from the Library's "Summarise N papers…", with its estimate first)
+                run.add_paper(p)
+                emit("paper", slim(p))
+                todo.append(p["id"])
+            n_new += 1
+        seen = load_json(seen_path, {})
+        for p in new + [p for p, _ in have] + gone:
+            for k in {p["id"], fx.key_for(None, p.get("journal") or "", p.get("title") or "")}:
+                seen.setdefault(k, {"journal": p.get("journal"), "title": p.get("title"), "added": datetime.now(timezone.utc).date().isoformat(), "follow": True})
+        os.makedirs(STATE, exist_ok=True)
+        with open(seen_path, "w") as f:
+            json.dump(seen, f, indent=1)
+        emit("log", {"msg": "Followed author %s: %d new work%s%s; %d already in your library (in the folder too), %d you deleted." % (
+            name, len(new), "" if len(new) == 1 else "s", "" if complete else " (OpenAlex stopped answering: the rest next week)", len(have), len(gone))})
+    run.save(force=True)
+    return todo
+
+
+def follow_settle(run, ids):
+    """After the followed works were downloaded: those that came (or that you deleted meanwhile) are dealt with; the others (a human check, a sign-in, no access)
+    are not, so next week's check tries them again. Returns (dealt with, to try again)."""
+    import authors
+    ok, again = 0, 0
+    for i in ids:
+        p = run.papers.get(i) or {}
+        if not p.get("folder") or not p.get("openalex"):
+            continue
+        if p.get("dl_status") in ("ok", "deleted"):
+            authors.follow_mark(p["folder"], [p["openalex"]])
+            for fid2, oa2 in p.get("also_folders") or []:     # (a co-author you also follow)
+                authors.follow_mark(fid2, [oa2])
+                if p.get("dl_status") == "ok":
+                    try:
+                        authors.file_new(fid2, paper_key(p))
+                    except Exception:  # noqa: BLE001
+                        pass
+            ok += 1
+        else:
+            again += 1
+    return ok, again
 
 
 FETCHED = os.path.join(dl.LOCAL, "fetched")       # what a journal's year range returned, abstracts included (a saved copy: asking Crossref again takes minutes)
@@ -820,7 +951,7 @@ class BatchFailed(Exception):
         self.reason = reason
 
 
-def _screen_batch(system, batch, usage):
+def _screen_batch(system, batch, usage, override=None):
     """One batch of papers judged by the model of the "screen" feature (Settings → AI), through the AI layer: the monthly budget stops it, local-only mode applies, and
     every call is in the usage ledger. Returns {n: result}. Raises ai.Blocked when nothing more may be asked, or the ai.AIError of an answer that asking again cannot change
     (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either. Raises BatchFailed (with the reason) when this batch could not be judged."""
@@ -832,7 +963,8 @@ def _screen_batch(system, batch, usage):
     why = "no answer"
     for attempt in range(3):
         try:
-            res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000)
+            res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000,
+                          override=override)
         except ai.Declined as e:
             if e.result is not None:
                 usage.add_result(e.result)                     # a refusal is billed too
@@ -869,15 +1001,16 @@ def reuse_days():
         return 90
 
 
-def screen_model():
-    """The model that screens, as Settings → AI sets it. Claude Sonnet 5.5 is named as before (so verdicts saved earlier still count); another provider or model by name."""
-    prov, model = ai.feature_model("screen")
+def screen_model(override=None):
+    """The model that screens, as Settings → AI sets it (or `override`, a backup for one run). Claude Sonnet 5.5 is named as before (so verdicts saved earlier still
+    count); another provider or model by name."""
+    prov, model = (override["provider"], override["model"]) if override else ai.feature_model("screen")
     return MODEL if (prov, model) == ("anthropic", MODEL) else "%s/%s" % (prov, model)
 
 
-def screen_fingerprint(system):
+def screen_fingerprint(system, override=None):
     """A verdict answers one question: the model and the whole instruction it was given (topics, method, focus phrase). Another question gets its own verdicts."""
-    return hashlib.sha256((screen_model() + "\n" + system).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256((screen_model(override) + "\n" + system).encode("utf-8")).hexdigest()[:16]
 
 
 def paper_digest(p):
@@ -943,91 +1076,149 @@ def remember_verdicts(fp, papers, now=None):
 
 
 def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
+    """Judge the run's papers that have no verdict yet, in batches, with the model chosen for screening (Settings → AI). A verdict saved for the same question and
+    text is reused. If that model cannot answer in the structured JSON screening needs (ai.cannot_structure: a 400/404/422 that says so), the papers still without a
+    verdict are screened once more with a backup model of the same provider (prices.backup_for), for this run only: the setting is not changed, the run says which
+    model it was (run.screen_backup), and there is never a third model. Anything else that stops the screening (the budget, a refused key) stops it as before."""
     system = screening_system(run.params.get("topics"), run.params.get("query"),
                               run.params.get("methods"))
     todo = [run.papers[i] for i in (ids or run.order) if not run.papers[i].get("verdict")]
-    fp = screen_fingerprint(system)
-    known = known_verdicts(fp, todo, reuse_days())
-    if known:                                                  # asked before, with the same question and the same text, not long ago: no second payment
-        for p in todo:
+    total = len(todo)
+    prog = {"done": 0}
+    valid = set(topic_labels())
+
+    def reuse(papers, fp, est=None):
+        """The papers of `papers` still to ask (a verdict saved for this question and text is taken instead: no second payment). est: what one paper would cost
+        with the model of this pass (None: the screening model's)."""
+        known = known_verdicts(fp, papers, reuse_days())
+        if not known:
+            return papers
+        for p in papers:
             e = known.get(p["id"])
             if e:
                 p["verdict"], p["relevance"], p["topics"], p["method"], p["reason"] = e["v"], e.get("rel") or 0, e.get("topics") or [], e.get("method"), e.get("reason") or ""
                 p.pop("model_verdict", None)
                 terms_rule(run, p)
                 emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
-        todo = [p for p in todo if p["id"] not in known]
         run.reused += len(known)
-        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question%s" % (len(known), " (about $%.2f not paid for again)" % (len(known) * est) if (est := est_screen_cost_per_paper()) is not None else "")})
+        prog["done"] += len(known)
+        est = est if est is not None else est_screen_cost_per_paper()
+        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question%s" % (len(known), " (about $%.2f not paid for again)" % (len(known) * est) if est is not None else "")})
         run.save(force=True)
-    batches = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
-    done, blocked = 0, None
-    emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": len(todo)})
-    valid = set(topic_labels())
-    halt = threading.Event()             # set by the worker whose batch met Blocked or a refused request: a batch that has not started yet is then not sent (the batches already
+        return [p for p in papers if p["id"] not in known]
+
+    def run_pass(papers, override, fp):
+        """Screen `papers` with the configured model (override None) or `override`. Returns (the AIError that stopped it or None, batches answered)."""
+        batches = [papers[i:i + batch_size] for i in range(0, len(papers), batch_size)]
+        blocked, answered = None, 0
+        halt = threading.Event()         # set by the worker whose batch met Blocked or a refused request: a batch that has not started yet is then not sent (the batches already
                                          # on their way finish; cancelling the waiting futures from this thread alone would let a free worker start one more first)
 
-    def one(b):
-        if halt.is_set() or stop.is_set():
-            return None                  # never sent: the papers stay unscreened
-        try:
-            return _screen_batch(system, b, run.usage)
-        except ai.AIError:
-            halt.set()
-            raise
-
-    with ThreadPoolExecutor(workers) as ex:
-        futs = {ex.submit(one, b): b for b in batches}
-        for fut in as_completed(futs):
-            if stop.is_set():
-                for f in futs:
-                    f.cancel()
-                break
-            batch = futs[fut]
-            if fut.cancelled():                                # cancelled below once nothing more may be asked: never started, not paid for
-                continue
-            why = ""
+        def one(b):
+            if halt.is_set() or stop.is_set():
+                return None              # never sent: the papers stay unscreened
             try:
-                res = fut.result()
-            except ai.AIError as e:                            # Blocked (budget, local-only, no key) or a request the provider refuses for every batch alike (model, key, credit):
-                for f in futs:                                 # the papers stay unscreened, to pick up later ("Retry screening"), instead of each being marked as failed
-                    f.cancel()
-                if blocked is None:
-                    blocked = e
-                continue
-            except BatchFailed as e:
-                res, why = {}, e.reason
-                emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
-            if res is None:                                    # not sent (see one): left unscreened, to pick up later
-                continue
-            for n, p in enumerate(batch, 1):
-                r = res.get(n)
-                if not r:
-                    reason = "screening failed: " + (why or ("the model's answer had no verdict for this paper" if res else "no answer"))
-                    p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, reason[:400], []
-                    p["method"] = None
-                else:
-                    p["verdict"], p["relevance"] = r["verdict"], r["relevance"]
-                    p["topics"] = [t for t in r["topics"] if t in valid]
-                    searched = run.params.get("topics") or []
-                    if not p["topics"] and p["verdict"] != "skip" and len(searched) == 1:
-                        p["topics"] = list(searched)
-                    p["reason"] = r["reason"]
-                    p["method"] = r.get("method")
-                    p.pop("model_verdict", None)
-                    terms_rule(run, p)
-                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
-            done += len(batch)
-            emit("progress", {"stage": "screening", "label": "Screening",
-                              "done": done, "total": len(todo)})
-            emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
-            remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
-            run.save()
+                return _screen_batch(system, b, run.usage, override)
+            except ai.AIError:
+                halt.set()
+                raise
+
+        with ThreadPoolExecutor(workers) as ex:
+            futs = {ex.submit(one, b): b for b in batches}
+            for fut in as_completed(futs):
+                if stop.is_set():
+                    for f in futs:
+                        f.cancel()
+                    break
+                batch = futs[fut]
+                if fut.cancelled():                            # cancelled below once nothing more may be asked: never started, not paid for
+                    continue
+                why = ""
+                try:
+                    res = fut.result()
+                except ai.AIError as e:                        # Blocked (budget, local-only, no key) or a request the provider refuses for every batch alike (model, key, credit):
+                    for f in futs:                             # the papers stay unscreened, to pick up later ("Retry screening"), instead of each being marked as failed
+                        f.cancel()
+                    if blocked is None:
+                        blocked = e
+                    continue
+                except BatchFailed as e:
+                    res, why = {}, e.reason
+                    emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
+                if res is None:                                # not sent (see one): left unscreened, to pick up later
+                    continue
+                if res:
+                    answered += 1                              # (a batch that failed gave no verdict: it does not count as screened by this model)
+                for n, p in enumerate(batch, 1):
+                    r = res.get(n)
+                    if not r:
+                        reason = "screening failed: " + (why or ("the model's answer had no verdict for this paper" if res else "no answer"))
+                        p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, reason[:400], []
+                        p["method"] = None
+                    else:
+                        p["verdict"], p["relevance"] = r["verdict"], r["relevance"]
+                        p["topics"] = [t for t in r["topics"] if t in valid]
+                        searched = run.params.get("topics") or []
+                        if not p["topics"] and p["verdict"] != "skip" and len(searched) == 1:
+                            p["topics"] = list(searched)
+                        p["reason"] = r["reason"]
+                        p["method"] = r.get("method")
+                        p.pop("model_verdict", None)
+                        terms_rule(run, p)
+                    emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
+                prog["done"] += len(batch)
+                emit("progress", {"stage": "screening", "label": "Screening", "done": prog["done"], "total": total})
+                emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
+                remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
+                run.save()
+        return blocked, answered
+
+    fp = screen_fingerprint(system)
+    emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": total})
+    todo = reuse(todo, fp)
+    blocked, answered = run_pass(todo, None, fp)
+    if answered:
+        run.screen_backup = {}                                 # the chosen model screens again: no backup is in use
+    no_backup = ""
+    if blocked is not None and ai.cannot_structure(blocked) and not stop.is_set():
+        prov, model = ai.feature_model("screen")
+        mine = ai.pricing.name(prov, model)
+        try:
+            b = ai.pricing.backup_for(prov, model)
+        except Exception:  # noqa: BLE001      (no list could be read: as before, the screening stops)
+            b = None
+        rest = [p for p in todo if not p.get("verdict")]
+        if b and rest:
+            cost_note = ""
+            if not b["within"]:
+                cost_note = (" No %s model at no more than twice its price can, so the cheapest one that can was chosen ($%.2f against $%.2f per million tokens in and out)." % (
+                    prov, b["price"], b["current_price"]) if b["current_price"] is not None else " The price of %s is not known, so the cheapest model that can was chosen." % mine)
+            emit("log", {"msg": "%s can't answer in the structured JSON that screening needs (%s). Screening the remaining %d papers with %s, a backup from %s, for this run "
+                                "only: your setting in Settings → AI is unchanged.%s" % (mine, str(blocked)[:200], len(rest), b["name"], prov, cost_note), "level": "warn"})
+            ov = {"provider": prov, "model": b["model"]}
+            fp2 = screen_fingerprint(system, ov)
+            reused0 = run.reused
+            try:
+                est2 = ai.cost_of(b["model"], {"in": int(EST_SCREEN_CHARS / 3.3), "out": EST_SCREEN_OUT}, 0, prov)
+            except Exception:  # noqa: BLE001
+                est2 = None
+            rest = reuse(rest, fp2, est2)
+            blocked2, answered2 = run_pass(rest, ov, fp2)
+            if answered2 or run.reused > reused0:
+                run.screen_backup = {**b, "instead_of": mine, "why": str(blocked)[:300], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+                run.save(force=True)
+            if blocked2 is not None:
+                blocked = ai.AIError("%s could not screen (%s). The backup %s was tried and also stopped: %s" % (mine, str(blocked)[:200], b["name"], str(blocked2)[:200]),
+                                     status=getattr(blocked2, "status", None))
+            else:
+                blocked = None
+        elif not b and ai.pricing.is_openrouter((ai.config_data().get("providers") or {}).get(prov)):
+            no_backup = " No backup model could be chosen: OpenRouter's model list could not be read, or it has no other model that can."
     if blocked is not None:
         left = len([p for p in todo if not p.get("verdict")])
         hint = ""
         if not isinstance(blocked, ai.Blocked) and getattr(blocked, "status", None) in (400, 404, 422):
-            hint = " The model chosen for screening (Settings → AI → Screening new papers) may not be able to answer in the structured JSON that screening asks for: its Test button there checks that."
+            hint = " The model chosen for screening (Settings → AI → Screening new papers) may not be able to answer in the structured JSON that screening asks for: its Test button there checks that." + no_backup
         run.screen_error = ("%s%s" % (blocked, hint))[:600]          # shown on the run's page until a screening finishes without stopping
         emit("log", {"msg": "Screening stopped with %d papers not screened: %s%s Once that is fixed, press “Retry screening” (or search again): the papers already judged are kept, and only the others are screened." % (left, blocked, hint), "level": "warn"})
         run.save(force=True)
@@ -1173,7 +1364,7 @@ def _summarize_one(run, p, emit):
 
 
 NOTIFY = None       # the Mac app sets a function (title, text) that shows a notification: a human check is waiting for the user (app/jw_app.py)
-WAITING_NOTE = "waiting for you: press “Open the check” at the top of the page"
+WAITING_NOTE = "waiting for you: its site wants a “verify you are human” check (the app asks you to open it)"
 NEEDS_CHECK_NOTE = "%s wants a human check: select the paper and press Download again (or open it in your browser)"
 
 
@@ -1185,7 +1376,7 @@ def _notify_user(title, text):
             pass
 
 
-def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=None):
+def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=None, auto_open=True, summarize=True):
     """Download the papers `ids` (one browser, a site's papers together), then summarise them. Papers from the same publisher are spaced out (pace_gap); the
     waiting time is used to summarise papers already downloaded, so a careful pace costs little time overall. `sleep`/`clock` are for the tests.
 
@@ -1194,7 +1385,12 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     A press is served between two papers or during a pace wait: the check opens in a window on that one page, and when the user has ticked the box the
     site's papers come back to the front of the queue, in the background. A site that asks again after a pass gets one more nudge; that time its window
     stays for its remaining papers. Papers still set aside when the rest is done end as needs_check (no waiting), except when nothing else was being
-    downloaded: then the check opens at once, as the command line does. Without `checks` the check window opens at once (browser.Browser's default)."""
+    downloaded: then the check opens at once, as the command line does (and the user is not first told to press "Open the check": until some paper gets a
+    final answer, a check met is told only once one does). Without `checks` the check window opens at once (browser.Browser's default).
+
+    auto_open=False: a check never opens by itself, even when nothing else was downloaded (the user did not start this for these papers: the weekly check's
+    followed authors); the user is told at once. summarize=False: the papers are downloaded only (no AI call; the Library offers their summaries, with an
+    estimate first)."""
     import collections
     import queue as queue_mod
     env = dl.load_env()
@@ -1215,6 +1411,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     nudged = {}             # host -> times the user was asked in this batch (at most twice)
     given_up = set()        # hosts whose check was not passed, or that asked a third time: their papers end as needs_check
     count = {"done": 0, "final": 0}         # papers finished; papers that got a final answer from a site in this batch (not set aside)
+    quiet = []              # (host, state, pub) of checks met before any paper got a final answer: told once one does (a batch of nothing else opens them at once instead)
     emit("progress", {"stage": "downloading", "label": "Downloading", "done": 0, "total": total})
     current = {}
 
@@ -1262,6 +1459,12 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         emit("challenge", {"host": host, "state": state, "msg": msg, "site": site})
         emit("log", {"msg": msg, "level": "warn"})
         _notify_user("A human check is waiting", "%s wants to check you're human. Open Journal Watcher and press “Open the check”." % site)
+
+    def release_quiet():
+        for q in quiet:
+            if q[0] in deferred and q[0] not in given_up:
+                nudge(*q)
+        quiet.clear()
 
     def open_one(br, host, stay):
         if host not in deferred or host in given_up or not hasattr(br, "open_check"):
@@ -1328,13 +1531,15 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                                 round(due - clock()), SITE_NAMES.get(pub, p.get("journal") or pub), pace)})
                         while clock() < due and not stop.is_set():
                             serve(br)                                # a press is served while waiting
-                            ready = next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
+                            ready = summarize and next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
                             if ready and due - clock() > 5:
                                 _summarize_one(run, ready, emit)         # use the wait: this paper becomes "Ready to read" sooner
                             else:
                                 sleep(min(1.0, max(0.0, due - clock())))
                         if stop.is_set():
                             break
+                    if quiet and not auto_open and not stop.is_set():       # another site's paper starts: the check can be opened while it downloads, so say so now
+                        release_quiet()
                     current.clear()
                     current["pub"] = pub
                     p["dl_status"] = "downloading"
@@ -1355,7 +1560,11 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         first = host not in deferred and host not in given_up
                         set_aside(p, host, pub)
                         if first and not stop.is_set():
-                            nudge(host, state, pub)
+                            if count["final"]:
+                                nudge(host, state, pub)
+                            else:
+                                quiet.append((host, state, pub))     # (told when another paper gets its answer; if none does, the check opens by itself, or with
+                                                                     # auto_open=False the papers just end as needing a check, with nobody told to press a button)
                         run.save()
                         continue
                     else:
@@ -1370,6 +1579,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     emit_dl(p)
                     finished(p)
                     run.save()
+                    if quiet and not stop.is_set():                  # a paper got its answer: the end of the batch will not open the checks by itself, so say so now
+                        release_quiet()
                 if ask and not stop.is_set():
                     serve(br)                                        # a press made during the last paper is still served
                     if todo_q:
@@ -1377,7 +1588,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                 # the rest is done. Papers set aside: when nothing else was being downloaded (say, a retry of papers that need a check), the user started this
                 # for them, so their check opens at once (the window then stays for that site's papers); otherwise they end as needs_check, without waiting.
                 waiting = [h for h in deferred if h not in given_up]
-                if ask and waiting and not stop.is_set() and count["final"] == 0 and br is not None:
+                if ask and auto_open and waiting and not stop.is_set() and count["final"] == 0 and br is not None:
+                    quiet.clear()                                    # (the window's own message tells the user: no "press Open the check" first)
                     for h in waiting:
                         nudged[h] = max(nudged.get(h, 0), 2)
                         open_one(br, h, stay=True)
@@ -1394,7 +1606,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % sum(len(v) for v in deferred.values()), "level": "warn"})
             emit("challenge", {"host": "", "state": "done", "msg": ""})
     run.save()
-    todo = [p for p in got if not p.get("summary")]
+    todo = [p for p in got if not p.get("summary")] if summarize else []
     for n, p in enumerate(todo, 1):
         if stop.is_set():
             break

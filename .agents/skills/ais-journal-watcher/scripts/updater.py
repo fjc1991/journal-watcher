@@ -90,6 +90,31 @@ def version():
         return "0.0.0"
 
 
+# The scholarly databases the app asks. They are told plainly who is asking (user_agent below); publisher sites and feeds are not on this list.
+API_HOSTS = {"api.openalex.org", "api.crossref.org", "api.unpaywall.org", "api.semanticscholar.org", "openlibrary.org", "api.elsevier.com"}
+
+
+def user_agent():
+    """How the app names itself to the scholarly databases it asks (OpenAlex, Crossref, Unpaywall, Semantic Scholar, Open Library): its name, version and project
+    page. Never an e-mail address or anything else about the person using it."""
+    try:
+        v = version()
+    except Exception:  # noqa: BLE001
+        v = ""
+    return "JournalWatcher/%s (an open-source tool for reading academic papers; https://github.com/fjc1991/journal-watcher)" % (v if v and v != "0.0.0" else "dev")
+
+
+def api_headers(url, h):
+    """h with the honest User-Agent when url goes to one of API_HOSTS (h is changed and returned)."""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return h
+    if host in API_HOSTS:
+        h["User-Agent"] = user_agent()
+    return h
+
+
 def settings():
     d = _read(SETTINGS, {})
     return {"auto": d.get("auto") is not False, "feed": str(d.get("feed") or ""), "skipped": str(d.get("skipped") or ""), "seen": str(d.get("seen") or "")}
@@ -210,7 +235,7 @@ def verify_feed(data, sig_text, keys):
 def _fetch(url, limit=MAX_FEED, timeout=15):
     if not _ok_url(url) or not url.isascii() or re.search(r"[\s\x00-\x1f\x7f]", url):
         raise BadAddress("The update address must start with https:// and be a plain web address")
-    req = urllib.request.Request(url, headers={"User-Agent": "JournalWatcher/" + version(), "Accept": "application/json"})
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent(), "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = r.read(limit + 1)
     if len(data) > limit:
@@ -416,7 +441,7 @@ def _set(phase, pct=0, error=""):
 def _download(url, dest, size, sha):
     h = hashlib.sha256()
     got = 0
-    req = urllib.request.Request(url, headers={"User-Agent": "JournalWatcher/" + version()})
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent()})
     with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length") or size or 0)
         while True:

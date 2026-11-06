@@ -180,10 +180,9 @@ def _ua():
     """Open Library asks the programs that use its API to say who they are: this one does (its name, version and project page)."""
     try:
         import updater
-        v = updater.version()
+        return updater.user_agent()
     except Exception:  # noqa: BLE001
-        v = ""
-    return "JournalWatcher/%s (an open-source tool for reading academic papers; https://github.com/fjc1991/journal-watcher)" % (v or "dev")
+        return "JournalWatcher/dev (an open-source tool for reading academic papers; https://github.com/fjc1991/journal-watcher)"
 
 
 def openlibrary_search(title="", authors=None, isbn="", rows=4):
@@ -352,10 +351,10 @@ def chapter_key(c):
     return "%d-%d" % (c["start"], c["end"])
 
 
-def chapter_text(pdf, c):
+def chapter_text(pdf, c, blocks=None):
     """(text, characters, left_out) of one chapter for a summary: its body paragraphs with [page] markers. Over SUMMARY_MAX_CHARS the first 60 % and the last 40 % of the allowance are kept
-    and a note says what was left out."""
-    bs = [b for b in bl.extract(pdf) if b.get("kind", "body") == "body" and c["start"] - 1 <= b["page"] <= c["end"] - 1]
+    and a note says what was left out. blocks: the book's blocks when the caller has them already (a whole book is read once)."""
+    bs = [b for b in (blocks if blocks is not None else bl.extract(pdf)) if b.get("kind", "body") == "body" and c["start"] - 1 <= b["page"] <= c["end"] - 1]
     parts, last = [], None
     for b in bs:
         mark = "[%d] " % (b["page"] + 1) if b["page"] != last else ""
@@ -412,42 +411,227 @@ def _relabel(text, info):
     return re.sub(r"\(pp?\.\s*(\d+)(?:\s*[–-]\s*(\d+))?\)", one, text)
 
 
+class NoText(ValueError):
+    """A part of a book with no body text to summarise (a bibliography, an index, a scanned image)."""
+
+
+def _summarise(pdf, info, c, title="", fresh=False, override=None, blocks=None):
+    """Write the summary of chapter c and save it in the book's .book.json. A generator: yields ("status", msg) and ("text", delta) as the answer arrives, and
+    returns the saved record ({"title", "start", "end", "text", "provider", "model", "cost", "left_out", "at"}). Raises ValueError (no text) or ai.AIError (Blocked,
+    Cancelled, the provider's refusal with its HTTP status, or an empty answer: an empty summary is never saved, nor kept in the answer cache, so asking again
+    really asks again)."""
+    import ai
+    key = chapter_key(c)
+    yield "status", "Reading the chapter…"
+    text, used, left_out = chapter_text(pdf, c, blocks)
+    if not text.strip():
+        raise NoText("No text could be read from this chapter (a scanned image?).")
+    messages = [{"role": "user", "content": "Book: %s\nChapter: %s (pages %d–%d of the file)\n\nText of the chapter:\n\n%s" % (title or "a book", c["title"], c["start"], c["end"], text)}]
+    yield "status", "Writing the summary…"
+    res = None
+    for kind, v in ai.stream("summarize", messages, system=SUMMARY_SYSTEM, max_tokens=1200, cache=True, fresh=fresh, override=override,
+                             cache_if=lambda t: bool((t or "").strip())):
+        if kind == "text":
+            yield "text", v
+        else:
+            res = v
+    if res is None or not (res.text or "").strip():
+        raise ai.AIError("The model gave an empty summary, so nothing was saved. Ask again, or choose another model in Settings → AI.")
+    rec = {"title": c["title"], "start": c["start"], "end": c["end"], "text": _relabel(res.text, info), "provider": res.provider, "model": res.model,
+           "cost": res.cost, "left_out": left_out, "at": datetime.now().isoformat(timespec="seconds")}
+    with _BOOKLOCK:
+        cur = info_at(pdf)
+        cur.setdefault("summaries", {})[key] = rec
+        _write_info(pdf, cur)
+    return rec
+
+
 def summary_stream(rel, i, title="", fresh=False, override=None):
     """Write (or return the saved) summary of chapter i. Yields {"type": "status"|"text"|"final"|"done"|"error"}; "final" carries the text with its pages said the way the rest of the app says
     them. It goes through the budgeted AI layer like every other call, so the monthly limit, the ledger and the tray apply."""
     import ai
     try:
         pdf, info, c = _chapter(rel, i)
-        key = chapter_key(c)
-        saved = (info.get("summaries") or {}).get(key)
-        if saved and not fresh:
+        saved = (info.get("summaries") or {}).get(chapter_key(c))
+        if saved and saved.get("text") and not fresh:
             yield {"type": "text", "delta": saved["text"]}
             yield {"type": "final", "text": saved["text"]}
             yield {"type": "done", "provider": saved.get("provider", ""), "model": saved.get("model", ""), "cost": 0.0, "cached": True, "saved": True}
             return
-        yield {"type": "status", "msg": "Reading the chapter…"}
-        text, used, left_out = chapter_text(pdf, c)
-        if not text.strip():
-            yield {"type": "error", "error": "No text could be read from this chapter (a scanned image?)."}
-            return
-        messages = [{"role": "user", "content": "Book: %s\nChapter: %s (pages %d–%d of the file)\n\nText of the chapter:\n\n%s" % (title or "a book", c["title"], c["start"], c["end"], text)}]
-        yield {"type": "status", "msg": "Writing the summary…"}
-        for kind, v in ai.stream("summarize", messages, system=SUMMARY_SYSTEM, max_tokens=1200, cache=True, fresh=fresh, override=override):
-            if kind == "text":
-                yield {"type": "text", "delta": v}
-            else:
-                final = _relabel(v.text, info)
-                with _BOOKLOCK:
-                    cur = info_at(pdf)
-                    cur.setdefault("summaries", {})[key] = {"title": c["title"], "start": c["start"], "end": c["end"], "text": final, "provider": v.provider, "model": v.model,
-                                                            "cost": v.cost, "left_out": left_out, "at": datetime.now().isoformat(timespec="seconds")}
-                    _write_info(pdf, cur)
-                yield {"type": "final", "text": final}
-                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "saved": True, "left_out": left_out}
+        gen = _summarise(pdf, info, c, title, fresh, override)
+        while True:
+            try:
+                kind, v = next(gen)
+            except StopIteration as stop:
+                rec = stop.value
+                break
+            yield {"type": "status", "msg": v} if kind == "status" else {"type": "text", "delta": v}
+        yield {"type": "final", "text": rec["text"]}
+        yield {"type": "done", "provider": rec["provider"], "model": rec["model"], "cost": rec["cost"], "cached": False, "saved": True, "left_out": rec["left_out"]}
     except ValueError as e:
         yield {"type": "error", "error": str(e)}
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
+
+
+# ---------------------------------------------------------------- the whole book: every chapter and section, then an overview written from those summaries
+OVERVIEW_SYSTEM = """You write an OVERVIEW of a whole academic book for a researcher who has not read it. You are given summaries of its chapters and sections, in the book's order,
+each under a heading with its title and pages. They are all you know about the book.
+Write Markdown, no preamble, about 600 words at most, in exactly this shape:
+**The book's argument.** Three to five sentences: what the book as a whole argues, and why it matters.
+**How it unfolds.** One short paragraph per chapter or part (by its title, in order): what it contributes to the argument.
+**Key concepts.** Four to eight bullets: the book's main concepts and claims. Each ends with the page reference that the summary gives for it, copied exactly as it is written there.
+**Evidence and method.** Two or three sentences: what the book rests on (cases, data, theory).
+**Limits and open questions.** One to three sentences.
+Use only the summaries; never add facts from elsewhere, and never invent a page reference. If a note says some summaries were shortened, say so in one short line first."""
+OVERVIEW_OUT_TOKENS = 1000
+OVERVIEW_MAX_CHARS = 150_000           # the summaries sent for the overview; past this, sections are left out first (chapters kept), then every summary is shortened alike
+EST_SUMMARY_CHARS = 2000               # how long a chapter summary comes out (for the overview's estimate, before the summaries exist)
+
+
+def parts(info):
+    """The parts of a book that the whole-book summary writes: every entry of its outline (chapters, and their sections, at any depth), in the book's order. An
+    entry with the same page range as one before it (a part and its first chapter, say) is the same text: it is summarised once, under the first title."""
+    out, seen = [], set()
+    for c in chapters(info):
+        k = chapter_key(c)
+        if k not in seen:
+            seen.add(k)
+            out.append(c)
+    return out
+
+
+def _book(rel):
+    pdf = ns.pdf_path(rel)
+    info = info_at(pdf) if pdf else {}
+    if not info:
+        raise ValueError("That is not a book in your library.")
+    if not chapters(info):
+        raise ValueError("This book has no outline (no table of contents in the file), so it cannot be summarised chapter by chapter.")
+    return pdf, info
+
+
+def _done(sums, c):
+    """A part needs nothing more: its summary is saved, or it was found to have no text to summarise (a bibliography, an index; marked "empty")."""
+    s = sums.get(chapter_key(c)) or {}
+    return bool(s.get("text") or s.get("empty"))
+
+
+def mark_empty(pdf, c):
+    """Note that this part has no body text (nothing is asked of the AI for it, and the overview leaves it out)."""
+    with _BOOKLOCK:
+        cur = info_at(pdf)
+        cur.setdefault("summaries", {})[chapter_key(c)] = {"title": c["title"], "start": c["start"], "end": c["end"], "text": "", "empty": True,
+                                                            "at": datetime.now().isoformat(timespec="seconds")}
+        _write_info(pdf, cur)
+
+
+def _fingerprint(info, ps):
+    """What the overview was written from: the parts and their summaries. A summary written again (or a part added) makes the overview out of date."""
+    import hashlib
+    sums = info.get("summaries") or {}
+    s = "\n".join("%s|%s" % (chapter_key(c), (sums.get(chapter_key(c)) or {}).get("text", "")) for c in ps)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def overview_pending(info):
+    """True when every part has a summary and the overview is missing, or was written from other summaries (out of date)."""
+    ps = parts(info)
+    sums = info.get("summaries") or {}
+    if not ps or any(not _done(sums, c) for c in ps) or not any((sums.get(chapter_key(c)) or {}).get("text") for c in ps):
+        return False
+    return (info.get("overview") or {}).get("fingerprint") != _fingerprint(info, ps)
+
+
+def overview_stale(info):
+    """An overview exists but no longer matches the summaries (one was written again, or a part has none yet)."""
+    ov = info.get("overview") or {}
+    return bool(ov.get("text")) and ov.get("fingerprint") != _fingerprint(info, parts(info))
+
+
+def whole_plan(rel):
+    """(pdf, info, the parts still without a summary, all the parts)."""
+    pdf, info = _book(rel)
+    ps = parts(info)
+    sums = info.get("summaries") or {}
+    return pdf, info, [c for c in ps if not _done(sums, c)], ps
+
+
+def _overview_input(info, ps):
+    """(text sent for the overview, cut): the stored summaries in the book's order, each under its title and pages."""
+    sums = info.get("summaries") or {}
+    items = [(c, (sums.get(chapter_key(c)) or {}).get("text", "")) for c in ps]
+    items = [(c, t) for c, t in items if t]                                   # (a part with no text to summarise is left out)
+    size = lambda its: sum(len(t) + 80 for _, t in its)                      # noqa: E731
+    head = lambda c: "%s %s (%s – %s)" % ("#" * min(4, c["level"] + 1), c["title"], place(info, c["start"]), place(info, c["end"]))  # noqa: E731
+    cut, dropped = "", None
+    while size(items) > OVERVIEW_MAX_CHARS and len({c["level"] for c, _ in items}) > 1:     # the deepest level goes first (sections before chapters, chapters before parts)
+        dropped = max(c["level"] for c, _ in items)
+        items = [(c, t) for c, t in items if c["level"] < dropped]
+        cut = "sections"
+    if size(items) > OVERVIEW_MAX_CHARS:
+        each = max(300, OVERVIEW_MAX_CHARS // max(1, len(items)) - 80)
+        items = [(c, t if len(t) <= each else t[:each].rsplit(" ", 1)[0] + " …") for c, t in items]
+        cut = "shortened"
+    notes = []
+    if dropped is not None:
+        notes.append("the summaries of the entries below outline level %d are left out here because the book is long" % (dropped - 1 if dropped > 1 else 1))
+    if cut == "shortened":
+        notes.append("each summary given is shortened")
+    note = "[Note: %s.]\n\n" % "; ".join(notes) if notes else ""
+    return note + "\n\n".join(head(c) + "\n" + t for c, t in items), cut
+
+
+def whole_estimate(rel):
+    """What summarising the whole book would cost, before anything is spent (no AI call): {"parts", "done", "todo", "nested", "overview" (it will be written),
+    "cost" (summaries of the parts to do plus the overview; None when the model has no price), "parts_cost", "overview_cost", "provider", "model", "left_out"
+    (parts that are long enough to be read from their start and end)}. Sections are summarised as well as the chapters that hold them, so their pages are sent twice."""
+    import ai
+    pdf, info, todo, ps = whole_plan(rel)
+    blocks = bl.extract(pdf) if todo else None
+    costs, left, empty = [], 0, 0
+    for c in todo:
+        text, used, lo = chapter_text(pdf, c, blocks)
+        if not text.strip():                       # (a bibliography, an index: nothing is sent for it)
+            empty += 1
+            continue
+        left += bool(lo)
+        costs.append(ai.estimate("summarize", used + len(SUMMARY_SYSTEM) + 300, SUMMARY_OUT_TOKENS))
+    sums = info.get("summaries") or {}
+    ov_in = min(OVERVIEW_MAX_CHARS, sum(len((sums.get(chapter_key(c)) or {}).get("text", "")) + 80 for c in ps) + EST_SUMMARY_CHARS * (len(todo) - empty)) + len(OVERVIEW_SYSTEM)
+    ov = (len(todo) > empty or (bool(todo) and any((sums.get(chapter_key(c)) or {}).get("text") for c in ps))) or overview_pending(info)
+    ov_cost = ai.estimate("summarize", ov_in, OVERVIEW_OUT_TOKENS) if ov else 0.0
+    parts_cost = sum(costs) if all(c is not None for c in costs) else None
+    provider, model = ai.feature_model("summarize")
+    return {"parts": len(ps), "done": len(ps) - len(todo), "todo": len(todo) - empty, "empty": empty, "nested": any(c["level"] > 1 for c in ps), "overview": ov,
+            "parts_cost": parts_cost, "overview_cost": ov_cost, "cost": parts_cost + ov_cost if parts_cost is not None and ov_cost is not None else None,
+            "provider": provider, "model": model, "left_out": left}
+
+
+def write_overview(rel, title="", override=None):
+    """Write the book's overview from its stored summaries only (never the book's text) and save it as info["overview"]. Raises ValueError when a part has no
+    summary yet, ai.AIError otherwise (an empty answer included: nothing is saved or cached). The page references are the summaries' own, copied as they are."""
+    import ai
+    pdf, info = _book(rel)
+    ps = parts(info)
+    sums = info.get("summaries") or {}
+    if any(not _done(sums, c) for c in ps) or not any((sums.get(chapter_key(c)) or {}).get("text") for c in ps):
+        raise ValueError("Every chapter and section needs its summary before the overview is written.")
+    body, cut = _overview_input(info, ps)
+    messages = [{"role": "user", "content": "Book: %s\n\nSummaries of its chapters and sections, in the book's order:\n\n%s" % (title or "a book", body)}]
+    res = None
+    for kind, v in ai.stream("summarize", messages, system=OVERVIEW_SYSTEM, max_tokens=2000, cache=True, override=override, cache_if=lambda t: bool((t or "").strip())):
+        if kind == "done":
+            res = v
+    if res is None or not (res.text or "").strip():
+        raise ai.AIError("The model gave an empty overview, so nothing was saved.")
+    rec = {"text": res.text.strip(), "provider": res.provider, "model": res.model, "cost": res.cost, "parts": len(ps), "fingerprint": _fingerprint(info, ps), "cut": cut,
+           "at": datetime.now().isoformat(timespec="seconds")}
+    with _BOOKLOCK:
+        cur = info_at(pdf)
+        cur["overview"] = rec
+        _write_info(pdf, cur)
+    return rec
 
 
 def _existing_book(isbn, title, doi=""):

@@ -41,10 +41,15 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+def env_files():
+    """The .env files the app reads: the skill folder's (older layout), then the data home's."""
+    return (os.path.join(BASE, ".env"), os.path.join(ROOT, ".env"))
+
+
 def read_dotenv():
     """Only the .env files: project-root .env, then the skill-folder .env (older layout)."""
     env = {}
-    for p in (os.path.join(BASE, ".env"), os.path.join(ROOT, ".env")):
+    for p in env_files():
         if os.path.exists(p):
             for line in open(p):
                 line = line.strip()
@@ -54,9 +59,12 @@ def read_dotenv():
     return env
 
 
+SOURCE_KEYS = ("OPENALEX_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INSTTOKEN")      # (Settings → Paper sources; the Unpaywall email is not a secret and stays in .env)
+
+
 def key_names():
-    """The names of the API keys the AI providers use (from ai.json), for looking them up in the Keychain."""
-    names = {"ANTHROPIC_API_KEY"}
+    """The names of the API keys the AI providers use (from ai.json) and of the paper sources' keys (OpenAlex, Elsevier), for looking them up in the Keychain."""
+    names = {"ANTHROPIC_API_KEY"} | set(SOURCE_KEYS)
     for ai_json in (os.path.join(BASE, "ai.json"),):
         for p in ((load_json(ai_json, {}) or {}).get("providers") or {}).values():
             if isinstance(p, dict) and p.get("key_env"):
@@ -79,6 +87,11 @@ def http_get(url, timeout=25, headers=None):
     h = {"User-Agent": UA, "Accept": "*/*"}
     if headers:
         h.update(headers)
+    try:
+        import updater          # scholarly databases (Crossref, Unpaywall, Semantic Scholar, Open Library) are told who is asking; publishers keep UA
+        updater.api_headers(url, h)
+    except Exception:  # noqa: BLE001
+        pass
     req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read(), dict(r.headers)
@@ -224,7 +237,7 @@ def try_unpaywall(doi, email):
     url = "https://api.unpaywall.org/v2/%s?email=%s" % (
         urllib.parse.quote(doi, safe=""), urllib.parse.quote(email))
     try:
-        raw, _ = http_get(url, headers={"Accept": "application/json", "User-Agent": UA})
+        raw, _ = http_get(url, headers={"Accept": "application/json"})
         d = json.loads(raw.decode())
         loc = d.get("best_oa_location") or {}
         return loc.get("url_for_pdf") or loc.get("url")

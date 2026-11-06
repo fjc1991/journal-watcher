@@ -92,6 +92,12 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .authc { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 13px; }
 .authc small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
 .authc input { margin-top: 3px; }
+#authfollow { margin-top: 6px; }
+.authsaved { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 13px; }
+.authsaved .lbl { margin-bottom: 4px; }
+.authrow { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; }
+.authrow small { display: block; color: var(--ink-3); font-size: 12px; } .authrow .warn { color: var(--bl); }
+.authrow label { margin-left: auto; white-space: nowrap; display: flex; gap: 4px; align-items: center; }
 .banner .chk { margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .runhead { padding: 16px 18px; }
 .runhead h1 { font: 600 22px var(--serif); margin: 0 0 4px; }
@@ -131,6 +137,8 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .v-skip { background: var(--sk-soft); color: var(--sk); }
 .v-error { background: var(--err-soft); color: var(--err); }
 .screenerr { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--err-soft); color: var(--err); font-size: 13px; overflow-wrap: anywhere; }
+.screennote { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
+.screennote .btn { margin-left: 6px; }
 .stat.bad b { color: var(--err); }
 .v-pending { background: var(--sk-soft); color: var(--ink-3); animation: pulse 1.4s infinite; }
 .rel { width: 90px; height: 4px; background: var(--sk-soft); border-radius: 99px; overflow: hidden; }
@@ -294,12 +302,14 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <div class="est">Starts a new run. To narrow the list you’re viewing, use the filters above the results.</div>
       </div>
       <div class="pane" id="pane-authors">
-        <p>Every journal article, conference paper and working paper of one author (from OpenAlex), downloaded into a folder named after them. No screening: each paper gets a summary, as any download does.</p>
+        <p>Every journal article, conference paper and working paper of one author (from OpenAlex), downloaded into a folder named after them. No screening: each paper gets a summary, as any download does. <b>Follow</b> does the same, then the weekly check brings their new works into the folder (downloaded only: no summary is written by itself).</p>
         <label class="lbl" for="authname">Author <span>(a name, or an ORCID iD)</span></label>
         <div class="row"><input type="text" id="authname" placeholder="e.g. Ann Lee" autocomplete="off"><button class="btn small" id="authgo" type="button">Find</button></div>
         <div id="authlist" class="authlist"></div>
         <div class="est hide" id="authhint">Tick more than one if they are the same person: OpenAlex sometimes lists one person twice (after a move, say).</div>
         <button class="btn primary full hide" id="authdl" type="button">Download all</button>
+        <button class="btn full hide" id="authfollow" type="button" title="Download all their works now, then their new works each week with the weekly check (into the same folder, no screening, no summary by itself)">Follow</button>
+        <div id="authsaved" class="authsaved hide"></div>
       </div>
       <div class="pane" id="pane-terms">
         <p>Every paper of the chosen journals and years whose title, abstract or keywords contain <b>any</b> of your terms. No AI and no cost: the matches are listed as they are found. You can still rank them with AI afterwards.</p>
@@ -343,6 +353,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
       </div>
       <div class="stats hide" id="stats"></div>
       <div class="screenerr hide" id="screenerr" role="status"></div>
+      <div class="screennote hide" id="screenbackup" role="status"><span id="screenbacktext"></span><button class="btn small" id="makebackup" type="button"></button></div>
     </div>
 
     <div class="card hide" id="resume"><div class="list-h">Pick up where you left off</div><div class="runs" id="resumelist" style="padding-top:6px"></div></div>
@@ -584,6 +595,7 @@ function renderNav() {
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("on", p.id === "pane-" + b.dataset.tab));
+  if (b.dataset.tab === "authors") loadAuthSaved();
 });
 function chip(label, on, cb) {
   const c = document.createElement("span"); c.className = "chip" + (on ? " on" : ""); c.textContent = label;
@@ -717,11 +729,26 @@ $("#searchbtn").onclick = async () => {
 let AUTH = [], AUTHSEQ = 0;
 const authPicked = () => [...document.querySelectorAll("#authlist [data-ai]:checked")].map(c => AUTH[+c.dataset.ai]);
 function paintAuthBtn() {
-  const p = authPicked(), b = $("#authdl");
-  b.classList.toggle("hide", !p.length); $("#authhint").classList.toggle("hide", AUTH.length < 2);
-  if (p.length) b.textContent = "Download all into their folder";
-  b.disabled = BUSY;
+  const p = authPicked(), b = $("#authdl"), f = $("#authfollow");
+  b.classList.toggle("hide", !p.length); f.classList.toggle("hide", !p.length); $("#authhint").classList.toggle("hide", AUTH.length < 2);
+  if (p.length) { b.textContent = "Download all into their folder"; f.textContent = "Follow: download all now, then new works each week"; }
+  b.disabled = f.disabled = BUSY;
 }
+async function loadAuthSaved() {                  // "Your authors": each author with a folder, and whether the weekly check follows them
+  let r; try { r = (await api("/api/authors")).authors || []; } catch (e) { return; }
+  const box = $("#authsaved"); box.classList.toggle("hide", !r.length);
+  box.innerHTML = `<div class="lbl">Your authors</div>` + r.map(a => `<div class="authrow"><span><b>${esc(a.name)}</b><small>${a.folder_name ? `folder “${esc(a.folder_name)}”` : "folder deleted"}${a.follow ? (a.follow_last ? ` · last checked ${esc(a.follow_last)}` : " · followed") : ""}</small>${a.follow_warn ? `<small class="warn">${esc(a.follow_warn)}</small>` : ""}</span>
+      <label title="${a.folder_name ? "The weekly check downloads their new works into this folder" : "Tick to follow again: their works go into a new folder"}"><input type="checkbox" data-follow="${esc(a.folder)}"${a.follow ? " checked" : ""}${BUSY && !a.follow ? " disabled" : ""}> Follow</label></div>`).join("");
+}
+$("#authsaved").onchange = async e => {
+  const c = e.target.closest("[data-follow]"); if (!c) return;
+  try {
+    const r = await api("/api/authors/follow", {folder: c.dataset.follow, on: c.checked});
+    if (r.run) { toast("Following: listing their works, then downloading what you do not have yet…"); startedRun(r.run); go({view: "run", j: "~queue"}); }
+    else toast(c.checked ? "Following again: the weekly check brings their new works." : "Not followed any more: the folder and its papers stay.");
+    loadAuthSaved();
+  } catch (er) { c.checked = !c.checked; notifyError(er); }
+};
 $("#authgo").onclick = async () => {
   const name = $("#authname").value.trim(); if (!name) return;
   const seq = ++AUTHSEQ;
@@ -738,14 +765,16 @@ $("#authgo").onclick = async () => {
 };
 $("#authname").onkeydown = e => { if (e.key === "Enter") $("#authgo").click(); };
 $("#authlist").onchange = paintAuthBtn;
-$("#authdl").onclick = async () => {
+async function authStart(follow) {
   const p = authPicked(); if (!p.length) return;
   try {
-    const r = await api("/api/authors/download", {ids: p.map(a => a.id), name: p[0].name, institution: (p[0].institutions || [])[0] || ""});
-    toast(`Listing ${p[0].name}'s works, then downloading them into the folder “${r.run.params.folder_name}”…`);
+    const r = await api(follow ? "/api/authors/follow" : "/api/authors/download", {ids: p.map(a => a.id), name: p[0].name, institution: (p[0].institutions || [])[0] || "", on: true});
+    toast(`Listing ${p[0].name}'s works, then downloading them into the folder “${r.run.params.folder_name}”…${follow ? " The weekly check then brings their new works there." : ""}`);
     startedRun(r.run); go({view: "run", j: "~queue"});
   } catch (e) { notifyError(e); }
-};
+}
+$("#authdl").onclick = () => authStart(false);
+$("#authfollow").onclick = () => authStart(true);
 const runWord = r => r.kind === "weekly" ? "weekly check" : r.kind === "author" ? "author's run" : r.kind === "picks" ? "download" : "search";   // (what the run is called in its menus)
 function startedRun(run) {
   SEL.clear(); FILTER = "relevant"; JST = {};
@@ -784,6 +813,17 @@ function updateScreenBtn() {
 }
 $("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.params && RUN.params.terms), {n} = screenPending();
   try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { toast(e.message); } };
+window.addEventListener("jw-settings-changed", async () => {      // a model changed in Settings: the page's estimates and the backup note follow it
+  try { CFG = await api("/api/config"); if (RUN) render(); } catch (e) {}
+});
+$("#makebackup").onclick = async e => {          // the backup that screened this run becomes the screening model (Settings → AI → Screening new papers)
+  const b = e.currentTarget;
+  try {
+    await api("/api/ai/config", {features: {screen: {provider: b.dataset.provider, model: b.dataset.model}}});
+    window.dispatchEvent(new Event("jw-settings-changed"));
+    toast(`${b.textContent.replace(/^Make | the screening model$/g, "")} now screens your papers.`);
+  } catch (er) { toast(er.message); }
+};
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
 let SI = null;
@@ -927,7 +967,7 @@ function renderMeta() {
   const nc = (RUN.checks || []).length;
   const li = pr.listing || {};
   const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
-    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "")
+    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "") + (pr.follow ? " · followed: the weekly check brings their new works into the folder" : "")
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
       (RUN.updated ? `, last ${fmtWhen(RUN.updated)}` : "")
@@ -947,10 +987,22 @@ function renderMeta() {
   const why = RUN.screen_error || "";
   $("#screenerr").classList.toggle("hide", !why || !screenPending().n);
   $("#screenerr").textContent = why ? "The last screening stopped: " + why : "";
+  const bk = RUN.screen_backup || {};                // a backup model screened this run (the chosen one cannot answer in the structured form screening needs)
+  $("#screenbackup").classList.toggle("hide", !bk.model);
+  if (bk.model) {
+    const sf = CFG.screen_feature || {}, now = sf.provider === bk.provider && sf.model === bk.model;
+    const price = n => "$" + (n >= 1 ? n.toFixed(2) : n.toPrecision(2));
+    $("#screenbacktext").textContent = `Screened by ${bk.name}, a backup model from ${bk.provider}: ${bk.instead_of}, your screening model, can’t answer in the structured form that screening needs (${bk.why}). Your setting is unchanged.`
+      + (bk.within ? "" : bk.current_price != null ? ` No ${bk.provider} model at no more than twice its price can, so the cheapest one that can was chosen (${price(bk.price)} against ${price(bk.current_price)} per million tokens in and out).` : ` The price of ${bk.instead_of} is not known, so the cheapest model that can was chosen.`)
+      + (now ? ` ${bk.name} is now your screening model.` : "");
+    $("#makebackup").classList.toggle("hide", now);
+    $("#makebackup").textContent = `Make ${bk.name} the screening model`;
+    $("#makebackup").dataset.provider = bk.provider; $("#makebackup").dataset.model = bk.model;
+  }
   $("#vt-bl").textContent = ` (${c("borderline")})`;
   $("#selrec").textContent = pr.terms ? "Select all matches" : "Select all “download”";
   updateScreenBtn();
-  const needsWork = p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary);
+  const needsWork = queueNeeds;
   const queued = ps.filter(needsWork).length;
   $("#vt-q").textContent = ` (${queued} to get${got ? `, ${ps.filter(p => p.verdict === "download" && p.dl_status === "ok").length} done` : ""})`;
   $("#qbtn").textContent = `Download whole queue (${queued})`;
@@ -1017,7 +1069,7 @@ function dlText(p) {
     case "not_yet": return `<span class="dl bad" title="Brand-new “articles in advance” reach the library’s EBSCO once they’re in an issue — retry in a few weeks.">Not in the library’s EBSCO yet</span>`;
     case "unavailable": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Not in your library’s holdings</span>`;
     case "needs_check": return p.dl_note && p.dl_note.startsWith("waiting for you")
-      ? `<span class="dl wait" title="Its site wants a “verify you are human” check. Press “Open the check” at the top of the page when you are ready.">Waiting for your check</span>`
+      ? `<span class="dl wait" title="Its site wants a “verify you are human” check. The app asks you to open it: an “Open the check” button at the top of the page once the other papers have had their turn, or, when nothing else is downloading, a window that opens by itself.">Waiting for your check</span>`
       : `<span class="dl bad" title="Its site wants a “verify you are human” check that was not done. Select the paper and press Download again: when nothing else is downloading, the check opens straight away and you tick the box yourself.">Needs a human check</span>`;
     case "wrong_paper": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Wrong PDF refused</span>`;
     case "failed": return `<span class="dl bad">Couldn’t download</span>`;
@@ -1153,8 +1205,10 @@ $("#dlbtn").onclick = async () => {
 $("#allpapers").onclick = e => { e.preventDefault(); go({j: "*"}); };
 document.querySelectorAll("#viewtabs button").forEach(b => b.onclick = () => go({j: b.dataset.vt || null}));
 $("#jsel").onchange = () => renderList();
+// a paper the queue still has work for: not downloaded, or without its summary (a followed author's work is downloaded only: its summary comes from the Library)
+function queueNeeds(p) { return p.verdict === "download" && (p.dl_status !== "ok" || (!p.summary && !p.summary_by_hand)); }
 $("#qbtn").onclick = async () => {
-  const ids = [...papers.values()].filter(p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary)).map(p => p.id);
+  const ids = [...papers.values()].filter(queueNeeds).map(p => p.id);
   try { await api("/api/download", {ids}); toast(`Downloading ${ids.length} queued papers in the background.`); }
   catch (e) { toast(e.message); }
 };
@@ -1362,7 +1416,8 @@ function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
   $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
   $("#status").classList.toggle("busy", busy);
-  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl"].forEach(s => $(s).disabled = busy);
+  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl", "#authfollow", "#makebackup"].forEach(s => $(s).disabled = busy);
+  document.querySelectorAll("#authsaved [data-follow]:not(:checked)").forEach(c => c.disabled = busy);      // (switching a follow on starts a download; switching one off is always allowed)
   updateScreenBtn();
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
@@ -1395,6 +1450,7 @@ function connect() {
     if (!d.busy) {
       loadRuns(); loadLibrary();
       if (window.LibraryUI && LibraryUI.refreshFolders) LibraryUI.refreshFolders();      // (an author's new folder appears in the sidebar)
+      if ($("#pane-authors").classList.contains("on")) loadAuthSaved();
       if (d.run && RUN && d.run.id === RUN.id) api("/api/runs/" + RUN.id).then(r => { setRun(r); render(); });
     }
   });

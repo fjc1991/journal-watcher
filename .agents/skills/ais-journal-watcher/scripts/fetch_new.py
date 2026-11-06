@@ -31,10 +31,20 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 # ---------- http ----------
 
+def _api_ua(url, h):
+    """OpenAlex and Crossref (and a JW_OPENALEX_URL mirror, see _openalex) are told plainly who is asking; feeds keep UA."""
+    try:
+        import updater
+        return updater.api_headers(url, h)
+    except Exception:  # noqa: BLE001
+        return h
+
+
 def http_get(url, timeout=40, headers=None):
     h = {"User-Agent": UA, "Accept": "*/*"}
     if headers:
         h.update(headers)
+    _api_ua(url, h)
     for attempt in range(4):
         req = urllib.request.Request(url, headers=h)
         try:
@@ -373,6 +383,13 @@ def openalex_key():
     key = os.environ.get("OPENALEX_API_KEY")
     if key:
         return key
+    try:
+        import keychain                    # (this Mac's Keychain: a key saved or moved there; cached for a minute, nothing under JW_NO_KEYCHAIN)
+        key = keychain.values(["OPENALEX_API_KEY"]).get("OPENALEX_API_KEY")
+        if key:
+            return key
+    except Exception:  # noqa: BLE001      (no Keychain: the file, as before)
+        pass
     p = os.path.join(ROOT, ".env")
     if os.path.exists(p):
         for line in open(p):
@@ -390,16 +407,18 @@ def openalex_spent():
     return time.time() < OPENALEX_SPENT["until"] and OPENALEX_SPENT["keyed"] == bool(openalex_key())
 
 
-def _openalex(path):
+def _openalex(path, missing=None):
     """GET an OpenAlex path. Without a key OpenAlex gives everyone on your network a small shared daily budget ($0.10: about 1,000 list calls or 100 searches); with a
     free key (Settings → Paper sources, or OPENALEX_API_KEY in .env) it is $1 a day of your own. Lookups of one work by DOI or ID are free either way. The key is sent
-    in the Authorization header (not in the address, which ends up in logs). When the budget is used up the call returns None at once instead of waiting."""
+    in the Authorization header (not in the address, which ends up in logs). When the budget is used up the call returns None at once instead of waiting.
+    missing: what to return when OpenAlex answers 404 (it does not know the thing asked for), instead of None (no answer)."""
     key = openalex_key()
     url = (os.environ.get("JW_OPENALEX_URL") or "https://api.openalex.org/") + path     # (the override is for tests and mirrors)
     single = bool(re.match(r"works/(doi:|W\d)", path)) and "?" not in path
     if not single and openalex_spent():
         return None
     h = {"Accept": "application/json"}
+    _api_ua("https://api.openalex.org/", h)        # (also when the address is a mirror or a test server)
     if key:
         h["Authorization"] = "Bearer " + key
     try:
@@ -409,6 +428,8 @@ def _openalex(path):
         wait = (e.headers.get("Retry-After") if e.headers else None) or ""
         if e.code == 429 and wait.isdigit() and int(wait) > 60:
             OPENALEX_SPENT.update(until=time.time() + int(wait), keyed=bool(key))
+        if e.code == 404 and missing is not None:
+            return missing
         return None
     except Exception:
         return None
