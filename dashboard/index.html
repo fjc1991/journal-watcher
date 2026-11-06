@@ -1327,7 +1327,7 @@ function renderLibrary() {
     });
     $("#liball").onclick = e => { e.preventDefault(); go({j: "*"}); };
   } else if (NAV.j === "*") {
-    box.innerHTML = (window.LibraryUI && LIB.length ? `<div class="reshead">${LibraryUI.readyKey(LIB)}</div>` : "") + CFG.journals.filter(j => byJ[j.abbr]).map(j =>
+    box.innerHTML = (window.LibraryUI && LIB.length ? `<div class="reshead">${LibraryUI.readyKey(LIB.filter(r => r.journal !== "Books"))}</div>` : "") + CFG.journals.filter(j => byJ[j.abbr]).map(j =>
       `<div class="jgroup"><h2>${mono(j.abbr, "sm")}${esc(j.name)}</h2>${groups(j.abbr)}</div>`).join("");
   } else {
     const j = jinfo(NAV.j);
@@ -1374,6 +1374,7 @@ function openPaper(id) {
   if (p.summary) loadSummary(p.summary);
 }
 function openLib(r) {
+  if (r.book) return openBook(r);
   fillDrawer({
     abbr: r.abbr, journal: r.journal, year: r.year, title: r.title, authors: r.authors,
     facts: (r.matched_topics || "").split(/;\s*/).filter(Boolean).map(t => `<span class="fact">${esc(t)}</span>`),
@@ -1385,9 +1386,24 @@ function openLib(r) {
   $("#dread").onclick = () => readPaper(r);
   if (r.summary) loadSummary(r.summary);
 }
-async function loadSummary(path) {
+function openBook(r) {                 // a book's page: the overview of the whole book, read from its own record now (never a copy that could be out of step)
+  const tok = openBook.tok = (openBook.tok || 0) + 1;
+  fillDrawer({
+    abbr: r.abbr, journal: r.journal, year: r.year, title: r.title, authors: r.authors, facts: [],
+    actions: [`<button class="btn primary small" id="dread">Read &amp; highlight</button>`, `<button class="btn small" id="dchap" title="The book's chapters and their summaries, in Library → Books">Chapters</button>`,
+      `<a class="btn small" target="_blank" href="${fileUrl(r.file)}">Open PDF</a>`, r.doi ? `<a class="btn small" target="_blank" href="https://doi.org/${esc(r.doi)}">DOI ↗</a>` : ""],
+    body: `<div id="dbook"><p class="pmeta">Reading the book’s summaries…</p></div>` + (r.summary ? `<h3>Summary saved with the book</h3><div class="md" id="dsum">Loading…</div>` : ""),
+  });
+  $("#dread").onclick = () => readPaper(r);
+  $("#dchap").onclick = () => { closeDrawer(); if (window.LibraryUI) LibraryUI.showChapters(r.file); };
+  api("/api/book?file=" + encodeURIComponent(r.file)).then(R => { if (openBook.tok === tok && $("#dbook")) $("#dbook").innerHTML = LibraryUI.bookSummaryHtml(R); })
+    .catch(() => { if (openBook.tok === tok && $("#dbook")) $("#dbook").innerHTML = `<p class="pmeta">No summary yet.</p>`; });
+  if (r.summary) loadSummary(r.summary, () => openBook.tok === tok);
+}
+async function loadSummary(path, still) {
   try {
     const md = await (await fetch(fileUrl(path))).text();
+    if (still && !still()) return;                      // (another page was opened meanwhile)
     // the summary repeats title/authors (shown above); render the rest
     const body = md.replace(/^# .*\n/, "").replace(/^\*\*Authors\*\*.*\n/m, "").replace(/</g, "&lt;");
     $("#dsum").innerHTML = window.marked ? marked.parse(body) : `<pre>${esc(md)}</pre>`;

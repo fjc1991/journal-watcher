@@ -3,7 +3,7 @@
 // Pages are drawn as "bands": normally one band per page, in collapse mode several strips of a page with
 // "⋯ N lines hidden" gaps between them. Highlights are fractions of the page, so every band can draw them.
 import * as pdfjs from "/static/vendor/pdfjs/pdf.mjs";
-import {errBox, notifyError, ico, S, $, $$, esc, fileUrl, clamp, debounce, toast, md, COLORS, colorOf, colorName, legend, emit, on} from "./state.js";
+import {errBox, notifyError, ico, S, $, $$, esc, fileUrl, clamp, debounce, toast, md, COLORS, colorOf, colorName, legend, emit, on, BOOK_HOW, BOOK_STALE, bookEmpty, usd} from "./state.js";
 import {frame, mdParts, chipList, wire as wireOut} from "./output.js";
 import * as N from "./notes.js";
 import * as T from "./text.js";
@@ -675,14 +675,14 @@ function renderToc() {
 // -- summary tab: the markdown the pipeline wrote next to the PDF, and "generate with another template" (shown, not saved, until you say so)
 function buildSum() {
   panels.sum.innerHTML = `<div class="rd-sub"><select id="sum-t" title="Summary template (edit them in Settings)"></select><button class="rd-btn" id="sum-go" title="Write this kind of summary with the model chosen in Settings; the saved summary is not touched">Generate</button>
-    <button class="rd-btn hide" id="sum-saved">Show saved</button></div><div class="rd-scroll" id="sum-body"></div><div class="ex-act hide" id="sum-act"></div>`;
+    <button class="rd-btn hide" id="sum-saved">Show saved</button><span class="pmeta hide" id="sum-bk">A book is summarised chapter by chapter in Library → Books → Chapters, not with a paper template.</span></div><div class="rd-scroll" id="sum-body"></div><div class="ex-act hide" id="sum-act"></div>`;
   wireOut($("#sum-body", panels.sum));
   $("#sum-go", panels.sum).onclick = () => genSummary(false);
   $("#sum-saved", panels.sum).onclick = () => { delete $("#sum-body", root).dataset.file; $("#sum-act", root).classList.add("hide"); $("#sum-saved", root).classList.add("hide"); loadSum(); };
   panels.sum.addEventListener("click", e => { const x = e.target.closest("[data-sx]")?.dataset.sx; if (!x) return; const text = $("#sum-body", root)._gen;
     if (x === "again") genSummary(true);
     else if (x === "copy") copyText(text, "Summary copied.");
-    else if (x === "notes" && C) { const p = C.nextPos(); N.addCard({type: "ai", question: "Summary — " + $("#sum-t", root).selectedOptions[0].textContent, text, cites: [], model: $("#sum-body", root)._model || "", x: p.x, y: p.y, w: 360}); showTab("notes"); toast("Saved to your notes."); }
+    else if (x === "notes" && C) { const p = C.nextPos(); N.addCard({type: "ai", question: "Summary — " + ($("#sum-body", root)._title || ($("#sum-t", root).selectedOptions[0] || {}).textContent || ""), text, cites: [], model: $("#sum-body", root)._model || "", x: p.x, y: p.y, w: 360}); showTab("notes"); toast("Saved to your notes."); }
     else if (x === "replace") replaceSummary(text); });
   fillTemplates();
 }
@@ -690,7 +690,7 @@ function buildSum() {
 function sumFrame(text, o = {}) {
   const mi = /^\*\*Matched interests\*\*:\s*(.*)$/m.exec(text);
   text = text.replace(/^# .*\n/, "").replace(/^\*\*Authors\*\*.*\n/m, "").replace(/^\*\*Matched interests\*\*.*\n/m, "").trim();
-  return frame({tool: "sum", kind: "Summary", icon: "sum", key: "sum:" + S.file + ":" + (o.key || "saved"), title: o.title || "", jump: !o.live,
+  return frame({tool: "sum", kind: "Summary", icon: "sum", key: "sum:" + S.file + ":" + (o.key || "saved"), title: o.title || "", jump: !o.live, notices: o.notices || "",
     sub: mi ? chipList(mi[1].split(/,\s*/).filter(Boolean).map(t => `<span class="of-badge">${esc(t)}</span>`)) : "", meta: o.meta || [],
     actions: o.live ? "" : `<button class="rd-btn" data-sx="copy" title="Copy the summary">Copy</button><button class="rd-btn" data-sx="notes" title="Put the summary on your notes canvas">→ Notes</button>`, sections: mdParts(text)});
 }
@@ -701,6 +701,7 @@ function fillTemplates() {
 }
 async function genSummary(fresh) {
   const el = $("#sum-body", root), act = $("#sum-act", root), tpl = $("#sum-t", root).value, tplName = $("#sum-t", root).selectedOptions[0].textContent; let text = "", done = null;
+  const forFile = S.file; el._title = tplName;
   el.dataset.file = "_generated"; el.innerHTML = `<span class="ask-status">Reading the whole paper…</span>`; act.classList.add("hide"); $("#sum-go", root).disabled = true;
   try {
     const r = await fetch("/api/ai/summary", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({file: S.file, template: tpl, fresh})});
@@ -709,6 +710,7 @@ async function genSummary(fresh) {
     for (;;) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
+        if (S.file !== forFile) return;                // (another paper was opened meanwhile: its tab is not written over)
         if (m.type === "text") { text += m.delta; el.innerHTML = sumFrame(text, {live: true, key: "gen", title: tplName}); } else if (m.type === "error") throw new Error(m.error); else if (m.type === "done") done = m; }
     }
     el._gen = text; el._model = done ? done.model : "";
@@ -726,12 +728,32 @@ async function replaceSummary(text) {
     S.meta.summary = r.path; const el = $("#sum-body", root); delete el.dataset.file; $("#sum-act", root).classList.add("hide"); $("#sum-saved", root).classList.add("hide"); loadSum(); toast("Summary saved.");
   } catch (e) { notifyError(e); }
 }
+let SUM_FOR = "";
 async function loadSum() {
-  const el = $("#sum-body", root), path = S.meta.summary;
-  if (!path) { el.innerHTML = `<div class="rd-empty">No summary has been written for this paper yet.<br>Pick a template above and press Generate.</div>`; return; }
+  const el = $("#sum-body", root), path = S.meta.summary, book = !!(S.meta && S.meta.journal === "Books");
+  if (SUM_FOR !== S.file) { SUM_FOR = S.file; delete el.dataset.file; el._gen = ""; el._title = ""; $("#sum-act", root).classList.add("hide"); }      // (another paper: nothing of the last one stays)
+  $("#sum-t", root).classList.toggle("hide", book); $("#sum-go", root).classList.toggle("hide", book); $("#sum-bk", root).classList.toggle("hide", !book);
+  if (book) { $("#sum-saved", root).classList.add("hide"); $("#sum-act", root).classList.add("hide"); if (await loadBookSum(el)) return; }
+  if (!path) { delete el.dataset.file; el.innerHTML = book ? el.innerHTML : `<div class="rd-empty">No summary has been written for this paper yet.<br>Pick a template above and press Generate.</div>`; return; }
   if (el.dataset.file === path) return; el.dataset.file = path; el.textContent = "Loading…";
   try { const t = await (await fetch(fileUrl(path))).text(); el._gen = t.replace(/^# .*\n/, "").replace(/^\*\*Authors\*\*.*\n/m, ""); el.innerHTML = sumFrame(t, {meta: [{t: "saved with the paper"}]}); }
   catch (e) { el.textContent = "Could not load the summary."; delete el.dataset.file; }
+}
+async function loadBookSum(el) {       // a book: the overview of the whole book, read from its own record each time. True when it was shown (else the caller may show an old saved summary)
+  const file = S.file; el.dataset.file = "book:" + file; el.textContent = "Loading…";
+  let R = null; try { R = await (await fetch("/api/book?file=" + encodeURIComponent(file))).json(); if (R.error) R = null; } catch (e) { R = null; }
+  if (S.file !== file || el.dataset.file !== "book:" + file) return true;
+  const ov = R && R.overview;
+  if (ov && ov.text) {
+    el._gen = ov.text; el._title = "The whole book";
+    el.innerHTML = sumFrame(ov.text, {key: "book", title: "The whole book", meta: [{t: "from the summaries of its " + R.parts + " chapters and sections"}, {t: ov.model || "the AI"}, ov.cost ? {t: usd(ov.cost)} : null,
+      R.overview_stale ? {t: "out of date", cls: "edited", title: BOOK_STALE} : null].filter(Boolean), notices: R.overview_stale ? `<p class="pmeta warn">${esc(BOOK_STALE)}</p>` : ""});
+    return true;
+  }
+  if (S.meta.summary) { delete el.dataset.file; return false; }
+  const [say, how] = bookEmpty(R);
+  el.innerHTML = `<div class="rd-empty">${esc(say)}${how ? "<br>" + esc(BOOK_HOW) : ""}</div>`;
+  return true;
 }
 
 // ---------------------------------------------------------------- quick navigation: just start typing

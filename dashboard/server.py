@@ -1060,7 +1060,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
                                    "chapters": [dict(c, summary=s_ if s_ and s_.get("text") else None, empty=bool(s_ and s_.get("empty")))
                                                 for c in books.chapters(info) for s_ in [(info.get("summaries") or {}).get(books.chapter_key(c))]],
-                                   "overview": info.get("overview"), "overview_stale": books.overview_stale(info)})
+                                   **books.overview_view(info)})
         if path == "/api/authors":      # the Authors tab's "Your authors": each author with a folder, whether you follow them, when the weekly check last listed them
             return self.send_json({"authors": authors.saved()})
         if path == "/api/book/whole":   # ?file=: what summarising the whole book would cost (no AI call) and the job's state; &status=1: only the job's state
@@ -1472,6 +1472,8 @@ class Handler(BaseHTTPRequestHandler):
             text = str(b.get("text") or "").strip()
             if not pdf or len(text) < 20:
                 return self.send_json({"error": "nothing to save"}, 400)
+            if books.is_book(b.get("file")):
+                return self.send_json({"error": "A book keeps its summaries with its chapters (Library → Books → Chapters); nothing was saved."}, 400)
             md = pdf[:-4] + ".md"
             if os.path.exists(md):
                 bk = os.path.join(pl.STATE, "summary_backups")
@@ -1722,6 +1724,8 @@ class Handler(BaseHTTPRequestHandler):
                 pdf = ns.pdf_path(b.get("file"))
                 if not pdf:
                     return self.send_json({"error": "no such paper"}, 404)
+                if books.is_book(b.get("file")):                     # (a book would be sent whole, with a paper template and no estimate: its chapters are summarised instead)
+                    return self.send_json({"error": books.BOOK_NO_TEMPLATE}, 400)
                 return self.stream_ndjson(ask.summary_stream(pdf, self.doc_info(b["file"])[0], b.get("template"), bool(b.get("fresh"))), job=self.job_of("summary", "Summary · " + self.title_of(b["file"]), file=b["file"], tab="sum"))
             if path == "/api/ai/suggest":   # {file, q?, a?} -> {questions: [...]}
                 pdf = ns.pdf_path(b.get("file"))

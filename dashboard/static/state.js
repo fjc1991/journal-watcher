@@ -135,6 +135,19 @@ export function progressDone(el) {
   if (el) el.textContent = "";
 }
 
+// a book's summary, said the same way on its page, in the reader and in the Chapters panel (books.overview_view gives R)
+export const BOOK_HOW = "A book is summarised chapter by chapter, then as a whole: press Chapters (Library → Books), then “Summarise the whole book…”. You see what it costs before anything is sent.";
+export const BOOK_STALE = "A chapter’s summary has changed since this overview was written. To bring it up to date, open Chapters (Library → Books) and press “Summarise the whole book…”: you see what it costs first.";
+export function bookEmpty(R) {          // what to say when a book has no overview yet: [the sentence, whether the how-to line belongs after it]
+  if (!R) return ["No summary yet.", false];
+  if (!R.parts) return ["No summary yet. This book has no outline (the file carries no chapter list), so it cannot be summarised chapter by chapter.", false];
+  if (R.parts_done === R.parts && !R.parts_summarised) return ["No text could be read from this book’s chapters (a scanned book?), so there is nothing to summarise.", false];
+  if (R.parts_done === R.parts) return ["Every chapter and section has its summary; the overview of the whole book is not written yet. Press Chapters, then “Summarise the whole book…”: it writes only the overview, and you see what it costs first.", false];
+  if (R.parts_summarised) return [`${R.parts_summarised} of ${R.parts} chapters and sections have their own summary. “Summarise the whole book…” (in Chapters) summarises the other ${R.parts - R.parts_done}, then writes the overview from all of them; you see what it costs first.`, false];
+  return ["No summary yet.", true];
+}
+export const usd = c => c == null ? "" : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
+
 export function debounce(fn, ms) {
   let t = null;
   const d = (...a) => { clearTimeout(t); t = setTimeout(() => { t = null; fn(...a); }, ms); };

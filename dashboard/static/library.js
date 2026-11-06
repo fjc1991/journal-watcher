@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -23,10 +23,12 @@ async function loadTags() { try { TAGS = (await api("/api/tags")).tags; } catch 
 const folderName = id => (FOLDERS.find(f => f.id === id) || {}).name || id;
 const download = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 
+// a paper whose AI summary is written, or a book whose overview of the whole book is (read from its own record)
+const summarised = r => !!(r && (r.summary || (r.book && r.book.overview && r.book.overview.text)));
 // the key to the green bar on a row: a paper whose AI summary is written, ready to be explored (rows = the papers of the list it explains)
 function readyKey(rows) {
-  const n = (rows || []).filter(r => r && r.summary).length;
-  return `<span class="readykey" title="A green bar beside a paper means its AI summary is written: open it to explore"><i aria-hidden="true"></i>Ready to read <small>${n} of ${(rows || []).length} summarised by AI</small></span>`;
+  const n = (rows || []).filter(summarised).length;
+  return `<span class="readykey" title="A green bar means its AI summary is written (for a book: the overview of the whole book): open it to explore"><i aria-hidden="true"></i>Ready to read <small>${n} of ${(rows || []).length} summarised by AI</small></span>`;
 }
 // ---------------------------------------------------------------- one paper row (used by every Library list)
 function row(r, i, snips) {
@@ -34,9 +36,9 @@ function row(r, i, snips) {
   const nt = r.notes ? `<span class="tag you" title="Highlights and notes you made in the reader">✎ ${r.notes.highlights} highlight${r.notes.highlights === 1 ? "" : "s"}${r.notes.cards ? ` · ${r.notes.cards} note${r.notes.cards === 1 ? "" : "s"}` : ""}</span>` : "";
   const prog = st.status === "reading" && st.progress ? `<span class="prog-mini" title="Page ${st.page || "?"}"><i style="width:${Math.round(st.progress * 100)}%"></i></span>` : "";
   const sn = (snips || []).map(s => `<div class="snip"><b>${s.kind === "highlight" ? "highlight" + (s.page ? " p." + s.page : "") : s.kind}</b> ${esc(s.text || "")}</div>`).join("");
-  return `<div class="card librow${r.summary ? " ready" : ""}" data-file="${esc(r.file)}">
+  return `<div class="card librow${summarised(r) ? " ready" : ""}" data-file="${esc(r.file)}">
     <div class="rowmain">
-      <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}${r.summary ? `<span class="sr-only"> (ready to read: summarised by AI)</span>` : ""}</div></div>
+      <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}${summarised(r) ? `<span class="sr-only"> (ready to read: summarised by AI)</span>` : ""}</div></div>
       <div class="pauth">${esc(authors(r.authors))}</div>
       <div class="pmeta">${r.book ? esc("Book" + (r.book.publisher ? " · " + r.book.publisher : "") + (r.year ? " · " + r.year : "") + (r.book.pages ? " · " + r.book.pages + " pages" : "") + (r.book.source === "epub" ? " · EPUB" : " · PDF") + ((r.book.toc || []).length ? " · outline of " + r.book.toc.length + " item" + (r.book.toc.length === 1 ? "" : "s") : "")) : `${esc(r.journal)} · ${esc(r.year || "")}${r.matched_topics ? " · " + esc(r.matched_topics) : ""}`}</div>
       ${st.takeaway ? `<div class="take" data-take="${esc(r.file)}" title="Click to edit">“${esc(st.takeaway)}”</div>` : ""}
@@ -50,7 +52,7 @@ function row(r, i, snips) {
       <span class="menuwrap"><button class="btn small" data-more aria-haspopup="true" aria-label="More actions" title="More: status, summary, PDF, folders, takeaway">${ico("more", "sm")}</button>
         <div class="menu card hide rowmenu" role="menu">
           <label class="rm-st"><span>Reading status</span><select class="stsel" data-st="${esc(r.file)}"><option value="">None</option>${Object.entries(ST).map(([k, v]) => `<option value="${k}"${st.status === k ? " selected" : ""}>${v}</option>`).join("")}</select></label>
-          ${r.summary ? `<button data-i="${i}" role="menuitem">${ico("sum", "sm")} Summary</button>` : ""}
+          ${summarised(r) ? `<button data-i="${i}" role="menuitem">${ico("sum", "sm")} Summary</button>` : ""}
           <a target="_blank" href="${fileUrl(r.file)}" role="menuitem">${ico("papers", "sm")} Open the PDF</a>
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
@@ -123,7 +125,7 @@ function top(el, opts) {
     const sh = document.createElement("div"); sh.id = "lib-shelves";
     opts.browse.append(sh); sh.append($("#lib-shelf", el), $("#lib-upnext", el));
   }
-  Promise.all([loadFolders(), loadTags(), loadSmart()]).then(() => { fillControls(el); tabs(el, opts); });
+  Promise.all([loadFolders(), loadTags(), loadSmart()]).then(() => { fillControls(el); tabs(el, opts); setTimeout(() => { PENDING_CHAP = ""; }, 0); });
   fillControls(el); tabs(el, opts);
   window.ReviewUI && window.ReviewUI.refreshBadge();
   sumPaint(); clearTimeout(sumTimer); sumTimer = setTimeout(sumPoll, 1500);
@@ -259,8 +261,25 @@ function drawChapters(box, file, R) {
       <div class="chap-sum${c.summary ? "" : " hide"}" data-sumbox="${c.i}">${c.summary ? sumHtml(c.summary) : ""}</div></li>`).join("")}</ol>` : `<p class="pmeta">This book has no outline: the file carries no chapter list.</p>`}
     ${R.source === "epub" ? "" : `<div class="row chap-off"><label>Printed page 1 is file page <input type="number" min="1" max="${R.pages}" value="${R.offset + 1}" data-chap-offv aria-label="File page where printed page 1 is" style="width:5.5em"></label> <button class="btn small" data-chap-off>Save</button> <span class="st-msg" role="status"></span></div>`}`;
 }
-const overviewHtml = R => `<div class="chap-h"><b>The whole book</b> <small>an overview written from the summaries of its chapters and sections${R.overview.cut ? " (the book is long: " + (R.overview.cut === "sections" ? "the sections' summaries were left out" : "each summary was shortened") + ")" : ""}</small></div>
-  ${R.overview_stale ? `<p class="pmeta warn">A chapter's summary has changed since this overview was written: “Summarise the whole book…” writes it again.</p>` : ""}
+// a book's page (the drawer): its overview, or what to do to get one
+function bookSummaryHtml(R) {
+  if (R && R.overview && R.overview.text) return `<div class="chap-overview">${overviewHtml(R, true)}</div>`;
+  const [say, how] = bookEmpty(R);
+  return `<p class="pmeta">${esc(say)}</p>${how ? `<p class="pmeta">${esc(BOOK_HOW)}</p>` : ""}`;
+}
+let PENDING_CHAP = "";              // a book whose Chapters panel is to be opened once the Books tab is drawn (from its page's Chapters button)
+function showChapters(file) {
+  const r = lib()[byFile(file)]; if (!r) return;
+  BQ = r.title || ""; BSCOPE.file = ""; F.tab = "books"; PENDING_CHAP = file;
+  ctx.go({view: "lib", j: null, tab: "books"});
+}
+function openPendingChap(box) {     // (the Library draws its tab again once its folders have loaded: the panel is opened each time until then)
+  if (!PENDING_CHAP) return;
+  const b = $(`.librow[data-file="${CSS.escape(PENDING_CHAP)}"] [data-chap]`, box);
+  if (b && b.getAttribute("aria-expanded") !== "true") b.click();
+}
+const overviewHtml = (R, far) => `<div class="chap-h"><b>The whole book</b> <small>an overview written from the summaries of its chapters and sections${R.overview.cut ? " (the book is long: " + (R.overview.cut === "sections" ? "the sections' summaries were left out" : "each summary was shortened") + ")" : ""}</small></div>
+  ${R.overview_stale ? `<p class="pmeta warn">${far ? esc(BOOK_STALE) : "A chapter's summary has changed since this overview was written: “Summarise the whole book…” writes it again."}</p>` : ""}
   <div class="of-md">${md(R.overview.text)}</div><small class="pmeta">Written by ${esc(R.overview.model || "the AI")}${R.overview.cost ? " · " + esc(money(R.overview.cost)) : ""}</small>`;
 async function wholeBook(card, box, b) {                        // the estimate first; only "Summarise" starts the job (in the background, in the activity tray)
   const file = card.dataset.file, out = $("[data-whole]", box), title = (lib()[byFile(file)] || {}).title || "";
@@ -293,6 +312,11 @@ function follow(card, box, out, file, st) {                    // the job's prog
     delete out.dataset.running;
     let R; try { R = await api("/api/book?file=" + encodeURIComponent(file)); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
     drawChapters(box, file, R);
+    const r0 = lib()[byFile(file)];
+    if (r0 && r0.book) {                                         // (the green bar, and the row's words for a screen reader, without a reload)
+      r0.book.overview = R.overview || undefined; card.classList.toggle("ready", summarised(r0));
+      const t = $(".ptitle", card); if (t && summarised(r0) && !$(".sr-only", t)) t.insertAdjacentHTML("beforeend", `<span class="sr-only"> (ready to read: summarised by AI)</span>`);
+    }
     const o = $("[data-whole]", box); o.classList.remove("hide");
     o.innerHTML = s.stopped === "cancelled" ? `<p class="pmeta">Cancelled: ${s.made} part${s.made === 1 ? "" : "s"} summarised before that are kept.</p>`
       : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.skipped ? ` (${s.skipped} with no text left out)` : ""}${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(money(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
@@ -353,6 +377,7 @@ function booksTab() {
     $("#bk-list", box).innerHTML = (all.length ? `<div class="reshead">${hit.length} book${hit.length === 1 ? "" : "s"}${q ? ` matching “${esc(BQ.trim())}”` : ` in your library`}</div>` : "") +
       (hit.map(([r, i]) => row(r, i)).join("") || (all.length ? `<div class="card empty"><h2>No book matches</h2>Try other words.</div>` : `<div class="card empty"><h2>No books yet</h2>Press <b>＋ Add a book</b> or drop PDF and EPUB files onto this page. Nothing is filed until you have checked the details.</div>`));
     bindRows($("#bk-list", box));
+    openPendingChap($("#bk-list", box));
   };
   drawBooks = draw;
   $("#bk-q", box).oninput = e => { BQ = e.target.value; BFT = false; $("#bk-out", box).innerHTML = ""; if (!BSCOPE.file) draw(); };         // (limited to a chapter, the words are for the search inside it: the list of books stays as it is)
@@ -719,7 +744,7 @@ async function tagManager() {
 function openTab(t) { F.tab = t; if (ctx.go && t === "folders") return ctx.go({view: "lib", j: null, tab: "folders"}); if (TOP) tabs(TOP.el, TOP.opts); }
 window.LibraryUI = {
   init(c) { ctx = c; const wire = () => ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "FoldersUI", "DropImport", "Palette", "Activity", "DraftUI", "ClaimsUI", "SynthUI", "ReviewUI", "WorkspaceUI", "BibImport"].forEach(n => window[n] && window[n].init(c)); wire(); addEventListener("load", wire, {once: true});   /* the other tab modules may still be loading */ wireRows(); return Promise.all([loadFolders(), loadTags()]); },
-  row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab,
+  row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab, bookSummaryHtml, showChapters, summarised,
   refreshFolders: loadFolders, state: F,
   folderCount: () => FOLDERS.length, folders: () => FOLDERS,
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added
