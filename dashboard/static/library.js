@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -72,7 +72,7 @@ async function setState(file, patch) {
 let TOP = null;
 function top(el, opts) {
   TOP = {el, opts}; QUEUE = null;
-  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers"], ["books", "Books"], ["ask", "Ask"], ["discover", "Discover"], ["hl", "Highlights"], ["review", "Review"], ["tags", "Tags"]].map(([k, t]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}${t}</button>`).join("")}</div>
+  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers", "search and browse them"], ["books", "Books", "your books, by chapter"], ["ask", "Ask", "questions across your library"], ["discover", "Discover", "papers your library cites"], ["hl", "Highlights", "everything you marked"], ["review", "Review", "flashcards due today"], ["tags", "Tags", "your papers by tag"]].map(([k, t, h]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>
     <div id="lib-papers">
       <div class="card libtools">
         <div class="row lt-top"><input type="search" id="lf-q" placeholder="Search titles, authors, summaries — and your own highlights and notes…" autocomplete="off">
@@ -115,6 +115,10 @@ function top(el, opts) {
     const c = e.target.closest("[data-unf]"); if (!c) return; if (c.dataset.unf === "all") Object.assign(F, {status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false}); else F[c.dataset.unf] = c.dataset.unf === "star" || c.dataset.unf === "notes" ? false : ""; fillControls(el); results(opts); });
   bind("lf-export", "click", e => { e.stopPropagation(); exportMenu($("#lf-exportmenu", el), {}); });
   $$(".libtabs button", el).forEach(b => b.onclick = () => { F.tab = b.dataset.tab; tabs(el, opts); });
+  if (opts && opts.browse) {                                      // the Library's home: the journal tiles first, then Continue reading and Up next below them
+    const sh = document.createElement("div"); sh.id = "lib-shelves";
+    opts.browse.append(sh); sh.append($("#lib-shelf", el), $("#lib-upnext", el));
+  }
   Promise.all([loadFolders(), loadTags(), loadSmart()]).then(() => { fillControls(el); tabs(el, opts); });
   fillControls(el); tabs(el, opts);
   window.ReviewUI && window.ReviewUI.refreshBadge();
@@ -361,7 +365,7 @@ async function inBooks(box) {                       // the words inside the book
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
-      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") out.innerHTML = `<div class="reshead">${esc(m.msg)}</div>`; else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
+      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") { if (!$(".reshead.jw-st", out)) out.innerHTML = `<div class="reshead jw-st"></div>`; progress($(".reshead.jw-st", out), m); } else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
   } catch (e) { out.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
   const hl = t => re ? t.split(re).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("") : esc(t);
@@ -383,7 +387,7 @@ async function fulltext(opts) {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
-      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") box.innerHTML = `<div class="reshead">${esc(m.msg)}</div>`; else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
+      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") { if (!$(".reshead.jw-st", box)) box.innerHTML = `<div class="reshead jw-st"></div>`; progress($(".reshead.jw-st", box), m); } else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
   } catch (e) { FT_BUSY = false; box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   FT_BUSY = false;
   const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
@@ -563,7 +567,7 @@ function folderView(box, id) {
       actions: `<span class="menuwrap"><button class="btn small" id="fv-add">${ico("plus", "sm")} Add papers ${ico("down", "sm")}</button><div class="menu card hide" id="fv-addmenu"><button data-add="pdf">PDFs from my computer…</button><button data-add="lib">Papers already in my library…</button><div class="pmeta" style="padding:6px 10px">Or drop PDFs anywhere on this page.</div></div></span>
       <button class="btn small" id="fv-rename">Rename</button><button class="btn small danger" id="fv-del">Delete folder</button>
       <span class="menuwrap"><button class="btn small" id="fv-export">${ico("download", "sm")} Export ${ico("down", "sm")}</button><div class="menu card hide" id="fv-expmenu"></div></span>`}) + `
-    ${window.IdeasUI ? `<div class="libtabs tooltabs fvtabs" style="margin-top:12px">${[["papers", "Papers", "papers"], ["ask", "Ask", "ask"], ["matrix", "Matrix", "matrix"], ["discover", "Discover", "discover"], ["evidence", "Evidence", "evidence"], ["synthesis", "Synthesis", "synthesis"], ["workspace", "Workspace", "workspace"], ["lab", "Ideas Lab", "ideas"], ["draft", "Related work", "draft"], ["claims", "Claim check", "claims"]].map(([k, t, i]) => `<button data-ft="${k}" data-tool="${i}">${ico(i)}${t}</button>`).join("")}</div>` : ""}
+    ${window.IdeasUI ? `<div class="libtabs tooltabs fvtabs" style="margin-top:12px">${[["papers", "Papers", "papers", "this folder's list"], ["ask", "Ask", "ask", "ask these papers"], ["matrix", "Matrix", "matrix", "compare them in a table"], ["discover", "Discover", "discover", "papers they cite"], ["evidence", "Evidence", "evidence", "who found what"], ["synthesis", "Synthesis", "synthesis", "what they say together"], ["workspace", "Workspace", "workspace", "a board to arrange them"], ["lab", "Ideas Lab", "ideas", "research ideas from them"], ["draft", "Related work", "draft", "a related-work draft"], ["claims", "Claim check", "claims", "check claims against them"]].map(([k, t, i, h]) => `<button data-ft="${k}" data-tool="${i}">${ico(i)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>` : ""}
     <div id="fv-body" style="margin-top:14px"></div>`;
   $("#fv-add").onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.toggle("hide"); };
   $$("#fv-addmenu [data-add]").forEach(b => b.onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.add("hide"); const D = window.DropImport; if (D) b.dataset.add === "pdf" ? D.choosePdfs(id) : D.pickFromLibrary(id); });

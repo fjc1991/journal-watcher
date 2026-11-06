@@ -291,17 +291,18 @@ def scope_stream(rows, library, min_n=2, limit=60):
         if not rows:
             yield {"type": "error", "error": "There are no papers in this scope."}
             return
-        yield {"type": "status", "msg": "Looking up your %d papers in OpenAlex…" % len(library)}
+        yield {"type": "status", "msg": "Looking up your %d papers in OpenAlex…" % len(library), "step": 1, "steps": 4}
         lib = Lib(library)
         hide = set(ignored())
         refs_of, related_of, via_pdf, nodata = {}, {}, 0, []
-        for r in rows:
+        for k, r in enumerate(rows, 1):
+            yield {"type": "status", "msg": "Reading the reference lists of these papers", "step": 2, "steps": 4, "done": k - 1, "total": len(rows)}
             rec = lib.rec(r)
             refs = list((rec or {}).get("refs", []))
             if not refs:
                 dois = _pdf_dois(r)
                 if dois:
-                    yield {"type": "status", "msg": "Reading the reference list of “%s”…" % r.get("title", "")[:50]}
+                    yield {"type": "status", "msg": "Reading the reference list of “%s” (from its PDF)" % r.get("title", "")[:50], "step": 2, "steps": 4, "done": k - 1, "total": len(rows)}
                     refs = [x["id"] for x in lookup("doi", dois).values()]
                     via_pdf += 1 if refs else 0
             if not refs:
@@ -312,7 +313,7 @@ def scope_stream(rows, library, min_n=2, limit=60):
             cites.update(refs_of[f])
             rel.update(set(related_of[f]))
         top_ids = [i for i, _ in sorted(cites.items(), key=lambda kv: -kv[1]) if cites[i] >= min_n and i not in hide][:200]
-        yield {"type": "status", "msg": "Fetching details of %d papers your papers cite…" % len(top_ids)}
+        yield {"type": "status", "msg": "Fetching details of %d papers your papers cite…" % len(top_ids), "step": 3, "steps": 4}
         rel_ids = [i for i, _ in rel.most_common(80)]
         recs = lookup("id", list(dict.fromkeys(top_ids + rel_ids)))
         by_file = {r["file"]: r for r in rows}
@@ -325,11 +326,11 @@ def scope_stream(rows, library, min_n=2, limit=60):
         for r, n in _rank(Counter({i: rel[i] for i in rel_ids}), recs, lib, hide | shown, 60):
             who = [{"file": f, "cite": evd.short_cite(by_file[f]), "title": by_file[f].get("title", "")} for f, ids in related_of.items() if r["id"] in ids]
             pool.append((r, n, who))
+        yield {"type": "status", "msg": "Comparing with the rest of your library…", "step": 4, "steps": 4}
         sims = _closeness([r for r, _, _ in pool], rows, [[w["file"] for w in who] for _, _, who in pool])
         for (r, n, who), s_ in sorted(zip(pool, sims), key=lambda t: (-t[0][1], -t[1])):
             if s_ >= REL_SIM and len(related) < 20:
                 related.append(_card(r, n, who, round(s_, 2)))
-        yield {"type": "status", "msg": "Comparing with the rest of your library…"}
         yield {"type": "result", "min_n": min_n, "missing": missing, "related": related, "similar": similar(rows, library, 8),
                "stats": {"papers": len(rows), "with_refs": len(rows) - len(nodata), "via_pdf": via_pdf, "no_refs": nodata[:12], "unresolved": len([r for r in rows if lib.rec(r) is None])}}
     except Exception as e:  # noqa: BLE001

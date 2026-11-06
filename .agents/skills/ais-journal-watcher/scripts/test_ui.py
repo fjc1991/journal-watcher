@@ -482,6 +482,19 @@ fx.fetch_journal = lambda j: []                                                 
             check("library home shows search, filters and journal tiles", page.locator("#libtiles .tile").count() == 1)
             page.wait_for_selector("#lib-upnext .unx", timeout=15000); n_unx = page.locator("#lib-upnext .unx").count()
             check("the Library has an Up next shelf: unread papers with why they are there", n_unx >= 1 and "up next" in page.inner_text("#lib-upnext").lower() and page.locator("#lib-upnext .unx-why").first.inner_text().strip() != "")
+            order_ = page.evaluate("(() => { const t = document.querySelector('#libtiles'), u = document.querySelector('#lib-upnext'), s = document.querySelector('#lib-shelf'); return [!!(t.compareDocumentPosition(u) & Node.DOCUMENT_POSITION_FOLLOWING), !!(t.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING)]; })()")
+            check("the journal tiles come first on the Library's home; Continue reading and Up next are below them", order_ == [True, True], str(order_))
+            tabs_ = page.evaluate("[...document.querySelectorAll('.libtabs button')].map(b => [b.querySelector('.tn') && b.querySelector('.tn').textContent, (b.querySelector('.th') || {}).textContent || '', Math.round(b.getBoundingClientRect().height), !!b.querySelector('.ico')])")
+            check("the Library's tabs are large tiles: each with its icon, its name and a one-line hint, at least 44 px tall",
+                  len(tabs_) == 7 and all(t_[0] and len(t_[1]) > 5 and t_[2] >= 44 and t_[3] for t_ in tabs_), str(tabs_))
+            prog_ = page.evaluate("""(async () => { const st = await import('/static/state.js'); const el = document.createElement('div'); document.body.append(el);
+                st.progress(el, {msg: 'Reading the reference lists', done: 3, total: 4}); const a = [el.querySelector('.jw-bar i').style.width, el.textContent, el.querySelector('.jw-prog').classList.contains('ind'), el.querySelector('[role=progressbar]').getAttribute('aria-valuenow')];
+                st.progress(el, {msg: 'Comparing', step: 4, steps: 4}); const b = [el.querySelector('.jw-bar i').style.width, el.textContent];
+                st.progress(el, 'Asking…'); const c = [el.querySelector('.jw-prog').classList.contains('ind'), el.textContent];
+                st.progressDone(el); const d = el.textContent; el.remove(); return [a, b, c, d]; })()""")
+            check("long actions show a progress bar: it fills with counts ('3 of 4', 75 %), follows steps, moves while there are none, and goes when done",
+                  prog_[0][0] == "75%" and "3 of 4" in prog_[0][1] and prog_[0][2] is False and prog_[0][3] == "75" and prog_[1][0] == "75%" and "Comparing" in prog_[1][1]
+                  and prog_[2][0] is True and "Asking" in prog_[2][1] and prog_[3] == "", str(prog_))
             first_unx = page.locator("#lib-upnext .unx >> nth=0").get_attribute("data-file")
             page.click("#lib-upnext .unx >> nth=0 >> [data-unx=later]"); page.wait_for_function("document.querySelector('#lib-upnext .unx') && /in your list/.test(document.querySelector('#lib-upnext .unx').innerText)")
             check("＋ To read keeps a paper in your list (it goes to the front of Up next)", api("/api/queue")["items"][0]["status"] == "toread")

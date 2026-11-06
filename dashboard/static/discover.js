@@ -4,7 +4,7 @@
 //     check (free copies first, then your publisher and library access) and each gets a summary.
 //   · the reader's "Related" tab: the same for the open paper (similar papers you have; what it cites that you don't have; related papers you don't have).
 // Server: POST /api/related/scope (stream: status | result | error), GET /api/related/paper, POST /api/related/{ignore,download}.
-import {errBox, notifyError, S as RS, $, $$, esc, ico, api, toast, on} from "./state.js";
+import {errBox, notifyError, S as RS, $, $$, esc, ico, api, toast, on, progress} from "./state.js";
 import {frame, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -96,7 +96,7 @@ async function find(S) {
     for (;;) {
       const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status") st.textContent = m.msg; else if (m.type === "error") throw new Error(m.error);
+        if (m.type === "status") progress(st, m); else if (m.type === "error") throw new Error(m.error);
         else if (m.type === "result") { Object.assign(S, {missing: m.missing, related: m.related, similar: m.similar, stats: m.stats, minUsed: m.min_n, hidden: 0}); } }
     }
     st.textContent = "";

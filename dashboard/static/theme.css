@@ -192,15 +192,17 @@ body.sb-open .sb-scrim { display: block; }
 .banner { border-radius: var(--r-card); border-color: color-mix(in srgb, var(--bl) 35%, var(--line)); }
 
 /* ---- tool tabs: a row on a hairline, the tool's icon in its colour, the page you are on underlined */
-.tooltabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 0; margin: 0 0 18px; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; box-shadow: none; max-width: 100%; }
-.tooltabs button { display: inline-flex; align-items: center; gap: 7px; border: 0; background: none; padding: 9px 12px 10px; border-radius: 8px 8px 0 0; color: var(--ink-3); font-weight: 500; cursor: pointer; position: relative; margin-bottom: -1px; }
-.tooltabs button .ico { color: var(--t, var(--ink-3)); width: 16px; height: 16px; opacity: .9; }
-.tooltabs button + button { border-left: 0; }
-.tooltabs button:hover { background: var(--hover); color: var(--ink); }
-.tooltabs button.on { background: none; color: var(--ink); font-weight: 600; box-shadow: none; }
-.tooltabs button.on::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0; background: var(--t, var(--ink)); }
-.tooltabs .n { font-size: 11px; color: var(--ink-3); }
-.tooltabs.libtabs, .tooltabs.fvtabs { display: flex; width: auto; }
+/* the tool tabs (the Library's and a folder's): large tiles, each with its tool's colour, its name and a one-line hint; the open one filled with its colour */
+.tooltabs { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 8px; padding: 0; margin: 0 0 18px; background: none; border: 0; border-radius: 0; box-shadow: none; max-width: 100%; }
+.tooltabs button { display: grid; grid-template-columns: auto 1fr; column-gap: 9px; align-items: center; text-align: left; min-height: 58px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.25; cursor: pointer; position: relative; box-shadow: none; }
+.tooltabs button .ico { grid-row: 1 / span 2; color: var(--t, var(--ink-2)); width: 22px; height: 22px; }
+.tooltabs button .th { grid-column: 2; display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--ink-2); line-height: 1.3; }
+.tooltabs button:hover { background: var(--t-soft, var(--hover)); border-color: var(--t-line, var(--line)); }
+.tooltabs button.on { background: color-mix(in srgb, var(--t, var(--accent)) 20%, var(--panel)); border: 2px solid var(--t, var(--accent)); padding: 9px 11px; }
+.tooltabs button.on .th { color: var(--ink); }
+.tooltabs button .nn, .tooltabs .n { position: absolute; top: 6px; right: 8px; font-size: 11px; color: var(--ink-2); }
+.tooltabs.libtabs, .tooltabs.fvtabs { display: grid; width: auto; }
 .viewtabs.card { padding: 0 4px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; box-shadow: none; background: none; gap: 2px; }
 .viewtabs button { flex: 0 0 auto; min-width: 0; padding: 10px 14px; border-radius: 8px 8px 0 0; color: var(--ink-3); font-weight: 500; font-size: 14px; margin-bottom: -1px; }
 .viewtabs button:hover { background: var(--hover); color: var(--ink); }
@@ -540,3 +542,14 @@ dialog.wl[open] { display: flex; flex-direction: column; }
 .la-mode.on { border-color: var(--accent); }
 .wl-btns .btn.done { border-color: color-mix(in srgb, var(--dl) 45%, var(--line)); background: var(--dl-soft); }
 .wl-ok { color: var(--dl) !important; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+
+/* the progress bar of something that takes a while (state.js progress): a bar that fills with counts, or moves without them, the message and the seconds */
+.jw-prog { display: inline-flex; align-items: center; gap: 10px; min-width: min(420px, 100%); max-width: 100%; vertical-align: middle; }
+.jw-prog .jw-bar { flex: 0 0 140px; height: 8px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; position: relative; }
+.jw-prog .jw-bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .3s ease; }
+.jw-prog.ind .jw-bar i { width: 35%; position: absolute; left: -35%; animation: jw-slide 1.4s ease-in-out infinite; }
+.jw-prog .jw-pmsg { font-size: 13px; color: var(--ink-2); }
+@keyframes jw-slide { 0% { left: -35%; } 100% { left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .jw-prog.ind .jw-bar i { animation: none; left: 0; width: 100%; opacity: .45; background: repeating-linear-gradient(90deg, var(--accent) 0 8px, transparent 8px 14px); }
+}

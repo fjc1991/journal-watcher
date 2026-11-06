@@ -2,7 +2,7 @@
 // limitations, future research. Every statement shows the pages it rests on (click to jump there). Click any text to edit it; your edits are saved
 // next to the paper (<name>.card.json) and marked. The same cards feed the folder's Evidence view and the Research Ideas Lab.
 // The server streams newline-delimited JSON from POST /api/ai/card: {type:"status"|"progress"|"card"|"done"|"error"}.
-import {errBox, notifyError, S, $, esc, ico, toast, on, debounce, api} from "./state.js";
+import {errBox, notifyError, S, $, esc, ico, toast, on, debounce, api, progress} from "./state.js";
 import * as N from "./notes.js";
 import * as C from "./canvas.js";
 import {jumpCite} from "./cite.js";
@@ -146,7 +146,7 @@ async function make(fresh) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line), st = $("#cd-st", panel);
-        if (m.type === "status" && st) st.textContent = m.msg;
+        if (m.type === "status" && st) progress(st, m);
         else if (m.type === "progress" && st) st.textContent = `Writing the card… ${(m.chars / 1000).toFixed(1)}k characters`;
         else if (m.type === "card") got = m.card; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }

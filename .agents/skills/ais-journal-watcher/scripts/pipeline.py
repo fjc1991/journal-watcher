@@ -186,6 +186,7 @@ def library():
             for r in csv.DictReader(f):
                 if r["status"] != "ok" or not r["file"]:
                     continue
+                r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (rows written before the names were unescaped)
                 md = r["file"][:-4] + ".md"
                 r["summary"] = md if os.path.exists(os.path.join(ROOT, md)) else None
                 r["notes"] = ns.counts(os.path.join(ROOT, r["file"]))  # reader highlights/cards, None if none

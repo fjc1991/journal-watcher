@@ -54,7 +54,7 @@ def _meta_from_item(it, doi=""):
         return None
     authors = [" ".join(x for x in [a.get("given"), a.get("family")] if x) or a.get("name", "") for a in it.get("author", [])]
     return {"title": re.sub(r"\s+", " ", fx.strip_html(it["title"][0])).strip(), "authors": [a for a in authors if a],
-            "container": (it.get("container-title") or [""])[0], "issn": it.get("ISSN") or [], "doi": it.get("DOI", doi),
+            "container": dl.plain((it.get("container-title") or [""])[0]), "issn": it.get("ISSN") or [], "doi": it.get("DOI", doi),
             "pub_date": fx.fmt_date_parts((it.get("published") or it.get("issued") or {}).get("date-parts")),
             "url": it.get("URL") or "https://doi.org/" + (it.get("DOI") or doi), "volume": it.get("volume", ""), "issue": it.get("issue", ""),
             "pages": it.get("page", ""), "publisher": it.get("publisher", ""), "type": it.get("type", ""),

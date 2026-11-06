@@ -4,7 +4,7 @@
 // reference), and a check lists citations that did not exist, sentences with no source and papers that were never cited. Edit the text, switch between
 // author-year and numbered citations, copy it, or export it as Word or Markdown. Saved as Papers/_folders/<id>.draft.json.
 // Server: GET /api/folder/draft, POST /api/ai/draft[/estimate] (stream: status | progress | draft | done | error), POST /api/folder/draft (edits, citation style).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, md, debounce} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, md, debounce, progress} from "./state.js";
 import {frame, mdParts, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -132,7 +132,7 @@ async function write(again) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "progress" && st()) st().textContent = `Writing… ${(m.chars / 1000).toFixed(1)}k characters`;
+        if (m.type === "status" && st()) progress(st(), m); else if (m.type === "progress" && st()) progress(st(), `Writing… ${(m.chars / 1000).toFixed(1)}k characters`);
         else if (m.type === "draft") { D.data.doc = m.doc; D.form.style = m.doc.style; D.form.pages = m.doc.pages; } else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }

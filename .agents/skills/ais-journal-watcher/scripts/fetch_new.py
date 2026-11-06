@@ -375,7 +375,7 @@ def venue_route(meta, venue, doi, journals):
     j = next((x for x in journals if x.get("issn") and x["issn"] in issn), None)
     if j:
         return j["name"], j["abbr"], j["publisher"]
-    name = re.sub(r"[\\/:*?\"<>|]+", " ", ((meta or {}).get("container") or venue or "")).strip()[:80] or "Other"
+    name = re.sub(r"[\\/:*?\"<>|]+", " ", unescape(unescape((meta or {}).get("container") or venue or ""))).strip()[:80] or "Other"
     return name, venue_abbr(name) if name != "Other" else "OTH", PUBLISHER_BY_PREFIX.get(doi.split("/")[0] if doi else "", "")
 
 

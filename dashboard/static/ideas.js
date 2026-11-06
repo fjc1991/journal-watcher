@@ -4,7 +4,7 @@
 //   Ideas Lab: your brief -> current events from a web search (you untick or add) -> ideas generated from the evidence, scored by a tough
 //             "editor" and checked against OpenAlex -> a board you star, shortlist, annotate, develop into an outline and export.
 // Server streams are newline-delimited JSON ({type: status|progress|events|ideas|text|paper|done|error}).
-import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md} from "./state.js";
+import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress} from "./state.js";
 import {frame, kv, callout, mdParts, sectionsHtml, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -138,7 +138,7 @@ async function findEvents() {
   if (L.busy) return; L.busy = true; renderEvents(); const st = () => $("#ev-st", L.root);
   try { await saveNow();          // what you typed so far is on the board before the server changes it
     await ndjson("/api/ai/ideas/events", {id: L.fid, focus: $("#lb-focus", L.root).value}, m => {
-    if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "events") { const b = L.doc.brief; L.doc = m.doc; L.doc.brief = b; } else if (m.type === "error") throw new Error(m.error);
+    if (m.type === "status" && st()) progress(st(), m); else if (m.type === "events") { const b = L.doc.brief; L.doc = m.doc; L.doc.brief = b; } else if (m.type === "error") throw new Error(m.error);
     else if (m.type === "done") { toast(m.found ? `${m.found} event${m.found === 1 ? "" : "s"} found${m.cost ? " · " + money(m.cost) : ""}.` : "The search found no usable events" + (m.note ? ": " + m.note.slice(0, 120) : "") + "."); if (!m.found && st()) st().textContent = m.note || ""; } }); }
   catch (e) { notifyError(e); }
   L.busy = false; renderEvents(); renderGen(); estimate();
@@ -161,7 +161,7 @@ async function generate() {
   if (L.busy) return; L.busy = true; const mode = $("#lab-mode", L.root).value; renderGen(); renderEvents(); const st = () => $("#gen-st", L.root);
   await saveNow();
   try { await ndjson("/api/ai/ideas/generate", {id: L.fid, brief: L.doc.brief, mode}, m => {
-    if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "progress" && st()) st().textContent = `Writing the ideas… ${(m.chars / 1000).toFixed(1)}k characters`;
+    if (m.type === "status" && st()) progress(st(), m); else if (m.type === "progress" && st()) progress(st(), {msg: `Writing the ideas… ${(m.chars / 1000).toFixed(1)}k characters`, step: 2, steps: 4});
     else if (m.type === "ideas") L.doc = m.doc; else if (m.type === "error") throw new Error(m.error);
     else if (m.type === "done") toast(`${m.made} ideas added${m.cost ? " · " + money(m.cost) : ""}${m.cached ? " (from the saved answer)" : ""}.`); }); }
   catch (e) { notifyError(e); if ($("#gen-st", L.root)) $("#gen-st", L.root).innerHTML = errInline(e); }

@@ -1732,6 +1732,35 @@ print("OK")
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("books: the outline as chapter page ranges, where a page is in words you could cite (chapter and printed page; location for an EPUB), the printed-page offset (checked, kept), and a search inside one chapter", t_book_chapters)
+    def t_plain_names():
+        """HTML entities in titles and journal names (Crossref and some feeds send "&amp;", sometimes twice) are turned back into characters when a paper is saved, when
+        the library is listed (rows saved before), and when a venue name comes from OpenAlex or Crossref; ordinary text is left alone."""
+        import pipeline as pl_, fetch_new as fx_
+        assert dl.plain("Journal of Economic Behavior &amp; Organization") == "Journal of Economic Behavior & Organization"
+        assert dl.plain("A &amp;amp; B") == "A & B" and dl.plain("R&D and M&A; prices") == "R&D and M&A; prices" and dl.plain("") == "" and dl.plain(None) == ""
+        assert dl.plain("&#8220;Generate&#8221; the Future") == "\u201cGenerate\u201d the Future"
+        name, _, _ = fx_.venue_route({"container": "Journal of Economic Behavior &amp;amp; Organization", "issn": []}, "", "10.1016/x", [])
+        assert name == "Journal of Economic Behavior & Organization", name
+        saved_dl = (dl.PAPERS, dl.ROOT); dl.PAPERS, dl.ROOT = pl_.PAPERS, pl_.ROOT          # (the library the pipeline lists)
+        idx_ = os.path.join(dl.PAPERS, "_index.csv"); saved_ = open(idx_, encoding="utf-8").read() if os.path.exists(idx_) else None
+        pdf_ = os.path.join(dl.PAPERS, "2025-01", "JEBO", "amp.pdf"); os.makedirs(os.path.dirname(pdf_), exist_ok=True); open(pdf_, "wb").write(b"%PDF")
+        try:
+            import csv as _csv
+            dl.save_index({"doi": "10.9/amp1", "title": "Winners &amp; losers", "journal": "Journal of Economic Behavior &amp; Organization", "abbr": "JEBO"}, os.path.relpath(pdf_, dl.ROOT), "ok")
+            row = [r for r in _csv.DictReader(open(idx_, newline="", encoding="utf-8")) if r["doi"] == "10.9/amp1"][0]
+            assert row["journal"] == "Journal of Economic Behavior & Organization" and row["title"] == "Winners & losers", row
+            with open(idx_, "a", newline="", encoding="utf-8") as fh:            # a row written by an older version, still escaped
+                w = _csv.DictWriter(fh, dl.INDEX_COLS); w.writerow(dict(row, doi="10.9/amp2", title="Old &amp; escaped", journal="Old &amp;amp; Journal"))
+            lib_ = {r["doi"]: r for r in pl_.library()}
+            assert lib_["10.9/amp2"]["journal"] == "Old & Journal" and lib_["10.9/amp2"]["title"] == "Old & escaped", lib_["10.9/amp2"]
+        finally:
+            if saved_ is None:
+                os.path.exists(idx_) and os.remove(idx_)
+            else:
+                open(idx_, "w", encoding="utf-8").write(saved_)
+            os.path.exists(pdf_) and os.remove(pdf_)
+            dl.PAPERS, dl.ROOT = saved_dl
+    check("names: '&amp;' in titles and journal names is shown as '&' (saved, listed, and from OpenAlex/Crossref), and ordinary '&' is left alone", t_plain_names)
     def t_api_identity():
         """The scholarly databases (OpenAlex, Crossref, Unpaywall, Semantic Scholar, Open Library, the price list) are told plainly who is asking: the app's name, version
         and project page, never an e-mail address. Publisher pages and feeds are asked as before (a browser's User-Agent): only the listed API hosts change."""
@@ -2612,6 +2641,11 @@ print("OK")
         rl.REL_SIM = -1.0                      # (the bag-of-words test embeddings are far cruder than the real model: the threshold has its own test below)
         msgs = list(rl.scope_stream(LIBRARY, LIBRARY, min_n=2))
         res = msgs[-1]; assert res["type"] == "result", msgs[-1]
+        st_ = [m for m in msgs if m["type"] == "status"]           # (the page's progress bar: four steps, and the papers counted while their reference lists are read)
+        assert [m.get("step") for m in st_][:1] == [1] and st_[-1].get("step") == 4 and all(m.get("steps") == 4 for m in st_), [(m.get("step"), m.get("msg")) for m in st_]
+        loop_ = [m for m in st_ if m.get("step") == 2 and "total" in m]
+        assert loop_ and all(m["total"] == len(LIBRARY) for m in loop_) and [m["done"] for m in loop_ if "PDF" not in m["msg"]] == list(range(len(LIBRARY))), [(m.get("done"), m.get("msg")) for m in loop_]
+        assert st_[-1]["msg"].startswith("Comparing") and msgs[-2] is st_[-1]
         ms = res["missing"]; assert [(m["id"], m["n"]) for m in ms] == [("W10", 4), ("W11", 2)], ms           # W3 is in the library; W12 and W13 are cited once
         assert {c["file"] for c in ms[0]["via"]} == {"Papers/2026-05/ISR/%s.pdf" % k for k in "abce"} and {c["file"] for c in ms[1]["via"]} == {"Papers/2026-05/ISR/%s.pdf" % k for k in "ac"}
         assert ms[0]["doi"] == "10.1234/ten" and ms[0]["authors"] == ["Zed Quinn", "Amy Roe"] and ms[0]["cited_by"] == 900 and ms[0]["year"] == 2020

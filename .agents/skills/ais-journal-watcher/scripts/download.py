@@ -125,6 +125,21 @@ def index_key(row):
     return (row.get("doi") or row.get("title") or "").lower()
 
 
+_ENTITY = re.compile(r"&(#\d+|#x[0-9a-fA-F]+|[A-Za-z]+);")
+
+
+def plain(s):
+    """Text with HTML entities turned back into characters ("Behavior &amp; Organization" -> "Behavior & Organization"): Crossref and some feeds send titles and
+    journal names escaped, sometimes twice, and the page escapes them again, so they showed as "&amp;amp;"."""
+    s = str(s or "")
+    for _ in range(3):
+        if "&" not in s or not _ENTITY.search(s):
+            break
+        import html
+        s = html.unescape(s)
+    return s
+
+
 def save_index(p, file, status, note=""):
     """Upsert one row per paper (keyed by DOI, else title)."""
     idx = os.path.join(PAPERS, "_index.csv")
@@ -135,7 +150,7 @@ def save_index(p, file, status, note=""):
     topics = p.get("topics") or list((p.get("topics_hit") or {}).keys())
     row = dict(zip(INDEX_COLS, [
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        p.get("journal", ""), p.get("abbr", ""), p.get("title", ""),
+        plain(p.get("journal", "")), p.get("abbr", ""), plain(p.get("title", "")),
         "; ".join(p.get("authors") or []), p.get("doi") or "",
         p.get("url") or "", "; ".join(topics),
         p.get("score", ""), file, status, note,
