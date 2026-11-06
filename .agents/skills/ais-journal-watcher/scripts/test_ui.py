@@ -1620,8 +1620,12 @@ fx.fetch_journal = lambda j: []                                                 
             ct_ = page.inner_text(C_)
             page.evaluate("""(sel) => { const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array([37, 80, 68, 70])], "again.pdf", {type: "application/pdf"}));
               const t = document.querySelector(sel + " .ptitle"); t.dispatchEvent(new DragEvent("dragover", {dataTransfer: dt, bubbles: true, cancelable: true})); }""", C_)
-            page.wait_for_function("document.querySelector('#toast') && /already in your library/.test(document.querySelector('#toast').textContent)", timeout=5000)
+            try:
+                page.wait_for_function("document.querySelector('#toast') && /already in your library/.test(document.querySelector('#toast').textContent)", timeout=5000); told_ = True
+            except Exception:  # noqa: BLE001
+                told_ = False
             page.evaluate("document.dispatchEvent(new DragEvent('dragend', {bubbles: true}))")
+            check("…dragging a PDF over it now says it is already in your library (a browser cancels a drop there, so it is said while you drag)", told_)
             check("…the card says Downloaded and 'No summary yet', with no 'Retry summary' (its summary is asked for in the Library, with the cost first), and it takes no more drops",
                   "No summary yet" in ct_ and "Retry summary" not in ct_ and "can-attach" not in (page.get_attribute(C_, "class") or ""), ct_[:300])
             # (the checks after this one expect the library as it was: the paper is deleted again, and its "deleted" row taken out of the index)
