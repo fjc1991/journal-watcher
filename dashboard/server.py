@@ -254,7 +254,7 @@ def _download_emit(base):
                 JOBS.waiting[data["host"]] = data
             elif data.get("state") == "done":
                 JOBS.waiting.clear()
-            elif data.get("state") in ("open", "passed", "failed"):
+            elif data.get("state") in ("open", "passed", "failed", "cleared"):
                 JOBS.waiting.pop(data.get("host"), None)
         base(event, data)
     return emit
@@ -277,6 +277,17 @@ def follow_download(run, ids, emit):
             ok, "" if ok == 1 else "s", ", %d to try again next week" % again if again else ""), "level": "ok"})
         if ok and indexer:
             indexer.kick(3)
+
+
+ATTACH_LOCK = threading.Lock()      # one PDF you add at a time: a run loaded from its file is changed and saved whole (two at once would each save their own copy)
+
+
+def attach_to_run(rid, fn):
+    """fn(run) for a paper's PDF you add: the open run itself, or the run read from its file. None if there is no such run."""
+    rid = str(rid or "")
+    with ATTACH_LOCK:
+        run = JOBS.run if JOBS.run and JOBS.run.id == rid else (pl.Run.load(rid) if rid else None)
+        return fn(run) if run else None
 
 
 def start_download(ids, prepare=None):
@@ -806,6 +817,17 @@ class Handler(BaseHTTPRequestHandler):
     def title_of(self, rel):
         return str(self.doc_info(rel)[0].get("title") or "this paper")[:64]
 
+    def attached(self, res):
+        """Answer a PDF you added to a paper of a run (pipeline.attach_pdf / attach_keep): the open pages show it at once. No summary is written."""
+        if res.get("filed"):
+            p = res["paper"]
+            HUB.emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "summary", "manual_url", "summary_by_hand")})
+            HUB.emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "ai_verdict", "user_set")})
+            HUB.emit("log", {"msg": "Your PDF of “%s” was added to the library." % (p.get("title") or "")[:60], "level": "ok"})
+            if indexer and not res.get("existing"):
+                indexer.kick(2)
+        return self.send_json({"ok": True, **res})
+
     def finish_import(self, res, summarize):
         """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does."""
         row = next((r for r in pl.library() if r["file"] == res["file"]), {})
@@ -991,7 +1013,7 @@ class Handler(BaseHTTPRequestHandler):
             bk_ = one("books")
             rows_ = [r for r in pl.library() if bk_ == "all" or (r.get("journal") == "Books") == (bk_ == "only")]
             return self.send_json(ls.search(rows_, one("q"), one("status"), one("star") == "1", one("folder"), one("journal"),
-                                            one("year"), one("tag"), one("notes") == "1", one("sort")))
+                                            one("year"), one("tag"), one("notes") == "1", one("sort"), one("kind")))
         if path == "/api/library/highlights":
             return self.send_json(ls.highlights(pl.library(), one("q"), one("tag") or None, one("color") or None, one("folder") or None, one("journal") or None))
         if path == "/api/tags/usage":
@@ -1060,7 +1082,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
                                    "chapters": [dict(c, summary=s_ if s_ and s_.get("text") else None, empty=bool(s_ and s_.get("empty")))
                                                 for c in books.chapters(info) for s_ in [(info.get("summaries") or {}).get(books.chapter_key(c))]],
-                                   "overview": info.get("overview"), "overview_stale": books.overview_stale(info)})
+                                   **books.overview_view(info)})
         if path == "/api/authors":      # the Authors tab's "Your authors": each author with a folder, whether you follow them, when the weekly check last listed them
             return self.send_json({"authors": authors.saved()})
         if path == "/api/book/whole":   # ?file=: what summarising the whole book would cost (no AI call) and the job's state; &status=1: only the job's state
@@ -1123,6 +1145,19 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if not self.local_only():
             return self.send_json({"error": "forbidden"}, 403)
+        if path == "/api/run/attach":   # a PDF you downloaded yourself, for one paper of a run: the raw PDF is the body; X-Run, X-Paper (URL-encoded)
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= 150 * 1024 * 1024:
+                return self.send_json({"error": "The file is empty or larger than 150 MB, so it cannot be added."}, 400)
+            data = self.rfile.read(n)
+            pid = urllib.parse.unquote(self.headers.get("X-Paper") or "")
+            try:
+                res = attach_to_run(urllib.parse.unquote(self.headers.get("X-Run") or ""), lambda run: pl.attach_pdf(run, pid, data))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if res is None:
+                return self.send_json({"error": "That run is not there any more: reload the page."}, 404)
+            return self.attached(res)
         if path == "/api/import/pdf":   # the raw PDF is the request body (not JSON); the name travels in a header
             n = int(self.headers.get("Content-Length") or 0)
             if not 0 < n <= 150 * 1024 * 1024:
@@ -1325,18 +1360,32 @@ class Handler(BaseHTTPRequestHandler):
             if JOBS.busy():
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
             items = [x for x in (b.get("items") or []) if isinstance(x, dict)][:40]
+            fid = str(b.get("folder") or "")                      # (Discover inside a folder: what you pick goes into that folder)
+            folder = fo.get(fid) if fid else None
+            if fid and not folder:
+                return self.send_json({"error": "That folder is not there any more: reload the page."}, 404)
             papers, have = related.run_papers(items)
+            if folder and have:                                    # the ones you had already: into the folder now (nothing to download)
+                hf = {h["file"] for h in have}
+                fo.add(fid, [r["key"] for r in pl.library() if r["file"] in hf])
             if not papers:
+                if folder and have:
+                    return self.send_json({"ok": True, "run": None, "have": have, "n": 0, "folder": folder["name"]})
                 return self.send_json({"error": "Nothing to download: %s" % ("they are all in your library already." if have else "no usable papers were chosen."), "have": have}, 400)
-            run = pl.Run("picks", {"label": re.sub(r"\s+", " ", str(b.get("label") or "related papers")).strip()[:60]})
+            params = {"label": re.sub(r"\s+", " ", str((folder or {}).get("name") or b.get("label") or "related papers")).strip()[:60]}
+            if folder:
+                params.update(folder=fid, folder_name=folder["name"])
+            run = pl.Run("picks", params)
             for p in papers:
+                if folder:
+                    p["folder"] = fid                               # (filed into it once it is in the library: by this download, a retry, or a PDF you add yourself)
                 run.add_paper(p)
             run.stage, run.status = "ready", "stopped"
             run.save(force=True)
             JOBS.run = run
             if not start_download([p["id"] for p in papers]):
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
-            return self.send_json({"ok": True, "run": run.to_dict(full=False), "have": have, "n": len(papers)})
+            return self.send_json({"ok": True, "run": run.to_dict(full=False), "have": have, "n": len(papers), "folder": (folder or {}).get("name", "")})
         if path == "/api/ask/chat":      # {folder?, turns}: replaces the saved conversation (an empty list deletes it)
             try:
                 return self.send_json(multiask.save_chat(str(b.get("folder") or "") or None, b.get("turns")))
@@ -1472,6 +1521,8 @@ class Handler(BaseHTTPRequestHandler):
             text = str(b.get("text") or "").strip()
             if not pdf or len(text) < 20:
                 return self.send_json({"error": "nothing to save"}, 400)
+            if books.is_book(b.get("file")):
+                return self.send_json({"error": "A book keeps its summaries with its chapters (Library → Books → Chapters); nothing was saved."}, 400)
             md = pdf[:-4] + ".md"
             if os.path.exists(md):
                 bk = os.path.join(pl.STATE, "summary_backups")
@@ -1722,6 +1773,8 @@ class Handler(BaseHTTPRequestHandler):
                 pdf = ns.pdf_path(b.get("file"))
                 if not pdf:
                     return self.send_json({"error": "no such paper"}, 404)
+                if books.is_book(b.get("file")):                     # (a book would be sent whole, with a paper template and no estimate: its chapters are summarised instead)
+                    return self.send_json({"error": books.BOOK_NO_TEMPLATE}, 400)
                 return self.stream_ndjson(ask.summary_stream(pdf, self.doc_info(b["file"])[0], b.get("template"), bool(b.get("fresh"))), job=self.job_of("summary", "Summary · " + self.title_of(b["file"]), file=b["file"], tab="sum"))
             if path == "/api/ai/suggest":   # {file, q?, a?} -> {questions: [...]}
                 pdf = ns.pdf_path(b.get("file"))
@@ -1790,6 +1843,14 @@ class Handler(BaseHTTPRequestHandler):
             if not ids:
                 return self.send_json({"error": "nothing selected"}, 400)
             return self.started(start_download(ids), JOBS.run)
+        if path == "/api/run/attach/keep":      # {run_id, id, token}: the PDF that did not look like the paper is the right one, you said
+            try:
+                res = attach_to_run(b.get("run_id"), lambda run: pl.attach_keep(run, str(b.get("id") or ""), b.get("token")))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if res is None:
+                return self.send_json({"error": "That run is not there any more: reload the page."}, 404)
+            return self.attached(res)
         if path == "/api/verdict":
             # the user's own call on a paper (e.g. borderline -> download queue)
             v = b.get("verdict")
@@ -1876,6 +1937,24 @@ class Handler(BaseHTTPRequestHandler):
             if not summaries.start([str(f) for f in files] if files is not None else None):
                 return self.send_json({"error": "Every one of these papers has a summary already."}, 400)
             return self.send_json({"ok": True, "status": summaries.status()})
+        if path == "/api/library/kind":          # {files: [...], kind, label?}: what these papers are (journal article, preprint, conference paper, other): only <stem>.paper.json is written
+            import kinds
+            k = str(b.get("kind") or "")
+            if k not in kinds.PAPER_KINDS:
+                return self.send_json({"error": "Choose a type: journal article, preprint or working paper, conference paper, or report, thesis or other."}, 400)
+            files = [str(f) for f in (b.get("files") or []) if isinstance(f, str)][:5000]
+            by = {r["file"]: r for r in pl.library()}
+            done = 0
+            for f in files:
+                r = by.get(f)
+                if not r or r.get("kind") == "book":
+                    continue
+                pdf = ns.pdf_path(f)
+                if not pdf:
+                    continue
+                kinds.write_sidecar(pdf, k, r.get("journal") or "", str(b.get("label") or "") if k == "other" else "", r.get("key") or pl.dl.index_key(r))
+                done += 1
+            return self.send_json({"ok": True, "changed": done})
         if path == "/api/library/delete":        # {files: [...]}: delete these papers or books for good (files, notes, summary, card, search index); a run never downloads them again
             files = b.get("files")
             if not isinstance(files, list) or not files or len(files) > 500:
@@ -1928,6 +2007,8 @@ class Handler(BaseHTTPRequestHandler):
                 if papers:
                     run = pl.Run("picks", {"label": "Download again: " + re.sub(r"\s+", " ", gone["title"])[:40]})
                     for p in papers:
+                        if gone.get("kind"):
+                            p["kind"], p["kind_label"] = gone["kind"], gone.get("label") or ""        # (a conference paper stays one)
                         run.add_paper(p)
                     run.stage, run.status = "ready", "stopped"
                     run.save(force=True)

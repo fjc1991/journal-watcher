@@ -373,7 +373,7 @@ def generate(fid, rows, brief, mode="add"):
     cost = 0.0
     try:
         brief = _brief(brief)
-        yield {"type": "status", "msg": "Reading the evidence from your papers…"}
+        yield {"type": "status", "msg": "Reading the evidence from your papers…", "step": 1, "steps": 4}
         ev = evd.build(rows)
         if len(ev["papers"]) < 2:
             yield {"type": "error", "error": "The Ideas Lab needs paper cards for at least two papers in this folder. Make them first (Evidence tab)."}
@@ -386,7 +386,7 @@ def generate(fid, rows, brief, mode="add"):
         user = "EVIDENCE\n%s\n\nRESEARCHER\nInterests: %s\nFocus for this brainstorm: %s\nConstraints (methods, data access, time, target journals): %s\nAmbition: %s\nJournals to choose from: %s\n\nPropose exactly %d ideas." % (
             evd.digest(ev, events), interests or "not given", brief["focus"] or "none given: use what the evidence suggests", brief["constraints"] or "none given",
             AMBITIONS[brief["ambition"]], journals or "any good IS journal", brief["n"])
-        yield {"type": "status", "msg": "Brainstorming %d ideas from %d papers…" % (brief["n"], len(ev["papers"]))}
+        yield {"type": "status", "msg": "Brainstorming %d ideas from %d papers…" % (brief["n"], len(ev["papers"])), "step": 2, "steps": 4}
         out, n = {}, [0]
 
         def run():
@@ -415,11 +415,11 @@ def generate(fid, rows, brief, mode="add"):
         ideas = [x for x in (_clean_idea(i, valid, event_ids) for i in raw if isinstance(i, dict)) if x["title"] and x["research_question"]][:brief["n"] + 2]
         if not ideas:
             raise ai.AIError("The ideas came back empty. Try again.")
-        yield {"type": "status", "msg": "Critiquing the ideas like a tough editor…"}
+        yield {"type": "status", "msg": "Critiquing the ideas like a tough editor…", "step": 3, "steps": 4}
         crit, cres = _critique(ideas, brief, interests)
         cost += cres.cost or 0
         folder_dois = {p["doi"].lower() for p in ev["papers"] if p["doi"]}
-        yield {"type": "status", "msg": "Checking what already exists (OpenAlex)…"}
+        yield {"type": "status", "msg": "Checking what already exists (OpenAlex)…", "step": 4, "steps": 4}
         from concurrent.futures import ThreadPoolExecutor
         queries = [(crit.get(i) or {}).get("search_query") or "%s %s" % (x["title"], x["research_question"]) for i, x in enumerate(ideas)]
         with ThreadPoolExecutor(max_workers=2) as ex:

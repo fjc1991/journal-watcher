@@ -97,6 +97,12 @@ def http_get(url, timeout=25, headers=None):
         return r.read(), dict(r.headers)
 
 
+def looks_pdf(data):
+    """A whole PDF file, of any size: what a PDF you chose yourself must be (a one-page comment is shorter than is_pdf's floor, which is there for a download that
+    stopped half-way or a reader's page)."""
+    return bool(data) and data[:1024].lstrip(b"\xef\xbb\xbf \r\n").startswith(b"%PDF") and b"%%EOF" in data[-2048:]
+
+
 def is_pdf(data):
     """A complete PDF: header at the start, %%EOF near the end (streamed/partial
     responses from in-browser readers fail the second test)."""
@@ -125,26 +131,55 @@ def index_key(row):
     return (row.get("doi") or row.get("title") or "").lower()
 
 
+_ENTITY = re.compile(r"&(#\d+|#x[0-9a-fA-F]+|[A-Za-z]+);")
+
+
+def plain(s):
+    """Text with HTML entities turned back into characters ("Behavior &amp; Organization" -> "Behavior & Organization"): Crossref and some feeds send titles and
+    journal names escaped, sometimes twice, and the page escapes them again, so they showed as "&amp;amp;"."""
+    s = str(s or "")
+    for _ in range(3):
+        if "&" not in s or not _ENTITY.search(s):
+            break
+        import html
+        s = html.unescape(s)
+    return s
+
+
+INDEX_LOCK = threading.RLock()     # one read-modify-write of Papers/_index.csv at a time in this process (a download thread and a PDF you add can write it at the same moment)
+
+
 def save_index(p, file, status, note=""):
-    """Upsert one row per paper (keyed by DOI, else title)."""
+    """Upsert one row per paper (keyed by DOI, else title). The file is replaced whole (a reader never sees half of it)."""
+    with INDEX_LOCK:
+        _save_index(p, file, status, note)
+
+
+def _save_index(p, file, status, note):
     idx = os.path.join(PAPERS, "_index.csv")
-    rows = []
+    rows, extra = [], []
     if os.path.exists(idx):
         with open(idx, newline="") as f:
-            rows = list(csv.DictReader(f))
+            rd = csv.DictReader(f)
+            rows = list(rd)
+            extra = [c for c in (rd.fieldnames or []) if c and c not in INDEX_COLS]       # (columns a later version may add: kept, not refused)
     topics = p.get("topics") or list((p.get("topics_hit") or {}).keys())
     row = dict(zip(INDEX_COLS, [
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        p.get("journal", ""), p.get("abbr", ""), p.get("title", ""),
+        plain(p.get("journal", "")), p.get("abbr", ""), p.get("title", ""),          # (the title as it came: a paper without a DOI is keyed by it, in runs, folders and reading status)
         "; ".join(p.get("authors") or []), p.get("doi") or "",
         p.get("url") or "", "; ".join(topics),
         p.get("score", ""), file, status, note,
     ]))
+    if status != "ok" and any(index_key(r) == index_key(row) and r.get("status") == "ok" and r.get("file") and os.path.exists(os.path.join(ROOT, r["file"])) for r in rows):
+        return                     # (a download that failed never takes a paper out of the library: its PDF came meanwhile, by another run or by you)
     rows = [r for r in rows if index_key(r) != index_key(row)] + [row]
-    with open(idx, "w", newline="") as f:
-        w = csv.DictWriter(f, INDEX_COLS)
+    tmp = tmp_path(idx)
+    with open(tmp, "w", newline="") as f:
+        w = csv.DictWriter(f, INDEX_COLS + extra, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, idx)
 
 
 def out_path(p):

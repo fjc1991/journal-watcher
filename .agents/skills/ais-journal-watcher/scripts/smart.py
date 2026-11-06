@@ -15,7 +15,7 @@ import download as dl  # noqa: E402
 
 PATH = os.path.join(dl.PAPERS, "_smart.json")
 _lock = threading.RLock()
-STRS = ("q", "status", "folder", "journal", "year", "tag")
+STRS = ("q", "status", "folder", "journal", "year", "tag", "kind")
 BOOLS = ("star", "notes")
 
 

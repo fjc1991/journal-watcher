@@ -4,7 +4,7 @@
 //     check (free copies first, then your publisher and library access) and each gets a summary.
 //   · the reader's "Related" tab: the same for the open paper (similar papers you have; what it cites that you don't have; related papers you don't have).
 // Server: POST /api/related/scope (stream: status | result | error), GET /api/related/paper, POST /api/related/{ignore,download}.
-import {errBox, notifyError, S as RS, $, $$, esc, ico, api, toast, on} from "./state.js";
+import {errBox, notifyError, S as RS, $, $$, esc, ico, api, toast, on, progress} from "./state.js";
 import {frame, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -51,8 +51,11 @@ function actions(S) {
     if (k === "download") {
       const its = items(); if (!its.length) return;
       t.closest("[data-k]").disabled = true;
-      try { const r = await api("/api/related/download", {items: its, label: S.label});
-        toast(`Downloading ${r.n} paper${r.n === 1 ? "" : "s"}${r.have && r.have.length ? ` (${r.have.length} already in your library)` : ""}…`); if (ctx.openRun) ctx.openRun(r.run); }
+      try { const r = await api("/api/related/download", {items: its, label: S.label, folder: S.folder || ""});
+        const had = r.have && r.have.length ? r.have.length : 0;
+        if (!r.run) { toast(`${had} paper${had === 1 ? " was" : "s were"} already in your library: now in the folder “${r.folder}”.`); t.closest("[data-k]").disabled = false;
+          if (ctx.reload) await ctx.reload(); if (window.LibraryUI) { await LibraryUI.refreshFolders(); LibraryUI.updateFolderHead && LibraryUI.updateFolderHead(); } return; }       // (the folder's count and the sidebar)
+        toast(`Downloading ${r.n} paper${r.n === 1 ? "" : "s"}${r.folder ? ` into the folder “${r.folder}”` : ""}${had ? ` (${had} already in your library${r.folder ? ", now in the folder" : ""})` : ""}…`); if (ctx.openRun) ctx.openRun(r.run); }
       catch (er) { notifyError(er); t.closest("[data-k]").disabled = false; }
     }
     if (k === "unhide") { try { const r = await api("/api/related/ignored"); const ids = Object.keys(r.ignored); if (!ids.length) return toast("Nothing is hidden."); if (!confirm(`Bring back ${ids.length} hidden paper${ids.length === 1 ? "" : "s"}?\n\n` + ids.slice(0, 8).map(i => "• " + r.ignored[i].title).join("\n"))) return;
@@ -60,8 +63,8 @@ function actions(S) {
   });
   S.bar = bar;
 }
-const barHtml = () => `<div class="dc-bar hide card"><b><span class="dc-n">0</span> selected</b><button class="btn primary" data-k="download">⬇ Download</button>
-  <span class="pmeta">Free copies first, then your publisher and library access. Each paper that arrives gets a summary (about 2–4¢). Watch it in the Download queue.</span></div>`;
+const barHtml = inFolder => `<div class="dc-bar hide card"><b><span class="dc-n">0</span> selected</b><button class="btn primary" data-k="download">⬇ Download</button>
+  <span class="pmeta">${inFolder ? "They go into this folder (those you already have, at once). " : ""}Free copies first, then your publisher and library access. Each paper that arrives gets a summary (about 2–4¢). Watch it in the Download queue.</span></div>`;
 
 // ---------------------------------------------------------------- folder / library tab
 export function mount(el, opts = {}) {
@@ -73,7 +76,7 @@ export function mount(el, opts = {}) {
       <label class="pmeta" style="display:inline-flex;gap:5px;align-items:center">cited by at least <select data-s="min">${[1, 2, 3, 4, 5].map(n => `<option${n === S.min ? " selected" : ""}>${n}</option>`).join("")}</select> of these papers</label>
       <button class="btn primary" data-k="find" id="dc-find">🔍 Find papers</button><button class="btn small" data-k="unhide">Hidden papers…</button><span class="pmeta" id="dc-st"></span></div>
     <div class="pmeta" style="margin-top:6px">Reads the reference lists of the papers in scope (OpenAlex; for papers it has no references for yet, the DOIs in the PDF’s own bibliography) and lists what several of them cite that you don’t have. Free; nothing is downloaded until you press Download.</div></div>
-    <div id="dc-out"></div>${barHtml()}`;
+    <div id="dc-out"></div>${barHtml(!!S.folder)}`;
   actions(S); S.redraw = () => draw(S); S.rerun = () => find(S);
   el.addEventListener("change", e => { const s = e.target.closest("[data-s]"); if (!s) return; if (s.dataset.s === "min") S.min = +s.value; else S.scope[s.dataset.s] = s.value; });
   el.addEventListener("click", e => { if (e.target.closest("#dc-find")) find(S); if (e.target.closest("[data-k=min1]")) { S.min = 1; const m = $('[data-s="min"]', el); if (m) m.value = "1"; find(S); } });
@@ -96,7 +99,7 @@ async function find(S) {
     for (;;) {
       const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status") st.textContent = m.msg; else if (m.type === "error") throw new Error(m.error);
+        if (m.type === "status") progress(st, m); else if (m.type === "error") throw new Error(m.error);
         else if (m.type === "result") { Object.assign(S, {missing: m.missing, related: m.related, similar: m.similar, stats: m.stats, minUsed: m.min_n, hidden: 0}); } }
     }
     st.textContent = "";

@@ -375,8 +375,9 @@ def venue_route(meta, venue, doi, journals):
     j = next((x for x in journals if x.get("issn") and x["issn"] in issn), None)
     if j:
         return j["name"], j["abbr"], j["publisher"]
-    name = re.sub(r"[\\/:*?\"<>|]+", " ", ((meta or {}).get("container") or venue or "")).strip()[:80] or "Other"
-    return name, venue_abbr(name) if name != "Other" else "OTH", PUBLISHER_BY_PREFIX.get(doi.split("/")[0] if doi else "", "")
+    raw = re.sub(r"[\\/:*?\"<>|]+", " ", (meta or {}).get("container") or venue or "").strip()[:80]
+    name = re.sub(r"[\\/:*?\"<>|]+", " ", unescape(unescape(raw))).strip()[:80] or "Other"
+    return name, venue_abbr(raw) if name != "Other" else "OTH", PUBLISHER_BY_PREFIX.get(doi.split("/")[0] if doi else "", "")      # (the abbreviation from the name as it came, as before: papers saved earlier keep the same group)
 
 
 def openalex_key():

@@ -84,7 +84,7 @@ def _window(text, tok, n=70):
     return ("…" if a else "") + re.sub(r"\s+", " ", text[a:b]).strip() + ("…" if b < len(text) else "")
 
 
-def search(rows, q="", status="", star=False, folder="", journal="", year="", tag="", notes=False, sort=""):
+def search(rows, q="", status="", star=False, folder="", journal="", year="", tag="", notes=False, sort="", kind=""):
     toks = _tokens(q or "")
     out = []
     for r in rows:
@@ -100,6 +100,8 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
         if journal and r.get("abbr") != journal:
             continue
         if year and r.get("year") != year:
+            continue
+        if kind and (r.get("kind") or "journal") != kind:          # (kinds.py: journal | preprint | conference | other)
             continue
         if notes and not r.get("notes"):
             continue
@@ -125,12 +127,12 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
                         found = True; score += w * min(c, 3)
                         if name in ("takeaway", "summary", "card") and len(snips) < 3:
                             snips.append({"kind": name, "page": None, "text": _window(text, t)})
-                for kind, text, obj in hl + cm:
+                for sk, text, obj in hl + cm:                       # (sk: not `kind`, the filter above)
                     if t in text.lower():
                         found = True; score += 3
                         if len(snips) < 3:
-                            pg = (obj.get("parts") or [{}])[0].get("page") if kind == "highlight" or obj.get("parts") else None
-                            snips.append({"kind": kind, "page": pg, "text": _window(text, t)})
+                            pg = (obj.get("parts") or [{}])[0].get("page") if sk == "highlight" or obj.get("parts") else None
+                            snips.append({"kind": sk, "page": pg, "text": _window(text, t)})
                 ok = ok and found
             if not ok:
                 continue

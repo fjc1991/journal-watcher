@@ -44,8 +44,9 @@ function overlay(show, text) {
   if (show && text != null) $(".di-pill", D.overlay).textContent = text;
 }
 let overFolder = null;
+const onRunList = () => visible($("#papers .paper.can-attach"));        // a run's list with papers that can take a PDF you downloaded yourself (attach.js)
 function hint(w) {
-  if (!w) return "Drop PDFs on the Library, Folders page or inside a folder to add them";
+  if (!w) return onRunList() ? "Drop the PDF on its paper’s card to add it to that paper" : "Drop PDFs on the Library, Folders page or inside a folder to add them";
   if (w.kind === "folder") return w.name ? "Add to “" + w.name + "”" : "Add to this folder";
   if (w.kind === "open") return "Add to this folder";
   return onBooksTab() ? "Drop PDF or EPUB files to add them as books — you’ll check the details first" : "Drop PDFs (or EPUB books) to add them — you’ll check the details and choose where they go";
@@ -70,6 +71,12 @@ const why = k => k.own ? "The file’s own details (title page / EPUB metadata)"
   : "Could not be confirmed against the PDF";
 const fieldsOf = (c, kind) => kind === "book" ? {title: c.title || "", authors: (c.authors || []).join("; "), publisher: c.publisher || "", pub_date: c.pub_date || c.year || "", isbn: c.isbn || "", doi: c.doi || ""}
   : {title: c.title || "", authors: (c.authors || []).join("; "), journal: c.journal || "", pub_date: c.pub_date || "", doi: c.doi || ""};
+// what kind of paper (kinds.py): its venue box says what to type
+const PTYPES = [["journal", "Journal article"], ["preprint", "Preprint or working paper"], ["conference", "Conference paper"], ["other", "Report, thesis or other"]];
+const VENUE = {journal: ["Journal", "e.g. Information Systems Research"], preprint: ["Repository or series", "e.g. SSRN, arXiv, NBER Working Papers"],
+  conference: ["Conference or proceedings", "e.g. ICIS 2024 Proceedings"], other: ["Source", "e.g. a university, a report series or a book title"]};
+const TYPEWORD = {preprint: "preprint", conference: "conference paper", other: "report, thesis or other"};
+const ptypeSel = (c, name) => `<label class="ir-type">Type <select data-ptype="${c.i}" aria-label="What kind of paper is ${esc(name)}?">${PTYPES.map(([v, t]) => `<option value="${v}"${c.ptype === v ? " selected" : ""}>${t}</option>`).join("")}</select></label>`;
 const blank = (kind, title) => kind === "book" ? {title: title || "", authors: "", publisher: "", pub_date: "", isbn: "", doi: ""} : {title: title || "", authors: "", journal: "", pub_date: "", doi: ""};
 const isbnOk = s => {           // an ISBN-10 or ISBN-13 with a correct check digit (empty is fine: not every book has one)
   const d = String(s || "").replace(/[\s-]/g, "").toUpperCase(); if (!d) return true;
@@ -97,12 +104,12 @@ function cardHtml(c) {
     : a.confidence === "check" ? ["warn", cands[0] && cands[0].verdict === "match" ? "Please check: the title matches, but the authors could not be confirmed." : "Please check: the record below could not be confirmed against the " + (book ? "book" : "PDF") + "."]
     : a.pdf.scan ? ["bad", "This " + (book ? "book" : "PDF") + " looks scanned (it has no text to read). Type the details yourself."] : ["bad", "No record was found online. Type the details; the " + (book ? "file’s" : "PDF’s") + " own title is filled in."];
   const opts = cands.map((k, n) => `<label class="ir-cand${k.verdict === "mismatch" ? " mis" : ""}"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="${n}"${c.sel === n ? " checked" : ""}>
-      <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${book ? (k.publisher ? " · " + esc(k.publisher) : "") : k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${book && k.isbn ? " · ISBN " + esc(k.isbn) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
+      <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${!book && TYPEWORD[k.kind] ? " · " + esc(TYPEWORD[k.kind]) : ""}${book ? (k.publisher ? " · " + esc(k.publisher) : "") : k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${book && k.isbn ? " · ISBN " + esc(k.isbn) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
       <small class="ir-why">${esc(why(k))}${k.doi_printed && k.verdict === "match" && k.authors_found ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
   const f = c.fields, fld = (k, label, ph, wide) => `<label class="ir-f${wide ? " wide" : ""}"><span>${label}</span><input type="text" data-k="${k}" data-i="${c.i}" value="${esc(f[k])}" placeholder="${esc(ph || "")}" autocomplete="off" spellcheck="false"></label>`;
-  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div><div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
+  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}<div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
     ${cands.length ? `<div class="ir-cands" role="radiogroup" aria-label="Records found for ${esc(c.file.name)}">${opts}<label class="ir-cand"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="-1"${c.sel === -1 ? " checked" : ""}><span><b>None of these</b><small>I will type the details myself</small></span></label></div>` : ""}
-    <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors or editors (separate with ;)", "Jane Doe; John Smith", true)}${book ? fld("publisher", "Publisher", "") + fld("pub_date", "Year", "YYYY") + fld("isbn", "ISBN", "978…") + fld("doi", "DOI (if it has one)", "10.…") : fld("journal", "Journal", "") + fld("pub_date", "Date", "YYYY or YYYY-MM-DD") + fld("doi", "DOI", "10.…")}</div>
+    <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors or editors (separate with ;)", "Jane Doe; John Smith", true)}${book ? fld("publisher", "Publisher", "") + fld("pub_date", "Year", "YYYY") + fld("isbn", "ISBN", "978…") + fld("doi", "DOI (if it has one)", "10.…") : ptypeSel(c, c.file.name) + fld("journal", VENUE[c.ptype || "journal"][0], VENUE[c.ptype || "journal"][1]) + fld("pub_date", "Date", "YYYY or YYYY-MM-DD") + fld("doi", "DOI", "10.…")}</div>
     <div class="ir-err" id="ir-e${c.i}" role="alert"></div>`;
 }
 
@@ -112,12 +119,13 @@ async function review(files, w, o = {}) {
   const fixed = w.kind === "folder" || w.kind === "open" ? w.id : null, fixedName = fixed ? (w.name || folderName(fs, fixed)) : "";
   const today = new Date().toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
   const last = fs.find(f => f.id === ls.get("jw-drop-last")), first = w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
-  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: ""}));
+  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: ""}));
   return new Promise(resolve => {
     $("#ir-dlg") && $("#ir-dlg").remove();
     const d = document.createElement("dialog"); d.id = "ir-dlg"; d.className = "card ir-dlg"; d.setAttribute("aria-labelledby", "ir-h");
     d.innerHTML = `<h2 id="ir-h">Check the details of ${plural(pdfs.length, pdfs.every(isEpub) ? "EPUB" : pdfs.some(isEpub) ? "file" : "PDF")}</h2>
-      <p class="pmeta">Nothing is filed until you press Add. Each file is read and looked up online (Crossref for papers; Open Library and Crossref for books); fix anything that is wrong. A PDF can be a paper or a book: choose.</p>
+      <p class="pmeta">Nothing is filed until you press Add. Each file is read and looked up online (Crossref for papers; Open Library and Crossref for books); fix anything that is wrong. Say what each file is: a paper (a journal article, a preprint or working paper, a conference paper, or a report, thesis or other) or a book.</p>
+      ${pdfs.length > 1 ? `<div class="row ir-all"><label>Set every paper's type to <select id="ir-all" aria-label="Set the type of every paper you have not set yourself"><option value="">(as each one says)</option>${PTYPES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>` : ""}
       <div class="ir-list">${cards.map(c => `<section class="ir-card" id="ir-c${c.i}"></section>`).join("")}${skipped.slice(0, 3).map(f => `<div class="ir-skip">${esc(f.name)} — not a PDF or EPUB, skipped</div>`).join("")}</div>
       <div class="ir-foot">
         ${fixed ? `<div class="ir-dest">Adding to the folder <b>“${esc(fixedName)}”</b></div>` : `<div class="ir-dest"><label for="ir-to">Add to</label><select id="ir-to"><option value="lib">Library only (no folder)</option>${fs.map(f => `<option value="f:${esc(f.id)}">Folder: ${esc(f.name)} (${plural(f.count, "paper")})</option>`).join("")}<option value="new">A new folder…</option></select>
@@ -139,7 +147,22 @@ async function review(files, w, o = {}) {
     if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
     cards.forEach(draw); status();
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
-      c.fields = c.sel >= 0 ? fieldsOf(c.a.candidates[c.sel], c.kind) : blank(c.kind, c.a.pdf.title);
+      if (c.sel >= 0) {
+        const cand = c.a.candidates[c.sel]; c.fields = fieldsOf(cand, c.kind);
+        if (c.kind !== "book" && !c.ptypeTouched && !c.ptypeAll) { c.ptype = cand.kind || "journal"; c.label = cand.label || ""; }
+      } else {
+        const typed = c.kind !== "book" && c.fields && c.fields.journal;     // (a venue you typed stays; else what the PDF itself says, if anything)
+        c.fields = blank(c.kind, c.a.pdf.title);
+        if (c.kind !== "book") {
+          c.fields.journal = typed || c.a.pdf.venue || "";
+          if (!c.ptypeTouched && !c.ptypeAll) { c.ptype = c.a.pdf.kind || "journal"; c.label = c.a.pdf.label || ""; }
+        }
+      }
+    };
+    const relabel = c => {                                                   // the type and the venue box's words, changed in place (focus and what you typed stay)
+      const sel = $(`[data-ptype="${c.i}"]`, d); if (sel && sel.value !== c.ptype) sel.value = c.ptype;
+      const inp = $(`[data-k="journal"][data-i="${c.i}"]`, d); if (!inp) return;
+      const v = VENUE[c.ptype] || VENUE.journal; inp.placeholder = v[1]; if (inp.previousElementSibling) inp.previousElementSibling.textContent = v[0];
     };
     const sync = c => $$(`[data-k][data-i="${c.i}"]`, d).forEach(el => { el.value = c.fields[el.dataset.k]; });
     const timers = {};         // "you already have this paper" follows the record you pick and what you type (the answer is for the title and DOI as they are now, not as they were)
@@ -156,7 +179,7 @@ async function review(files, w, o = {}) {
     };
     const source = c => {
       if (c.sel < 0) return "hand";
-      const cand = c.a.candidates[c.sel], k = fieldsOf(cand, c.kind), same = Object.keys(k).every(x => norm(k[x]) === norm(c.fields[x]));
+      const cand = c.a.candidates[c.sel], k = fieldsOf(cand, c.kind), same = Object.keys(k).every(x => norm(k[x]) === norm(c.fields[x])) && (c.kind === "book" || (cand.kind || "journal") === c.ptype);
       return c.kind === "book" ? (same ? (cand.own ? "file" : "lookup") : "edited") : same ? "crossref" : "edited";
     };
     // look at the files one after the other (each one waits on the lookup), the cards fill in as they come. Switching a PDF between paper and book looks at it again.
@@ -171,11 +194,25 @@ async function review(files, w, o = {}) {
     };
     (async () => { for (const c of cards) { if (closed) break; if (!(await look(c)) && closed) break; } })();
     d.addEventListener("change", e => {
+      if (e.target.id === "ir-all") {                              // every paper whose type you have not set yourself
+        const v = e.target.value;
+        cards.forEach(c => {                                           // (a card still being read keeps it: take() leaves a type chosen here alone; a type chosen on a card itself wins)
+          if (c.kind === "book" || c.ptypeTouched) return;
+          c.ptypeAll = !!v;
+          const own = c.state !== "ok" ? null : c.sel >= 0 ? c.a.candidates[c.sel] : c.a.pdf;            // ("as each one says": its own type and word again)
+          c.ptype = v || (own ? own.kind || "journal" : c.ptype); c.label = v ? "" : (own && own.label) || "";
+          relabel(c);
+        });
+        return;
+      }
+      if (e.target.dataset.ptype !== undefined) {                  // a paper's type: only the words of its venue box change (nothing is read again)
+        const c = cards[+e.target.dataset.ptype]; c.ptype = e.target.value; c.ptypeTouched = true; if (c.ptype !== "other") c.label = ""; relabel(c); return;
+      }
       const t = e.target, i = +(t.dataset.inc ?? t.dataset.sel ?? t.dataset.kind ?? -1); if (i < 0) return; const c = cards[i];
       if (t.dataset.kind !== undefined) {                          // paper <-> book: the old look is thrown away and the file is looked at again
         if (c.a) discard([c.a.token]); c.kind = t.value; c.a = null; c.state = "reading"; c.sel = -1; c.existing = ""; c.fields = blank(c.kind); draw(c); status(); look(c);
       } else if (t.dataset.inc !== undefined) { c.include = t.checked; $("#ir-c" + i, d).classList.toggle("off", !c.include); }
-      else { c.sel = +t.value; take(c); sync(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }
+      else { c.sel = +t.value; take(c); sync(c); relabel(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }
       status();
     });
     d.addEventListener("input", e => {
@@ -200,7 +237,12 @@ async function review(files, w, o = {}) {
         dest = {mode: "new", name: n};
       } else dest = {mode: "folder", id: to.value.slice(2)};
       discard(cards.filter(c => c.state === "ok" && !c.include).map(c => c.a.token));
-      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, fields: {...c.fields, source: source(c), ...(c.kind === "book" ? {kind: "book"} : {})}})), dest, summarize: $("#ir-sum", d).checked});
+      const extra = c => {                                       // a paper's type; the record's Crossref type and ISSN (only while its venue is the record's)
+        if (c.kind === "book") return {kind: "book"};
+        const cand = c.sel >= 0 ? c.a.candidates[c.sel] : null, sameVenue = cand && norm(cand.journal || "") === norm(c.fields.journal || "");
+        return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : []};
+      };
+      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked});
     };
     $("#ir-go", d).onclick = go;
     $("#ir-cancel", d).onclick = () => d.close();
@@ -332,6 +374,7 @@ export function pickFromLibrary(folderId) {
 function wire() {
   let hideT = 0;
   const off = () => { clearTimeout(hideT); overlay(false); mark(null); };
+  D.off = off;
   document.addEventListener("dragover", e => {
     if (!hasFiles(e) || e.defaultPrevented) return;                     // (the "Add a paper" box handles its own drops)
     if (e.target.closest && e.target.closest("dialog")) return;
@@ -345,10 +388,11 @@ function wire() {
     if (!hasFiles(e) || e.defaultPrevented) return;
     if (e.target.closest && e.target.closest("dialog")) { e.preventDefault(); return; }
     e.preventDefault(); const w = where(e.target); off();
-    if (!w) return toast("Open the Library or a folder first, then drop the PDFs there.");
+    if (!w) return toast(onRunList() ? "Drop the PDF on its paper’s card: it is added to that paper. To add it as a new paper, open the Library and drop it there."
+      : "Open the Library or a folder first, then drop the PDFs there.");
     handle(e.dataTransfer.files, w);
   });
 }
 
-window.DropImport = {init(c) { ctx = c; }, handle, where, choosePdfs, chooseBooks, pickFromLibrary};
+window.DropImport = {init(c) { ctx = c; }, handle, where, choosePdfs, chooseBooks, pickFromLibrary, off: () => D.off && D.off()};
 wire();

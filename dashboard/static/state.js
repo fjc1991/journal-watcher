@@ -102,6 +102,52 @@ export async function api(path, body) {
   return j;
 }
 
+// A progress bar for something that takes a while (Discover's "Find papers", a synthesis, a claim check…): progress(el, m) with a "status" message from the server
+// ({msg, done?, total?, step?, steps?}). With counts the bar fills ("Reading reference lists · 12 of 40"); without, it moves, and the seconds that have passed are
+// shown, so it is plain that the work goes on. It goes away by itself when the tool writes something else into el (or progressDone(el)).
+const PROG = new WeakMap();
+export function progress(el, m) {
+  if (!el) return;
+  m = typeof m === "string" ? {msg: m} : (m || {});
+  let p = PROG.get(el);
+  if (!p || !el.contains(p.node)) {
+    if (p) clearInterval(p.timer);
+    el.innerHTML = `<span class="jw-prog" role="progressbar" aria-label="Working" aria-valuemin="0" aria-valuemax="100"><span class="jw-bar"><i></i></span><span class="jw-pmsg" aria-live="polite"></span></span>`;
+    p = {node: el.firstElementChild, t0: Date.now(), m: {}};
+    p.timer = setInterval(() => { if (!el.isConnected || !el.contains(p.node)) { clearInterval(p.timer); PROG.delete(el); return; } paint(p); }, 1000);     // (written over, or taken off the page)
+    PROG.set(el, p);
+  }
+  p.m = m;
+  paint(p);
+}
+function paint(p) {
+  const m = p.m, n = p.node, bar = n.querySelector("i"), msg = n.querySelector(".jw-pmsg");
+  const part = m.total ? Math.min(1, (m.done || 0) / m.total) : null;
+  const frac = m.steps ? Math.min(1, ((m.step || 1) - 1 + (part ?? 0)) / m.steps) : part;
+  n.classList.toggle("ind", frac == null);
+  if (frac != null) { bar.style.width = Math.round(frac * 100) + "%"; n.setAttribute("aria-valuenow", String(Math.round(frac * 100))); } else { bar.style.width = ""; n.removeAttribute("aria-valuenow"); }
+  const secs = Math.round((Date.now() - p.t0) / 1000);
+  msg.textContent = (m.msg || "Working…") + (m.total ? ` · ${m.done || 0} of ${m.total}` : "") + (secs >= 2 ? ` · ${secs} s` : "");
+}
+export function progressDone(el) {
+  const p = el && PROG.get(el);
+  if (p) { clearInterval(p.timer); PROG.delete(el); }
+  if (el) el.textContent = "";
+}
+
+// a book's summary, said the same way on its page, in the reader and in the Chapters panel (books.overview_view gives R)
+export const BOOK_HOW = "A book is summarised chapter by chapter, then as a whole: press Chapters (Library → Books), then “Summarise the whole book…”. You see what it costs before anything is sent.";
+export const BOOK_STALE = "A chapter’s summary has changed since this overview was written. To bring it up to date, open Chapters (Library → Books) and press “Summarise the whole book…”: you see what it costs first.";
+export function bookEmpty(R) {          // what to say when a book has no overview yet: [the sentence, whether the how-to line belongs after it]
+  if (!R) return ["No summary yet.", false];
+  if (!R.parts) return ["No summary yet. This book has no outline (the file carries no chapter list), so it cannot be summarised chapter by chapter.", false];
+  if (R.parts_done === R.parts && !R.parts_summarised) return ["No text could be read from this book’s chapters (a scanned book?), so there is nothing to summarise.", false];
+  if (R.parts_done === R.parts) return ["Every chapter and section has its summary; the overview of the whole book is not written yet. Press Chapters, then “Summarise the whole book…”: it writes only the overview, and you see what it costs first.", false];
+  if (R.parts_summarised) return [`${R.parts_summarised} of ${R.parts} chapters and sections have their own summary. “Summarise the whole book…” (in Chapters) summarises the other ${R.parts - R.parts_done}, then writes the overview from all of them; you see what it costs first.`, false];
+  return ["No summary yet.", true];
+}
+export const usd = c => c == null ? "" : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
+
 export function debounce(fn, ms) {
   let t = null;
   const d = (...a) => { clearTimeout(t); t = setTimeout(() => { t = null; fn(...a); }, ms); };

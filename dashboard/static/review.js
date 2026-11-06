@@ -2,7 +2,7 @@
 // show the answer and say how it went (Again / Hard / Good / Easy, or keys 1-4) and the card comes back after a longer or shorter gap (plain SM-2; at most N new cards a day).
 // Make cards from papers that have a card (one model call per six papers; every card has to rest on notes it was given, and carries the page it came from), add your own,
 // browse and edit all of them, suspend or delete any. Saved in Papers/_flashcards.json. Server: GET /api/flashcards, POST /api/flashcards/{rate,add,update,delete,settings}, POST /api/ai/flashcards[/estimate].
-import {$, $$, esc, ico, api, toast, notifyError, errInline, debounce} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errInline, debounce, progress} from "./state.js";
 
 let ctx = null;
 const R = {el: null, d: null, view: "study", queue: [], shown: false, done: 0, total: 0, folder: "", sel: new Set(), per: 8, q: "", showSusp: false, edit: null, busy: false, last: null};
@@ -145,7 +145,7 @@ async function generate() {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "cards") res = m; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
+        if (m.type === "status" && st()) progress(st(), m); else if (m.type === "cards") res = m; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
     R.busy = false; R.sel.clear(); await load(); startSession(); R.view = "study"; draw();

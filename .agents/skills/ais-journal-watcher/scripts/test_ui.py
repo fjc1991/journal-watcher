@@ -482,6 +482,19 @@ fx.fetch_journal = lambda j: []                                                 
             check("library home shows search, filters and journal tiles", page.locator("#libtiles .tile").count() == 1)
             page.wait_for_selector("#lib-upnext .unx", timeout=15000); n_unx = page.locator("#lib-upnext .unx").count()
             check("the Library has an Up next shelf: unread papers with why they are there", n_unx >= 1 and "up next" in page.inner_text("#lib-upnext").lower() and page.locator("#lib-upnext .unx-why").first.inner_text().strip() != "")
+            order_ = page.evaluate("(() => { const t = document.querySelector('#libtiles'), u = document.querySelector('#lib-upnext'), s = document.querySelector('#lib-shelf'); return [!!(t.compareDocumentPosition(u) & Node.DOCUMENT_POSITION_FOLLOWING), !!(t.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING)]; })()")
+            check("the journal tiles come first on the Library's home; Continue reading and Up next are below them", order_ == [True, True], str(order_))
+            tabs_ = page.evaluate("[...document.querySelectorAll('.libtabs button')].map(b => [b.querySelector('.tn') && b.querySelector('.tn').textContent, (b.querySelector('.th') || {}).textContent || '', Math.round(b.getBoundingClientRect().height), !!b.querySelector('.ico')])")
+            check("the Library's tabs are large tiles: each with its icon, its name and a one-line hint, at least 44 px tall",
+                  len(tabs_) == 7 and all(t_[0] and len(t_[1]) > 5 and t_[2] >= 44 and t_[3] for t_ in tabs_), str(tabs_))
+            prog_ = page.evaluate("""(async () => { const st = await import('/static/state.js'); const el = document.createElement('div'); document.body.append(el);
+                st.progress(el, {msg: 'Reading the reference lists', done: 3, total: 4}); const a = [el.querySelector('.jw-bar i').style.width, el.textContent, el.querySelector('.jw-prog').classList.contains('ind'), el.querySelector('[role=progressbar]').getAttribute('aria-valuenow')];
+                st.progress(el, {msg: 'Comparing', step: 4, steps: 4}); const b = [el.querySelector('.jw-bar i').style.width, el.textContent];
+                st.progress(el, 'Asking…'); const c = [el.querySelector('.jw-prog').classList.contains('ind'), el.textContent];
+                st.progressDone(el); const d = el.textContent; el.remove(); return [a, b, c, d]; })()""")
+            check("long actions show a progress bar: it fills with counts ('3 of 4', 75 %), follows steps, moves while there are none, and goes when done",
+                  prog_[0][0] == "75%" and "3 of 4" in prog_[0][1] and prog_[0][2] is False and prog_[0][3] == "75" and prog_[1][0] == "75%" and "Comparing" in prog_[1][1]
+                  and prog_[2][0] is True and "Asking" in prog_[2][1] and prog_[3] == "", str(prog_))
             first_unx = page.locator("#lib-upnext .unx >> nth=0").get_attribute("data-file")
             page.click("#lib-upnext .unx >> nth=0 >> [data-unx=later]"); page.wait_for_function("document.querySelector('#lib-upnext .unx') && /in your list/.test(document.querySelector('#lib-upnext .unx').innerText)")
             check("＋ To read keeps a paper in your list (it goes to the front of Up next)", api("/api/queue")["items"][0]["status"] == "toread")
@@ -1347,11 +1360,26 @@ fx.fetch_journal = lambda j: []                                                 
                 if os.path.exists(marker):
                     break
                 page.wait_for_timeout(250)
-            check("one click creates a 'Picks' run and starts the download queue for it", os.path.exists(marker) and open(marker).read() == "doi:10.1234/abc" and "Picks · this folder" in page.inner_text("#runtitle"), open(marker).read() if os.path.exists(marker) else "no marker")
+            check("one click creates a 'Picks' run and starts the download queue for it", os.path.exists(marker) and open(marker).read() == "doi:10.1234/abc" and "Picks · Lab" in page.inner_text("#runtitle"), (open(marker).read() if os.path.exists(marker) else "no marker", page.inner_text("#runtitle")))
             page.wait_for_function("document.querySelector('#listview') && /Couldn’t download/.test(document.querySelector('#listview').innerText)", timeout=10000)      # (not just any card: the empty-state card "No papers in this run" also matched `.card`, and the check then read the list before the paper was in it)
             check("the Download queue shows it with its status", "The platform classic" in page.inner_text("#listview") and "Cited by 3 of your papers" in page.inner_text("#listview") and "Couldn’t download" in page.inner_text("#listview"), page.inner_text("#listview")[:300])
             runs = [f for f in os.listdir(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")) if f.endswith("picks.json")]
             check("the run is saved like any other (state/runs)", len(runs) == 1)
+            pk_ = json.load(open(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs", runs[0]))); pick_rid_ = pk_["id"]
+            check("…it is named after the folder Discover was used in, remembers it, and each paper goes into that folder once it is in the library (it used to say only 'this folder', and nothing reached the folder)",
+                  pk_["params"].get("folder") == "lab" and pk_["params"].get("folder_name") == "Lab" and all(p_.get("folder") == "lab" for p_ in pk_["papers"]) and "in the folder “Lab”" in page.inner_text("#runmeta"), str(pk_["params"]))
+            out_ = [r_ for r_ in api("/api/library") if "lab" in (r_.get("folders") or []) and r_.get("journal") != "Books" and r_.get("title")][:1]
+            if out_:
+                api("/api/folders", {"action": "remove", "id": "lab", "files": [out_[0]["file"]]})        # (a paper of your library that is not in the folder)
+                for _ in range(40):
+                    if not api("/api/state").get("busy"):
+                        break
+                    time.sleep(0.25)
+                had_ = api("/api/related/download", {"items": [{"id": "x1", "title": out_[0]["title"]}], "label": "this folder", "folder": "lab"})
+                check("…a paper you pick there that is already in your library goes into the folder at once (nothing to download)",
+                      had_["run"] is None and had_["folder"] == "Lab" and "lab" in next(r_ for r_ in api("/api/library") if r_["file"] == out_[0]["file"]).get("folders", []), str(had_)[:300])
+            else:
+                check("…a library paper in the folder exists for this check", False)
             open(marker + ".wrong", "w").write("1")                                                   # the next round of the queue: the app refuses a different work's PDF
             page.click("#qbtn")
             try:
@@ -1543,6 +1571,77 @@ fx.fetch_journal = lambda j: []                                                 
             shot(page, "14-related-tab")
             page.click('#reader [data-a="back"]')
 
+            print("a PDF you downloaded yourself, added to its paper's card")
+            import pymupdf as _pmA
+            import base64 as _b64A
+            def mk_(title, body):
+                d = _pmA.open(); pg = d.new_page(); pg.insert_textbox(_pmA.Rect(60, 60, 540, 130), title, fontsize=18); pg.insert_textbox(_pmA.Rect(60, 150, 540, 790), body, fontsize=9)
+                d.embfile_add("pad.bin", os.urandom(45000)); b = _b64A.b64encode(d.tobytes()).decode(); d.close(); return b
+            right_ = mk_("The platform classic", "Zed Quinn and Amy Roe. https://doi.org/10.1234/abc " + "We study how platforms grow and govern their complementors. " * 30)
+            wrong_ = mk_("Two-stage differences in differences", "John Gardner. This version: April 2021. " + "We study estimators for staggered treatment timing. " * 30)
+            STG_ = os.path.join(TMP, "local-state", "staging"); staged_ = lambda: len([f for f in os.listdir(STG_) if f.endswith(".pdf")]) if os.path.isdir(STG_) else 0
+            page.goto(base + "/"); page.wait_for_selector("#libitem")
+            page.evaluate("openRun({id: %s})" % json.dumps(pick_rid_)); page.wait_for_selector("#listview:not(.hide)", timeout=10000)
+            C_ = '#papers .paper[data-id="doi:10.1234/abc"]'; page.wait_for_selector(C_, timeout=10000)
+            check("a paper whose download failed takes a dropped PDF, and its card offers 'Add the PDF I downloaded…' beside 'Open in my browser'",
+                  "can-attach" in (page.get_attribute(C_, "class") or "") and page.locator(C_ + ' [data-act="attach"]').count() == 1 and page.locator(C_ + " a:has-text('Open in my browser')").count() == 1, page.inner_text(C_)[:300])
+            n_lib_, n_seen_ = len(api("/api/library")), len(SEEN)
+            ov_ = page.evaluate("""([sel, b64]) => { const dt = new DataTransfer(), bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+              dt.items.add(new File([u], "x.pdf", {type: "application/pdf"})); const t = document.querySelector(sel + " .ptitle"), o = {dataTransfer: dt, bubbles: true, cancelable: true};
+              t.dispatchEvent(new DragEvent("dragenter", o)); const ev = new DragEvent("dragover", o); t.dispatchEvent(ev);
+              const pill = document.querySelector(".di-ov:not(.hide) .di-pill"); return [pill ? pill.textContent : null, document.querySelector(sel).classList.contains("at-over"), ev.defaultPrevented]; }""", [C_, right_])
+            page.evaluate("document.dispatchEvent(new DragEvent('dragend', {bubbles: true}))")
+            check("…dragging a PDF over the card marks the card (the page-wide 'add to the Library' overlay stays away)", ov_ == [None, True, True], str(ov_))
+            page.evaluate(JS_DROP, [C_ + " .ptitle", [[_b64A.b64encode(b"just notes").decode(), "notes.txt", "text/plain"]], False])
+            page.wait_for_function("document.querySelector('#toast') && /Only a PDF can be added/.test(document.querySelector('#toast').textContent)", timeout=5000)
+            check("…a file that is not a PDF is refused by name, and nothing is added", len(api("/api/library")) == n_lib_ and not page.locator("#ir-dlg[open]").count())
+            st0_ = staged_()
+            page.evaluate(JS_DROP, [C_ + " .ptitle", [[wrong_, "gardner.pdf", "application/pdf"]], False]); page.wait_for_selector("#at-dlg[open]", timeout=20000)
+            dt_ = page.inner_text("#at-dlg")
+            check("…another paper's PDF is not added: the dialog says what it seems to be and why, and asks; nothing is in the library yet",
+                  "Two-stage differences in differences" in dt_ and "The platform classic" in dt_ and "It is the right paper" in dt_ and "Why:" in dt_ and not page.locator("#ir-dlg[open]").count()
+                  and staged_() == st0_ + 1 and len(api("/api/library")) == n_lib_, dt_[:400])
+            page.click("#at-no"); page.wait_for_function("!document.querySelector('#at-dlg')")
+            for _ in range(20):
+                if staged_() == st0_:
+                    break
+                time.sleep(0.2)
+            check("…Cancel forgets it (the PDF kept aside is gone) and the card is as it was", staged_() == st0_ and "can-attach" in (page.get_attribute(C_, "class") or "") and len(api("/api/library")) == n_lib_)
+            with page.expect_file_chooser() as fc_:
+                page.click(C_ + ' [data-act="attach"]')
+            pdf_path_ = os.path.join(TMP, "the-platform-classic.pdf"); open(pdf_path_, "wb").write(_b64A.b64decode(right_))
+            fc_.value.set_files(pdf_path_)
+            page.wait_for_function("(s => { const c = document.querySelector(s); return c && /Downloaded/.test(c.innerText); })(%s)" % json.dumps(C_), timeout=20000)
+            row_ = [r_ for r_ in csv.DictReader(open(os.path.join(TMP, "Papers", "_index.csv"), newline="", encoding="utf-8")) if r_.get("doi") == "10.1234/abc"]
+            lab_ = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.json")))
+            check("…'Add the PDF I downloaded…' chooses the right PDF: it is filed like a download (its name, 'added by you'), into the folder Discover was used in, and no AI is asked",
+                  row_ and row_[-1]["status"] == "ok" and row_[-1]["note"].startswith("added by you") and re.search(r"Papers/\d{4}-\d{2}/.*_10\.1234-abc_the-platform-classic\.pdf$", row_[-1]["file"])
+                  and "10.1234/abc" in lab_.get("papers", []) and len(SEEN) == n_seen_, (row_[-1:] if row_ else None, lab_.get("papers")))
+            ct_ = page.inner_text(C_)
+            page.evaluate("""(sel) => { const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array([37, 80, 68, 70])], "again.pdf", {type: "application/pdf"}));
+              const t = document.querySelector(sel + " .ptitle"); t.dispatchEvent(new DragEvent("dragover", {dataTransfer: dt, bubbles: true, cancelable: true})); }""", C_)
+            try:
+                page.wait_for_function("document.querySelector('#toast') && /already in your library/.test(document.querySelector('#toast').textContent)", timeout=5000); told_ = True
+            except Exception:  # noqa: BLE001
+                told_ = False
+            page.evaluate("document.querySelector('#toast') && (document.querySelector('#toast').textContent = '')")
+            page.evaluate("""(sel) => { const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array([37, 80, 68, 70])], "again.pdf", {type: "application/pdf"}));
+              const o = {dataTransfer: dt, bubbles: true, cancelable: true}; document.querySelector("#runmeta").dispatchEvent(new DragEvent("dragover", o));
+              document.querySelector(sel + " .ptitle").dispatchEvent(new DragEvent("dragover", o)); }""", C_)
+            told2_ = page.evaluate("/already in your library/.test((document.querySelector('#toast') || {}).textContent || '')")
+            page.evaluate("document.dispatchEvent(new DragEvent('dragend', {bubbles: true}))")
+            check("…dragging a PDF over it now says it is already in your library (a browser cancels a drop there, so it is said while you drag), and says it again on the next drag", told_ and told2_)
+            check("…the card says Downloaded and 'No summary yet', with no 'Retry summary' (its summary is asked for in the Library, with the cost first), and it takes no more drops",
+                  "No summary yet" in ct_ and "Retry summary" not in ct_ and "can-attach" not in (page.get_attribute(C_, "class") or ""), ct_[:300])
+            # (the checks after this one expect the library as it was: the paper is deleted again, and its "deleted" row taken out of the index)
+            api("/api/library/delete", {"files": [row_[-1]["file"]]})
+            idx_ = os.path.join(TMP, "Papers", "_index.csv")
+            with open(idx_, newline="", encoding="utf-8") as f_:
+                rd_ = csv.DictReader(f_); cols_ = rd_.fieldnames; keep_ = [r_ for r_ in rd_ if r_.get("doi") != "10.1234/abc"]
+            with open(idx_, "w", newline="", encoding="utf-8") as f_:
+                w_ = csv.DictWriter(f_, cols_); w_.writeheader(); w_.writerows(keep_)
+            check("(the paper is out of the library and the folder again for the checks that follow)", len(api("/api/library")) == n_lib_ and "10.1234/abc" not in json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.json"))).get("papers", []))
+
 
             print("round 2d: skim layer")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
@@ -1601,7 +1700,7 @@ fx.fetch_journal = lambda j: []                                                 
             _d = _pm.open(); _pg = _d.new_page(); _pg.insert_textbox(_pm.Rect(60, 60, 535, 200), "A dropped paper about platform governance and complementors in software ecosystems.", fontsize=12)
             _d.embfile_add("padding", os.urandom(45000)); drop_b64 = base64.b64encode(_d.tobytes()).decode(); _d.close()      # (the importer refuses PDFs under 40 KB as probably cut off)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile")
-            check("the Library has a Folders tab showing each folder as a tile with its paper count", page.locator(".fp-tile[data-id]").count() == 2 and "Lab" in page.inner_text(".fp-tile[data-id='lab'] .fp-name") and page.text_content(".fp-tile[data-id='lab'] .fp-num") == "3")
+            check("the Library has a Folders tab showing each folder as a tile with its paper count", page.locator(".fp-tile[data-id]").count() == 2 and "Lab" in page.inner_text(".fp-tile[data-id='lab'] .fp-name") and page.text_content(".fp-tile[data-id='lab'] .fp-num") == "3", str([(f_["id"], f_["name"], f_["count"]) for f_ in api("/api/folders")]))
             check("…and what is inside: cards and what else the folder holds", "3 papers · 3 with a card" in page.inner_text(".fp-tile[data-id='lab'] .fp-meta") and "💡" in page.inner_text(".fp-tile[data-id='lab'] .fp-flags") and "▦" in page.inner_text(".fp-tile[data-id='lab'] .fp-flags"))
             shot(page, "17-folders")
             page.evaluate("document.documentElement.dataset.theme = 'dark'"); page.wait_for_timeout(300); shot(page, "18-folders-dark"); page.evaluate("document.documentElement.dataset.theme = 'light'")
@@ -1689,6 +1788,60 @@ fx.fetch_journal = lambda j: []                                                 
             check("each tool in a folder has its own colour on its tab icon", len(set(tool_cols)) >= 8 and len(tool_cols) == 10, str(tool_cols))
             page.click("#settingsbtn"); page.wait_for_selector("#settings.hide", state="attached")
             check("…and the page you were on is lit again", page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "folders")
+
+            print("paper kinds: a preprint's PDF, its type and venue, the Type filter and Change type")
+            import pymupdf as _pmK
+            import base64 as _b64K
+            _dk = _pmK.open(); _pk = _dk.new_page(); _pk.insert_textbox(_pmK.Rect(60, 30, 540, 50), "arXiv:2401.01234v1 [econ.GN] 3 Jan 2024", fontsize=8)
+            _pk.insert_textbox(_pmK.Rect(60, 60, 540, 200), "Kappa evidence on platform pricing experiments in two-sided markets", fontsize=16)
+            _pk.insert_textbox(_pmK.Rect(60, 210, 540, 780), "Kim Kappa. We run pricing experiments on a two-sided platform. " * 20, fontsize=9)
+            _dk.embfile_add("padding", os.urandom(45000)); kappa_ = _b64K.b64encode(_dk.tobytes()).decode(); _dk.close()
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); nk0_ = len(api("/api/library"))
+            _dk = _pmK.open(); _pk = _dk.new_page(); _pk.insert_textbox(_pmK.Rect(60, 60, 540, 200), "Lambda notes on marketplace design for gig work platforms", fontsize=16)
+            _pk.insert_textbox(_pmK.Rect(60, 210, 540, 780), "Lee Lambda. We study marketplace design. " * 20, fontsize=9); _dk.embfile_add("padding", os.urandom(45000)); lambda_ = _b64K.b64encode(_dk.tobytes()).decode(); _dk.close()
+            page.evaluate(JS_DROP, [".fp-path", [[kappa_, "kappa.pdf", "application/pdf"], [lambda_, "lambda.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]")
+            page.wait_for_selector("#ir-c0 .ir-f", timeout=30000); page.wait_for_selector("#ir-c1 .ir-f", timeout=30000)
+            types_ = lambda: [page.eval_on_selector('[data-ptype="%d"]' % i_, "e => e.value") for i_ in (0, 1)]
+            page.select_option("#ir-all", "other"); t1_ = types_(); page.select_option("#ir-all", "conference"); t2_ = types_(); page.select_option("#ir-all", ""); t3_ = types_()
+            check("'Set every paper's type' sets them all, again when you choose another, and '(as each one says)' gives each its own type back",
+                  t1_ == ["other", "other"] and t2_ == ["conference", "conference"] and t3_ == ["preprint", "journal"], str([t1_, t2_, t3_]))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.evaluate(JS_DROP, [".fp-path", [[kappa_, "kappa.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=30000)
+            check("a PDF with an arXiv stamp is offered as a preprint, with arXiv in its box, and the box is named for a repository or series",
+                  page.eval_on_selector('[data-ptype="0"]', "e => e.value") == "preprint" and page.input_value('[data-k="journal"][data-i="0"]') == "arXiv" and "Repository or series" in page.inner_text("#ir-c0"), page.inner_text("#ir-c0")[:400])
+            page.select_option('[data-ptype="0"]', "conference")
+            check("…changing the type renames the box at once and keeps what is in it (nothing is read again)", "Conference or proceedings" in page.inner_text("#ir-c0") and page.input_value('[data-k="journal"][data-i="0"]') == "arXiv")
+            page.fill('[data-k="journal"][data-i="0"]', "Kappa Workshop 2024"); page.select_option("#ir-to", "lib"); page.click("#ir-go")
+            page.wait_for_selector(".di-snack:has-text('Added 1 paper')", timeout=15000)
+            kr_ = next((r_ for r_ in api("/api/library") if r_.get("title", "").startswith("Kappa evidence")), {})
+            side_ = json.load(open(os.path.join(TMP, kr_["file"])[:-4] + ".paper.json")) if kr_.get("file") else {}
+            check("…it is filed as a conference paper under the venue you typed, and its type is kept next to the PDF (not in the index)",
+                  kr_.get("kind") == "conference" and kr_.get("journal") == "Kappa Workshop 2024" and side_.get("kind") == "conference" and "kind" not in open(os.path.join(TMP, "Papers", "_index.csv"), encoding="utf-8").readline(), (kr_.get("kind"), kr_.get("journal"), side_))
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]')
+            page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.select_option("#lf-kind", "conference"); page.keyboard.press("Escape")
+            try:
+                page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
+            except Exception:  # noqa: BLE001      (the check below says it failed; the next ones still run)
+                pass
+            check("the Type filter on its own lists the conference papers and nothing else (it used to count as no filter at all)",
+                  page.locator("#lib-results .librow").count() == 1 and page.inner_text('#lib-results .librow:has-text("Kappa evidence") .tag.kind').strip() == "Conference", page.inner_text("#lib-results")[:300])
+            page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
+            page.check('#kind-dlg input[name="kd"][value="other"]'); page.select_option("#kd-lab", "Thesis"); page.click("#kd-go"); page.wait_for_selector("#kind-dlg", state="detached")
+            side_ = json.load(open(os.path.join(TMP, kr_["file"])[:-4] + ".paper.json"))
+            check("Change type writes only the file beside the PDF: now a thesis", side_.get("kind") == "other" and side_.get("label") == "Thesis", side_)
+            page.select_option("#lf-kind", "") if page.is_visible("#lf-kind") else None
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]'); page.fill("#lf-q", "Kappa evidence")
+            page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
+            page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
+            check("…and the dialog opened again shows it as a thesis (the word is not lost when you only look)", page.is_checked('#kind-dlg input[name="kd"][value="other"]') and page.input_value("#kd-lab") == "Thesis" and page.is_visible("#kd-lab"))
+            page.click("#kd-no"); page.fill("#lf-q", "")
+            api("/api/library/delete", {"files": [kr_["file"]]})                # (the checks that follow count the library as it was)
+            idx_ = os.path.join(TMP, "Papers", "_index.csv")
+            with open(idx_, newline="", encoding="utf-8") as f_:
+                rd_ = csv.DictReader(f_); cols_ = rd_.fieldnames; keep_ = [r_ for r_ in rd_ if not r_.get("title", "").startswith("Kappa evidence")]
+            with open(idx_, "w", newline="", encoding="utf-8") as f_:
+                w_ = csv.DictWriter(f_, cols_); w_.writeheader(); w_.writerows(keep_)
+            check("(the paper is gone again for the checks that follow)", len(api("/api/library")) == nk0_)
 
             print("drag and drop PDFs you already have")
             def mkpdf(text, authors=None):
@@ -1837,7 +1990,7 @@ fx.fetch_journal = lambda j: []                                                 
             book_b64 = mk_epub("Platforms and Their Governance", "978-0-201-83595-3")
             n_all = lambda: len(api("/api/library")); n_before_books = n_all()
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
-            check("the Library has a Books tab next to Papers", [b_.inner_text().strip() for b_ in page.locator(".libtabs button").all()][:2] == ["Papers", "Books"])
+            check("the Library has a Books tab next to Papers", [b_.inner_text().strip() for b_ in page.locator(".libtabs button .tn").all()][:2] == ["Papers", "Books"], str(page.locator(".libtabs button .tn").all_inner_texts()))
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-add")
             check("it is empty at first and says how to add books", "No books yet" in page.inner_text("#lib-books") and page.locator("#lib-papers:not(.hide)").count() == 0)
             ov = page.evaluate(JS_DROP, ["#lib-books", [EP(book_b64, "governance.epub")], True])
@@ -2022,6 +2175,38 @@ fx.fetch_journal = lambda j: []                                                 
                   "FAKE BOOK OVERVIEW" in page.inner_text("#bk-list .chap-overview") and page.inner_text("#bk-list [data-chap-whole]").strip() == "Book summary")
             page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("#bk-list [data-whole] .ok", timeout=10000)
             check("…pressing it says everything is done, and asks nothing", len(chat_calls("You write an OVERVIEW")) - n_ov0 == 1 and "up to date" in page.inner_text("#bk-list [data-whole]"))
+            print("book: the overview on the book's page and in the reader")
+            bk_row_ = '#bk-list .librow:has-text("Platforms and Their Governance")'
+            check("the book's row has the green 'ready' bar once its overview is written", "ready" in (page.get_attribute(bk_row_, "class") or ""), page.get_attribute(bk_row_, "class"))
+            page.click(bk_row_ + " .ptitle"); page.wait_for_selector("#drawer.on #dbook")
+            page.wait_for_function("!/Reading the book/.test(document.querySelector('#dbook').innerText)", timeout=10000)
+            check("…the book's page shows the overview of the whole book (it used to say 'No summary yet.')",
+                  "FAKE BOOK OVERVIEW from 3 summaries" in page.inner_text("#dbook") and "No summary yet" not in page.inner_text("#drawer") and "has changed since" not in page.inner_text("#dbook"), page.inner_text("#drawer")[:400])
+            page.click("#dchap"); page.wait_for_selector("#bk-list .chap-ol li", timeout=10000)
+            check("…its Chapters button closes the page and opens that book's chapters in Library → Books",
+                  not page.locator("#drawer.on").count() and page.get_attribute(bk_row_ + " [data-chap]", "aria-expanded") == "true" and "FAKE BOOK OVERVIEW" in page.inner_text("#bk-list .chap-overview"))
+            bj_path_ = os.path.join(TMP, ep_row["file"])[:-4] + ".book.json"; bj_keep_ = open(bj_path_, encoding="utf-8").read()
+            bj_ = json.loads(bj_keep_); bj_["overview"]["fingerprint"] = "changed-since"; open(bj_path_, "w", encoding="utf-8").write(json.dumps(bj_))   # (as if a chapter's summary had been written again)
+            page.click(bk_row_ + " .ptitle"); page.wait_for_selector("#drawer.on #dbook .chap-overview", timeout=10000)
+            check("…an overview older than a chapter's summary is still shown, and says it is out of date and how to bring it up to date",
+                  "FAKE BOOK OVERVIEW" in page.inner_text("#dbook") and "has changed since this overview was written" in page.inner_text("#dbook") and "Summarise the whole book" in page.inner_text("#dbook"), page.inner_text("#dbook")[:400])
+            page.click("#dread"); page.wait_for_selector(".rd-band .textLayer span", timeout=60000)
+            page.click('.rd-tabs button[data-tab="sum"]')
+            page.wait_for_function("/FAKE BOOK OVERVIEW/.test(document.querySelector('#sum-body').innerText)", timeout=10000)
+            check("…the reader's Summary tab shows the same overview, marked out of date, with no paper template or Generate button for a book",
+                  "FAKE BOOK OVERVIEW" in page.inner_text("#sum-body") and "has changed since" in page.inner_text("#sum-body") and not page.is_visible("#sum-go") and not page.is_visible("#sum-t")
+                  and "chapter by chapter" in page.inner_text("#sum-bk"), page.inner_text("#reader .rd-sub")[:300])
+            open(bj_path_, "w", encoding="utf-8").write(bj_keep_)
+            def post_code_(path, body):
+                try:
+                    urllib.request.urlopen(urllib.request.Request(base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})); return 200
+                except urllib.error.HTTPError as e_:
+                    return e_.code
+            n_any_ = len(chat_calls(""))
+            check("…a paper-template summary of a book is refused by the server (it would send the whole book with no estimate), and nothing is sent; nor is one saved",
+                  post_code_("/api/ai/summary", {"file": ep_row["file"], "template": "tldr"}) == 400 and len(chat_calls("")) == n_any_
+                  and post_code_("/api/doc/summary", {"file": ep_row["file"], "text": "A summary written by hand for the whole book."}) == 400 and not os.path.exists(os.path.join(TMP, ep_row["file"])[:-4] + ".md"))
+            page.click('.rd-bar [data-a="back"]')
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")

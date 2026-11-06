@@ -1,12 +1,15 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty} from "./state.js";
 
 let ctx = null;
-const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false, sort: "", list: false, tab: "papers"};
+const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
 let FOLDERS = [], TAGS = [], SMART = [];
-const FILTER_KEYS = ["q", "status", "folder", "journal", "year", "tag"];
+const FILTER_KEYS = ["q", "status", "folder", "journal", "year", "tag", "kind"];
+// what kind of work a paper is (kinds.py): the tag on its row and the Type filter
+const KINDS = [["journal", "Journal articles", "Journal article"], ["preprint", "Preprints and working papers", "Preprint or working paper"], ["conference", "Conference papers", "Conference paper"], ["other", "Reports, theses and other", "Report, thesis or other"]];
+const kindTag = r => r.kind === "preprint" ? "Preprint" : r.kind === "conference" ? "Conference" : r.kind === "other" ? (r.kind_label || "Other") : "";
 const SEL = new Set();
 const ST = {toread: "To read", reading: "Reading", read: "Read"};
 const lib = () => ctx.getLib();
@@ -20,10 +23,12 @@ async function loadTags() { try { TAGS = (await api("/api/tags")).tags; } catch 
 const folderName = id => (FOLDERS.find(f => f.id === id) || {}).name || id;
 const download = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 
+// a paper whose AI summary is written, or a book whose overview of the whole book is (read from its own record)
+const summarised = r => !!(r && (r.summary || (r.book && r.book.overview && r.book.overview.text)));
 // the key to the green bar on a row: a paper whose AI summary is written, ready to be explored (rows = the papers of the list it explains)
 function readyKey(rows) {
-  const n = (rows || []).filter(r => r && r.summary).length;
-  return `<span class="readykey" title="A green bar beside a paper means its AI summary is written: open it to explore"><i aria-hidden="true"></i>Ready to read <small>${n} of ${(rows || []).length} summarised by AI</small></span>`;
+  const n = (rows || []).filter(summarised).length;
+  return `<span class="readykey" title="A green bar means its AI summary is written (for a book: the overview of the whole book): open it to explore"><i aria-hidden="true"></i>Ready to read <small>${n} of ${(rows || []).length} summarised by AI</small></span>`;
 }
 // ---------------------------------------------------------------- one paper row (used by every Library list)
 function row(r, i, snips) {
@@ -31,13 +36,13 @@ function row(r, i, snips) {
   const nt = r.notes ? `<span class="tag you" title="Highlights and notes you made in the reader">✎ ${r.notes.highlights} highlight${r.notes.highlights === 1 ? "" : "s"}${r.notes.cards ? ` · ${r.notes.cards} note${r.notes.cards === 1 ? "" : "s"}` : ""}</span>` : "";
   const prog = st.status === "reading" && st.progress ? `<span class="prog-mini" title="Page ${st.page || "?"}"><i style="width:${Math.round(st.progress * 100)}%"></i></span>` : "";
   const sn = (snips || []).map(s => `<div class="snip"><b>${s.kind === "highlight" ? "highlight" + (s.page ? " p." + s.page : "") : s.kind}</b> ${esc(s.text || "")}</div>`).join("");
-  return `<div class="card librow${r.summary ? " ready" : ""}" data-file="${esc(r.file)}">
+  return `<div class="card librow${summarised(r) ? " ready" : ""}" data-file="${esc(r.file)}">
     <div class="rowmain">
-      <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}${r.summary ? `<span class="sr-only"> (ready to read: summarised by AI)</span>` : ""}</div></div>
+      <div class="rowhead"><input type="checkbox" class="rsel" data-sel="${esc(r.file)}"${SEL.has(r.file) ? " checked" : ""} aria-label="Select"><div class="ptitle" data-i="${i}">${esc(r.title)}${summarised(r) ? `<span class="sr-only"> (ready to read: summarised by AI)</span>` : ""}</div></div>
       <div class="pauth">${esc(authors(r.authors))}</div>
       <div class="pmeta">${r.book ? esc("Book" + (r.book.publisher ? " · " + r.book.publisher : "") + (r.year ? " · " + r.year : "") + (r.book.pages ? " · " + r.book.pages + " pages" : "") + (r.book.source === "epub" ? " · EPUB" : " · PDF") + ((r.book.toc || []).length ? " · outline of " + r.book.toc.length + " item" + (r.book.toc.length === 1 ? "" : "s") : "")) : `${esc(r.journal)} · ${esc(r.year || "")}${r.matched_topics ? " · " + esc(r.matched_topics) : ""}`}</div>
       ${st.takeaway ? `<div class="take" data-take="${esc(r.file)}" title="Click to edit">“${esc(st.takeaway)}”</div>` : ""}
-      <div class="tags">${st.status ? `<span class="tag stt st-${esc(st.status)}" title="Reading status">${esc(ST[st.status] || st.status)}</span>` : ""}${nt}${r.card ? `<span class="tag you" data-card="${esc(r.file)}" title="This paper has a card (question, theory, method, findings, limitations…). Click to open it." style="cursor:pointer">📇 card</span>` : ""}${fl.map(f => `<span class="tag fol" data-openfolder="${esc(f.id)}">📁 ${esc(f.name)}</span>`).join("")}${prog}</div>
+      <div class="tags">${kindTag(r) ? `<span class="tag kind k-${esc(r.kind)}" title="${esc((KINDS.find(k => k[0] === r.kind) || [, , ""])[2])}: not a journal article">${esc(kindTag(r))}</span>` : ""}${st.status ? `<span class="tag stt st-${esc(st.status)}" title="Reading status">${esc(ST[st.status] || st.status)}</span>` : ""}${nt}${r.card ? `<span class="tag you" data-card="${esc(r.file)}" title="This paper has a card (question, theory, method, findings, limitations…). Click to open it." style="cursor:pointer">📇 card</span>` : ""}${fl.map(f => `<span class="tag fol" data-openfolder="${esc(f.id)}">📁 ${esc(f.name)}</span>`).join("")}${prog}</div>
       ${sn}
     </div>
     <div class="row actions">
@@ -47,10 +52,11 @@ function row(r, i, snips) {
       <span class="menuwrap"><button class="btn small" data-more aria-haspopup="true" aria-label="More actions" title="More: status, summary, PDF, folders, takeaway">${ico("more", "sm")}</button>
         <div class="menu card hide rowmenu" role="menu">
           <label class="rm-st"><span>Reading status</span><select class="stsel" data-st="${esc(r.file)}"><option value="">None</option>${Object.entries(ST).map(([k, v]) => `<option value="${k}"${st.status === k ? " selected" : ""}>${v}</option>`).join("")}</select></label>
-          ${r.summary ? `<button data-i="${i}" role="menuitem">${ico("sum", "sm")} Summary</button>` : ""}
+          ${summarised(r) ? `<button data-i="${i}" role="menuitem">${ico("sum", "sm")} Summary</button>` : ""}
           <a target="_blank" href="${fileUrl(r.file)}" role="menuitem">${ico("papers", "sm")} Open the PDF</a>
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
+          ${r.book ? "" : `<button data-setkind="${esc(r.file)}" role="menuitem">${ico("papers", "sm")} Type: ${esc((KINDS.find(k => k[0] === (r.kind || "journal")) || KINDS[0])[2])}…</button>`}
           <button data-delitem="${esc(r.file)}" role="menuitem" class="danger">${ico("x", "sm")} Delete this ${r.book ? "book" : "paper"}…</button>
         </div></span>
     </div>${r.book ? `<div class="chaplist hide"></div>` : ""}</div>`;
@@ -72,7 +78,7 @@ async function setState(file, patch) {
 let TOP = null;
 function top(el, opts) {
   TOP = {el, opts}; QUEUE = null;
-  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers"], ["books", "Books"], ["ask", "Ask"], ["discover", "Discover"], ["hl", "Highlights"], ["review", "Review"], ["tags", "Tags"]].map(([k, t]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}${t}</button>`).join("")}</div>
+  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers", "search and browse them"], ["books", "Books", "your books, by chapter"], ["ask", "Ask", "questions across your library"], ["discover", "Discover", "papers your library cites"], ["hl", "Highlights", "everything you marked"], ["review", "Review", "flashcards due today"], ["tags", "Tags", "your papers by tag"]].map(([k, t, h]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>
     <div id="lib-papers">
       <div class="card libtools">
         <div class="row lt-top"><input type="search" id="lf-q" placeholder="Search titles, authors, summaries — and your own highlights and notes…" autocomplete="off">
@@ -80,7 +86,7 @@ function top(el, opts) {
           <span class="menuwrap"><button class="btn" id="lf-filters" aria-haspopup="true" title="Filter by status, folder, journal, year, tag, notes">${ico("filter")} Filters <span class="nn" id="lf-nf"></span></button>
             <div class="menu card hide lf-pop" id="lf-pop">
               <label>Status<select id="lf-status"><option value="">Any status</option><option value="toread">To read</option><option value="reading">Reading</option><option value="read">Read</option><option value="none">No status</option></select></label>
-              <label>Folder<select id="lf-folder"></select></label><label>Journal<select id="lf-journal"></select></label><label>Year<select id="lf-year"></select></label><label>Tag<select id="lf-tag"></select></label>
+              <label>Folder<select id="lf-folder"></select></label><label>Type<select id="lf-kind"><option value="">Any type</option>${KINDS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label><label>Journal or source<select id="lf-journal"></select></label><label>Year<select id="lf-year"></select></label><label>Tag<select id="lf-tag"></select></label>
               <button class="btn small" id="lf-notes" title="Only papers where you made highlights or notes">✎ Only papers with my notes</button></div></span>
           <button class="btn" id="lf-star" title="Only starred papers">☆ Starred</button>
           <select id="lf-sort" aria-label="Sort"><option value="">Sort: best match / newest</option><option value="title">Sort: title</option><option value="journal">Sort: journal</option><option value="opened">Sort: last opened</option><option value="notes">Sort: most highlights</option></select>
@@ -102,7 +108,7 @@ function top(el, opts) {
   bind("lf-q", "input", e => { F.q = e.target.value; refresh(); });
   bind("lf-q", "keydown", e => { if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); fulltext(opts); } });
   bind("lf-ft", "click", () => fulltext(opts));
-  [["lf-status", "status"], ["lf-folder", "folder"], ["lf-journal", "journal"], ["lf-year", "year"], ["lf-tag", "tag"], ["lf-sort", "sort"]]
+  [["lf-status", "status"], ["lf-folder", "folder"], ["lf-kind", "kind"], ["lf-journal", "journal"], ["lf-year", "year"], ["lf-tag", "tag"], ["lf-sort", "sort"]]
     .forEach(([id, k]) => bind(id, "change", e => { F[k] = e.target.value; results(opts); }));
   bind("lf-star", "click", () => { F.star = !F.star; results(opts); });
   bind("lf-notes", "click", () => { F.notes = !F.notes; results(opts); });
@@ -112,10 +118,14 @@ function top(el, opts) {
   bind("lf-filters", "click", e => { e.stopPropagation(); const m = $("#lf-pop", el), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); });
   $("#lf-chips", el).addEventListener("click", async e => {
     if (e.target.closest("[data-savesearch]")) { const n = prompt("Name this search (it will be kept next to your folders):", F.q || ""); if (!n || !n.trim()) return; try { SMART = (await api("/api/smart", {action: "add", name: n.trim(), filters: pickFilters()})).searches; toast("Saved."); fillControls(el); } catch (er) { notifyError(er); } return; }
-    const c = e.target.closest("[data-unf]"); if (!c) return; if (c.dataset.unf === "all") Object.assign(F, {status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false}); else F[c.dataset.unf] = c.dataset.unf === "star" || c.dataset.unf === "notes" ? false : ""; fillControls(el); results(opts); });
+    const c = e.target.closest("[data-unf]"); if (!c) return; if (c.dataset.unf === "all") Object.assign(F, {status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false}); else F[c.dataset.unf] = c.dataset.unf === "star" || c.dataset.unf === "notes" ? false : ""; fillControls(el); results(opts); });
   bind("lf-export", "click", e => { e.stopPropagation(); exportMenu($("#lf-exportmenu", el), {}); });
   $$(".libtabs button", el).forEach(b => b.onclick = () => { F.tab = b.dataset.tab; tabs(el, opts); });
-  Promise.all([loadFolders(), loadTags(), loadSmart()]).then(() => { fillControls(el); tabs(el, opts); });
+  if (opts && opts.browse) {                                      // the Library's home: the journal tiles first, then Continue reading and Up next below them
+    const sh = document.createElement("div"); sh.id = "lib-shelves";
+    opts.browse.append(sh); sh.append($("#lib-shelf", el), $("#lib-upnext", el));
+  }
+  Promise.all([loadFolders(), loadTags(), loadSmart()]).then(() => { fillControls(el); tabs(el, opts); setTimeout(() => { PENDING_CHAP = ""; }, 0); });
   fillControls(el); tabs(el, opts);
   window.ReviewUI && window.ReviewUI.refreshBadge();
   sumPaint(); clearTimeout(sumTimer); sumTimer = setTimeout(sumPoll, 1500);
@@ -179,7 +189,8 @@ function fillControls(el) {
   const ys = [...new Set(P.map(r => r.year).filter(Boolean))].sort().reverse();
   $("#lf-q", el).value = F.q; $("#lf-status", el).value = F.status; $("#lf-sort", el).value = F.sort;
   $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + FOLDERS.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")", F.folder)).join("");
-  $("#lf-journal", el).innerHTML = opt("", "Any journal", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
+  $("#lf-kind", el).value = F.kind || "";
+  $("#lf-journal", el).innerHTML = opt("", "Any journal or source", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
   $("#lf-year", el).innerHTML = opt("", "Any year", F.year) + ys.map(y => opt(y, y, F.year)).join("");
   $("#lf-tag", el).innerHTML = opt("", "Any tag", F.tag) + TAGS.map(t => opt(t.id, (t.category ? t.category + ": " : "") + t.name, F.tag)).join("");
   $("#lf-star", el).classList.toggle("on", F.star); $("#lf-notes", el).classList.toggle("on", F.notes); $("#lf-list", el).classList.toggle("on", F.list);
@@ -188,7 +199,7 @@ function fillControls(el) {
     `<span class="chip" id="lf-newfolder">＋ New folder</span>`;
   $$("[data-smart]", el).forEach(c => c.onclick = e => { const del = e.target.closest("[data-smartdel]");
     if (del) { e.stopPropagation(); if (confirm("Forget the saved search “" + (SMART.find(s => s.id === del.dataset.smartdel) || {}).name + "”? The papers are not affected.")) api("/api/smart", {action: "delete", id: del.dataset.smartdel}).then(r => { SMART = r.searches; fillControls(el); }).catch(notifyError); return; }
-    const s = SMART.find(x => x.id === c.dataset.smart); if (!s) return; Object.assign(F, {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false, list: false}, s.filters); F.tab = "papers"; tabs(el, TOP && TOP.opts); fillControls(el); results(TOP && TOP.opts); });
+    const s = SMART.find(x => x.id === c.dataset.smart); if (!s) return; Object.assign(F, {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, list: false}, s.filters); F.tab = "papers"; tabs(el, TOP && TOP.opts); fillControls(el); results(TOP && TOP.opts); });
   $("#lf-newfolder", el).onclick = () => newFolder();
   const gt = $('[data-gotab="folders"]', el); if (gt) gt.onclick = () => openTab("folders");
 }
@@ -250,8 +261,25 @@ function drawChapters(box, file, R) {
       <div class="chap-sum${c.summary ? "" : " hide"}" data-sumbox="${c.i}">${c.summary ? sumHtml(c.summary) : ""}</div></li>`).join("")}</ol>` : `<p class="pmeta">This book has no outline: the file carries no chapter list.</p>`}
     ${R.source === "epub" ? "" : `<div class="row chap-off"><label>Printed page 1 is file page <input type="number" min="1" max="${R.pages}" value="${R.offset + 1}" data-chap-offv aria-label="File page where printed page 1 is" style="width:5.5em"></label> <button class="btn small" data-chap-off>Save</button> <span class="st-msg" role="status"></span></div>`}`;
 }
-const overviewHtml = R => `<div class="chap-h"><b>The whole book</b> <small>an overview written from the summaries of its chapters and sections${R.overview.cut ? " (the book is long: " + (R.overview.cut === "sections" ? "the sections' summaries were left out" : "each summary was shortened") + ")" : ""}</small></div>
-  ${R.overview_stale ? `<p class="pmeta warn">A chapter's summary has changed since this overview was written: “Summarise the whole book…” writes it again.</p>` : ""}
+// a book's page (the drawer): its overview, or what to do to get one
+function bookSummaryHtml(R) {
+  if (R && R.overview && R.overview.text) return `<div class="chap-overview">${overviewHtml(R, true)}</div>`;
+  const [say, how] = bookEmpty(R);
+  return `<p class="pmeta">${esc(say)}</p>${how ? `<p class="pmeta">${esc(BOOK_HOW)}</p>` : ""}`;
+}
+let PENDING_CHAP = "";              // a book whose Chapters panel is to be opened once the Books tab is drawn (from its page's Chapters button)
+function showChapters(file) {
+  const r = lib()[byFile(file)]; if (!r) return;
+  BQ = r.title || ""; BSCOPE.file = ""; F.tab = "books"; PENDING_CHAP = file;
+  ctx.go({view: "lib", j: null, tab: "books"});
+}
+function openPendingChap(box) {     // (the Library draws its tab again once its folders have loaded: the panel is opened each time until then)
+  if (!PENDING_CHAP) return;
+  const b = $(`.librow[data-file="${CSS.escape(PENDING_CHAP)}"] [data-chap]`, box);
+  if (b && b.getAttribute("aria-expanded") !== "true") b.click();
+}
+const overviewHtml = (R, far) => `<div class="chap-h"><b>The whole book</b> <small>an overview written from the summaries of its chapters and sections${R.overview.cut ? " (the book is long: " + (R.overview.cut === "sections" ? "the sections' summaries were left out" : "each summary was shortened") + ")" : ""}</small></div>
+  ${R.overview_stale ? `<p class="pmeta warn">${far ? esc(BOOK_STALE) : "A chapter's summary has changed since this overview was written: “Summarise the whole book…” writes it again."}</p>` : ""}
   <div class="of-md">${md(R.overview.text)}</div><small class="pmeta">Written by ${esc(R.overview.model || "the AI")}${R.overview.cost ? " · " + esc(money(R.overview.cost)) : ""}</small>`;
 async function wholeBook(card, box, b) {                        // the estimate first; only "Summarise" starts the job (in the background, in the activity tray)
   const file = card.dataset.file, out = $("[data-whole]", box), title = (lib()[byFile(file)] || {}).title || "";
@@ -284,6 +312,11 @@ function follow(card, box, out, file, st) {                    // the job's prog
     delete out.dataset.running;
     let R; try { R = await api("/api/book?file=" + encodeURIComponent(file)); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
     drawChapters(box, file, R);
+    const r0 = lib()[byFile(file)];
+    if (r0 && r0.book) {                                         // (the green bar, and the row's words for a screen reader, without a reload)
+      r0.book.overview = R.overview || undefined; card.classList.toggle("ready", summarised(r0));
+      const t = $(".ptitle", card); if (t && summarised(r0) && !$(".sr-only", t)) t.insertAdjacentHTML("beforeend", `<span class="sr-only"> (ready to read: summarised by AI)</span>`);
+    }
     const o = $("[data-whole]", box); o.classList.remove("hide");
     o.innerHTML = s.stopped === "cancelled" ? `<p class="pmeta">Cancelled: ${s.made} part${s.made === 1 ? "" : "s"} summarised before that are kept.</p>`
       : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.skipped ? ` (${s.skipped} with no text left out)` : ""}${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(money(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
@@ -344,6 +377,7 @@ function booksTab() {
     $("#bk-list", box).innerHTML = (all.length ? `<div class="reshead">${hit.length} book${hit.length === 1 ? "" : "s"}${q ? ` matching “${esc(BQ.trim())}”` : ` in your library`}</div>` : "") +
       (hit.map(([r, i]) => row(r, i)).join("") || (all.length ? `<div class="card empty"><h2>No book matches</h2>Try other words.</div>` : `<div class="card empty"><h2>No books yet</h2>Press <b>＋ Add a book</b> or drop PDF and EPUB files onto this page. Nothing is filed until you have checked the details.</div>`));
     bindRows($("#bk-list", box));
+    openPendingChap($("#bk-list", box));
   };
   drawBooks = draw;
   $("#bk-q", box).oninput = e => { BQ = e.target.value; BFT = false; $("#bk-out", box).innerHTML = ""; if (!BSCOPE.file) draw(); };         // (limited to a chapter, the words are for the search inside it: the list of books stays as it is)
@@ -361,7 +395,7 @@ async function inBooks(box) {                       // the words inside the book
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
-      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") out.innerHTML = `<div class="reshead">${esc(m.msg)}</div>`; else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
+      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") { if (!$(".reshead.jw-st", out)) out.innerHTML = `<div class="reshead jw-st"></div>`; progress($(".reshead.jw-st", out), m); } else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
   } catch (e) { out.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
   const hl = t => re ? t.split(re).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("") : esc(t);
@@ -383,7 +417,7 @@ async function fulltext(opts) {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
     for (;;) { const {value, done} = await rd.read(); if (done) break; buf += dec.decode(value, {stream: true}); let i;
-      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") box.innerHTML = `<div class="reshead">${esc(m.msg)}</div>`; else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
+      while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.type === "status") { if (!$(".reshead.jw-st", box)) box.innerHTML = `<div class="reshead jw-st"></div>`; progress($(".reshead.jw-st", box), m); } else if (m.type === "results") res = m; else if (m.type === "error") throw new Error(m.error); } }
   } catch (e) { FT_BUSY = false; box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   FT_BUSY = false;
   const keys = [...res.phrases, ...res.words].filter(Boolean).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), re = keys.length ? new RegExp("(" + keys.join("|") + ")", "gi") : null;
@@ -394,7 +428,7 @@ async function fulltext(opts) {
   const open = i => { const it = res.items[i], row = lib()[byFile(it.file)]; if (row) ctx.readPaper(row, {goto: {page: it.page, quote: it.quote}}); };
   box.querySelectorAll("[data-ft]").forEach(c => { c.onclick = () => open(+c.dataset.ft); c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(+c.dataset.ft); } }; });
 }
-const active = () => !!(F.q || F.status || F.star || F.folder || F.journal || F.year || F.tag || F.notes || F.list);
+const active = () => !!(F.q || F.status || F.star || F.folder || F.journal || F.year || F.tag || F.kind || F.notes || F.list);
 let seq = 0;
 async function results(opts) {
   const box = $("#lib-results"); if (!box) return;
@@ -416,12 +450,12 @@ async function results(opts) {
   actionbar();
 }
 const pickFilters = () => ({...Object.fromEntries(FILTER_KEYS.filter(k => F[k]).map(k => [k, F[k]])), ...(F.star ? {star: true} : {}), ...(F.notes ? {notes: true} : {})});
-const smartText = s => { const f = s.filters, t = []; if (f.q) t.push("“" + f.q + "”"); if (f.status) t.push(ST[f.status] || f.status); if (f.star) t.push("starred"); if (f.folder) t.push("folder " + folderName(f.folder)); if (f.journal) t.push(f.journal); if (f.year) t.push(f.year); if (f.tag) t.push("tag"); if (f.notes) t.push("with my notes"); return t.join(" · "); };
+const smartText = s => { const f = s.filters, t = []; if (f.q) t.push("“" + f.q + "”"); if (f.status) t.push(ST[f.status] || f.status); if (f.star) t.push("starred"); if (f.folder) t.push("folder " + folderName(f.folder)); if (f.journal) t.push(f.journal); if (f.year) t.push(f.year); if (f.kind) t.push((KINDS.find(k => k[0] === f.kind) || [, f.kind])[1].toLowerCase()); if (f.tag) t.push("tag"); if (f.notes) t.push("with my notes"); return t.join(" · "); };
 function drawChips() {
   const box = $("#lf-chips"); if (!box) return;
   const sel = id => { const s = $("#" + id); return s && s.selectedOptions[0] ? s.selectedOptions[0].textContent.replace(/^📁\s*/, "").replace(/\s*\(\d+\)$/, "") : ""; };
   const cs = [F.status && ["status", "Status: " + (ST[F.status] || "No status")], F.star && ["star", "★ Starred"], F.folder && ["folder", "Folder: " + sel("lf-folder")], F.journal && ["journal", "Journal: " + sel("lf-journal")],
-    F.year && ["year", "Year: " + F.year], F.tag && ["tag", "Tag: " + sel("lf-tag")], F.notes && ["notes", "✎ With my notes"]].filter(Boolean);
+    F.year && ["year", "Year: " + F.year], F.kind && ["kind", "Type: " + (KINDS.find(k => k[0] === F.kind) || [, F.kind])[1]], F.tag && ["tag", "Tag: " + sel("lf-tag")], F.notes && ["notes", "✎ With my notes"]].filter(Boolean);
   const can = Object.keys(pickFilters()).length > 0;
   box.classList.toggle("hide", !can);
   box.innerHTML = cs.map(([k, t]) => `<span class="chip on" data-unf="${k}" title="Remove this filter">${esc(t)} ${ico("x", "sm")}</span>`).join("") + (cs.length > 1 ? `<button class="linkbtn" data-unf="all">Clear all</button>` : "") + (can ? `<button class="linkbtn" data-savesearch title="Keep this search and its filters as a chip next to your folders">${ico("search", "sm")} Save this search</button>` : "");
@@ -478,6 +512,8 @@ function wireRows() {
     if (more) { e.stopPropagation(); const m = more.parentElement.querySelector(".menu"), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); return; }
     const pick = e.target.closest(".rowmenu button, .rowmenu a"); if (pick) pick.closest(".menu").classList.add("hide");
     const star = e.target.closest("[data-star]"), fold = e.target.closest("[data-fold]"), take = e.target.closest("[data-take]"), of = e.target.closest("[data-openfolder]"), cd = e.target.closest("[data-card]"), del = e.target.closest("[data-delitem]");
+    const sk = e.target.closest("[data-setkind]");
+    if (sk) { setKind([sk.dataset.setkind]); return; }
     if (del) deleteItems([del.dataset.delitem]);
     else if (cd) { const i = byFile(cd.dataset.card); if (i >= 0) ctx.readPaper(lib()[i], {tab: "card"}); }
     else if (star) { const r = lib()[byFile(star.dataset.star)]; setState(star.dataset.star, {star: !(r.state || {}).star}).catch(er => notifyError(er)); }
@@ -518,11 +554,35 @@ function actionbar() {
   bar.classList.toggle("hide", !SEL.size);
   if (!SEL.size) return;
   bar.innerHTML = `<b>${SEL.size} selected</b><span class="menuwrap"><button class="btn small" id="ab-fold">📁 Add to folder ▾</button></span>
-    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
+    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small" id="ab-kind" title="Say what these papers are: journal articles, preprints, conference papers, or reports, theses and other">Set type…</button><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
+  $("#ab-kind").onclick = () => setKind([...SEL]);
   $("#ab-del").onclick = () => deleteItems([...SEL]);
   $("#ab-clear").onclick = () => { SEL.clear(); $$(".rsel").forEach(c => c.checked = false); actionbar(); };
   $("#ab-fold").onclick = e => { e.stopPropagation(); folderPop(e.currentTarget, [...SEL], true); };
   $("#ab-exp").onclick = e => { e.stopPropagation(); exportMenu($("#ab-expmenu"), {files: [...SEL]}); };
+}
+
+// ---------------------------------------------------------------- what kind of work papers are: a journal article, a preprint, a conference paper, or other (kinds.py)
+function setKind(files) {
+  files = files.filter(f => { const r = lib()[byFile(f)]; return r && !r.book; }); if (!files.length) return;
+  const r0 = lib()[byFile(files[0])], cur = files.every(f => (lib()[byFile(f)].kind || "journal") === (r0.kind || "journal")) ? (r0.kind || "journal") : "";
+  const lab0 = cur === "other" && files.every(f => (lib()[byFile(f)].kind_label || "") === (r0.kind_label || "")) ? (r0.kind_label || "") : "";      // (a Report or Thesis keeps its word)
+  $("#kind-dlg") && $("#kind-dlg").remove();
+  const d = document.createElement("dialog"); d.id = "kind-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "kind-h");
+  d.innerHTML = `<h2 id="kind-h">What ${files.length === 1 ? "is this paper" : "are these " + files.length + " papers"}?</h2>
+    <p class="pmeta">Only the type is changed: the files stay where they are and keep their journal or source name.</p>
+    <div class="di-list" role="radiogroup" aria-label="Type">${KINDS.map(([v, , one]) => `<label class="di-opt"><input type="radio" name="kd" value="${v}"${cur === v ? " checked" : ""}> ${one}</label>`).join("")}</div>
+    <label class="${cur === "other" ? "" : "hide"}" id="kd-lab-w">Which one <select id="kd-lab">${[["", "Other"], ...["Report", "Thesis", "Chapter", "Dataset"].map(x => [x, x])].map(([v, t]) => `<option value="${v}"${v === lab0 ? " selected" : ""}>${t}</option>`).join("")}</select></label>
+    <div class="row di-btns"><button class="btn" id="kd-no">Cancel</button><button class="btn primary" id="kd-go"${cur ? "" : " disabled"}>Save</button></div>`;
+  document.body.append(d); d.showModal();
+  const pick = () => (d.querySelector("input[name=kd]:checked") || {}).value || "";
+  d.addEventListener("change", () => { $("#kd-go", d).disabled = !pick(); $("#kd-lab-w", d).classList.toggle("hide", pick() !== "other"); });
+  $("#kd-no", d).onclick = () => d.close();
+  $("#kd-go", d).onclick = async () => {
+    try { const r = await api("/api/library/kind", {files, kind: pick(), label: pick() === "other" ? $("#kd-lab", d).value : ""}); d.close(); toast(`Type saved for ${r.changed} paper${r.changed === 1 ? "" : "s"}.`); await ctx.reload(); results(TOP && TOP.opts); }
+    catch (er) { notifyError(er); }
+  };
+  d.addEventListener("close", () => d.remove(), {once: true});
 }
 
 // ---------------------------------------------------------------- folders
@@ -563,7 +623,7 @@ function folderView(box, id) {
       actions: `<span class="menuwrap"><button class="btn small" id="fv-add">${ico("plus", "sm")} Add papers ${ico("down", "sm")}</button><div class="menu card hide" id="fv-addmenu"><button data-add="pdf">PDFs from my computer…</button><button data-add="lib">Papers already in my library…</button><div class="pmeta" style="padding:6px 10px">Or drop PDFs anywhere on this page.</div></div></span>
       <button class="btn small" id="fv-rename">Rename</button><button class="btn small danger" id="fv-del">Delete folder</button>
       <span class="menuwrap"><button class="btn small" id="fv-export">${ico("download", "sm")} Export ${ico("down", "sm")}</button><div class="menu card hide" id="fv-expmenu"></div></span>`}) + `
-    ${window.IdeasUI ? `<div class="libtabs tooltabs fvtabs" style="margin-top:12px">${[["papers", "Papers", "papers"], ["ask", "Ask", "ask"], ["matrix", "Matrix", "matrix"], ["discover", "Discover", "discover"], ["evidence", "Evidence", "evidence"], ["synthesis", "Synthesis", "synthesis"], ["workspace", "Workspace", "workspace"], ["lab", "Ideas Lab", "ideas"], ["draft", "Related work", "draft"], ["claims", "Claim check", "claims"]].map(([k, t, i]) => `<button data-ft="${k}" data-tool="${i}">${ico(i)}${t}</button>`).join("")}</div>` : ""}
+    ${window.IdeasUI ? `<div class="libtabs tooltabs fvtabs" style="margin-top:12px">${[["papers", "Papers", "papers", "this folder's list"], ["ask", "Ask", "ask", "ask these papers"], ["matrix", "Matrix", "matrix", "compare them in a table"], ["discover", "Discover", "discover", "papers they cite"], ["evidence", "Evidence", "evidence", "who found what"], ["synthesis", "Synthesis", "synthesis", "what they say together"], ["workspace", "Workspace", "workspace", "a board to arrange them"], ["lab", "Ideas Lab", "ideas", "research ideas from them"], ["draft", "Related work", "draft", "a related-work draft"], ["claims", "Claim check", "claims", "check claims against them"]].map(([k, t, i, h]) => `<button data-ft="${k}" data-tool="${i}">${ico(i)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>` : ""}
     <div id="fv-body" style="margin-top:14px"></div>`;
   $("#fv-add").onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.toggle("hide"); };
   $$("#fv-addmenu [data-add]").forEach(b => b.onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.add("hide"); const D = window.DropImport; if (D) b.dataset.add === "pdf" ? D.choosePdfs(id) : D.pickFromLibrary(id); });
@@ -685,7 +745,7 @@ async function tagManager() {
 function openTab(t) { F.tab = t; if (ctx.go && t === "folders") return ctx.go({view: "lib", j: null, tab: "folders"}); if (TOP) tabs(TOP.el, TOP.opts); }
 window.LibraryUI = {
   init(c) { ctx = c; const wire = () => ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "FoldersUI", "DropImport", "Palette", "Activity", "DraftUI", "ClaimsUI", "SynthUI", "ReviewUI", "WorkspaceUI", "BibImport"].forEach(n => window[n] && window[n].init(c)); wire(); addEventListener("load", wire, {once: true});   /* the other tab modules may still be loading */ wireRows(); return Promise.all([loadFolders(), loadTags()]); },
-  row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab,
+  row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab, bookSummaryHtml, showChapters, summarised,
   refreshFolders: loadFolders, state: F,
   folderCount: () => FOLDERS.length, folders: () => FOLDERS,
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added

@@ -966,7 +966,7 @@ function renderMeta() {
   const pr = RUN.params || {};
   const nc = (RUN.checks || []).length;
   const li = pr.listing || {};
-  const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
+  const scope = RUN.kind === "picks" ? (pr.folder ? `Papers you chose in Discover in the folder “${pr.folder_name || pr.label}”: each goes into that folder once it is in your library` : `Papers you chose in Discover: ${pr.label || "related papers"}`)
     : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "") + (pr.follow ? " · followed: the weekly check brings their new works into the folder" : "")
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
@@ -1061,7 +1061,7 @@ function dlText(p) {
     case "ok": return `<span class="dl ok">✓ Downloaded${p.summary ? " · summary" : ""}</span>` +
       (/preprint|open copy/i.test(p.dl_note || "") ? `<span class="dl" title="Not the publisher’s final version">${esc((p.dl_note.match(/(preprint|open copy)[^|;]*/i) || [""])[0])}</span>` : "") +
       (/identity not checked/i.test(p.dl_note || "") ? `<span class="dl" title="${esc((p.dl_note.match(/identity not checked[^|;]*/i) || [""])[0])}">Identity not checked</span>` : "") +
-      (p.summary ? "" : `<span class="dl bad">No summary yet</span>`);
+      (p.summary ? "" : `<span class="dl bad"${p.summary_by_hand ? ` title="Its summary is not written by itself: Library → “Summarise N papers…” says what it costs first."` : ""}>No summary yet</span>`);
     case "downloading": return `<span class="dl wait">Downloading…</span>`;
     case "summarizing": return `<span class="dl wait">Summarizing…</span>`;
     case "needs_login": return `<span class="dl bad">Needs publisher login</span>`;
@@ -1081,10 +1081,13 @@ function shortAuthors(a) {
   const xs = Array.isArray(a) ? a : (a ? String(a).split(/;\s*/) : []);
   return xs.slice(0, 4).join(", ") + (xs.length > 4 ? ` +${xs.length - 4} more` : "");
 }
+// a PDF you downloaded yourself can be added to a paper that has none and is not being downloaded (attach.js); the card's button only where its download failed
+const DL_FAILED = ["failed", "needs_check", "wrong_paper", "needs_login", "needs_nova", "needs_library", "unavailable", "not_yet"];
+const canAttach = p => !["downloading", "summarizing"].includes(p.dl_status) && !(p.dl_status === "ok" && p.file);
 function card(p) {
   const el = document.createElement("div");
   const v = p.verdict || "pending";
-  el.className = "card paper" + (v === "skip" ? " skip" : "");
+  el.className = "card paper" + (v === "skip" ? " skip" : "") + (canAttach(p) ? " can-attach" : "");
   el.dataset.id = p.id;
   const tags = (p.topics || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") +
     (p.method ? `<span class="tag" title="Main method">⚙ ${esc(p.method)}</span>` : "") +
@@ -1110,9 +1113,10 @@ function card(p) {
       ${["unavailable", "not_yet", "failed", "wrong_paper"].includes(p.dl_status) && illLink(p) ? `<a class="btn small" href="${illLink(p)}" title="Email your library an interlibrary-loan request for this paper">Ask my library</a>` : ""}
       ${p.dl_status === "not_yet" && SIGNIN_FOR[p.publisher] ? `<button class="btn small" data-act="login">Use my ${SIGNIN_FOR[p.publisher].toUpperCase()} membership</button>` : ""}
       ${["failed", "needs_check", "wrong_paper"].includes(p.dl_status) && p.manual_url ? `<a class="btn small" target="_blank" href="${esc(p.manual_url)}">Open in my browser</a>` : ""}
+      ${DL_FAILED.includes(p.dl_status) ? `<button class="btn small" data-act="attach" title="Downloaded it in your own browser? Choose that PDF, or drop it on this card: it is added to this paper.">Add the PDF I downloaded…</button>` : ""}
       ${p.dl_status === "ok" && p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">PDF</a>` : ""}
       ${p.summary ? `<button class="btn small" data-act="sum">Summary</button>` : ""}
-      ${p.dl_status === "ok" && !p.summary ? `<button class="btn small" data-act="resum" title="${esc(p.dl_note || "")}">Retry summary</button>` : ""}
+      ${p.dl_status === "ok" && !p.summary && !p.summary_by_hand ? `<button class="btn small" data-act="resum" title="${esc(p.dl_note || "")}">Retry summary</button>` : ""}
       ${v === "borderline" ? `<button class="btn primary small" data-act="queue">→ Move to download queue</button>` : ""}
       ${v === "borderline" && NAV.j === "~borderline" ? `<button class="btn small" data-act="skipv">Not relevant</button>` : ""}
       ${v === "download" && p.dl_status !== "ok" && NAV.j === "~queue" ? `<button class="btn small" data-act="unqueue">Remove from queue</button>` : ""}
@@ -1129,9 +1133,15 @@ function card(p) {
   const ub = el.querySelector('[data-act="unqueue"]'); if (ub) ub.onclick = () =>
     setVerdict([p.id], p.ai_verdict && p.ai_verdict !== "download" ? p.ai_verdict : "borderline");
   const ab = el.querySelector(".abs"); if (ab) ab.onclick = () => ab.classList.toggle("open");
+  const atb = el.querySelector('[data-act="attach"]'); if (atb) atb.onclick = () => window.AttachPDF && AttachPDF.pick(p.id);
   if (!visible(p)) el.classList.add("hide");
   return el;
 }
+window.RunView = {                    // what attach.js needs of the run on the page
+  paper: id => papers.get(id), runId: () => RUN && RUN.id,
+  applied(id, d) { const p = papers.get(id); if (!p) return; Object.assign(p, d); SEL.delete(id); updateCard(id); metaSoon(); renderTilesSoon(); updateSel(); loadLibrary();
+    if ($("#drawer").classList.contains("on") && openPaper.id === id) openPaper(id); },
+};
 // The list draws the papers that match, LIST_STEP at a time (a run can have 1000 or more): more come as you scroll near the end, or with "Show more".
 // {keep}: a redraw in place (a verdict, Select all, new fit scores) keeps how many are drawn; otherwise (a filter, a search, another view) it starts again.
 const LIST_STEP = 60; let SHOWN = LIST_STEP, VIS = [];
@@ -1327,7 +1337,7 @@ function renderLibrary() {
     });
     $("#liball").onclick = e => { e.preventDefault(); go({j: "*"}); };
   } else if (NAV.j === "*") {
-    box.innerHTML = (window.LibraryUI && LIB.length ? `<div class="reshead">${LibraryUI.readyKey(LIB)}</div>` : "") + CFG.journals.filter(j => byJ[j.abbr]).map(j =>
+    box.innerHTML = (window.LibraryUI && LIB.length ? `<div class="reshead">${LibraryUI.readyKey(LIB.filter(r => r.journal !== "Books"))}</div>` : "") + CFG.journals.filter(j => byJ[j.abbr]).map(j =>
       `<div class="jgroup"><h2>${mono(j.abbr, "sm")}${esc(j.name)}</h2>${groups(j.abbr)}</div>`).join("");
   } else {
     const j = jinfo(NAV.j);
@@ -1353,6 +1363,7 @@ function fillDrawer({abbr, journal, year, title, authors, facts, actions, body})
 }
 function openPaper(id) {
   const p = papers.get(id); if (!p) return;
+  openPaper.id = id;
   fillDrawer({
     abbr: p.abbr, journal: jinfo(p.abbr).name, year: p.pub_date, title: p.title, authors: p.authors,
     facts: [p.verdict ? `<span class="fact verdict v-${esc(p.verdict)}">${esc(p.verdict)} · ${p.relevance ?? "–"}</span>` : "",
@@ -1361,19 +1372,24 @@ function openPaper(id) {
     actions: [p.file && p.dl_status === "ok" ? `<button class="btn primary small" id="dread">Read &amp; highlight</button>` : "",
       p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">Open PDF</a>` : "",
       p.doi ? `<a class="btn small" target="_blank" href="https://doi.org/${esc(p.doi)}">DOI ↗</a>` : (p.url ? `<a class="btn small" target="_blank" href="${esc(p.url)}">Article page ↗</a>` : ""),
-      !p.file ? `<button class="btn small" id="dsel">${SEL.has(id) ? "✓ Selected — click to deselect" : "Select for download"}</button>` : ""],
+      !p.file ? `<button class="btn small" id="dsel">${SEL.has(id) ? "✓ Selected — click to deselect" : "Select for download"}</button>` : "",
+      canAttach(p) ? `<button class="btn small" id="dattach">Add the PDF I downloaded…</button>` : ""],
     body: (p.reason ? `<h3>Why the AI flagged it</h3><p>${esc(p.reason)}</p>` : "") +
       (p.summary ? `<h3>Summary</h3><div class="md" id="dsum">Loading…</div>` : "") +
       `<h3>Abstract</h3><p>${p.abstract ? esc(p.abstract) : "<i>No abstract available.</i>"}</p>` +
       (p.keywords && p.keywords.length ? `<h3>Keywords</h3><p>${esc(p.keywords.join(", "))}</p>` : "") +
-      (p.dl_note && p.dl_status !== "ok" ? `<h3>Download notes</h3><p class="pmeta">${esc(p.dl_note)}</p>` : ""),
+      (p.dl_note && p.dl_status !== "ok" ? `<h3>Download notes</h3><p class="pmeta">${esc(p.dl_note)}</p>` : "") +
+      (canAttach(p) && p.dl_status ? `<p class="pmeta">Downloaded it yourself? Press “Add the PDF I downloaded…” or drop the PDF on the paper’s card.</p>` : ""),
   });
+  const da = $("#dattach"); if (da) da.onclick = () => window.AttachPDF && AttachPDF.pick(id);
   const ds = $("#dsel"); if (ds) ds.onclick = () => { SEL.has(id) ? SEL.delete(id) : SEL.add(id); updateCard(id); updateSel(); openPaper(id); };
   const dr = $("#dread"); if (dr) dr.onclick = () => readPaper({file: p.file, title: p.title, authors: p.authors, abbr: p.abbr,
     journal: jinfo(p.abbr).name, year: (p.pub_date || "").slice(0, 4), doi: p.doi, summary: p.summary});
   if (p.summary) loadSummary(p.summary);
 }
 function openLib(r) {
+  openPaper.id = null;
+  if (r.book) return openBook(r);
   fillDrawer({
     abbr: r.abbr, journal: r.journal, year: r.year, title: r.title, authors: r.authors,
     facts: (r.matched_topics || "").split(/;\s*/).filter(Boolean).map(t => `<span class="fact">${esc(t)}</span>`),
@@ -1385,9 +1401,24 @@ function openLib(r) {
   $("#dread").onclick = () => readPaper(r);
   if (r.summary) loadSummary(r.summary);
 }
-async function loadSummary(path) {
+function openBook(r) {                 // a book's page: the overview of the whole book, read from its own record now (never a copy that could be out of step)
+  const tok = openBook.tok = (openBook.tok || 0) + 1;
+  fillDrawer({
+    abbr: r.abbr, journal: r.journal, year: r.year, title: r.title, authors: r.authors, facts: [],
+    actions: [`<button class="btn primary small" id="dread">Read &amp; highlight</button>`, `<button class="btn small" id="dchap" title="The book's chapters and their summaries, in Library → Books">Chapters</button>`,
+      `<a class="btn small" target="_blank" href="${fileUrl(r.file)}">Open PDF</a>`, r.doi ? `<a class="btn small" target="_blank" href="https://doi.org/${esc(r.doi)}">DOI ↗</a>` : ""],
+    body: `<div id="dbook"><p class="pmeta">Reading the book’s summaries…</p></div>` + (r.summary ? `<h3>Summary saved with the book</h3><div class="md" id="dsum">Loading…</div>` : ""),
+  });
+  $("#dread").onclick = () => readPaper(r);
+  $("#dchap").onclick = () => { closeDrawer(); if (window.LibraryUI) LibraryUI.showChapters(r.file); };
+  api("/api/book?file=" + encodeURIComponent(r.file)).then(R => { if (openBook.tok === tok && $("#dbook")) $("#dbook").innerHTML = LibraryUI.bookSummaryHtml(R); })
+    .catch(() => { if (openBook.tok === tok && $("#dbook")) $("#dbook").innerHTML = `<p class="pmeta">No summary yet.</p>`; });
+  if (r.summary) loadSummary(r.summary, () => openBook.tok === tok);
+}
+async function loadSummary(path, still) {
   try {
     const md = await (await fetch(fileUrl(path))).text();
+    if (still && !still()) return;                      // (another page was opened meanwhile)
     // the summary repeats title/authors (shown above); render the rest
     const body = md.replace(/^# .*\n/, "").replace(/^\*\*Authors\*\*.*\n/m, "").replace(/</g, "&lt;");
     $("#dsum").innerHTML = window.marked ? marked.parse(body) : `<pre>${esc(md)}</pre>`;
@@ -1508,6 +1539,7 @@ init().catch(e => { $("#runtitle").textContent = "Can’t reach the dashboard se
 <script type="module" src="/static/discover.js"></script>
 <script type="module" src="/static/folders.js"></script>
 <script type="module" src="/static/dropimport.js"></script>
+<script type="module" src="/static/attach.js"></script>
 <script type="module" src="/static/palette.js"></script>
 <script type="module" src="/static/draft.js"></script>
 <script type="module" src="/static/claims.js"></script>

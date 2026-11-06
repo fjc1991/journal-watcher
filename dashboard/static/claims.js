@@ -3,7 +3,7 @@
 // supported / partly / contradicted / not found in your papers, with the passages it rests on (click one: the paper opens at that page); when a claim names a paper
 // ("Singhal et al., 2026") it says whether that paper's own passages really say it. The model may only point at passages it was given; anything else is dropped on the server.
 // Saved as Papers/_folders/<id>.claims.json. Server: GET /api/folder/claims, POST /api/ai/claims[/estimate] (stream: status | progress | claims | done | error), POST /api/folder/claims (tick off).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -135,7 +135,7 @@ async function run(fresh) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "claims") C.data.doc = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
+        if (m.type === "status" && st()) progress(st(), m); else if (m.type === "claims") C.data.doc = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
     C.busy = false; drawOut(); drawGo(); if (done) toast("Claims checked" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
@@ -177,7 +177,7 @@ async function review(fresh) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "review") C.data.review = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
+        if (m.type === "status" && st()) progress(st(), m); else if (m.type === "review") C.data.review = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
     C.busy = false; if (btn) btn.disabled = false; if (st()) st().textContent = ""; drawRev(); if (done) toast("Reviewer 2 has read it" + (done.cost != null ? " · " + money(done.cost) : "") + ".");

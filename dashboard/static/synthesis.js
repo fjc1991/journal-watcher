@@ -2,7 +2,7 @@
 // speak to with each paper's position (the map: themes down, papers across, a cell per paper that has something to say) and what is still open (gaps). Every cell and gap points at
 // the notes it rests on (click: the paper opens at that page); the server drops anything that points at a note it was not given, and marks a gap with no note behind it as "not grounded".
 // Saved as Papers/_folders/<id>.synthesis.json. Server: GET /api/folder/synthesis, POST /api/ai/synthesis[/estimate] (stream: status | progress | synthesis | done | error).
-import {$, esc, ico, api, toast, notifyError, errInline, debounce} from "./state.js";
+import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -99,7 +99,7 @@ async function run(again) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (m.type === "status" && st()) st().textContent = m.msg; else if (m.type === "synthesis") Y.data.doc = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
+        if (m.type === "status" && st()) progress(st(), m); else if (m.type === "synthesis") Y.data.doc = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
     Y.busy = false; draw(); if (done) toast("Synthesis made" + (done.cost != null ? " · " + money(done.cost) : "") + ".");

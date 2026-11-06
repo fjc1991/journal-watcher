@@ -549,6 +549,35 @@ def overview_stale(info):
     return bool(ov.get("text")) and ov.get("fingerprint") != _fingerprint(info, parts(info))
 
 
+BOOK_NO_TEMPLATE = ("A book is not summarised with a paper template: the whole book would be sent at once. Use Library → Books → Chapters → “Summarise the whole "
+                    "book…”, which shows what it costs first.")
+
+
+def overview_view(info):
+    """What a book's page and the reader's Summary tab show, read from its own .book.json each time (never a copy): {overview (or None), overview_stale, parts,
+    parts_done (summarised or found to have no text), parts_summarised}. No AI call."""
+    ps = parts(info)
+    sums = info.get("summaries") or {}
+    ov = info.get("overview") or {}
+    return {"overview": ov if ov.get("text") else None, "overview_stale": overview_stale(info), "parts": len(ps),
+            "parts_done": sum(1 for c in ps if _done(sums, c)), "parts_summarised": sum(1 for c in ps if (sums.get(chapter_key(c)) or {}).get("text"))}
+
+
+def is_book(rel):
+    """Is this file under Papers/ a book? Its .book.json, or (that file missing) its library row's journal "Books", or the EPUB it was made from."""
+    pdf = ns.pdf_path(rel)
+    if not pdf:
+        return False
+    if info_at(pdf) or os.path.exists(pdf[:-4] + ".epub"):
+        return True
+    try:
+        import csv
+        with open(os.path.join(dl.PAPERS, "_index.csv"), newline="", encoding="utf-8") as f:
+            return any(r.get("file") == rel and r.get("journal") == JOURNAL for r in csv.DictReader(f))
+    except OSError:
+        return False
+
+
 def whole_plan(rel):
     """(pdf, info, the parts still without a summary, all the parts)."""
     pdf, info = _book(rel)

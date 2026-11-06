@@ -305,6 +305,13 @@ def audit(progress=None, use_kept=False):
 
 
 def remove(file):
+    """(One writer of Papers/_index.csv at a time: see _remove.)"""
+    import download as dl
+    with dl.INDEX_LOCK:
+        return _remove(file)
+
+
+def _remove(file):
     """Take a PDF out of the library without deleting anything: the PDF and its notes, summary, card and skim files move to Papers/_removed/<time>/ (same sub-folders),
     and its row in Papers/_index.csv becomes status "removed" (so the library no longer lists it and a download can try again). Returns the row's data for a new download
     ({title, doi, authors, journal, date}) and where the files went."""
@@ -316,11 +323,15 @@ def remove(file):
         raise ValueError("That file is not in your library.")
     idx = os.path.join(paths.PAPERS, "_index.csv")
     with open(idx, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        rd = csv.DictReader(f)
+        rows = list(rd)
+        extra = [c for c in (rd.fieldnames or []) if c and c not in dl.INDEX_COLS]       # (columns a later version may add: kept)
     mine = [r for r in rows if r.get("file") == file and r.get("status") == "ok" and os.path.realpath(os.path.join(paths.ROOT, r["file"])) == pdf]
     if not mine:
         raise ValueError("That file is not in your library index.")
     row = mine[0]
+    import kinds
+    side = kinds.read_sidecar(pdf, dl.index_key(row))             # (its kind goes with the new download)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest_root = os.path.join(base, "_removed", stamp)
     moves = []
@@ -338,13 +349,13 @@ def remove(file):
     row["note"] = ("removed by Check my PDFs: it did not look like this paper (kept in %s)" % os.path.relpath(dest_root, root))[:300]
     tmp = idx + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, dl.INDEX_COLS)
+        w = csv.DictWriter(f, dl.INDEX_COLS + extra, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     os.replace(tmp, idx)
     m = re.match(r"Papers/(\d{4}-\d{2})/", file)
     return {"title": row.get("title", ""), "doi": row.get("doi", ""), "authors": [a for a in (row.get("authors") or "").split("; ") if a], "journal": row.get("journal", ""),
-            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, root), "files": moved}
+            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, root), "files": moved, "kind": side.get("kind") or "", "label": side.get("label") or ""}
 
 
 def main(argv=None):

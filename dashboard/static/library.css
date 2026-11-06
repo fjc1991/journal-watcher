@@ -72,3 +72,7 @@
 /* Summarise N papers…: the estimate, the progress and what came of it (library.js sumBox) */
 .lf-sumbox { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-size: 14px; line-height: 1.5; }
 .lf-sumbox p { margin: 0 0 8px; } .lf-sumbox .bad { color: var(--err); } .lf-sumfail { margin: 0 0 8px 18px; padding: 0; font-size: 13px; overflow-wrap: anywhere; }
+/* what kind of work a paper is (kinds.py): a quiet tag, one tone per kind (a journal article has none) */
+.tag.kind { font-weight: 600; background: var(--bl-soft); color: var(--bl); }
+.tag.kind.k-conference { background: var(--dl-soft); color: var(--dl); }
+.tag.kind.k-other { background: var(--sk-soft); color: var(--ink-2); }
