@@ -973,7 +973,7 @@ Kept as decided with the author, and flagged in the PR: the backup model screens
 
 Running at the same time as a download, which the feature invites (a design review found these before coding): the batch marks a paper "downloading", "set aside" or "needs a check" under `ATTACH_LOCK` and only if it has no file; `open_one` no longer resets a set-aside paper you added; the end of the batch no longer marks it as needing a check; a paper with `summary_by_hand` is not summarised by a batch. `save_index` and `Run.save` now write through a temporary file, one writer at a time.
 
-**Tests.** `t_attach_pdf` (child process, fresh homes, offline, no keychain, a summariser that raises), covering: the right PDF, twice, another run, a wrong PDF, keep for that paper only, cancel, a scan, not/half a PDF, being downloaded, a deleted paper, an author folder before and after deletion, a followed author and co-author, a copy keyed by title, the batch with a set-aside paper and the check opened or not, a paper reached during a pace wait, two writers of the index and of a run, the endpoints and two requests at once. Sixteen mutations, all caught (three only after cases were added). UI: the card takes a drop, not a text file, the wrong PDF's dialog and Cancel, the file chooser, the index row and the folder, no AI call.
+**Tests.** `t_attach_pdf` (child process, fresh homes, offline, no keychain, a summariser that raises), covering: the right PDF, twice, another run, a wrong PDF, keep for that paper only, cancel, a scan, not/half a PDF, being downloaded, a deleted paper, an author folder before and after deletion, a followed author and co-author, a copy keyed by title, the batch with a set-aside paper and the check opened or not, a paper reached during a pace wait, two writers of the index and of a run, the endpoints and two requests at once. Sixteen mutations, all caught (three only after cases were added); the review fixes below were checked by seventeen more mutations, all caught. UI: the card takes a drop, not a text file, the wrong PDF's dialog and Cancel, the file chooser, the index row and the folder, no AI call.
 
 **Not verified.** A real browser drag from the Finder (the UI tests dispatch drag events with a DataTransfer), and the 150 MB limit with a real file.
 
@@ -984,6 +984,14 @@ Running at the same time as a download, which the feature invites (a design revi
 **Changed.** `discover.js` sends the folder; `/api/related/download` checks it exists, adds the papers you had, gives each paper `folder` (the download, a retry or `attach_pdf` file it through `_into_folder`), and names the run after the folder (`params.folder`, `folder_name`); the run page says so.
 
 **Tests.** UI: the run's name and saved folder, a paper you had goes in at once, and (item 41's test on the same card) a PDF added later lands in the folder.
+
+### Review of items 38–42 (2026-11-06)
+
+A review workflow (four reviewers by area, a skeptic for each) kept 22 of 24 findings; all 22 are fixed in the same PR, each Python fix with an offline check shown failing on the code before it. The ones that mattered most: item 40's "&amp;" change made `library()` key a paper without a DOI by its unescaped title, so such a paper saved earlier would have dropped out of its folders and lost its reading status (the key is again taken from the title as stored, and the title is saved as it came; only the journal name is saved unescaped); and a PDF added on a past run's card while a running download had the same paper queued could be downloaded again over it, or taken out of the library by that download's failure (the batch now takes the library's copy, by the same key, before downloading, after a failure and when a check is opened, and a failed download never replaces a row that is in the library). Others: kinds false positives (an acknowledgement of a dissertation, a wrapped footnote about a talk), SSRN papers added by DOI filed under "SSRN Electronic Journal", the Type filter not counting as a filter, the reader's Generate button left disabled, a venue's abbreviation changed by the unescaping (two groups for one journal).
+
+A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 findings, all fixed: the first version of the batch's lookup matched a paper by its title alone (an "Editorial" without a DOI would have stood for another journal's "Editorial"), and the first wrapped-footnote rule skipped a real conference footer when the body line above it said "accepted".
+
+**Not changed, by decision:** a past "Picks · this folder" run cannot be named after its folder (it never recorded it); the author adds its papers to the folder by hand.
 
 ## 2. How it runs now (CLI agent)
 
