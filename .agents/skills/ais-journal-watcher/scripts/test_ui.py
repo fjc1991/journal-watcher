@@ -400,10 +400,10 @@ def main():
     head = ("import sys, runpy\nsys.path.insert(0, %r)\nimport pipeline as pl\n"
             "import os\n"
             "def fake(run, ids, emit, stop, checks=None, **k):\n    open(%r, 'w').write(','.join(ids))\n"
-            "    if checks is not None and os.path.exists(%r):      # a site wants a human check: wait (up to 20 s) for 'Open the check', write down which site was asked for\n"
+            "    if checks is not None and os.path.exists(%r):      # a site wants a human check: wait (up to 60 s: a slow CI runner) for 'Open the check', write down which site was asked for\n"
             "        emit('challenge', {'host': 'www.sciencedirect.com', 'state': 'pending', 'site': 'ScienceDirect', 'msg': 'ScienceDirect wants to check you are human. Press Open the check.'})\n"
             "        import queue\n"
-            "        try:\n            h = checks.get(timeout=20)\n        except queue.Empty:\n            h = ''\n"
+            "        try:\n            h = checks.get(timeout=60)\n        except queue.Empty:\n            h = ''\n"
             "        open(%r, 'w').write(h)\n"
             "        emit('challenge', {'host': h, 'state': 'open', 'msg': 'A Chromium window is open on ' + h})\n"
             "        emit('challenge', {'host': h, 'state': 'passed', 'msg': h + ' check passed'})\n"
@@ -1467,20 +1467,23 @@ fx.fetch_journal = lambda j: []                                                 
             check("…ticking it again follows again without downloading everything again", ann().get("follow") is True and api("/api/state")["busy"] is False and not os.path.exists(marker))
             AUTHOR_EXTRA[0] = 1                                                                            # OpenAlex now lists a 46th work
             open(marker + ".check", "w").write("1")                                                        # (and its download meets a human check)
+            t_click = time.time()
             page.click('.tabs button[data-tab="weekly"]'); page.click("#weeklybtn")
+            t_clicked = time.time()
             st_ = {}
-            for _ in range(80):
+            for _ in range(160):
                 st_ = api("/api/state")
                 if st_.get("checks"): break
                 time.sleep(0.25)
             check("the weekly check downloads the followed author's new work as a download: its human check is offered with 'Open the check' (it does not open by itself)",
                   st_.get("busy") and st_.get("kind") == "download" and any(c_["host"] == "www.sciencedirect.com" for c_ in st_.get("checks") or []), str({k_: st_.get(k_) for k_ in ("busy", "kind", "checks")}))
+            t_seen = time.time()
             ok_chk = api("/api/check", {"host": "www.sciencedirect.com"}).get("ok")
-            for _ in range(80):
+            for _ in range(240):
                 if os.path.exists(marker + ".checked"): break
                 time.sleep(0.25)
             chk_txt = open(marker + ".checked").read() if os.path.exists(marker + ".checked") else "(not written)"
-            check("…'Open the check' reaches that download", ok_chk is True and chk_txt == "www.sciencedirect.com", "ok=%r checked=%r state=%s" % (ok_chk, chk_txt, str({k_: v_ for k_, v_ in api("/api/state").items() if k_ != "run"})[:300]))
+            check("…'Open the check' reaches that download", ok_chk is True and chk_txt == "www.sciencedirect.com", "ok=%r checked=%r clicks %.1fs, check seen after %.1fs, state=%s" % (ok_chk, chk_txt, t_clicked - t_click, t_seen - t_clicked, str({k_: v_ for k_, v_ in api("/api/state").items() if k_ != "run"})[:300]))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=30000)
             wk_ = api("/api/runs/" + api("/api/state")["run"]["id"])
             fp_ = [p_ for p_ in wk_["papers"] if p_.get("openalex") == "W77045"]
