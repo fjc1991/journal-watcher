@@ -423,6 +423,7 @@ def config():
         "openalex_key": bool(pl.fx.openalex_key()),
         "est_cost_per_paper": pl.est_screen_cost_per_paper(),          # with the model chosen for screening; None when its price is not known (the page says so)
         "screen_model": ai.pricing.name(*ai.feature_model("screen")) if ai else "Claude Sonnet 5.5",
+        "screen_feature": dict(zip(("provider", "model"), ai.feature_model("screen"))) if ai else {},     # (which provider and model: a backup on a run's page is compared with it)
         "model": pl.MODEL,
         "this_week": pl.week_of(),
         "this_week_label": pl.week_label(pl.week_of()),

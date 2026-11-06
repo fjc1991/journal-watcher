@@ -4,6 +4,7 @@
     prices.refresh(force=False)     read OpenRouter's public price list (at most once a day); returns how many models it has
     prices.refresh_soon()           the same in the background, when an OpenRouter model is in use and the saved list is old
     prices.name(provider, model)    the name a person reads: "Claude Sonnet 5.5", "scaledown/summarize"
+    prices.backup_for(provider, m)  a model of the same provider that can answer in structured JSON (for screening, when m cannot), or None
 
 Where a price comes from, in this order:
   1. "yours":       a price typed in Settings → AI → Prices (ai.json "prices"), for that model name; it always wins
@@ -41,6 +42,8 @@ STALE_DAYS = 120                  # a built-in price older than this is shown as
 OR_MAX_AGE = 86400                # read OpenRouter's list again after a day
 OR_URL = os.environ.get("JW_OPENROUTER_MODELS_URL", "https://openrouter.ai/api/v1/models")
 CACHE = os.path.join(dl.LOCAL, "openrouter_prices.json")
+FORMAT = 2                        # the saved list's layout: 2 = with the "json" flag (and the context sizes) of the models that answer in a JSON schema; an older list is read again
+MIN_CTX, MIN_OUT = 40_000, 8_000  # a backup screening model must take a batch of papers (about 15,000 tokens in) and give its verdicts (up to 8,000 out)
 _lock = threading.Lock()
 _mem = {"at": 0.0, "data": None}
 _busy = {"on": False}
@@ -103,6 +106,14 @@ def parse_openrouter(payload):
                 e["web_search"] = float(pr["web_search"])
         except (TypeError, ValueError):
             pass
+        # can it answer in a JSON schema? OpenRouter lists "structured_outputs" for that ("response_format" alone is often only JSON mode, not a schema); a model with a
+        # charge per request is left out (its price per token is not what it costs)
+        if "structured_outputs" in (m.get("supported_parameters") or []) and not (_per_million(pr.get("request")) or 0):
+            e["json"] = True
+            top = m.get("top_provider") or {}
+            for k, v in (("ctx", m.get("context_length") or top.get("context_length")), ("max_out", top.get("max_completion_tokens"))):
+                if isinstance(v, (int, float)) and v > 0:
+                    e[k] = int(v)
         out[mid] = e
     return out
 
@@ -120,7 +131,7 @@ def refresh(force=False):
     with _lock:
         d = _load()
         age = time.time() - float(d.get("fetched_ts") or 0)
-        if not force and d.get("models") and age < OR_MAX_AGE:
+        if not force and d.get("models") and age < OR_MAX_AGE and d.get("format") == FORMAT:
             return len(d["models"])
         try:
             req = urllib.request.Request(OR_URL, headers={"User-Agent": _ua(), "Accept": "application/json"})
@@ -130,7 +141,7 @@ def refresh(force=False):
             return len(d.get("models") or {})
         if not models:
             return len(d.get("models") or {})
-        new = {"fetched": datetime.now(timezone.utc).isoformat(timespec="seconds"), "fetched_ts": time.time(), "models": models}
+        new = {"fetched": datetime.now(timezone.utc).isoformat(timespec="seconds"), "fetched_ts": time.time(), "format": FORMAT, "models": models}
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
         tmp = dl.tmp_path(CACHE)
         with open(tmp, "w", encoding="utf-8") as f:
@@ -211,3 +222,47 @@ def name(provider, model):
     if m:
         return "Claude %s %s%s" % (m.group(1).capitalize(), m.group(2), "." + m.group(3) if m.group(3) else "")
     return str(model or provider or "the AI")
+
+
+def _offline():
+    return bool(os.environ.get("JW_OFFLINE")) and not os.environ.get("JW_OPENROUTER_MODELS_URL")
+
+
+def structured_models(provider, cfg=None):
+    """{model id: in + out price per million tokens} of the models at `provider` that can answer in a JSON schema (what screening needs), or None when the app has
+    no such list for that provider. OpenRouter: its public model list (read now if the saved one is missing or of an older layout), without the ":free" models
+    (heavily rate-limited, and their providers may keep prompts) and without models too small for a batch of papers. Claude: every model in BUILTIN."""
+    cfg = cfg or _cfg()
+    p = _provider(cfg, provider)
+    if is_openrouter(p):
+        d = _load()
+        if (not d.get("models") or d.get("format") != FORMAT) and not _offline():
+            refresh()
+            _mem.update(at=0.0, data=None)
+            d = _load()
+        if d.get("format") != FORMAT:
+            return {}
+        return {mid: round(e["in"] + e["out"], 6) for mid, e in (d.get("models") or {}).items()
+                if e.get("json") and not mid.endswith(":free") and (e.get("ctx") or MIN_CTX) >= MIN_CTX and (e.get("max_out") or MIN_OUT) >= MIN_OUT}
+    if p.get("type") == "anthropic" or provider == "anthropic":
+        return {mid: round(e["in"] + e["out"], 6) for mid, e in BUILTIN["anthropic"].items()}
+    return None
+
+
+def backup_for(provider, model, cfg=None):
+    """A model of the same provider for screening when `model` cannot answer in the structured JSON screening needs (the rule chosen: the cheapest model that can,
+    at no more than twice the price of `model`; if none is within that, the cheapest that can, and within=False says so). Never `model` itself. None when there
+    is no list for the provider (structured_models) or nothing in it. Returns {provider, model, name, price, current_price, within} (prices: in + out per million
+    tokens; current_price None when not known, and then within is False)."""
+    cfg = cfg or _cfg()
+    cands = structured_models(provider, cfg)
+    if not cands:
+        return None
+    cands = {m: v for m, v in cands.items() if m != model}
+    if not cands:
+        return None
+    cur = lookup(provider, model, cfg)
+    cur = round(cur["in"] + cur["out"], 6) if cur else None
+    ok = [m for m, v in cands.items() if cur is not None and v <= 2 * cur + 1e-9]
+    pick = min(ok or cands, key=lambda m: (cands[m], m))
+    return {"provider": provider, "model": pick, "name": name(provider, pick), "price": cands[pick], "current_price": cur, "within": bool(ok)}

@@ -241,6 +241,7 @@ class Run:
         self.checks = []   # weekly: timestamps of every check merged into this week; a search: every time it was run again
         self.reused = 0    # verdicts taken from earlier screening instead of asked for again (see screen)
         self.screen_error = ""     # why the last screening stopped early (budget, key, a model that cannot screen); "" once one finishes
+        self.screen_backup = {}    # the backup model that screened this run because the chosen one cannot answer in structured JSON (screen); {} when the chosen one did
         self._last_save = 0
 
     def slug(self):
@@ -294,7 +295,7 @@ class Run:
              "week": self.week, "checks": self.checks,
              "updated": max(self.checks) if self.checks else self.created,
              "n_papers": len(self.order), "errors": self.errors[-20:], "jstate": self.jstate,
-             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused, "screen_error": self.screen_error,
+             "search_key": search_key(self.params) if self.kind == "search" else "", "reused": self.reused, "screen_error": self.screen_error, "screen_backup": self.screen_backup,
              "n_download": sum(1 for p in self.papers.values() if p.get("verdict") == "download"),
              "n_borderline": sum(1 for p in self.papers.values() if p.get("verdict") == "borderline")}
         if full:
@@ -327,6 +328,7 @@ class Run:
         r.checks = d.get("checks") or ([r.created] if r.kind == "weekly" else [])
         r.reused = int(d.get("reused") or 0)
         r.screen_error = str(d.get("screen_error") or "")
+        r.screen_backup = d.get("screen_backup") if isinstance(d.get("screen_backup"), dict) else {}
         for p in d.get("papers", []):
             if p.get("dl_status") in ("downloading", "summarizing"):
                 # interrupted (dashboard closed mid-download): ready to retry
@@ -820,7 +822,7 @@ class BatchFailed(Exception):
         self.reason = reason
 
 
-def _screen_batch(system, batch, usage):
+def _screen_batch(system, batch, usage, override=None):
     """One batch of papers judged by the model of the "screen" feature (Settings → AI), through the AI layer: the monthly budget stops it, local-only mode applies, and
     every call is in the usage ledger. Returns {n: result}. Raises ai.Blocked when nothing more may be asked, or the ai.AIError of an answer that asking again cannot change
     (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either. Raises BatchFailed (with the reason) when this batch could not be judged."""
@@ -832,7 +834,8 @@ def _screen_batch(system, batch, usage):
     why = "no answer"
     for attempt in range(3):
         try:
-            res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000)
+            res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000,
+                          override=override)
         except ai.Declined as e:
             if e.result is not None:
                 usage.add_result(e.result)                     # a refusal is billed too
@@ -869,15 +872,16 @@ def reuse_days():
         return 90
 
 
-def screen_model():
-    """The model that screens, as Settings → AI sets it. Claude Sonnet 5.5 is named as before (so verdicts saved earlier still count); another provider or model by name."""
-    prov, model = ai.feature_model("screen")
+def screen_model(override=None):
+    """The model that screens, as Settings → AI sets it (or `override`, a backup for one run). Claude Sonnet 5.5 is named as before (so verdicts saved earlier still
+    count); another provider or model by name."""
+    prov, model = (override["provider"], override["model"]) if override else ai.feature_model("screen")
     return MODEL if (prov, model) == ("anthropic", MODEL) else "%s/%s" % (prov, model)
 
 
-def screen_fingerprint(system):
+def screen_fingerprint(system, override=None):
     """A verdict answers one question: the model and the whole instruction it was given (topics, method, focus phrase). Another question gets its own verdicts."""
-    return hashlib.sha256((screen_model() + "\n" + system).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256((screen_model(override) + "\n" + system).encode("utf-8")).hexdigest()[:16]
 
 
 def paper_digest(p):
@@ -943,91 +947,142 @@ def remember_verdicts(fp, papers, now=None):
 
 
 def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
+    """Judge the run's papers that have no verdict yet, in batches, with the model chosen for screening (Settings → AI). A verdict saved for the same question and
+    text is reused. If that model cannot answer in the structured JSON screening needs (ai.cannot_structure: a 400/404/422 that says so), the papers still without a
+    verdict are screened once more with a backup model of the same provider (prices.backup_for), for this run only: the setting is not changed, the run says which
+    model it was (run.screen_backup), and there is never a third model. Anything else that stops the screening (the budget, a refused key) stops it as before."""
     system = screening_system(run.params.get("topics"), run.params.get("query"),
                               run.params.get("methods"))
     todo = [run.papers[i] for i in (ids or run.order) if not run.papers[i].get("verdict")]
-    fp = screen_fingerprint(system)
-    known = known_verdicts(fp, todo, reuse_days())
-    if known:                                                  # asked before, with the same question and the same text, not long ago: no second payment
-        for p in todo:
+    total = len(todo)
+    prog = {"done": 0}
+    valid = set(topic_labels())
+
+    def reuse(papers, fp):
+        """The papers of `papers` still to ask (a verdict saved for this question and text is taken instead: no second payment)."""
+        known = known_verdicts(fp, papers, reuse_days())
+        if not known:
+            return papers
+        for p in papers:
             e = known.get(p["id"])
             if e:
                 p["verdict"], p["relevance"], p["topics"], p["method"], p["reason"] = e["v"], e.get("rel") or 0, e.get("topics") or [], e.get("method"), e.get("reason") or ""
                 p.pop("model_verdict", None)
                 terms_rule(run, p)
                 emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
-        todo = [p for p in todo if p["id"] not in known]
         run.reused += len(known)
+        prog["done"] += len(known)
         emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question%s" % (len(known), " (about $%.2f not paid for again)" % (len(known) * est) if (est := est_screen_cost_per_paper()) is not None else "")})
         run.save(force=True)
-    batches = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
-    done, blocked = 0, None
-    emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": len(todo)})
-    valid = set(topic_labels())
-    halt = threading.Event()             # set by the worker whose batch met Blocked or a refused request: a batch that has not started yet is then not sent (the batches already
+        return [p for p in papers if p["id"] not in known]
+
+    def run_pass(papers, override, fp):
+        """Screen `papers` with the configured model (override None) or `override`. Returns (the AIError that stopped it or None, batches answered)."""
+        batches = [papers[i:i + batch_size] for i in range(0, len(papers), batch_size)]
+        blocked, answered = None, 0
+        halt = threading.Event()         # set by the worker whose batch met Blocked or a refused request: a batch that has not started yet is then not sent (the batches already
                                          # on their way finish; cancelling the waiting futures from this thread alone would let a free worker start one more first)
 
-    def one(b):
-        if halt.is_set() or stop.is_set():
-            return None                  # never sent: the papers stay unscreened
-        try:
-            return _screen_batch(system, b, run.usage)
-        except ai.AIError:
-            halt.set()
-            raise
-
-    with ThreadPoolExecutor(workers) as ex:
-        futs = {ex.submit(one, b): b for b in batches}
-        for fut in as_completed(futs):
-            if stop.is_set():
-                for f in futs:
-                    f.cancel()
-                break
-            batch = futs[fut]
-            if fut.cancelled():                                # cancelled below once nothing more may be asked: never started, not paid for
-                continue
-            why = ""
+        def one(b):
+            if halt.is_set() or stop.is_set():
+                return None              # never sent: the papers stay unscreened
             try:
-                res = fut.result()
-            except ai.AIError as e:                            # Blocked (budget, local-only, no key) or a request the provider refuses for every batch alike (model, key, credit):
-                for f in futs:                                 # the papers stay unscreened, to pick up later ("Retry screening"), instead of each being marked as failed
-                    f.cancel()
-                if blocked is None:
-                    blocked = e
-                continue
-            except BatchFailed as e:
-                res, why = {}, e.reason
-                emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
-            if res is None:                                    # not sent (see one): left unscreened, to pick up later
-                continue
-            for n, p in enumerate(batch, 1):
-                r = res.get(n)
-                if not r:
-                    reason = "screening failed: " + (why or ("the model's answer had no verdict for this paper" if res else "no answer"))
-                    p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, reason[:400], []
-                    p["method"] = None
-                else:
-                    p["verdict"], p["relevance"] = r["verdict"], r["relevance"]
-                    p["topics"] = [t for t in r["topics"] if t in valid]
-                    searched = run.params.get("topics") or []
-                    if not p["topics"] and p["verdict"] != "skip" and len(searched) == 1:
-                        p["topics"] = list(searched)
-                    p["reason"] = r["reason"]
-                    p["method"] = r.get("method")
-                    p.pop("model_verdict", None)
-                    terms_rule(run, p)
-                emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
-            done += len(batch)
-            emit("progress", {"stage": "screening", "label": "Screening",
-                              "done": done, "total": len(todo)})
-            emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
-            remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
-            run.save()
+                return _screen_batch(system, b, run.usage, override)
+            except ai.AIError:
+                halt.set()
+                raise
+
+        with ThreadPoolExecutor(workers) as ex:
+            futs = {ex.submit(one, b): b for b in batches}
+            for fut in as_completed(futs):
+                if stop.is_set():
+                    for f in futs:
+                        f.cancel()
+                    break
+                batch = futs[fut]
+                if fut.cancelled():                            # cancelled below once nothing more may be asked: never started, not paid for
+                    continue
+                why = ""
+                try:
+                    res = fut.result()
+                except ai.AIError as e:                        # Blocked (budget, local-only, no key) or a request the provider refuses for every batch alike (model, key, credit):
+                    for f in futs:                             # the papers stay unscreened, to pick up later ("Retry screening"), instead of each being marked as failed
+                        f.cancel()
+                    if blocked is None:
+                        blocked = e
+                    continue
+                except BatchFailed as e:
+                    res, why = {}, e.reason
+                    emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
+                if res is None:                                # not sent (see one): left unscreened, to pick up later
+                    continue
+                answered += 1
+                for n, p in enumerate(batch, 1):
+                    r = res.get(n)
+                    if not r:
+                        reason = "screening failed: " + (why or ("the model's answer had no verdict for this paper" if res else "no answer"))
+                        p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, reason[:400], []
+                        p["method"] = None
+                    else:
+                        p["verdict"], p["relevance"] = r["verdict"], r["relevance"]
+                        p["topics"] = [t for t in r["topics"] if t in valid]
+                        searched = run.params.get("topics") or []
+                        if not p["topics"] and p["verdict"] != "skip" and len(searched) == 1:
+                            p["topics"] = list(searched)
+                        p["reason"] = r["reason"]
+                        p["method"] = r.get("method")
+                        p.pop("model_verdict", None)
+                        terms_rule(run, p)
+                    emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
+                prog["done"] += len(batch)
+                emit("progress", {"stage": "screening", "label": "Screening", "done": prog["done"], "total": total})
+                emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
+                remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])
+                run.save()
+        return blocked, answered
+
+    fp = screen_fingerprint(system)
+    emit("progress", {"stage": "screening", "label": "Screening", "done": 0, "total": total})
+    todo = reuse(todo, fp)
+    blocked, answered = run_pass(todo, None, fp)
+    if answered:
+        run.screen_backup = {}                                 # the chosen model screens again: no backup is in use
+    no_backup = ""
+    if blocked is not None and ai.cannot_structure(blocked) and not stop.is_set():
+        prov, model = ai.feature_model("screen")
+        mine = ai.pricing.name(prov, model)
+        try:
+            b = ai.pricing.backup_for(prov, model)
+        except Exception:  # noqa: BLE001      (no list could be read: as before, the screening stops)
+            b = None
+        rest = [p for p in todo if not p.get("verdict")]
+        if b and rest:
+            cost_note = ""
+            if not b["within"]:
+                cost_note = (" No %s model at no more than twice its price can, so the cheapest one that can was chosen ($%.2f against $%.2f per million tokens in and out)." % (
+                    prov, b["price"], b["current_price"]) if b["current_price"] is not None else " The price of %s is not known, so the cheapest model that can was chosen." % mine)
+            emit("log", {"msg": "%s can't answer in the structured JSON that screening needs (%s). Screening the remaining %d papers with %s, a backup from %s, for this run "
+                                "only: your setting in Settings → AI is unchanged.%s" % (mine, str(blocked)[:200], len(rest), b["name"], prov, cost_note), "level": "warn"})
+            ov = {"provider": prov, "model": b["model"]}
+            fp2 = screen_fingerprint(system, ov)
+            reused0 = run.reused
+            rest = reuse(rest, fp2)
+            blocked2, answered2 = run_pass(rest, ov, fp2)
+            if answered2 or run.reused > reused0:
+                run.screen_backup = {**b, "instead_of": mine, "why": str(blocked)[:300], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+                run.save(force=True)
+            if blocked2 is not None:
+                blocked = ai.AIError("%s could not screen (%s). The backup %s was tried and also stopped: %s" % (mine, str(blocked)[:200], b["name"], str(blocked2)[:200]),
+                                     status=getattr(blocked2, "status", None))
+            else:
+                blocked = None
+        elif not b and ai.pricing.is_openrouter((ai.config_data().get("providers") or {}).get(prov)):
+            no_backup = " No backup model could be chosen: OpenRouter's model list could not be read, or it has no other model that can."
     if blocked is not None:
         left = len([p for p in todo if not p.get("verdict")])
         hint = ""
         if not isinstance(blocked, ai.Blocked) and getattr(blocked, "status", None) in (400, 404, 422):
-            hint = " The model chosen for screening (Settings → AI → Screening new papers) may not be able to answer in the structured JSON that screening asks for: its Test button there checks that."
+            hint = " The model chosen for screening (Settings → AI → Screening new papers) may not be able to answer in the structured JSON that screening asks for: its Test button there checks that." + no_backup
         run.screen_error = ("%s%s" % (blocked, hint))[:600]          # shown on the run's page until a screening finishes without stopping
         emit("log", {"msg": "Screening stopped with %d papers not screened: %s%s Once that is fixed, press “Retry screening” (or search again): the papers already judged are kept, and only the others are screened." % (left, blocked, hint), "level": "warn"})
         run.save(force=True)

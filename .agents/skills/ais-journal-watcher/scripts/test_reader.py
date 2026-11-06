@@ -645,6 +645,7 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
     def t_prices():
         """What a model costs and where the number comes from: a price you typed wins, OpenRouter models get OpenRouter's list (read at most once a day, kept when a read
         fails), Claude models the built-in table, a keyless model on this computer is free, anything else is unknown (never a silent $0)."""
+        import time
         import prices as pr_
         from datetime import date
         from http.server import BaseHTTPRequestHandler as BH
@@ -652,7 +653,17 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
             {"id": "scaledown/summarize", "pricing": {"prompt": "0.00000004", "completion": "0"}},
             {"id": "anthropic/claude-sonnet-5.5", "pricing": {"prompt": "0.000002", "completion": "0.00001", "web_search": "0.004", "input_cache_read": "0.0000001", "input_cache_write": "0.0000025"}},
             {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
-            {"id": "broken", "pricing": {"prompt": "x"}}, {"pricing": {}}]}
+            {"id": "broken", "pricing": {"prompt": "x"}}, {"pricing": {}},
+            # (models that can answer in a JSON schema, and some that cannot or may not be picked: for the backup screening model)
+            {"id": "cheap/json", "pricing": {"prompt": "0.00000005", "completion": "0.00000005"}, "supported_parameters": ["response_format", "structured_outputs"], "context_length": 131072, "top_provider": {"max_completion_tokens": 16384}},
+            {"id": "so/json", "pricing": {"prompt": "0.000001", "completion": "0.000001"}, "supported_parameters": ["structured_outputs"], "context_length": 200000},
+            {"id": "mid/json", "pricing": {"prompt": "0.000003", "completion": "0.000003"}, "supported_parameters": ["tools", "structured_outputs"]},
+            {"id": "rf/only", "pricing": {"prompt": "0.00000001", "completion": "0.00000001"}, "supported_parameters": ["response_format"]},           # JSON mode only, no schema
+            {"id": "x/json:free", "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["structured_outputs"]},
+            {"id": "tiny/json", "pricing": {"prompt": "0.000000001", "completion": "0.000000001"}, "supported_parameters": ["structured_outputs"], "context_length": 8192},
+            {"id": "short/json", "pricing": {"prompt": "0.000000001", "completion": "0.000000001"}, "supported_parameters": ["structured_outputs"], "top_provider": {"max_completion_tokens": 2048}},
+            {"id": "fee/json", "pricing": {"prompt": "0", "completion": "0", "request": "0.01"}, "supported_parameters": ["structured_outputs"]},
+            {"id": "half/x", "pricing": {"prompt": "0.00000002", "completion": "0.00000003"}}]}
         hits = []
 
         class H(BH):
@@ -678,11 +689,15 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
             parsed = pr_.parse_openrouter(payload)
             assert parsed["scaledown/summarize"] == {"in": 0.04, "out": 0.0, "cache_write": 0.04, "cache_read": 0.04}, parsed
             assert parsed["anthropic/claude-sonnet-5.5"]["cache_read"] == 0.1 and parsed["anthropic/claude-sonnet-5.5"]["web_search"] == 0.004, parsed
-            assert "openrouter/auto" not in parsed and "broken" not in parsed and len(parsed) == 2, "a router's -1 price and a broken entry are left out"
-            assert pr_.refresh() == 2 and len(hits) == 1
-            assert pr_.refresh() == 2 and len(hits) == 1, "a list read less than a day ago is not read again"
+            assert "openrouter/auto" not in parsed and "broken" not in parsed and len(parsed) == 11, "a router's -1 price and a broken entry are left out"
+            assert parsed["cheap/json"]["json"] is True and parsed["cheap/json"]["ctx"] == 131072 and parsed["cheap/json"]["max_out"] == 16384 and parsed["so/json"]["json"] is True, parsed
+            assert not any("json" in parsed[m] for m in ("rf/only", "half/x", "fee/json", "anthropic/claude-sonnet-5.5")), "JSON mode alone, or a charge per request: not a schema model"
+            open(pr_.CACHE, "w").write(json.dumps({"fetched": "2026-11-06T00:00:00+00:00", "fetched_ts": time.time(), "models": {"scaledown/summarize": parsed["scaledown/summarize"]}}))
+            pr_._mem["data"] = None                                                                           # a list from before the JSON flags, read an hour ago: read again now
+            assert pr_.refresh() == 11 and len(hits) == 1 and json.load(open(pr_.CACHE))["format"] == pr_.FORMAT and json.load(open(pr_.CACHE))["models"]["cheap/json"]["json"]
+            assert pr_.refresh() == 11 and len(hits) == 1, "a list read less than a day ago is not read again"
             H.fail = True
-            assert pr_.refresh(force=True) == 2 and len(hits) == 2, "a failed read keeps the list it had"
+            assert pr_.refresh(force=True) == 11 and len(hits) == 2, "a failed read keeps the list it had"
             H.fail = False
             cfg = {"providers": {"anthropic": {"type": "anthropic"}, "openrouter": {"type": "openai_compat", "base_url": "https://openrouter.ai/api/v1", "key_env": "K"},
                                  "ollama": {"type": "openai_compat", "base_url": "http://localhost:11434/v1"}, "proxy": {"type": "openai_compat", "base_url": "http://127.0.0.1:4000/v1", "key_env": "P"},
@@ -699,6 +714,29 @@ print("JSON" + json.dumps({"index": blocks.INDEX, "cache": ai.CACHE, "state": st
             assert pr_.stale({"source": "openrouter", "checked": "2026-11-01"}, date(2026, 11, 5)) and not pr_.stale({"source": "yours", "checked": ""})
             assert pr_.name("anthropic", "claude-sonnet-5-5") == "Claude Sonnet 5.5" and pr_.name("openrouter", "anthropic/claude-sonnet-5.5") == "Claude Sonnet 5.5"
             assert pr_.name("openrouter", "scaledown/summarize") == "scaledown/summarize" and pr_.name("anthropic", "claude-opus-5") == "Claude Opus 5"
+            # the backup screening model: same provider, can answer in a JSON schema, the cheapest at no more than twice the price (else the cheapest, said); never itself
+            assert set(pr_.structured_models("openrouter", cfg)) == {"cheap/json", "so/json", "mid/json"}, pr_.structured_models("openrouter", cfg)   # (no :free, no small or per-request model)
+            b = pr_.backup_for("openrouter", "scaledown/summarize", cfg)
+            assert b == {"provider": "openrouter", "model": "cheap/json", "name": "cheap/json", "price": 0.1, "current_price": 0.04, "within": False}, b       # 0.1 > 2 x 0.04
+            b = pr_.backup_for("openrouter", "anthropic/claude-sonnet-5.5", cfg)
+            assert b["model"] == "cheap/json" and b["within"] is True and b["current_price"] == 12.0, b
+            assert pr_.backup_for("openrouter", "half/x", cfg)["within"] is True, "exactly twice the price is within"
+            b = pr_.backup_for("openrouter", "cheap/json", cfg)
+            assert b["model"] == "so/json" and b["within"] is False, b                                         # never the model itself
+            b = pr_.backup_for("openrouter", "no/such", cfg)
+            assert b["model"] == "cheap/json" and b["current_price"] is None and b["within"] is False, b      # its price unknown: the cheapest, and said
+            b = pr_.backup_for("anthropic", "claude-sonnet-5-5", dict(cfg, prices={}))
+            assert b["model"] == "claude-haiku-5-5" and b["name"] == "Claude Haiku 5.5" and b["within"] is True, b
+            assert pr_.backup_for("openai", "gpt-x", cfg) is None and pr_.structured_models("ollama", cfg) is None, "no list for other providers: no backup"
+            n_hits, off0 = len(hits), os.environ.get("JW_OFFLINE")
+            open(pr_.CACHE, "w").write(json.dumps({"fetched_ts": time.time(), "models": {"cheap/json": {"in": 0.05, "out": 0.05}}})); pr_._mem["data"] = None
+            os.environ["JW_OFFLINE"] = "1"
+            try:
+                assert pr_.structured_models("openrouter", cfg) == {} and len(hits) == n_hits, "offline (JW_OFFLINE): an old list is not read again, and gives no backup"
+                os.environ.pop("JW_OFFLINE")
+                assert set(pr_.structured_models("openrouter", cfg)) == {"cheap/json", "so/json", "mid/json"} and len(hits) == n_hits + 1, "an old list is read again when a backup is needed"
+            finally:
+                os.environ.pop("JW_OFFLINE", None) if off0 is None else os.environ.__setitem__("JW_OFFLINE", off0)
             # through ai.cost_of: the provider decides where the price comes from
             saved_cfg = dict(CFG)
             write_cfg(dict(CFG, providers=dict(CFG["providers"], openrouter=cfg["providers"]["openrouter"], anthropic=cfg["providers"]["anthropic"]), prices={}))
@@ -5327,10 +5365,78 @@ print("OK")
             assert any(e == "log" and d.get("level") == "warn" and "5 papers not screened" in d["msg"] and "Retry screening" in d["msg"] for e, d in events), events[-2:]
             assert len(ai.usage_log(100000)) == rows0                                                                       # a refused request costs nothing and is not in the ledger
             r.save(force=True); assert pl_.Run.load(r.id).screen_error == r.screen_error and pl_.Run.load(r.id).to_dict(full=False)["screen_error"] == r.screen_error
+            assert r.screen_backup == {} and {c["model"] for c in chat_calls()[n0:]} == {"m1"}, "a provider with no model list: no backup is tried"
             # 2. a key the provider refuses: the same, at once
             Fake.http_error = lambda body: (401, "User not found.") if body.get("response_format") else None
             n0 = len(chat_calls()); r2 = new_run("key"); pl_.screen(r2, emit, stop, batch_size=2, workers=1)
             assert len(chat_calls()) - n0 == 1 and not any(r2.papers[i].get("verdict") for i in r2.order) and "HTTP 401" in r2.screen_error and "structured JSON" not in r2.screen_error, r2.screen_error
+            # 2b. a backup model (OpenRouter, a model that cannot answer in a JSON schema): the rest of the run is screened once more with the cheapest model of the same
+            #     provider that can (from OpenRouter's list), for this run only (the setting is not changed); the run says which, and its verdicts are that model's
+            assert ai.cannot_structure(ai.AIError("scaledown/summarize: response_format is not supported by this model (HTTP 400)", status=400))
+            assert ai.cannot_structure(ai.AIError("No endpoints found that can handle the requested parameters.", status=404))
+            assert not ai.cannot_structure(ai.AIError("response_format is not supported", status=401)) and not ai.cannot_structure(ai.AIError("maximum context length exceeded", status=400))
+            assert not ai.cannot_structure(ai.AIError("output_config.effort: unknown value", status=400)) and not ai.cannot_structure(ai.Blocked("response_format"))
+            import prices as pr_
+            saved_pr = (pr_.CACHE, pr_.OR_URL, os.environ.get("JW_OFFLINE"))
+            pr_.CACHE, pr_.OR_URL = os.path.join(TMP, "or_backup_prices.json"), "http://127.0.0.1:9/api/v1/models"     # (never the real list)
+            os.environ["JW_OFFLINE"] = "1"
+            sd = {"in": 0.04, "out": 0.0, "cache_write": 0.04, "cache_read": 0.04}
+            json.dump({"format": pr_.FORMAT, "fetched": "2026-11-06T00:00:00+00:00", "fetched_ts": pl_.time.time(),
+                       "models": {"scaledown/summarize": sd, "cheap/json": {"in": 0.05, "out": 0.05, "cache_write": 0.05, "cache_read": 0.05, "json": True}}}, open(pr_.CACHE, "w"))
+            pr_._mem["data"] = None
+            orfake = dict(CFG["providers"]["fake"], base_url=CFG["providers"]["fake"]["base_url"].replace("/v1", "/openrouter.ai/v1"))     # (the fake server, at an address that reads as OpenRouter)
+            write_cfg({**CFG, "providers": dict(CFG["providers"], orfake=orfake), "features": {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "orfake", "model": "scaledown/summarize"}}})
+            cfg_text = open(ai.CONFIG).read()
+            no_schema = lambda models: (lambda body: (400, "%s: response_format is not supported by this model" % body["model"]) if body.get("response_format") and body.get("model") in models else None)
+            try:
+                Fake.http_error, Fake.responder = no_schema({"scaledown/summarize"}), verdicts
+                n0, events[:] = len(chat_calls()), []
+                r6 = new_run("backup"); pl_.screen(r6, emit, stop, batch_size=2, workers=1)
+                assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize", "cheap/json", "cheap/json", "cheap/json"], [c["model"] for c in chat_calls()[n0:]]
+                assert all(r6.papers[i]["verdict"] == "download" for i in r6.order) and r6.screen_error == "", (r6.screen_error, [r6.papers[i].get("verdict") for i in r6.order])
+                b6 = r6.screen_backup
+                assert b6["model"] == "cheap/json" and b6["provider"] == "orfake" and b6["instead_of"] == "scaledown/summarize" and b6["within"] is False and "response_format" in b6["why"], b6
+                assert open(ai.CONFIG).read() == cfg_text, "the screening setting is not changed"
+                logs = [d["msg"] for e, d in events if e == "log" and "backup" in d["msg"]]
+                assert len(logs) == 1 and "cheap/json" in logs[0] and "unchanged" in logs[0] and "twice its price" in logs[0], logs
+                r6.save(force=True); assert pl_.Run.load(r6.id).screen_backup == b6 and pl_.Run.load(r6.id).to_dict(full=False)["screen_backup"] == b6
+                system6 = pl_.screening_system(r6.params.get("topics"), r6.params.get("query"), r6.params.get("methods"))
+                vd = json.load(open(pl_.VERDICTS))
+                fp_b, fp_c = pl_.screen_fingerprint(system6, {"provider": "orfake", "model": "cheap/json"}), pl_.screen_fingerprint(system6)
+                assert set(r6.order) <= set(vd.get(fp_b) or {}) and not set(r6.order) & set(vd.get(fp_c) or {}), "the verdicts are the backup's, not the chosen model's"
+                # the chosen model works again: new papers are screened by it, and the run no longer names a backup
+                Fake.http_error = None
+                for k in (7, 8):
+                    r6.add_paper({"id": "backup-%d" % k, "title": "Paper %d about platforms" % k, "abbr": abbr, "pub_date": "2026-09-01", "abstract": "About platforms.", "keywords": ["x"]})
+                n0 = len(chat_calls()); pl_.screen(r6, emit, stop, batch_size=2, workers=1)
+                assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize"] and r6.screen_backup == {}, ([c["model"] for c in chat_calls()[n0:]], r6.screen_backup)
+                # four batches on their way at once: those already sent finish, then the rest goes to the backup; said once
+                Fake.http_error = no_schema({"scaledown/summarize"})
+                n0, events[:] = len(chat_calls()), []
+                r7 = new_run("backup4", n=6); pl_.screen(r7, emit, stop, batch_size=1, workers=4)
+                ms = [c["model"] for c in chat_calls()[n0:]]
+                assert 1 <= ms.count("scaledown/summarize") <= 4 and ms.count("cheap/json") == 6 and all(r7.papers[i]["verdict"] == "download" for i in r7.order), ms
+                assert len([1 for e, d in events if e == "log" and "backup" in d["msg"]]) == 1
+                # not for a refused key, nor a request that is too long: those stop as before, no backup
+                for err in ((401, "User not found."), (400, "This model's maximum context length is 8192 tokens.")):
+                    Fake.http_error = (lambda e_: (lambda body: e_ if body.get("response_format") else None))(err)
+                    n0 = len(chat_calls()); r8 = new_run("nobackup%d" % err[0]); pl_.screen(r8, emit, stop, batch_size=2, workers=1)
+                    assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize"] and r8.screen_backup == {} and r8.screen_error and not any(r8.papers[i].get("verdict") for i in r8.order), (err, r8.screen_error)
+                # the backup cannot either: one request to each, never a third model; the papers wait unscreened and the reason names both
+                Fake.http_error = no_schema({"scaledown/summarize", "cheap/json"})
+                n0 = len(chat_calls()); r9 = new_run("both"); pl_.screen(r9, emit, stop, batch_size=2, workers=1)
+                assert [c["model"] for c in chat_calls()[n0:]] == ["scaledown/summarize", "cheap/json"], [c["model"] for c in chat_calls()[n0:]]
+                assert not any(r9.papers[i].get("verdict") for i in r9.order) and r9.screen_backup == {} and "scaledown/summarize" in r9.screen_error and "cheap/json" in r9.screen_error, r9.screen_error
+                # no list to choose from (offline, nothing saved): it stops as before and says that no backup could be chosen
+                os.remove(pr_.CACHE); pr_._mem["data"] = None
+                Fake.http_error = no_schema({"scaledown/summarize"})
+                n0 = len(chat_calls()); r10 = new_run("nolist"); pl_.screen(r10, emit, stop, batch_size=2, workers=1)
+                assert len(chat_calls()) - n0 == 1 and "No backup model could be chosen" in r10.screen_error and r10.screen_backup == {}, r10.screen_error
+            finally:
+                pr_.CACHE, pr_.OR_URL = saved_pr[:2]; pr_._mem["data"] = None
+                os.environ.pop("JW_OFFLINE", None) if saved_pr[2] is None else os.environ.__setitem__("JW_OFFLINE", saved_pr[2])
+                Fake.http_error = None; Fake.responder = None
+                write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "fake", "model": "m1"}}})
             # 3. a busy provider every time: each batch is asked three times, then its papers are marked as failed with the provider's words
             Fake.http_error = lambda body: (503, "upstream overloaded") if body.get("response_format") else None
             n0, events[:] = len(chat_calls()), []

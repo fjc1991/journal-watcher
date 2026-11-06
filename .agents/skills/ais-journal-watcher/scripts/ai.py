@@ -66,6 +66,16 @@ def retryable(e):
     return not isinstance(e, (Blocked, Declined)) and getattr(e, "status", None) not in NOT_RETRYABLE
 
 
+_NO_STRUCTURE = re.compile(r"response_format|structured[ _-]?outputs?|json[ _]schema|output_config\.format|handle the requested parameters", re.I)
+
+
+def cannot_structure(e):
+    """Whether the provider refused the request because this model cannot answer in a JSON schema (what screening asks for): a 400, 404 or 422 whose words say so
+    (OpenRouter: "response_format is not supported", "No endpoints found that can handle the requested parameters"). A refused key, credit, the budget, a request
+    that is too long or any other error is not this."""
+    return isinstance(e, AIError) and not isinstance(e, (Blocked, Declined)) and getattr(e, "status", None) in (400, 404, 422) and bool(_NO_STRUCTURE.search(str(e)))
+
+
 class Blocked(AIError):
     """The call was not made, and trying again now cannot help: this month's budget is used up, local-only mode forbids the provider, no key or no provider is set.
     A job that makes many calls (screening) stops on it instead of retrying and instead of marking every paper as failed."""

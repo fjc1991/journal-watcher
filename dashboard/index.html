@@ -131,6 +131,8 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .v-skip { background: var(--sk-soft); color: var(--sk); }
 .v-error { background: var(--err-soft); color: var(--err); }
 .screenerr { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--err-soft); color: var(--err); font-size: 13px; overflow-wrap: anywhere; }
+.screennote { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
+.screennote .btn { margin-left: 6px; }
 .stat.bad b { color: var(--err); }
 .v-pending { background: var(--sk-soft); color: var(--ink-3); animation: pulse 1.4s infinite; }
 .rel { width: 90px; height: 4px; background: var(--sk-soft); border-radius: 99px; overflow: hidden; }
@@ -343,6 +345,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
       </div>
       <div class="stats hide" id="stats"></div>
       <div class="screenerr hide" id="screenerr" role="status"></div>
+      <div class="screennote hide" id="screenbackup" role="status"><span id="screenbacktext"></span><button class="btn small" id="makebackup" type="button"></button></div>
     </div>
 
     <div class="card hide" id="resume"><div class="list-h">Pick up where you left off</div><div class="runs" id="resumelist" style="padding-top:6px"></div></div>
@@ -784,6 +787,14 @@ function updateScreenBtn() {
 }
 $("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.params && RUN.params.terms), {n} = screenPending();
   try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { toast(e.message); } };
+$("#makebackup").onclick = async e => {          // the backup that screened this run becomes the screening model (Settings → AI → Screening new papers)
+  const b = e.currentTarget;
+  try {
+    await api("/api/ai/config", {features: {screen: {provider: b.dataset.provider, model: b.dataset.model}}});
+    CFG = await api("/api/config"); window.dispatchEvent(new Event("jw-settings-changed")); render();
+    toast(`${b.textContent.replace(/^Make | the screening model$/g, "")} now screens your papers.`);
+  } catch (er) { toast(er.message); }
+};
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
 let SI = null;
@@ -947,6 +958,18 @@ function renderMeta() {
   const why = RUN.screen_error || "";
   $("#screenerr").classList.toggle("hide", !why || !screenPending().n);
   $("#screenerr").textContent = why ? "The last screening stopped: " + why : "";
+  const bk = RUN.screen_backup || {};                // a backup model screened this run (the chosen one cannot answer in the structured form screening needs)
+  $("#screenbackup").classList.toggle("hide", !bk.model);
+  if (bk.model) {
+    const sf = CFG.screen_feature || {}, now = sf.provider === bk.provider && sf.model === bk.model;
+    const price = n => "$" + (n >= 1 ? n.toFixed(2) : n.toPrecision(2));
+    $("#screenbacktext").textContent = `Screened by ${bk.name}, a backup model from ${bk.provider}: ${bk.instead_of}, your screening model, can’t answer in the structured form that screening needs (${bk.why}). Your setting is unchanged.`
+      + (bk.within ? "" : bk.current_price != null ? ` No ${bk.provider} model at no more than twice its price can, so the cheapest one that can was chosen (${price(bk.price)} against ${price(bk.current_price)} per million tokens in and out).` : ` The price of ${bk.instead_of} is not known, so the cheapest model that can was chosen.`)
+      + (now ? ` ${bk.name} is now your screening model.` : "");
+    $("#makebackup").classList.toggle("hide", now);
+    $("#makebackup").textContent = `Make ${bk.name} the screening model`;
+    $("#makebackup").dataset.provider = bk.provider; $("#makebackup").dataset.model = bk.model;
+  }
   $("#vt-bl").textContent = ` (${c("borderline")})`;
   $("#selrec").textContent = pr.terms ? "Select all matches" : "Select all “download”";
   updateScreenBtn();
@@ -1362,7 +1385,7 @@ function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
   $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
   $("#status").classList.toggle("busy", busy);
-  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl"].forEach(s => $(s).disabled = busy);
+  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl", "#makebackup"].forEach(s => $(s).disabled = busy);
   updateScreenBtn();
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");

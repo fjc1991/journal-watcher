@@ -2751,6 +2751,28 @@ bks.crossref_books = lambda title, rows=3: []
             page.wait_for_function("document.querySelector('#screenbtn').classList.contains('hide') && document.querySelector('#screenerr').classList.contains('hide')", timeout=8000)
             check("…then the button and the reason are gone, and 'Screening failed' is no longer counted", "SCREENING FAILED" not in page.inner_text("#stats").upper())
             page.evaluate("go({j: null})")
+            # a run screened by a backup model (the chosen one cannot answer in a JSON schema): the page says which and why; one click makes it the screening model
+            rid_b = "2025-W03_weekly"
+            bk_ = {"provider": "openrouter", "model": "cheap/json", "name": "cheap/json", "price": 0.1, "current_price": 0.04, "within": False, "instead_of": "m1",
+                   "why": "openrouter: m1: response_format is not supported by this model (HTTP 400)", "at": "2025-01-13T10:00:00+00:00"}
+            json.dump({"id": rid_b, "kind": "weekly", "params": {"topics": [], "query": ""}, "created": "2025-01-13T10:00:00+00:00", "stage": "ready", "status": "done",
+                       "usage": {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}, "week": "2025-W03", "checks": ["2025-01-13T10:00:00+00:00"], "errors": [], "jstate": {},
+                       "screen_error": "", "screen_backup": bk_, "papers": [dict(p_, id="bk-%d" % k, verdict="download", relevance=70, reason="fits", topics=[]) for k, p_ in enumerate(pp)]},
+                      open(os.path.join(runs_dir, rid_b + ".json"), "w"))
+            aij = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "ai.json"); aij_saved = open(aij).read()
+            page.evaluate("openRun({id: %s})" % json.dumps(rid_b)); page.wait_for_selector("#screenbackup:not(.hide)", timeout=8000)
+            nt_ = page.inner_text("#screenbackup")
+            check("a run screened by a backup model says so: which model, instead of which, why, and that the setting is unchanged; the price note when it costs more than twice as much",
+                  "cheap/json" in nt_ and "m1" in nt_ and "response_format" in nt_ and "unchanged" in nt_ and "twice its price" in nt_ and page.locator("#screenerr.hide").count() == 1
+                  and page.is_visible("#makebackup") and "Make cheap/json the screening model" in page.inner_text("#makebackup"), nt_)
+            page.click("#makebackup")
+            page.wait_for_function("document.querySelector('#makebackup').classList.contains('hide')", timeout=8000)
+            scr_ = json.load(open(aij))["features"].get("screen") or {}
+            check("…'Make it the screening model' sets Settings → AI → Screening new papers to that provider and model (nothing else changes), and the note then says so",
+                  scr_.get("provider") == "openrouter" and scr_.get("model") == "cheap/json" and "is now your screening model" in page.inner_text("#screenbackup")
+                  and json.load(open(aij))["features"]["ask"] == {"provider": "fake", "model": "m1"}, str(scr_))
+            open(aij, "w").write(aij_saved); os.remove(os.path.join(runs_dir, rid_b + ".json"))
+            page.evaluate("go({j: null})")
             # Settings → AI: the screening Test sends a real screening request (the fake model answers that one with other JSON: it cannot screen)
             page.evaluate("window.Settings.open('ai')"); page.wait_for_selector('tr[data-f="screen"] [data-testf]')
             page.click('tr[data-f="screen"] [data-testf]'); page.wait_for_function("(() => { const t = document.querySelector('tr[data-f=\"screen\"] .tres'); return t && t.textContent && t.textContent !== '…'; })()", timeout=15000)
