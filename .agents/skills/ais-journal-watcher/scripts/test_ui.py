@@ -2936,10 +2936,11 @@ fx.fetch_journal = lambda j: []                                                 
             check("'Write the summaries' writes each summary beside its PDF in the background (the fake model's summary)", done_ and "FAKE SUMMARY" in open(os.path.join(sumdir, "sumtest.md")).read(), str(api("/api/summaries")["status"]))
             try:
                 page.wait_for_function("/Summaries finished/.test(document.querySelector('#lf-sumbox').innerText)", timeout=15000)
+                page.wait_for_selector("#lf-sum.hide", state="attached", timeout=10000)      # (the button goes once the Library has reloaded its list, a moment after the message)
             except Exception:  # noqa: BLE001  (the check below says what is wrong)
                 pass
             check("…the Library says what came of it, and the button is gone once nothing is left", "Summaries finished" in page.inner_text("#lf-sumbox") and api("/api/summaries")["n"] == 0
-                  and page.locator("#lf-sum.hide").count() == 1, page.inner_text("#lf-sumbox"))
+                  and page.locator("#lf-sum.hide").count() == 1, "%s · n=%s · button hidden=%s" % (page.inner_text("#lf-sumbox"), api("/api/summaries")["n"], page.locator("#lf-sum.hide").count()))
             check("…and the job was listed in the AI activity tray", any(j["kind"] == "summary" for j in api("/api/activity")["jobs"]), str([j["kind"] for j in api("/api/activity")["jobs"]][:8]))
             open(idxp, "w", newline="").write(saved_idx); shutil.rmtree(sumdir, ignore_errors=True)
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector(".navbtn", state="attached")
