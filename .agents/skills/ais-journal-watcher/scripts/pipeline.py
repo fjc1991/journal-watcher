@@ -227,6 +227,9 @@ def week_label(wid):
     return "Week %d · %s" % (int(w), rng)
 
 
+_SAVE_LOCK = threading.RLock()
+
+
 class Run:
     """One dashboard run, persisted to state/runs/<id>.json."""
 
@@ -306,14 +309,26 @@ class Run:
         return d
 
     def save(self, force=False):
+        """Write the run to RUNS/<id>.json. A job's thread and a request's thread (a verdict, a PDF you added) can save the same run at once: one write at a
+        time, each through its own temporary file, and the papers are turned into text before anything is written."""
         if not force and time.time() - self._last_save < 2:
             return
-        self._last_save = time.time()
-        os.makedirs(RUNS, exist_ok=True)
-        tmp = os.path.join(RUNS, self.id + ".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False)
-        os.replace(tmp, os.path.join(RUNS, self.id + ".json"))
+        with _SAVE_LOCK:
+            self._last_save = time.time()
+            os.makedirs(RUNS, exist_ok=True)
+            for n in range(5):
+                try:
+                    text = json.dumps(self.to_dict(), ensure_ascii=False)
+                    break
+                except RuntimeError:                         # (a paper got a new field while it was read: read it again)
+                    if n == 4:
+                        raise
+                    time.sleep(0.01)
+            dest = os.path.join(RUNS, self.id + ".json")
+            tmp = dl.tmp_path(dest)
+            with open(tmp, "w") as f:
+                f.write(text)
+            os.replace(tmp, dest)
 
     @classmethod
     def load(cls, rid):
@@ -665,7 +680,7 @@ def follow_list(run, emit, stop):
     return todo
 
 
-def follow_settle(run, ids):
+def follow_settle(run, ids, keys=None):
     """After the followed works were downloaded: those that came (or that you deleted meanwhile) are dealt with; the others (a human check, a sign-in, no access)
     are not, so next week's check tries them again. Returns (dealt with, to try again)."""
     import authors
@@ -680,7 +695,7 @@ def follow_settle(run, ids):
                 authors.follow_mark(fid2, [oa2])
                 if p.get("dl_status") == "ok":
                     try:
-                        authors.file_new(fid2, paper_key(p))
+                        authors.file_new(fid2, (keys or {}).get(i) or paper_key(p))
                     except Exception:  # noqa: BLE001
                         pass
             ok += 1
@@ -1340,16 +1355,97 @@ def _write_kind(p, path):
             pass
 
 
-def _into_folder(p):
-    """A paper of an author run is filed into the author's folder once it is in the library."""
+def _into_folder(p, key=None, force=False):
+    """A paper of an author run is filed into the author's folder once it is in the library. key: its key in the library (a copy you already had may be keyed by
+    its title); force: put it back even if it was filed there before (you added, yourself, a paper you had deleted). Returns the folder's name if the paper is in it."""
     fid = p.get("folder")
     if not fid:
-        return
+        return ""
+    k = key or paper_key(p)
     try:
         import authors
-        authors.file_new(fid, paper_key(p))          # (once: a paper you took out of the folder is not put back by a later retry)
+        authors.file_new(fid, k)          # (once: a paper you took out of the folder is not put back by a later retry)
+        if force:
+            fo.add(fid, [k])
+        f = fo.get(fid) or {}
+        return f.get("name", "") if k in (f.get("papers") or []) else ""
     except Exception:  # noqa: BLE001      (the folder was deleted meanwhile: the paper stays in the library)
-        pass
+        return ""
+
+
+# ---------------------------------------------------------------- a PDF you downloaded yourself, for a paper of a run
+
+ATTACH_NOTE = "added by you (a PDF you downloaded yourself)"
+ATTACH_LOCK = threading.RLock()     # a paper's download status: a download and a PDF you add never change it at the same moment (download_and_summarize takes it too)
+
+
+def has_file(p):
+    return bool(p.get("file")) and os.path.exists(os.path.join(ROOT, p["file"]))
+
+
+def _attachable(run, pid):
+    p = run.papers.get(str(pid or ""))
+    if not p:
+        raise ValueError("That paper is not in this run any more: reload the page.")
+    if p.get("dl_status") == "downloading":
+        raise ValueError("This paper is being downloaded right now. Wait until it is done; if it does not come, add your PDF then.")
+    if p.get("dl_status") in ("ok", "summarizing") and has_file(p):
+        raise ValueError("This paper is already in your library.")
+    return p
+
+
+def _attach_file(run, p, data, note, save):
+    import importer
+    with ATTACH_LOCK:
+        _attachable(run, p["id"])                                # (again, now that nothing else can change it: its download may have started meanwhile)
+        was_deleted = p.get("dl_status") == "deleted"
+        res = importer._file(dict(p), data, note, after=lambda dest: _write_kind(p, dest))   # the download's file name, an index row 'ok', never a copy twice, never over another file
+        row = next((r for r in importer.library_rows() if r["file"] == res["file"]), None)
+        key = dl.index_key(row) if row else paper_key(p)
+        md = res["file"][:-4] + ".md"
+        upd = dict(dl_status="ok", file=res["file"], dl_note=note if not res["existing"] else "already in your library",
+                   summary=md if os.path.exists(os.path.join(ROOT, md)) else None, summary_by_hand=True)      # (its summary is asked for in the Library, with the cost first)
+        if p.get("verdict") != "download":                       # (you wanted it: it is no longer shown as skipped)
+            upd.update(ai_verdict=p.get("ai_verdict") or p.get("verdict"), verdict="download", user_set=True)
+        p.update(upd)                                            # (one update: a running job may be saving this run)
+    folder = _into_folder(p, key, force=was_deleted)
+    if run.kind == "weekly" and p.get("folder"):
+        follow_settle(run, [p["id"]], keys={p["id"]: key})      # a followed author's work: dealt with, not fetched again next week
+    if save:
+        run.save(force=True)
+    return {"filed": True, **res, "was_deleted": was_deleted, "folder": folder, "paper": slim(p)}
+
+
+def attach_pdf(run, pid, data, save=True):
+    """A PDF you downloaded yourself, for paper `pid` of `run`. It gets the same check as a download (identity.check): a PDF that is this paper, or that cannot be checked
+    (a scan), is filed at once like a download; one that does not look like it is kept aside (a token) until you say it is the right paper (attach_keep) or cancel. Never an
+    AI call. Returns {"filed": True, file, existing, was_deleted, folder, paper, …} or {"filed": False, token, title, seems, why}. Raises ValueError with words for you."""
+    import identity
+    import importer
+    p = _attachable(run, pid)
+    if not dl.looks_pdf(data):
+        raise ValueError("That doesn’t look like a complete PDF. Drop the PDF file itself, not a web page, a link to it, or a download that has not finished.")
+    if importer._existing(p):                                    # you have it already: the card points to your copy (nothing to check, nothing written)
+        return _attach_file(run, p, data, ATTACH_NOTE, save)
+    verdict, why, ev = identity.check(p, data)
+    if verdict == "mismatch":
+        says = (ev or {}).get("pdf_says") or ""
+        pre = "this PDF is titled “%s”: " % says[:90].replace("|", "/")
+        return {"filed": False, "token": importer._stage(data, bind={"run": run.id, "id": p["id"]}), "title": p.get("title") or "",
+                "seems": says or importer._read(data)["title"] or "", "why": why[len(pre):] if why.startswith(pre) else why}
+    res = _attach_file(run, p, data, ATTACH_NOTE + ("; identity not checked (%s)" % why if verdict == "unverified" else ""), save)
+    return dict(res, unverified=why if verdict == "unverified" else "")
+
+
+def attach_keep(run, pid, token, save=True):
+    """You said the PDF that did not look like this paper is the right one: file it, and 'Check my PDFs' no longer flags it."""
+    import identity
+    import importer
+    p = _attachable(run, pid)
+    res = importer.take_staged(token, lambda data: _attach_file(run, p, data, ATTACH_NOTE + "; you said it is the right paper", save), expect={"run": run.id, "id": p["id"]})
+    if not res["existing"]:
+        identity.keep(res["file"])
+    return dict(res, kept=True)
 
 
 def pace_gap(publisher, pace, challenged=False, rnd=None):
@@ -1456,10 +1552,23 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         emit("progress", {"stage": "downloading", "label": "Downloading", "done": count["done"], "total": total})
 
     def set_aside(p, host, pub):
-        deferred.setdefault(host, []).append(p)
-        waiting_pub[pub] = host
-        p.update(dl_status="needs_check", dl_note=WAITING_NOTE, manual_url=dl.browser_pdf_url(p))
+        with ATTACH_LOCK:
+            if has_file(p):                                  # (you added its PDF yourself meanwhile)
+                return False
+            deferred.setdefault(host, []).append(p)
+            waiting_pub[pub] = host
+            p.update(dl_status="needs_check", dl_note=WAITING_NOTE, manual_url=dl.browser_pdf_url(p))
         emit_dl(p)
+        return True
+
+    def have_it(p):                                          # the paper has its PDF (from before, or you added it yourself): nothing to download
+        if not p.get("summary_by_hand"):                     # (a PDF you added is summarised only when you ask, in the Library, with the cost first)
+            got.append(p)
+        if p.get("dl_status") != "ok":
+            p["dl_status"] = "ok"
+            emit_dl(p)
+        _into_folder(p)
+        finished(p, final=False)
 
     def nudge(host, state, pub):
         nudged[host] = nudged.get(host, 0) + 1
@@ -1490,10 +1599,16 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             back = deferred.pop(host)
             for k in [k for k, v in waiting_pub.items() if v == host]:
                 waiting_pub.pop(k)
+            again = []
             for q in back:                                  # no longer waiting for the user (a Stop before they come up leaves them as never tried)
-                q.update(dl_status=None, dl_note=None)
+                with ATTACH_LOCK:
+                    if has_file(q):                         # (you added its PDF yourself while it waited: it stays as it is)
+                        finished(q, final=False)
+                        continue
+                    q.update(dl_status=None, dl_note=None)
                 emit_dl(q)
-            todo_q.extendleft(reversed(back))               # the site's papers, back to the front of the queue (still paced)
+                again.append(q)
+            todo_q.extendleft(reversed(again))              # the site's papers, back to the front of the queue (still paced)
         else:
             given_up.add(host)
 
@@ -1522,10 +1637,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     if stop.is_set():
                         break
                     p = todo_q.popleft()
-                    if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])):
-                        got.append(p)
-                        _into_folder(p)
-                        finished(p, final=False)
+                    if has_file(p):
+                        have_it(p)
                         continue
                     if paper_key(p) in gone:                         # you deleted it: never fetched again by a run
                         p.update(dl_status="deleted", dl_note=DELETED_NOTE)
@@ -1534,7 +1647,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         continue
                     pub = site_key(p)
                     if pub in waiting_pub:                           # its site's check waits for the user
-                        set_aside(p, waiting_pub[pub], pub)
+                        if not set_aside(p, waiting_pub[pub], pub):
+                            have_it(p)
                         continue
                     if pub in last_at:
                         due = last_at[pub] + pace_gap(pub, pace, pub in challenged)
@@ -1552,9 +1666,15 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                             break
                     if quiet and not auto_open and not stop.is_set():       # another site's paper starts: the check can be opened while it downloads, so say so now
                         release_quiet()
+                    with ATTACH_LOCK:                                # (you may have added its PDF yourself during the wait)
+                        late = has_file(p)
+                        if not late:
+                            p["dl_status"] = "downloading"
+                    if late:
+                        have_it(p)
+                        continue
                     current.clear()
                     current["pub"] = pub
-                    p["dl_status"] = "downloading"
                     emit("download", {"id": p["id"], "dl_status": "downloading"})
                     ok, path, note = dl.download_paper(dict(p), env, browser=br)
                     chall = current.get("chall")
@@ -1612,11 +1732,17 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     finally:                                                # (also after an error: no paper is left 'waiting for you')
         for host, ps in deferred.items():
             for p in ps:
-                p.update(dl_status="needs_check", dl_note=NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), host))
-                emit_dl(p)
-                finished(p)
+                with ATTACH_LOCK:
+                    mine = has_file(p)                      # (you added its PDF yourself while it waited)
+                    if not mine:
+                        p.update(dl_status="needs_check", dl_note=NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), host))
+                if not mine:
+                    emit_dl(p)
+                finished(p, final=not mine)
+        left = sum(1 for v in deferred.values() for p in v if p.get("dl_status") == "needs_check")
+        if left:
+            emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % left, "level": "warn"})
         if any(deferred.values()):
-            emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % sum(len(v) for v in deferred.values()), "level": "warn"})
             emit("challenge", {"host": "", "state": "done", "msg": ""})
     run.save()
     todo = [p for p in got if not p.get("summary")] if summarize else []

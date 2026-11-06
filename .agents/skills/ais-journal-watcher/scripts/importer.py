@@ -320,15 +320,56 @@ def _waiting(token):
     return None
 
 
-def _stage(data):
+def _stage(data, bind=None):
+    """Keep a PDF until you say what to do with it; returns its token. bind: what it is waiting for (a paper of a run, {"run", "id"}): only that may take it."""
     os.makedirs(STAGING, exist_ok=True)
     sweep()
     token = uuid.uuid4().hex
+    if bind is not None:
+        with open(os.path.join(STAGING, token + ".attach.json"), "w", encoding="utf-8") as f:
+            json.dump(bind, f)
     tmp = os.path.join(STAGING, token + ".tmp")
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, _staged_path(token))
     return token
+
+
+def take_staged(token, fn, expect):
+    """Hand a staged PDF to fn(data) once: the token is claimed first (of two requests for it only one gets the PDF), it must be waiting for `expect` (the paper it was
+    checked against: a PDF staged for another paper, or by the Library's import, is refused), and if fn fails the PDF waits again. Returns fn's answer."""
+    path = _waiting(token)
+    gone = ValueError("That PDF is no longer waiting to be added: drop it again.")
+    if not path:
+        raise gone
+    try:
+        with open(path[:-4] + ".attach.json", encoding="utf-8") as f:
+            bound = json.load(f)
+    except (OSError, ValueError):
+        bound = None
+    if bound != expect:
+        raise ValueError("That PDF was not checked against this paper: drop it on the paper's card again.")
+    claimed = path + ".claimed"
+    try:
+        os.replace(path, claimed)
+    except OSError:
+        raise gone
+    try:
+        with open(claimed, "rb") as fh:
+            data = fh.read()
+        res = fn(data)
+    except Exception:
+        try:
+            os.replace(claimed, path)
+        except OSError:
+            pass
+        raise
+    for extra in (claimed, path[:-4] + ".attach.json"):
+        try:
+            os.remove(extra)
+        except OSError:
+            pass
+    return res
 
 
 def discard(tokens):
@@ -337,7 +378,7 @@ def discard(tokens):
     for t in tokens or []:
         p = _staged_path(t)
         if p:
-            for extra in (p + ".conv", p[:-4] + ".conv", p + ".claimed"):          # (a book staged with its converted copy)
+            for extra in (p + ".conv", p[:-4] + ".conv", p + ".claimed", p[:-4] + ".attach.json"):          # (a book staged with its converted copy; a PDF staged for a paper of a run)
                 try:
                     os.remove(extra)
                 except OSError:

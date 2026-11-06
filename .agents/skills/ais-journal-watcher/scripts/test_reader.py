@@ -171,6 +171,311 @@ def make_pdf(path):
     doc.save(path); doc.close()
 
 
+ATTACH_CHILD = r'''
+import csv, json, os, sys, threading, queue, urllib.parse, urllib.request, urllib.error
+sys.path.insert(0, @HERE@)
+import paths
+paths.seed_home()
+import download as dl, pipeline as pl, importer, identity, deletion, folders as fo, authors as au
+R = {k: open(v, "rb").read() for k, v in json.loads(@FILES@).items()}
+ID_T, ID_D = @T@, @D@
+def boom(*a, **k):
+    raise AssertionError("a summary was asked for")
+calls = []
+pl.summarize = boom
+pl._summarize_one = lambda run, p, emit: calls.append(p["id"])
+def paper(**kw):
+    p = {"id": "doi:" + ID_D, "doi": ID_D, "title": ID_T, "authors": ["Jane Doe", "Richard Roe"], "journal": "Management Science", "abbr": "MNSC", "pub_date": "2024-05",
+         "publisher": "informs", "verdict": "download", "dl_status": "failed", "dl_note": "no PDF on any route", "manual_url": "https://doi.org/" + ID_D}
+    p.update(kw)
+    return p
+def mkrun(papers, kind="picks", params=None):
+    r = pl.Run(kind, params or {"label": "t"})
+    for p in papers:
+        r.add_paper(p)
+    r.save(force=True)
+    return r
+IDX = os.path.join(dl.PAPERS, "_index.csv")
+rows = lambda: list(csv.DictReader(open(IDX, newline="", encoding="utf-8"))) if os.path.exists(IDX) else []
+pdfs = lambda: sorted(os.path.join(a, f) for a, _, fs in os.walk(dl.PAPERS) for f in fs if f.endswith(".pdf"))
+staged = lambda: sorted(os.listdir(importer.STAGING)) if os.path.isdir(importer.STAGING) else []
+def raises(fn, words):
+    try:
+        fn()
+    except ValueError as e:
+        assert words in str(e), (words, str(e))
+        return
+    raise AssertionError("no error: " + words)
+
+# (1) the right PDF: filed like a download (its name, an index row 'ok' "added by you"), the run saved, no summary
+P = paper(); run = mkrun([P])
+r = pl.attach_pdf(run, P["id"], R["right"])
+assert r["filed"] and not r["existing"] and os.path.join(dl.ROOT, r["file"]) == dl.out_path(dict(P)), r
+row = [x for x in rows() if x["file"] == r["file"]]
+assert row and row[-1]["status"] == "ok" and row[-1]["note"].startswith("added by you"), row
+p = run.papers[P["id"]]
+assert p["dl_status"] == "ok" and p["file"] == r["file"] and p["summary_by_hand"] is True and r["paper"]["dl_status"] == "ok" and not r["unverified"], p
+saved = json.load(open(os.path.join(pl.RUNS, run.id + ".json")))
+assert [x for x in saved["papers"] if x["id"] == P["id"]][0]["dl_status"] == "ok", "the run is saved"
+assert open(os.path.join(dl.ROOT, r["file"]), "rb").read() == R["right"]
+FIRST = r["file"]
+# (2) a second time on the same paper
+raises(lambda: pl.attach_pdf(run, P["id"], R["right"]), "already in your library")
+# (3) the same paper in another run: the copy you have (nothing written twice, nothing checked, nothing kept aside)
+n_rows, n_pdfs = len(rows()), len(pdfs())
+run2 = mkrun([paper()])
+r = pl.attach_pdf(run2, P["id"], R["wrong"])
+assert r["filed"] and r["existing"] and r["file"] == FIRST and len(rows()) == n_rows and len(pdfs()) == n_pdfs and not staged(), (r, staged())
+assert run2.papers[P["id"]]["file"] == FIRST and run2.papers[P["id"]]["dl_status"] == "ok"
+# (4) a PDF of another paper: kept aside, nothing filed; it says what the PDF seems to be and why
+Q = paper(id="doi:10.1287/mnsc.2024.0002", doi="10.1287/mnsc.2024.0002", dl_status="wrong_paper")
+O = paper(id="doi:10.1/other", doi="10.1/other", title="Another paper entirely, about hotels")
+run3 = mkrun([Q, O])
+n_rows, n_pdfs = len(rows()), len(pdfs())
+r = pl.attach_pdf(run3, Q["id"], R["wrong"])
+assert not r["filed"] and os.path.exists(os.path.join(importer.STAGING, r["token"] + ".pdf")) and r["seems"] == "Two-stage differences in differences", r
+assert r["why"] and not r["why"].startswith("this PDF is titled") and r["title"] == ID_T, r
+assert len(rows()) == n_rows and len(pdfs()) == n_pdfs and run3.papers[Q["id"]]["dl_status"] == "wrong_paper"
+tok = r["token"]
+# (5) "It is the right paper": for that paper only (not another paper's card, not a Library import's PDF); filed, and Check my PDFs leaves it alone
+raises(lambda: pl.attach_keep(run3, O["id"], tok), "not checked against this paper")
+lib_tok = importer._stage(R["wrong"])
+raises(lambda: pl.attach_keep(run3, Q["id"], lib_tok), "not checked against this paper")
+importer.discard([lib_tok])
+r = pl.attach_keep(run3, Q["id"], tok)
+assert r["filed"] and r["kept"] and "you said it is the right paper" in run3.papers[Q["id"]]["dl_note"], r
+assert [x["verdict"] for x in identity.audit(use_kept=True) if x["file"] == r["file"]] == ["kept"]
+assert not [f for f in staged() if f.startswith(tok)], staged()
+raises(lambda: pl.attach_keep(run3, Q["id"], tok), "already in your library")
+# a staged PDF is taken once; when filing it fails, it waits again
+t2 = importer._stage(b"x", bind={"a": 1})
+assert importer.take_staged(t2, lambda d: d, {"a": 1}) == b"x"
+raises(lambda: importer.take_staged(t2, lambda d: d, {"a": 1}), "no longer waiting")
+t3 = importer._stage(b"y", bind={"a": 1})
+def bad(d):
+    raise ValueError("nope")
+raises(lambda: importer.take_staged(t3, bad, {"a": 1}), "nope")
+assert importer.take_staged(t3, lambda d: d, {"a": 1}) == b"y"
+t4 = importer._stage(b"z", bind={"a": 1}); took = []
+def slow(d):
+    import time as _t; _t.sleep(0.3); took.append(d); return d
+def take4():
+    try:
+        importer.take_staged(t4, slow, {"a": 1})
+    except ValueError:
+        pass
+ths = [threading.Thread(target=take4) for _ in range(2)]
+[x.start() for x in ths]; [x.join() for x in ths]
+assert took == [b"z"], "two presses at once: the PDF is taken once"
+# (6) Cancel: the kept-aside PDF is gone
+Q2 = paper(id="doi:10.1287/mnsc.2024.0003", doi="10.1287/mnsc.2024.0003"); run3.add_paper(Q2)
+tok = pl.attach_pdf(run3, Q2["id"], R["wrong"])["token"]
+importer.discard([tok])
+assert not [f for f in staged() if f.startswith(tok)], staged()
+raises(lambda: pl.attach_keep(run3, Q2["id"], tok), "no longer waiting")
+# (7) a scan cannot be checked: filed at once, and the card says so
+Q3 = paper(id="doi:10.1287/mnsc.2024.0004", doi="10.1287/mnsc.2024.0004"); run3.add_paper(Q3)
+r = pl.attach_pdf(run3, Q3["id"], R["scan"])
+assert r["filed"] and r["unverified"] and "identity not checked" in run3.papers[Q3["id"]]["dl_note"], r
+# (8) not a PDF, half a PDF, a paper being downloaded, a paper not in the run; a short PDF is fine
+Q4 = paper(id="doi:10.1287/mnsc.2024.0005", doi="10.1287/mnsc.2024.0005"); run3.add_paper(Q4)
+raises(lambda: pl.attach_pdf(run3, Q4["id"], b"not a pdf"), "complete PDF")
+raises(lambda: pl.attach_pdf(run3, Q4["id"], R["right"][:len(R["right"]) // 2]), "complete PDF")
+run3.papers[Q4["id"]]["dl_status"] = "downloading"
+raises(lambda: pl.attach_pdf(run3, Q4["id"], R["small"]), "being downloaded")
+run3.papers[Q4["id"]]["dl_status"] = "failed"
+raises(lambda: pl.attach_pdf(run3, "doi:nope", R["right"]), "not in this run")
+assert not dl.is_pdf(R["small"])
+r = pl.attach_pdf(run3, Q4["id"], R["small"])
+assert r["filed"], r
+# (9) a paper you deleted: adding it yourself brings it back
+deletion.delete_item(r["file"]); pl.mark_downloaded(run3)
+assert run3.papers[Q4["id"]]["dl_status"] == "deleted" and dl.index_key(Q4) in deletion.deleted_keys()
+r = pl.attach_pdf(run3, Q4["id"], R["small"])
+assert r["filed"] and r["was_deleted"] and dl.index_key(Q4) not in deletion.deleted_keys(), r
+# (10) an author run: into the author's folder (and again after you deleted it and add it back: you chose it)
+fid, _ = au.folder_for(["A5000000333"], "Ann Lee", "")      # (an author record: what it filed once is not filed again by itself)
+A = paper(id="doi:10.7777/au.3", doi="10.7777/au.3", title="Platforms and the ties that bind them", folder=fid)
+runA = mkrun([A], kind="author", params={"label": "Ann Lee"})
+t = pl.attach_pdf(runA, A["id"], R["wrong"]); assert not t["filed"], t
+r = pl.attach_keep(runA, A["id"], t["token"])
+assert dl.index_key(A) in fo.get(fid)["papers"] and r["folder"] == "Ann Lee", (r, fo.get(fid))
+deletion.delete_item(r["file"]); pl.mark_downloaded(runA)
+assert dl.index_key(A) not in fo.get(fid)["papers"]
+t = pl.attach_pdf(runA, A["id"], R["wrong"]); r = pl.attach_keep(runA, A["id"], t["token"])
+assert dl.index_key(A) in fo.get(fid)["papers"] and r["folder"] == "Ann Lee" and r["was_deleted"], (r, fo.get(fid))
+# (11) a followed author's work in the weekly run: dealt with (not fetched again next week), also for a co-author you follow, and in both folders
+fidF, _ = au.folder_for(["A5000000111"], "Bo Chen", "MIT"); au.set_follow(fidF, True)
+fid2, _ = au.folder_for(["A5000000222"], "Cy Dee", "")
+W = paper(id="doi:10.7777/w.42", doi="10.7777/w.42", title="Followed work about ties", folder=fidF, openalex="https://openalex.org/W42", also_folders=[[fid2, "https://openalex.org/W43"]], summary_by_hand=True)
+runW = mkrun([W], kind="weekly")
+t = pl.attach_pdf(runW, W["id"], R["wrong"]); r = pl.attach_keep(runW, W["id"], t["token"])
+recs = {x["folder"]: x for x in au.load()["authors"]}
+assert "W42" in recs[fidF].get("follow_known", []) and "W43" in recs[fid2].get("follow_known", []), recs
+assert dl.index_key(W) in fo.get(fidF)["papers"] and dl.index_key(W) in fo.get(fid2)["papers"]
+# a followed work you already had, filed without its DOI (keyed by its title): both folders get the key your copy has
+TT = "Followed work filed by its title"
+had = os.path.join(dl.PAPERS, "2024-05", "x_title_only.pdf"); os.makedirs(os.path.dirname(had), exist_ok=True); open(had, "wb").write(R["small"])
+dl.save_index({"doi": "", "title": TT, "journal": "J", "abbr": "J"}, os.path.relpath(had, dl.ROOT), "ok", "added by you")
+W2 = paper(id="doi:10.7777/w.44", doi="10.7777/w.44", title=TT, folder=fidF, openalex="https://openalex.org/W44", also_folders=[[fid2, "https://openalex.org/W45"]])
+runW.add_paper(W2)
+r = pl.attach_pdf(runW, W2["id"], R["wrong"])
+assert r["existing"] and TT.lower() in fo.get(fidF)["papers"] and TT.lower() in fo.get(fid2)["papers"], (r, fo.get(fid2))
+
+# (12) a download batch with a paper whose PDF you added: not downloaded, not summarised
+class _Br:
+    def __init__(self, on_challenge=None, ask=False, **k):
+        self.ch = on_challenge
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def open_check(self, host, stay=False):
+        self.ch(host, "passed"); return True
+got_dl = []
+def fake_dl(p, env, browser=None, dry=False):
+    got_dl.append(p["id"]); return False, None, "no PDF"
+dl.download_paper, dl.open_browser = fake_dl, _Br
+calls.clear()
+pl.download_and_summarize(run, [P["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0)
+assert not got_dl and not calls and run.papers[P["id"]]["dl_status"] == "ok", (got_dl, calls)
+# (13) a paper set aside for a human check gets its PDF from you while another site's paper downloads; the check is then opened: it stays as it is
+SD = "www.sciencedirect.com"; ev_log, hit = [], {}; clk = [0.0]
+E1 = paper(id="doi:10.1016/e1", doi="10.1016/e1", title="Elsevier paper one", publisher="elsevier")
+E2 = paper(id="doi:10.1287/mnsc.2024.0006", doi="10.1287/mnsc.2024.0006", publisher="elsevier")
+W1 = paper(id="doi:10.1002/w1", doi="10.1002/w1", title="Wiley paper one", publisher="wiley")
+runC = mkrun([E1, E2, W1]); checks = queue.Queue()
+def fake_dl2(p, env, browser=None, dry=False):
+    if p["publisher"] == "elsevier":
+        browser.ch(SD, "pending"); return False, None, "challenge:%s" % SD
+    assert runC.papers[E2["id"]]["dl_status"] == "needs_check"
+    hit["attach"] = pl.attach_pdf(runC, E2["id"], R["right"]); ev_log.append(("ATTACH", {}))
+    checks.put(SD)                                   # and you press "Open the check"
+    f = dl.out_path(dict(p)); open(f, "wb").write(R["small"]); return True, f, "browser"
+def tick(d):
+    clk[0] += max(d, 1.0)
+dl.download_paper = fake_dl2
+pl.download_and_summarize(runC, [E1["id"], E2["id"], W1["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=tick, clock=lambda: clk[0], checks=checks, summarize=False)
+assert hit["attach"]["filed"], hit
+assert runC.papers[E2["id"]]["dl_status"] == "ok" and runC.papers[E1["id"]]["dl_status"] == "needs_check" and runC.papers[W1["id"]]["dl_status"] == "ok", {k: v["dl_status"] for k, v in runC.papers.items()}
+i = ev_log.index(("ATTACH", {}))
+assert not [d for e, d in ev_log[i:] if e == "download" and d.get("id") == E2["id"]], [d for e, d in ev_log[i:] if e == "download"]
+prog = [d for e, d in ev_log if e == "progress" and d.get("stage") == "downloading"]
+assert prog[-1]["done"] == prog[-1]["total"] == 3, prog[-1]
+# ... and when the check is never opened (the batch ends with the paper still set aside): it stays as you left it
+ev_log.clear(); hit.clear(); clk[0] = 0.0
+E3 = paper(id="doi:10.1016/e3", doi="10.1016/e3", title="Elsevier paper three", publisher="elsevier")
+E4 = paper(id="doi:10.1287/mnsc.2024.0013", doi="10.1287/mnsc.2024.0013", publisher="elsevier")
+W3 = paper(id="doi:10.1002/w3", doi="10.1002/w3", title="Wiley paper three", publisher="wiley")
+runC = mkrun([E3, E4, W3]); E2 = E4
+def fake_dl2b(p, env, browser=None, dry=False):
+    if p["publisher"] == "elsevier":
+        browser.ch(SD, "pending"); return False, None, "challenge:%s" % SD
+    hit["attach"] = pl.attach_pdf(runC, E4["id"], R["right"]); ev_log.append(("ATTACH", {}))
+    f = dl.out_path(dict(p)); open(f, "wb").write(R["small"]); return True, f, "browser"
+dl.download_paper = fake_dl2b
+pl.download_and_summarize(runC, [E3["id"], E4["id"], W3["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=tick, clock=lambda: clk[0], checks=queue.Queue(), summarize=False)
+assert hit["attach"]["filed"] and runC.papers[E4["id"]]["dl_status"] == "ok" and runC.papers[E3["id"]]["dl_status"] == "needs_check", {k: v["dl_status"] for k, v in runC.papers.items()}
+i = ev_log.index(("ATTACH", {}))
+assert not [d for e, d in ev_log[i:] if e == "download" and d.get("id") == E4["id"]]
+assert [m for e, m in ev_log if e == "log" and "1 paper(s) still need a human check" in m.get("msg", "")], "only the paper still waiting is counted"
+# (14) the batch is downloading the paper: you are told to wait; the batch reaches a paper whose PDF you added during its wait: it is not downloaded, your file stays
+B1 = paper(id="doi:10.1287/mnsc.2024.0007", doi="10.1287/mnsc.2024.0007"); runD = mkrun([B1])
+def fake_dl3(p, env, browser=None, dry=False):
+    raises(lambda: pl.attach_pdf(runD, B1["id"], R["right"]), "being downloaded"); return False, None, "no PDF"
+dl.download_paper, dl.open_browser = fake_dl3, _Br
+pl.download_and_summarize(runD, [B1["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0)
+assert runD.papers[B1["id"]]["dl_status"] == "failed"
+B2 = paper(id="doi:10.1/b2", doi="10.1/b2", title="Informs paper two"); B3 = paper(id="doi:10.1287/mnsc.2024.0008", doi="10.1287/mnsc.2024.0008")
+runE = mkrun([B2, B3]); seen_dl, clk[0] = [], 0.0
+def slp(d):
+    clk[0] += max(d, 1.0)
+    if "b3" not in hit:
+        hit["b3"] = pl.attach_pdf(runE, B3["id"], R["right"])
+def fake_dl4(p, env, browser=None, dry=False):
+    seen_dl.append(p["id"]); return False, None, "no PDF"
+dl.download_paper = fake_dl4
+pl.download_and_summarize(runE, [B2["id"], B3["id"]], lambda *a: None, threading.Event(), sleep=slp, clock=lambda: clk[0], summarize=False)
+assert seen_dl == [B2["id"]] and hit["b3"]["filed"] and runE.papers[B3["id"]]["dl_status"] == "ok", (seen_dl, runE.papers[B3["id"]])
+assert open(os.path.join(dl.ROOT, runE.papers[B3["id"]]["file"]), "rb").read() == R["right"]
+assert not calls
+
+# (15) the index and a run's file, written by several threads at once: nothing lost, nothing half-written
+def many(tag):
+    for i in range(150):
+        dl.save_index({"doi": "10.9/%s%d" % (tag, i), "title": "t"}, "", "failed")
+ths = [threading.Thread(target=many, args=(x,)) for x in "ab"]
+[x.start() for x in ths]; [x.join() for x in ths]
+ks = {x["doi"] for x in rows()}
+assert all("10.9/%s%d" % (x, i) in ks for x in "ab" for i in range(150)), len(ks)
+errs = []
+def saver():
+    try:
+        for _ in range(80):
+            runC.save(force=True)
+    except Exception as e:  # noqa: BLE001
+        errs.append(repr(e))
+ths = [threading.Thread(target=saver) for _ in range(3)]
+[x.start() for x in ths]; [x.join() for x in ths]
+assert not errs, errs
+
+# --- the server: /api/run/attach (the raw PDF), /api/run/attach/keep, the guard; a run read from its file; two at once
+import importlib.util
+from http.server import ThreadingHTTPServer
+spec = importlib.util.spec_from_file_location("jw_server", os.path.join(paths.DASHBOARD, "server.py")); sv = importlib.util.module_from_spec(spec); spec.loader.exec_module(sv)
+srv = ThreadingHTTPServer(("127.0.0.1", 0), sv.Handler); threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = "http://127.0.0.1:%d" % srv.server_address[1]
+hq = sv.HUB.subscribe()
+def post(path, data, headers):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(base + path, data, headers)) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+def drain():
+    out = []
+    while True:
+        try:
+            out.append(hq.get_nowait())
+        except queue.Empty:
+            return out
+S1 = paper(id="doi:10.1287/mnsc.2024.0009", doi="10.1287/mnsc.2024.0009", dl_status="wrong_paper")
+S2 = paper(id="doi:10.1287/mnsc.2024.0010", doi="10.1287/mnsc.2024.0010", title="A different paper about platforms and hotels")
+S3 = paper(id="doi:10.1287/mnsc.2024.0011", doi="10.1287/mnsc.2024.0011"); S4 = paper(id="doi:10.1287/mnsc.2024.0012", doi="10.1287/mnsc.2024.0012")
+runS = mkrun([S1, S2, S3, S4]); sv.JOBS.run = None
+hdr = lambda pid, rid=None: {"Content-Type": "application/pdf", "X-Run": urllib.parse.quote(rid or runS.id), "X-Paper": urllib.parse.quote(pid), "X-Filename": "x.pdf"}
+drain()
+c, j = post("/api/run/attach", R["right"], hdr(S1["id"]))
+assert c == 200 and j["ok"] and j["filed"] and j["paper"]["dl_status"] == "ok", (c, j)
+evs = drain()
+assert any(m.startswith("event: download") and '"dl_status": "ok"' in m and S1["id"] in m for m in evs) and any(m.startswith("event: log") and "was added to the library" in m for m in evs), evs
+assert pl.Run.load(runS.id).papers[S1["id"]]["dl_status"] == "ok", "a run read from its file is saved"
+c, j = post("/api/run/attach", R["wrong"], hdr(S2["id"]))
+assert c == 200 and j["filed"] is False and j["token"] and j["seems"] and j["why"], (c, j)
+assert not [m for m in drain() if m.startswith("event: download")]
+jh = {"Content-Type": "application/json"}
+c, j2 = post("/api/run/attach/keep", json.dumps({"run_id": runS.id, "id": S2["id"], "token": j["token"]}).encode(), jh)
+assert c == 200 and j2["filed"] and j2["kept"], (c, j2)
+c, j3 = post("/api/run/attach/keep", json.dumps({"run_id": runS.id, "id": S2["id"], "token": j["token"]}).encode(), jh)
+assert c == 400, (c, j3)
+c, j = post("/api/run/attach", b"", hdr(S3["id"])); assert c == 400 and "150 MB" in j["error"], (c, j)
+c, j = post("/api/run/attach", R["right"], hdr(S3["id"], "nope")); assert c == 404, (c, j)
+c, j = post("/api/run/attach", b"hello", hdr(S3["id"])); assert c == 400 and "complete PDF" in j["error"], (c, j)
+c, j = post("/api/run/attach", R["right"], dict(hdr(S3["id"]), Origin="https://evil.example")); assert c == 403, (c, j)
+res = {}
+def at(pid):
+    res[pid] = post("/api/run/attach", R["right"], hdr(pid))
+ths = [threading.Thread(target=at, args=(x["id"],)) for x in (S3, S4)]
+[x.start() for x in ths]; [x.join() for x in ths]
+assert all(v[0] == 200 and v[1]["filed"] for v in res.values()), res
+back = pl.Run.load(runS.id).papers
+assert back[S3["id"]]["dl_status"] == "ok" and back[S4["id"]]["dl_status"] == "ok", "two at once: both are saved"
+assert not calls
+srv.shutdown()
+print("ALL OK")
+'''
+
+
 def main():
     print("notes store")
     d = os.path.join(PAPERS, "2026-04", "MIS Quarterly"); os.makedirs(d)
@@ -4043,6 +4348,26 @@ print("OK")
         hbr_pdf = mkpdf([("Managing Oneself", "By the author. " + FILL)])
         _with_downloads(body)
     check("downloads: a different work's PDF is refused on every route (nothing stored, status 'wrong_paper', the PDF named), the next route is tried (also inside the browser route), a needed sign-in stays the reason, a scan is kept as 'not checked'", t_download_gate)
+    def t_attach_pdf():
+        """A PDF you downloaded yourself, added to a paper of a run (its card): checked like a download, filed under the download's name, never summarised by
+        itself; a PDF that does not look like the paper waits until you say it is the right one (for that paper only); the folders of an author run and of a
+        followed author get it; a download running at the same time never undoes it; the server's endpoints, and two at once."""
+        import subprocess
+        home, loc, src = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-"), tempfile.mkdtemp(prefix="jw-src-")
+        try:
+            files = {}
+            for name, data in (("right", RIGHT), ("wrong", WRONG), ("scan", mkpdf([("", "")] * 2, scan=True)), ("small", mkpdf([(ID_T, "Jane Doe and Richard Roe. " + FILL[:400])], pad=False))):
+                files[name] = os.path.join(src, name + ".pdf")
+                with open(files[name], "wb") as f:
+                    f.write(data)
+            child = ATTACH_CHILD.replace("@HERE@", repr(HERE)).replace("@FILES@", repr(json.dumps(files))).replace("@T@", repr(ID_T)).replace("@D@", repr(ID_D))
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1", JW_OFFLINE="1"), capture_output=True, text=True, timeout=300)
+            assert r.returncode == 0 and "ALL OK" in r.stdout, (r.stdout[-2000:], r.stderr[-4000:])
+        finally:
+            for d_ in (home, loc, src):
+                shutil.rmtree(d_, ignore_errors=True)
+    check("a PDF you downloaded yourself, for a paper whose download failed: checked like a download and filed under its name (never summarised by itself); a PDF that does not look like it waits until you say it is the right paper; folders and followed authors get it; a download running meanwhile never undoes it; the endpoints", t_attach_pdf)
 
     def t_library_route():
         """The publisher wants a login and your library (OpenAthens or EZproxy) is set up and signed in: the same page is asked for through the library's sign-in."""

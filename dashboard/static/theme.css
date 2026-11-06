@@ -254,6 +254,9 @@ body.sb-open .sb-scrim { display: block; }
 .papers { gap: 0; }
 .card.paper, .card.librow { background: transparent; border: 0; border-bottom: 1px solid var(--line-2); border-radius: 0; box-shadow: none; padding: 16px 10px; transition: background .12s; }
 .card.paper:hover, .card.librow:hover { background: var(--hover); border-color: var(--line-2); box-shadow: none; transform: none; }
+/* a PDF you downloaded yourself, dragged over the paper's card (attach.js) */
+.card.paper.at-over { background: var(--accent-soft); border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
+.card.paper.at-busy { opacity: .65; }
 .card.paper:last-child, .card.librow:last-child { border-bottom: 0; }
 .ptitle { font: 600 15.5px/1.35 var(--sans); letter-spacing: -.005em; }
 .librow { column-gap: var(--sp-4); position: relative; }

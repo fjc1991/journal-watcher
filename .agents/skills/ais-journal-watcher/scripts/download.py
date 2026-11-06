@@ -97,6 +97,12 @@ def http_get(url, timeout=25, headers=None):
         return r.read(), dict(r.headers)
 
 
+def looks_pdf(data):
+    """A whole PDF file, of any size: what a PDF you chose yourself must be (a one-page comment is shorter than is_pdf's floor, which is there for a download that
+    stopped half-way or a reader's page)."""
+    return bool(data) and data[:1024].lstrip(b"\xef\xbb\xbf \r\n").startswith(b"%PDF") and b"%%EOF" in data[-2048:]
+
+
 def is_pdf(data):
     """A complete PDF: header at the start, %%EOF near the end (streamed/partial
     responses from in-browser readers fail the second test)."""
@@ -140,8 +146,16 @@ def plain(s):
     return s
 
 
+INDEX_LOCK = threading.RLock()     # one read-modify-write of Papers/_index.csv at a time in this process (a download thread and a PDF you add can write it at the same moment)
+
+
 def save_index(p, file, status, note=""):
-    """Upsert one row per paper (keyed by DOI, else title)."""
+    """Upsert one row per paper (keyed by DOI, else title). The file is replaced whole (a reader never sees half of it)."""
+    with INDEX_LOCK:
+        _save_index(p, file, status, note)
+
+
+def _save_index(p, file, status, note):
     idx = os.path.join(PAPERS, "_index.csv")
     rows, extra = [], []
     if os.path.exists(idx):
@@ -158,10 +172,12 @@ def save_index(p, file, status, note=""):
         p.get("score", ""), file, status, note,
     ]))
     rows = [r for r in rows if index_key(r) != index_key(row)] + [row]
-    with open(idx, "w", newline="") as f:
+    tmp = tmp_path(idx)
+    with open(tmp, "w", newline="") as f:
         w = csv.DictWriter(f, INDEX_COLS + extra, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, idx)
 
 
 def out_path(p):

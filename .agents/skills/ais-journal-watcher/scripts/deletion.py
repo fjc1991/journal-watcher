@@ -55,7 +55,7 @@ def delete_item(file):
     import notes_store as ns
     import readstate as rs
     import folders as fo
-    with _lock:
+    with _lock, dl.INDEX_LOCK:                  # (the index: not while a download writes its row)
         full = _inside_papers(file)
         idx = _index_path()
         with open(idx, newline="", encoding="utf-8") as f:

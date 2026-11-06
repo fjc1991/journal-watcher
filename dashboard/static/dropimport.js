@@ -44,8 +44,9 @@ function overlay(show, text) {
   if (show && text != null) $(".di-pill", D.overlay).textContent = text;
 }
 let overFolder = null;
+const onRunList = () => visible($("#papers .paper.can-attach"));        // a run's list with papers that can take a PDF you downloaded yourself (attach.js)
 function hint(w) {
-  if (!w) return "Drop PDFs on the Library, Folders page or inside a folder to add them";
+  if (!w) return onRunList() ? "Drop the PDF on its paper’s card to add it to that paper" : "Drop PDFs on the Library, Folders page or inside a folder to add them";
   if (w.kind === "folder") return w.name ? "Add to “" + w.name + "”" : "Add to this folder";
   if (w.kind === "open") return "Add to this folder";
   return onBooksTab() ? "Drop PDF or EPUB files to add them as books — you’ll check the details first" : "Drop PDFs (or EPUB books) to add them — you’ll check the details and choose where they go";
@@ -367,6 +368,7 @@ export function pickFromLibrary(folderId) {
 function wire() {
   let hideT = 0;
   const off = () => { clearTimeout(hideT); overlay(false); mark(null); };
+  D.off = off;
   document.addEventListener("dragover", e => {
     if (!hasFiles(e) || e.defaultPrevented) return;                     // (the "Add a paper" box handles its own drops)
     if (e.target.closest && e.target.closest("dialog")) return;
@@ -380,10 +382,11 @@ function wire() {
     if (!hasFiles(e) || e.defaultPrevented) return;
     if (e.target.closest && e.target.closest("dialog")) { e.preventDefault(); return; }
     e.preventDefault(); const w = where(e.target); off();
-    if (!w) return toast("Open the Library or a folder first, then drop the PDFs there.");
+    if (!w) return toast(onRunList() ? "Drop the PDF on its paper’s card: it is added to that paper. To add it as a new paper, open the Library and drop it there."
+      : "Open the Library or a folder first, then drop the PDFs there.");
     handle(e.dataTransfer.files, w);
   });
 }
 
-window.DropImport = {init(c) { ctx = c; }, handle, where, choosePdfs, chooseBooks, pickFromLibrary};
+window.DropImport = {init(c) { ctx = c; }, handle, where, choosePdfs, chooseBooks, pickFromLibrary, off: () => D.off && D.off()};
 wire();

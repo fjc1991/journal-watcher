@@ -279,6 +279,17 @@ def follow_download(run, ids, emit):
             indexer.kick(3)
 
 
+ATTACH_LOCK = threading.Lock()      # one PDF you add at a time: a run loaded from its file is changed and saved whole (two at once would each save their own copy)
+
+
+def attach_to_run(rid, fn):
+    """fn(run) for a paper's PDF you add: the open run itself, or the run read from its file. None if there is no such run."""
+    rid = str(rid or "")
+    with ATTACH_LOCK:
+        run = JOBS.run if JOBS.run and JOBS.run.id == rid else (pl.Run.load(rid) if rid else None)
+        return fn(run) if run else None
+
+
 def start_download(ids, prepare=None):
     """Download these papers of the open run in the background. `prepare(emit)`, when given, runs first inside the same job and returns the ids (an author's works
     are listed there: it can take a while, and a "verify you are human" check during the downloads works as for any download)."""
@@ -806,6 +817,17 @@ class Handler(BaseHTTPRequestHandler):
     def title_of(self, rel):
         return str(self.doc_info(rel)[0].get("title") or "this paper")[:64]
 
+    def attached(self, res):
+        """Answer a PDF you added to a paper of a run (pipeline.attach_pdf / attach_keep): the open pages show it at once. No summary is written."""
+        if res.get("filed"):
+            p = res["paper"]
+            HUB.emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "summary", "manual_url", "summary_by_hand")})
+            HUB.emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "ai_verdict", "user_set")})
+            HUB.emit("log", {"msg": "Your PDF of “%s” was added to the library." % (p.get("title") or "")[:60], "level": "ok"})
+            if indexer and not res.get("existing"):
+                indexer.kick(2)
+        return self.send_json({"ok": True, **res})
+
     def finish_import(self, res, summarize):
         """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does."""
         row = next((r for r in pl.library() if r["file"] == res["file"]), {})
@@ -1123,6 +1145,19 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if not self.local_only():
             return self.send_json({"error": "forbidden"}, 403)
+        if path == "/api/run/attach":   # a PDF you downloaded yourself, for one paper of a run: the raw PDF is the body; X-Run, X-Paper (URL-encoded)
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= 150 * 1024 * 1024:
+                return self.send_json({"error": "The file is empty or larger than 150 MB, so it cannot be added."}, 400)
+            data = self.rfile.read(n)
+            pid = urllib.parse.unquote(self.headers.get("X-Paper") or "")
+            try:
+                res = attach_to_run(urllib.parse.unquote(self.headers.get("X-Run") or ""), lambda run: pl.attach_pdf(run, pid, data))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if res is None:
+                return self.send_json({"error": "That run is not there any more: reload the page."}, 404)
+            return self.attached(res)
         if path == "/api/import/pdf":   # the raw PDF is the request body (not JSON); the name travels in a header
             n = int(self.headers.get("Content-Length") or 0)
             if not 0 < n <= 150 * 1024 * 1024:
@@ -1794,6 +1829,14 @@ class Handler(BaseHTTPRequestHandler):
             if not ids:
                 return self.send_json({"error": "nothing selected"}, 400)
             return self.started(start_download(ids), JOBS.run)
+        if path == "/api/run/attach/keep":      # {run_id, id, token}: the PDF that did not look like the paper is the right one, you said
+            try:
+                res = attach_to_run(b.get("run_id"), lambda run: pl.attach_keep(run, str(b.get("id") or ""), b.get("token")))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if res is None:
+                return self.send_json({"error": "That run is not there any more: reload the page."}, 404)
+            return self.attached(res)
         if path == "/api/verdict":
             # the user's own call on a paper (e.g. borderline -> download queue)
             v = b.get("verdict")
