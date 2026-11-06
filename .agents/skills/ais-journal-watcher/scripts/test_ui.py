@@ -426,7 +426,7 @@ def fake_ssrn(query, y0, y1, limit=200, progress=None):                         
     open(SSRNLOG, 'a').write('%s|%s|%s|%s\n' % (query, y0, y1, limit))
     return [{'title': 'Platform governance on SSRN %d' % i, 'doi': '10.2139/ssrn.99000%d%d' % (y0, i), 'pub_date': '%d-01' % y0, 'abstract': 'We study platform governance on SSRN.', 'keywords': None, 'authors': ['A. Author']} for i in range(2)]
 fx.crossref_ssrn = fake_ssrn
-def fake_screen(system, batch, usage):                                            # what the model is asked, one line per batch (the test counts them)
+def fake_screen(system, batch, usage, override=None):                                          # what the model is asked, one line per batch (the test counts them)
     open(SCREENLOG, 'a').write('%d\n' % len(batch))
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen

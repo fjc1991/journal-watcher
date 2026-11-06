@@ -5224,7 +5224,7 @@ print("OK")
         import pipeline as pl_
         abbr = pl_.journals()[0]["abbr"]
         hit = [{"term": "DiD", "field": "abstract", "text": "DiD"}]
-        def fake_batch(system, batch, usage):
+        def fake_batch(system, batch, usage, override=None):
             return {n: {"n": n, "verdict": ["download", "borderline", "skip"][n % 3], "relevance": 10 * n, "topics": [], "reason": "r%d" % n, "method": "Econometrics (DiD)"}
                     for n, _ in enumerate(batch, 1)}
         def arts(with_hits):
@@ -5284,7 +5284,7 @@ print("OK")
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
         asked, fetched, events = [], [], []
-        def fake_batch(system, batch, usage):
+        def fake_batch(system, batch, usage, override=None):
             asked.extend(p["title"] for p in batch)
             return {n: {"n": n, "verdict": "download" if "Platform" in p["title"] else "skip", "relevance": 80, "topics": [topic], "reason": "because", "method": None} for n, p in enumerate(batch, 1)}
         real = (pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts)
@@ -5324,7 +5324,7 @@ print("OK")
             asked.clear(); r6 = run_with(); pl_.screen(r6, emit, stop)                           # older than the number of days: asked again, and remembered afresh
             assert len(asked) == 3 and r6.reused == 0
             asked.clear(); r7 = run_with(); pl_.screen(r7, emit, stop); assert not asked and r7.reused == 3
-            pl_._screen_batch = lambda system, batch, usage: {}                                  # a failure is an error verdict and is never remembered
+            pl_._screen_batch = lambda system, batch, usage, override=None: {}                                  # a failure is an error verdict and is never remembered
             asked.clear(); r8 = run_with(query="fails"); pl_.screen(r8, emit, stop)
             assert {r8.papers[i]["verdict"] for i in r8.papers} == {"error"}
             pl_._screen_batch = fake_batch
