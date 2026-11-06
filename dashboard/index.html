@@ -966,7 +966,7 @@ function renderMeta() {
   const pr = RUN.params || {};
   const nc = (RUN.checks || []).length;
   const li = pr.listing || {};
-  const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
+  const scope = RUN.kind === "picks" ? (pr.folder ? `Papers you chose in Discover in the folder “${pr.folder_name || pr.label}”: each goes into that folder once it is in your library` : `Papers you chose in Discover: ${pr.label || "related papers"}`)
     : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "") + (pr.follow ? " · followed: the weekly check brings their new works into the folder" : "")
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +

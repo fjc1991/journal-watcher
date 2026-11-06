@@ -1360,11 +1360,26 @@ fx.fetch_journal = lambda j: []                                                 
                 if os.path.exists(marker):
                     break
                 page.wait_for_timeout(250)
-            check("one click creates a 'Picks' run and starts the download queue for it", os.path.exists(marker) and open(marker).read() == "doi:10.1234/abc" and "Picks · this folder" in page.inner_text("#runtitle"), open(marker).read() if os.path.exists(marker) else "no marker")
+            check("one click creates a 'Picks' run and starts the download queue for it", os.path.exists(marker) and open(marker).read() == "doi:10.1234/abc" and "Picks · Lab" in page.inner_text("#runtitle"), (open(marker).read() if os.path.exists(marker) else "no marker", page.inner_text("#runtitle")))
             page.wait_for_function("document.querySelector('#listview') && /Couldn’t download/.test(document.querySelector('#listview').innerText)", timeout=10000)      # (not just any card: the empty-state card "No papers in this run" also matched `.card`, and the check then read the list before the paper was in it)
             check("the Download queue shows it with its status", "The platform classic" in page.inner_text("#listview") and "Cited by 3 of your papers" in page.inner_text("#listview") and "Couldn’t download" in page.inner_text("#listview"), page.inner_text("#listview")[:300])
             runs = [f for f in os.listdir(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")) if f.endswith("picks.json")]
             check("the run is saved like any other (state/runs)", len(runs) == 1)
+            pk_ = json.load(open(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs", runs[0]))); pick_rid_ = pk_["id"]
+            check("…it is named after the folder Discover was used in, remembers it, and each paper goes into that folder once it is in the library (it used to say only 'this folder', and nothing reached the folder)",
+                  pk_["params"].get("folder") == "lab" and pk_["params"].get("folder_name") == "Lab" and all(p_.get("folder") == "lab" for p_ in pk_["papers"]) and "in the folder “Lab”" in page.inner_text("#runmeta"), str(pk_["params"]))
+            out_ = [r_ for r_ in api("/api/library") if "lab" in (r_.get("folders") or []) and r_.get("journal") != "Books" and r_.get("title")][:1]
+            if out_:
+                api("/api/folders", {"action": "remove", "id": "lab", "files": [out_[0]["file"]]})        # (a paper of your library that is not in the folder)
+                for _ in range(40):
+                    if not api("/api/state").get("busy"):
+                        break
+                    time.sleep(0.25)
+                had_ = api("/api/related/download", {"items": [{"id": "x1", "title": out_[0]["title"]}], "label": "this folder", "folder": "lab"})
+                check("…a paper you pick there that is already in your library goes into the folder at once (nothing to download)",
+                      had_["run"] is None and had_["folder"] == "Lab" and "lab" in next(r_ for r_ in api("/api/library") if r_["file"] == out_[0]["file"]).get("folders", []), str(had_)[:300])
+            else:
+                check("…a library paper in the folder exists for this check", False)
             open(marker + ".wrong", "w").write("1")                                                   # the next round of the queue: the app refuses a different work's PDF
             page.click("#qbtn")
             try:
@@ -1555,6 +1570,51 @@ fx.fetch_journal = lambda j: []                                                 
             check("the reader's Related tab: cited-but-missing, related, and similar papers you have", "The platform classic" in body and "Platform governance and AI" in body and "Chatbots and Customer Trust" in body and "Governance of platform ecosystems" in body, body[:600])
             shot(page, "14-related-tab")
             page.click('#reader [data-a="back"]')
+
+            print("a PDF you downloaded yourself, added to its paper's card")
+            import pymupdf as _pmA
+            import base64 as _b64A
+            def mk_(title, body):
+                d = _pmA.open(); pg = d.new_page(); pg.insert_textbox(_pmA.Rect(60, 60, 540, 130), title, fontsize=18); pg.insert_textbox(_pmA.Rect(60, 150, 540, 790), body, fontsize=9)
+                d.embfile_add("pad.bin", os.urandom(45000)); b = _b64A.b64encode(d.tobytes()).decode(); d.close(); return b
+            right_ = mk_("The platform classic", "Zed Quinn and Amy Roe. https://doi.org/10.1234/abc " + "We study how platforms grow and govern their complementors. " * 30)
+            wrong_ = mk_("Two-stage differences in differences", "John Gardner. This version: April 2021. " + "We study estimators for staggered treatment timing. " * 30)
+            STG_ = os.path.join(TMP, "local-state", "staging"); staged_ = lambda: len([f for f in os.listdir(STG_) if f.endswith(".pdf")]) if os.path.isdir(STG_) else 0
+            page.goto(base + "/"); page.wait_for_selector("#libitem")
+            page.evaluate("openRun({id: %s})" % json.dumps(pick_rid_)); page.wait_for_selector("#listview:not(.hide)", timeout=10000)
+            C_ = '#papers .paper[data-id="doi:10.1234/abc"]'; page.wait_for_selector(C_, timeout=10000)
+            check("a paper whose download failed takes a dropped PDF, and its card offers 'Add the PDF I downloaded…' beside 'Open in my browser'",
+                  "can-attach" in (page.get_attribute(C_, "class") or "") and page.locator(C_ + ' [data-act="attach"]').count() == 1 and page.locator(C_ + " a:has-text('Open in my browser')").count() == 1, page.inner_text(C_)[:300])
+            n_lib_, n_seen_ = len(api("/api/library")), len(SEEN)
+            check("…dragging a PDF over the card marks the card (the page-wide 'add to the Library' overlay stays away)", page.evaluate(JS_DROP, [C_ + " .ptitle", [[right_, "x.pdf", "application/pdf"]], True]) is None and "at-over" in (page.get_attribute(C_, "class") or ""))
+            page.evaluate(JS_DROP, [C_ + " .ptitle", [[_b64A.b64encode(b"just notes").decode(), "notes.txt", "text/plain"]], False])
+            page.wait_for_function("document.querySelector('#toast') && /Only a PDF can be added/.test(document.querySelector('#toast').textContent)", timeout=5000)
+            check("…a file that is not a PDF is refused by name, and nothing is added", len(api("/api/library")) == n_lib_ and not page.locator("#ir-dlg[open]").count())
+            st0_ = staged_()
+            page.evaluate(JS_DROP, [C_ + " .ptitle", [[wrong_, "gardner.pdf", "application/pdf"]], False]); page.wait_for_selector("#at-dlg[open]", timeout=20000)
+            dt_ = page.inner_text("#at-dlg")
+            check("…another paper's PDF is not added: the dialog says what it seems to be and why, and asks; nothing is in the library yet",
+                  "Two-stage differences in differences" in dt_ and "The platform classic" in dt_ and "It is the right paper" in dt_ and "Why:" in dt_ and not page.locator("#ir-dlg[open]").count()
+                  and staged_() == st0_ + 1 and len(api("/api/library")) == n_lib_, dt_[:400])
+            page.click("#at-no"); page.wait_for_function("!document.querySelector('#at-dlg')")
+            for _ in range(20):
+                if staged_() == st0_:
+                    break
+                time.sleep(0.2)
+            check("…Cancel forgets it (the PDF kept aside is gone) and the card is as it was", staged_() == st0_ and "can-attach" in (page.get_attribute(C_, "class") or "") and len(api("/api/library")) == n_lib_)
+            with page.expect_file_chooser() as fc_:
+                page.click(C_ + ' [data-act="attach"]')
+            pdf_path_ = os.path.join(TMP, "the-platform-classic.pdf"); open(pdf_path_, "wb").write(_b64A.b64decode(right_))
+            fc_.value.set_files(pdf_path_)
+            page.wait_for_function("(s => { const c = document.querySelector(s); return c && /Downloaded/.test(c.innerText); })(%s)" % json.dumps(C_), timeout=20000)
+            row_ = [r_ for r_ in csv.DictReader(open(os.path.join(TMP, "Papers", "_index.csv"), newline="", encoding="utf-8")) if r_.get("doi") == "10.1234/abc"]
+            lab_ = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.json")))
+            check("…'Add the PDF I downloaded…' chooses the right PDF: it is filed like a download (its name, 'added by you'), into the folder Discover was used in, and no AI is asked",
+                  row_ and row_[-1]["status"] == "ok" and row_[-1]["note"].startswith("added by you") and re.search(r"Papers/\d{4}-\d{2}/.*_10\.1234-abc_the-platform-classic\.pdf$", row_[-1]["file"])
+                  and "10.1234/abc" in lab_.get("papers", []) and len(SEEN) == n_seen_, (row_[-1:] if row_ else None, lab_.get("papers")))
+            ct_ = page.inner_text(C_)
+            check("…the card says Downloaded and 'No summary yet', with no 'Retry summary' (its summary is asked for in the Library, with the cost first), and it takes no more drops",
+                  "No summary yet" in ct_ and "Retry summary" not in ct_ and "can-attach" not in (page.get_attribute(C_, "class") or ""), ct_[:300])
 
 
             print("round 2d: skim layer")

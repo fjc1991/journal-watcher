@@ -1360,18 +1360,32 @@ class Handler(BaseHTTPRequestHandler):
             if JOBS.busy():
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
             items = [x for x in (b.get("items") or []) if isinstance(x, dict)][:40]
+            fid = str(b.get("folder") or "")                      # (Discover inside a folder: what you pick goes into that folder)
+            folder = fo.get(fid) if fid else None
+            if fid and not folder:
+                return self.send_json({"error": "That folder is not there any more: reload the page."}, 404)
             papers, have = related.run_papers(items)
+            if folder and have:                                    # the ones you had already: into the folder now (nothing to download)
+                hf = {h["file"] for h in have}
+                fo.add(fid, [r["key"] for r in pl.library() if r["file"] in hf])
             if not papers:
+                if folder and have:
+                    return self.send_json({"ok": True, "run": None, "have": have, "n": 0, "folder": folder["name"]})
                 return self.send_json({"error": "Nothing to download: %s" % ("they are all in your library already." if have else "no usable papers were chosen."), "have": have}, 400)
-            run = pl.Run("picks", {"label": re.sub(r"\s+", " ", str(b.get("label") or "related papers")).strip()[:60]})
+            params = {"label": re.sub(r"\s+", " ", str((folder or {}).get("name") or b.get("label") or "related papers")).strip()[:60]}
+            if folder:
+                params.update(folder=fid, folder_name=folder["name"])
+            run = pl.Run("picks", params)
             for p in papers:
+                if folder:
+                    p["folder"] = fid                               # (filed into it once it is in the library: by this download, a retry, or a PDF you add yourself)
                 run.add_paper(p)
             run.stage, run.status = "ready", "stopped"
             run.save(force=True)
             JOBS.run = run
             if not start_download([p["id"] for p in papers]):
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
-            return self.send_json({"ok": True, "run": run.to_dict(full=False), "have": have, "n": len(papers)})
+            return self.send_json({"ok": True, "run": run.to_dict(full=False), "have": have, "n": len(papers), "folder": (folder or {}).get("name", "")})
         if path == "/api/ask/chat":      # {folder?, turns}: replaces the saved conversation (an empty list deletes it)
             try:
                 return self.send_json(multiask.save_chat(str(b.get("folder") or "") or None, b.get("turns")))

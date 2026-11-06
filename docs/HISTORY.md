@@ -943,6 +943,48 @@ A review workflow (four reviewers by area, a skeptic for each) kept 18 of 26 fin
 
 Kept as decided with the author, and flagged in the PR: the backup model screens the rest of the run by itself (the run says so afterwards) rather than asking first; a reviewer rated that high because the cost shown before the run was the configured model's.
 
+### Item 38. A book's overview on its page and in the reader (2026-11-06, the author's report)
+
+**Asked.** "After summarizing books, the full book summary is not displaying in the tab when I click on the book." The book's drawer said "No summary yet.": it only looked for a paper's `.md` summary. Decided with the author: the book page and the reader.
+
+**Changed.** `books.overview_view` (overview, stale, counts of parts done and summarised: read from `.book.json` each time, no copy), `books.is_book`; `/api/book` returns it; `/api/ai/summary` and `/api/doc/summary` refuse a book (a paper template would send the whole book with no estimate). Page: `openBook` (drawer with the overview, or what is missing, and a Chapters button), the reader's Summary tab (`loadBookSum`; templates hidden for a book), `state.bookEmpty`/`BOOK_HOW`/`BOOK_STALE` so the three places say the same thing; the green "ready" bar counts a book with an overview.
+
+**Tests.** `t_whole_book` (overview_view at three states, empty parts, is_book); UI: ready bar, drawer, Chapters button, a stale overview (fingerprint edited on disk: the fake AI writes the same text again), reader tab, the server refusals.
+
+### Item 39. Paper kinds when adding PDFs (2026-11-06, the author's request)
+
+**Asked.** "When adding my own PDFs, I need to have more flexibility than just journals… preprint and conference proceedings." Decided: Journal article, Preprint / working paper, Conference paper, Report / thesis / other.
+
+**Changed.** New `kinds.py` (vocabulary, Crossref type → kind, the PDF's own stamp or footer, venue abbreviations); the kind is kept in a `<stem>.paper.json` sidecar, not in `_index.csv` (an older version's `DictWriter(INDEX_COLS)` raises on an unknown column; the writers now keep unknown columns anyway). `importer.journal_for/_paper/_read/analyse_pdf/confirm`; a strong preprint stamp beats a title-only journal record (no record is picked, and the dialog says why). Library: Type filter, tag, menu and selection action (`/api/library/kind` writes sidecars only).
+
+**Tests.** `t_kinds`. A bug this introduced was found by the UI suite: the search loop over highlights reused the name `kind` and hid every later paper; renamed, with an offline check that fails on the old code.
+
+### Item 40. Large tool tiles, journals first on the Library's home, progress bars, "&amp;" (2026-11-06, the author's requests)
+
+**Changed.** `.tooltabs` tiles (icon, name, hint; the open one filled) for the Library tabs and a folder's tools; the home page moves Continue reading and Up next below the journal tiles; `state.progress`/`progressDone` (a bar with counts when the server sends `done/total` or `step/steps`, otherwise a moving bar with seconds) used by Discover, synthesis, claims, drafts, ideas, review and cards (`related.scope_stream` and `ideas.generate` now report steps); `download.plain` unescapes HTML entities in titles and journal names (Crossref sends some twice escaped).
+
+**Tests.** UI: tile sizes and hints, the home order, `progress()` itself; `t_plain_names`, `t_scope` steps.
+
+### Item 41. A PDF you downloaded yourself, for a paper whose download failed (2026-11-06, the author's request)
+
+**Asked.** "When there is an issue downloading the PDF, I can open the paper in my browser, download it… and then drag and drop it into the correct place." Decided with the author: drop on the paper's card; a PDF that fails the identity check is explained, and you may keep it.
+
+**Changed.** `pipeline.attach_pdf/attach_keep/_attach_file/_attachable/has_file`, `ATTACH_LOCK`; `importer._stage(bind=)` and `take_staged` (a token is claimed once and only for the paper it was checked against); `download.looks_pdf` (a PDF you chose has no 40 kB floor); `_into_folder(key, force)` and `follow_settle(keys)` use the key of the row actually filed (a copy you had may be keyed by title). Server: `POST /api/run/attach` (raw body, before JSON parsing) and `/api/run/attach/keep`, both behind `local_only`, one at a time (a run read from its file is changed and saved whole). Page: `attach.js` (capture-phase drop handler on `#papers .paper`, the dialog, the file chooser), card and drawer buttons, `RunView`.
+
+Running at the same time as a download, which the feature invites (a design review found these before coding): the batch marks a paper "downloading", "set aside" or "needs a check" under `ATTACH_LOCK` and only if it has no file; `open_one` no longer resets a set-aside paper you added; the end of the batch no longer marks it as needing a check; a paper with `summary_by_hand` is not summarised by a batch. `save_index` and `Run.save` now write through a temporary file, one writer at a time.
+
+**Tests.** `t_attach_pdf` (child process, fresh homes, offline, no keychain, a summariser that raises), covering: the right PDF, twice, another run, a wrong PDF, keep for that paper only, cancel, a scan, not/half a PDF, being downloaded, a deleted paper, an author folder before and after deletion, a followed author and co-author, a copy keyed by title, the batch with a set-aside paper and the check opened or not, a paper reached during a pace wait, two writers of the index and of a run, the endpoints and two requests at once. Sixteen mutations, all caught (three only after cases were added). UI: the card takes a drop, not a text file, the wrong PDF's dialog and Cancel, the file chooser, the index row and the folder, no AI call.
+
+**Not verified.** A real browser drag from the Finder (the UI tests dispatch drag events with a DataTransfer), and the 150 MB limit with a real file.
+
+### Item 42. Discover picks go into the folder they were chosen in (2026-11-06, the author's report)
+
+**Asked.** "In a folder I used the discover panel… downloaded the ones that could be downloaded… But they were not added to the main folder." The page sent only the label "this folder". Decided with the author: papers already in the library go in at once; a paper that fails goes in when its PDF arrives; the run names its folder (an older run cannot: it never recorded it).
+
+**Changed.** `discover.js` sends the folder; `/api/related/download` checks it exists, adds the papers you had, gives each paper `folder` (the download, a retry or `attach_pdf` file it through `_into_folder`), and names the run after the folder (`params.folder`, `folder_name`); the run page says so.
+
+**Tests.** UI: the run's name and saved folder, a paper you had goes in at once, and (item 41's test on the same card) a PDF added later lands in the folder.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
