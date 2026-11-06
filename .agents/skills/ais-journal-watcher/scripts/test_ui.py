@@ -1479,7 +1479,8 @@ fx.fetch_journal = lambda j: []                                                 
             for _ in range(80):
                 if os.path.exists(marker + ".checked"): break
                 time.sleep(0.25)
-            check("…'Open the check' reaches that download", ok_chk is True and os.path.exists(marker + ".checked") and open(marker + ".checked").read() == "www.sciencedirect.com")
+            chk_txt = open(marker + ".checked").read() if os.path.exists(marker + ".checked") else "(not written)"
+            check("…'Open the check' reaches that download", ok_chk is True and chk_txt == "www.sciencedirect.com", "ok=%r checked=%r state=%s" % (ok_chk, chk_txt, str({k_: v_ for k_, v_ in api("/api/state").items() if k_ != "run"})[:300]))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=30000)
             wk_ = api("/api/runs/" + api("/api/state")["run"]["id"])
             fp_ = [p_ for p_ in wk_["papers"] if p_.get("openalex") == "W77045"]
@@ -2872,7 +2873,7 @@ fx.fetch_journal = lambda j: []                                                 
                        "usage": {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}, "week": "2025-W03", "checks": ["2025-01-13T10:00:00+00:00"], "errors": [], "jstate": {},
                        "screen_error": "", "screen_backup": bk_, "papers": [dict(p_, id="bk-%d" % k, verdict="download", relevance=70, reason="fits", topics=[]) for k, p_ in enumerate(pp)]},
                       open(os.path.join(runs_dir, rid_b + ".json"), "w"))
-            aij = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "ai.json"); aij_saved = open(aij).read()
+            aij = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "ai.json"); aij_saved = open(aij).read(); ask_before = json.load(open(aij))["features"].get("ask")
             page.evaluate("openRun({id: %s})" % json.dumps(rid_b)); page.wait_for_selector("#screenbackup:not(.hide)", timeout=8000)
             nt_ = page.inner_text("#screenbackup")
             check("a run screened by a backup model says so: which model, instead of which, why, and that the setting is unchanged; the price note when it costs more than twice as much",
@@ -2883,7 +2884,7 @@ fx.fetch_journal = lambda j: []                                                 
             scr_ = json.load(open(aij))["features"].get("screen") or {}
             check("…'Make it the screening model' sets Settings → AI → Screening new papers to that provider and model (nothing else changes), and the note then says so",
                   scr_.get("provider") == "openrouter" and scr_.get("model") == "cheap/json" and "is now your screening model" in page.inner_text("#screenbackup")
-                  and json.load(open(aij))["features"]["ask"] == {"provider": "fake", "model": "m1"}, str(scr_))
+                  and json.load(open(aij))["features"].get("ask") == ask_before, str((scr_, page.inner_text("#screenbackup")[-120:], json.load(open(aij))["features"].get("ask"), ask_before)))
             open(aij, "w").write(aij_saved); os.remove(os.path.join(runs_dir, rid_b + ".json"))
             page.evaluate("go({j: null})")
             # Settings → AI: the screening Test sends a real screening request (the fake model answers that one with other JSON: it cannot screen)
