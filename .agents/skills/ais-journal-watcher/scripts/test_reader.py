@@ -536,7 +536,7 @@ def main():
                 act_.cancel(j_["id"]); return ["Some ", "words (p. 3)."]
             answers(chapter=cancel_now); n1 = len(mine())
             assert bj.start(brel) is True; st = wait()
-            assert st["stopped"] == "cancelled" and len(mine()) - n1 == 1 and set(bk.info_at(bpdf)["summaries"]) == {"3-4"} and "overview" not in bk.info_at(bpdf), st
+            assert st["stopped"] == "cancelled" and not st["failed"] and len(mine()) - n1 == 1 and set(bk.info_at(bpdf)["summaries"]) == {"3-4"} and "overview" not in bk.info_at(bpdf), st     # (a cancel is not a failure)
             js = [j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary")]
             assert js[0]["status"] == "cancelled", js[:1]
             # --- a refused key stops it at the first part
@@ -551,7 +551,7 @@ def main():
             # --- one part fails, the others are made: the job goes on, but no overview is written while a part is missing; pressing again does only that part, then the overview
             reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""] if chap(b) == "B2" else ["S-%s (p. 3)." % chap(b)])
             assert bj.start(brel) is True; st = wait()
-            assert st["made"] == 3 and len(st["failed"]) == 1 and st["failed"][0]["title"] == "B2" and st["overview"] is False and "overview" not in bk.info_at(bpdf), st
+            assert st["made"] == 3 and len(st["failed"]) == 1 and st["failed"][0]["title"] == "B2" and st["overview"] is False and st["stopped"] == "" and "overview" not in bk.info_at(bpdf), st      # (no overview is even tried)
             answers(); n1 = len(mine())
             assert bj.start(brel) is True; st = wait()
             assert [chap(b) if not sysof(b).startswith("You write") else "OV" for b in mine()[n1:]] == ["B2", "OV"] and st["overview"] is True, [sysof(b)[:20] for b in mine()[n1:]]
