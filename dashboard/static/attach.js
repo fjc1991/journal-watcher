@@ -19,19 +19,20 @@ export async function send(file, id) {
   if (!window.RunView || !RunView.paper(id)) return toast("That paper is not in this run any more: reload the page.");
   if (BUSY.has(id)) return;
   BUSY.add(id); const c = cardOf(id); if (c) c.classList.add("at-busy");
+  const rid = RunView.runId() || "";
   toast(`Checking “${file.name}” against this paper…`);
   try {
-    const r = await fetch("/api/run/attach", {method: "POST", body: file, headers: {"Content-Type": "application/pdf", "X-Run": encodeURIComponent(RunView.runId() || ""),
+    const r = await fetch("/api/run/attach", {method: "POST", body: file, headers: {"Content-Type": "application/pdf", "X-Run": encodeURIComponent(rid),
       "X-Paper": encodeURIComponent(id), "X-Filename": encodeURIComponent(file.name)}});
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || r.statusText);
-    if (j.filed) done(id, j); else await refused(id, file, j);
+    if (j.filed) done(id, j, rid); else await refused(id, file, j, rid);
   } catch (e) { toast(e.message); }
   finally { BUSY.delete(id); const c2 = cardOf(id); if (c2) c2.classList.remove("at-busy"); }
 }
 
-function done(id, j) {
-  RunView.applied(id, j.paper);
+function done(id, j, rid) {
+  if (RunView.runId() === rid) RunView.applied(id, j.paper);         // (another run opened meanwhile: the server's event updates this one's card if it shows it)
   const folder = j.folder ? ` It is in the folder “${j.folder}”.` : "";
   toast(j.existing ? "You already have this paper in your library, so nothing was added twice: the card now points to your copy."
     : j.kept ? "Added to your library, as you said it is the right paper. " + SUMMARY_LATER + folder
@@ -40,9 +41,10 @@ function done(id, j) {
 }
 
 // the PDF did not pass the check: say what it seems to be and why; nothing is filed unless you say it is the right paper
-function refused(id, file, j) {
+function refused(id, file, j, rid) {
   return new Promise(resolve => {
-    const old = $("#at-dlg"); if (old) old.remove();
+    const old = $("#at-dlg"); if (old && old.open) old.close();     // (another card's question still open: it is cancelled, its PDF forgotten, its card free again)
+    if ($("#at-dlg")) $("#at-dlg").remove();
     const d = document.createElement("dialog"); d.id = "at-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "at-h");
     d.innerHTML = `<h2 id="at-h">This PDF does not look like this paper</h2>
       <p>You are adding “${esc(file.name)}” to “${esc(j.title)}”.</p>
@@ -58,7 +60,7 @@ function refused(id, file, j) {
     $("#at-no", d).onclick = () => d.close();
     $("#at-yes", d).onclick = async () => {
       keeping = true; $("#at-yes", d).disabled = $("#at-no", d).disabled = true;
-      try { done(id, await api("/api/run/attach/keep", {run_id: RunView.runId(), id, token: j.token})); }
+      try { done(id, await api("/api/run/attach/keep", {run_id: rid, id, token: j.token}), rid); }
       catch (e) { toast(e.message); if (!/no longer waiting/.test(e.message)) discard(); }
       d.close();
     };
@@ -74,7 +76,7 @@ export function pick(id) {
 
 // a drop on a paper's card: taken here, before the page-wide import (dropimport.js) sees it (capture phase; it skips events whose default was prevented)
 function wire() {
-  let over = null;
+  let over = null, told = null;
   const unmark = () => { if (over) over.classList.remove("at-over"); over = null; };
   const cardAt = e => e.target && e.target.closest ? e.target.closest("#papers .paper") : null;
   document.addEventListener("dragover", e => {
@@ -82,14 +84,18 @@ function wire() {
     const c = cardAt(e); if (!c) { unmark(); return; }
     e.preventDefault(); if (window.DropImport && DropImport.off) DropImport.off();
     if (c.classList.contains("can-attach")) { e.dataTransfer.dropEffect = "copy"; if (over !== c) { unmark(); over = c; c.classList.add("at-over"); } }
-    else { e.dataTransfer.dropEffect = "none"; unmark(); }
+    else {                                       // (the browser then cancels the drop: say why now, once for this card)
+      e.dataTransfer.dropEffect = "none"; unmark();
+      if (told !== c) { told = c; const p = window.RunView && RunView.paper(c.dataset.id);
+        toast(p && p.dl_status === "downloading" ? "This paper is being downloaded right now. Wait until it is done; if it does not come, add your PDF then." : "This paper is already in your library."); }
+    }
   }, true);
   document.addEventListener("dragleave", e => { if (over && !(e.relatedTarget && over.contains(e.relatedTarget))) unmark(); }, true);
-  document.addEventListener("dragend", unmark, true);
+  document.addEventListener("dragend", () => { unmark(); told = null; }, true);
   document.addEventListener("drop", e => {
     if (!hasFiles(e)) return;
     const c = cardAt(e); if (!c) return;
-    e.preventDefault(); e.stopPropagation(); unmark();
+    e.preventDefault(); e.stopPropagation(); unmark(); told = null;
     const id = c.dataset.id, p = window.RunView && RunView.paper(id), fs = [...e.dataTransfer.files];
     if (!c.classList.contains("can-attach"))
       return toast(p && p.dl_status === "downloading" ? "This paper is being downloaded right now. Wait until it is done; if it does not come, add your PDF then." : "This paper is already in your library.");

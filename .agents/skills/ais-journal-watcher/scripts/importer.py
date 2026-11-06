@@ -146,7 +146,7 @@ def _same(row, p):
     d1, d2 = (row.get("doi") or "").strip().lower(), (p.get("doi") or "").strip().lower()
     if d1 and d2:
         return d1 == d2
-    t1, t2 = fx.norm_title(row.get("title") or ""), fx.norm_title(p.get("title") or "")
+    t1, t2 = fx.norm_title(dl.plain(row.get("title"))), fx.norm_title(dl.plain(p.get("title")))      # ("&amp;" and "&" are the same title)
     return bool(t1) and t1 == t2
 
 
@@ -231,7 +231,8 @@ def add_pdf(data, filename="paper.pdf", doi=""):
     doi = clean_doi(doi) or sniffed
     meta = crossref_meta(doi) if doi else None
     if meta:
-        kind, _, label = kinds.from_crossref(meta)
+        kind, venue, label = kinds.from_crossref(meta)
+        meta = dict(meta, container=venue or meta.get("container"))          # (as the review dialog does: an SSRN record's "SSRN Electronic Journal" is the series SSRN)
         p, note = _paper(meta, kind), "added by you (metadata from Crossref)"
         return _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), meta.get("type") or ""))
     else:
@@ -249,7 +250,8 @@ def add_doi(doi):
     meta = crossref_meta(doi)
     if not meta:
         raise ValueError("Crossref doesn’t know that DOI (or can’t be reached).")
-    kind, _, label = kinds.from_crossref(meta)
+    kind, venue, label = kinds.from_crossref(meta)
+    meta = dict(meta, container=venue or meta.get("container"))
     p = _paper(meta, kind)
     ex = _existing(p)
     if ex:
@@ -410,7 +412,7 @@ def _read(data):
     except Exception:  # noqa: BLE001
         pass
     kind, venue, label = kinds.from_text(first) if first else (None, "", "")
-    if kind is None and re.search(r"(a thesis submitted|doctoral dissertation|in partial fulfil{1,2}ment of the requirements)", r["text"][:6000], re.I):
+    if kind is None and re.search(r"(a (doctoral |master'?s )?(thesis|dissertation) submitted|in partial fulfil{1,2}ment of the requirements)", r["text"][:6000], re.I):
         kind, label = "other", "Thesis"
     return {"dois": dois[:4], "title": re.sub(r"\s+", " ", title or "").strip(), "pages": r["pages_read"], "scan": bool(r["pages_read"] and r["scans"] * 2 >= r["pages_read"] and r["words"] < 60),
             "kind": kind, "venue": venue, "label": label}

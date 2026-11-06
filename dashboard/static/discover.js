@@ -53,7 +53,8 @@ function actions(S) {
       t.closest("[data-k]").disabled = true;
       try { const r = await api("/api/related/download", {items: its, label: S.label, folder: S.folder || ""});
         const had = r.have && r.have.length ? r.have.length : 0;
-        if (!r.run) { toast(`${had} paper${had === 1 ? " was" : "s were"} already in your library: now in the folder “${r.folder}”.`); t.closest("[data-k]").disabled = false; if (ctx.reload) await ctx.reload(); return; }
+        if (!r.run) { toast(`${had} paper${had === 1 ? " was" : "s were"} already in your library: now in the folder “${r.folder}”.`); t.closest("[data-k]").disabled = false;
+          if (ctx.reload) await ctx.reload(); if (window.LibraryUI) { await LibraryUI.refreshFolders(); LibraryUI.updateFolderHead && LibraryUI.updateFolderHead(); } return; }       // (the folder's count and the sidebar)
         toast(`Downloading ${r.n} paper${r.n === 1 ? "" : "s"}${r.folder ? ` into the folder “${r.folder}”` : ""}${had ? ` (${had} already in your library${r.folder ? ", now in the folder" : ""})` : ""}…`); if (ctx.openRun) ctx.openRun(r.run); }
       catch (er) { notifyError(er); t.closest("[data-k]").disabled = false; }
     }

@@ -399,6 +399,51 @@ pl.download_and_summarize(runE, [B2["id"], B3["id"]], lambda *a: None, threading
 assert seen_dl == [B2["id"]] and hit["b3"]["filed"] and runE.papers[B3["id"]]["dl_status"] == "ok", (seen_dl, runE.papers[B3["id"]])
 assert open(os.path.join(dl.ROOT, runE.papers[B3["id"]]["file"]), "rb").read() == R["right"]
 assert not calls
+# (14b) the same paper waits in a running download AND sits in another run you opened: you add its PDF on that other run's card; the running download takes your copy
+X1 = paper(id="doi:10.1/x1", doi="10.1/x1", title="Informs paper x one"); X = paper(id="doi:10.1287/mnsc.2024.0014", doi="10.1287/mnsc.2024.0014")
+runP = mkrun([X1, X]); runR = mkrun([dict(X)]); seen_dl, clk[0] = [], 0.0
+def slp2(d):
+    clk[0] += max(d, 1.0)
+    if "x" not in hit:
+        hit["x"] = pl.attach_pdf(runR, X["id"], R["right"])            # (a run read from its file: runP's copy of the paper knows nothing of it)
+dl.download_paper = fake_dl4
+pl.download_and_summarize(runP, [X1["id"], X["id"]], lambda *a: None, threading.Event(), sleep=slp2, clock=lambda: clk[0])
+px = runP.papers[X["id"]]
+assert seen_dl == [X1["id"]] and hit["x"]["filed"] and px["dl_status"] == "ok" and px["file"] == hit["x"]["file"] and px["summary_by_hand"] and not calls, (seen_dl, px)
+assert open(os.path.join(dl.ROOT, px["file"]), "rb").read() == R["right"]
+dl.save_index(dict(X), "", "failed", "a download that failed meanwhile")       # (a failed download never takes a paper out of the library)
+assert [x["status"] for x in rows() if x["doi"] == X["doi"]] == ["ok"], [x for x in rows() if x["doi"] == X["doi"]]
+# (14c) a paper whose copy in the library is keyed by its title: when the download batch reaches it, it is not filed again under its DOI
+fidK, _ = au.folder_for(["A5000000444"], "Di Ek", "")
+TK = "A paper you had without its DOI"
+hk = os.path.join(dl.PAPERS, "2024-05", "x_tk.pdf"); open(hk, "wb").write(R["small"])
+dl.save_index({"doi": "", "title": TK, "journal": "J", "abbr": "J"}, os.path.relpath(hk, dl.ROOT), "ok", "added by you")
+K = paper(id="doi:10.7777/k.1", doi="10.7777/k.1", title=TK, folder=fidK); runK = mkrun([K], kind="author", params={"label": "Di Ek"})
+assert pl.attach_pdf(runK, K["id"], R["wrong"])["existing"]
+dl.download_paper, dl.open_browser = fake_dl, _Br
+pl.download_and_summarize(runK, [K["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0)
+assert fo.get(fidK)["papers"] == [TK.lower()], fo.get(fidK)["papers"]
+# (14d) every paper that waited for a site's check got its PDF from you: pressing "Open the check" opens nothing, and the page is told it no longer waits
+opened = []
+class _BrB(_Br):
+    def open_check(self, host, stay=False):
+        opened.append(host); self.ch(host, "passed"); return True
+E5 = paper(id="doi:10.1287/mnsc.2024.0015", doi="10.1287/mnsc.2024.0015", publisher="elsevier")
+W5 = paper(id="doi:10.1002/w5", doi="10.1002/w5", title="Wiley paper five", publisher="wiley")
+runF = mkrun([E5, W5]); checks = queue.Queue(); ev_log.clear(); clk[0] = 0.0
+def fake_dl5(p, env, browser=None, dry=False):
+    if p["publisher"] == "elsevier":
+        browser.ch(SD, "pending"); return False, None, "challenge:%s" % SD
+    pl.attach_pdf(runF, E5["id"], R["right"]); checks.put(SD)
+    f = dl.out_path(dict(p)); open(f, "wb").write(R["small"]); return True, f, "browser"
+dl.download_paper, dl.open_browser = fake_dl5, _BrB
+pl.download_and_summarize(runF, [E5["id"], W5["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=tick, clock=lambda: clk[0], checks=checks, summarize=False)
+assert not opened and runF.papers[E5["id"]]["dl_status"] == "ok" and any(e == "challenge" and d.get("state") == "cleared" and d.get("host") == SD for e, d in ev_log), (opened, [d for e, d in ev_log if e == "challenge"])
+# (14e) Check my PDFs' "Remove" writes the index under the same lock as a download
+keep_rm = identity._remove
+identity._remove = lambda f: dl.INDEX_LOCK._is_owned()
+assert identity.remove("anything") is True
+identity._remove = keep_rm
 
 # (15) the index and a run's file, written by several threads at once: nothing lost, nothing half-written
 def many(tag):
@@ -1615,6 +1660,25 @@ print("JSON" + json.dumps(out))
             hits_ = ls_.search(rows_, kind="conference"); hits_ = hits_.get("results", hits_) if isinstance(hits_, dict) else hits_
             assert {x["file"] for x in hits_} == {rc["file"]}, [x["file"] for x in hits_]
             assert sm_.clean_filters({"kind": "preprint", "q": "x"}).get("kind") == "preprint"
+            # ordinary journal articles are not theses or conference papers because a footnote says so (a wrapped one too); a preprint server's subject is not its venue
+            body_ = "A study of platforms\nJane Doe\n" + "text of the paper\n" * 30
+            assert kd.from_text(body_ + "This paper is based on the first author's doctoral dissertation.\nJournal of X 2020") == (None, "", "")
+            assert kd.from_text(body_ + "An earlier version was presented at the Fortieth\nInternational Conference on Information Systems, Munich, 2019.") == (None, "", "")
+            assert kd.from_text("A thesis submitted for the degree of Doctor of Philosophy\nJane Doe") == ("other", "", "Thesis")
+            assert kd.from_crossref({"type": "posted-content", "doi": "10.1101/2020.01.01.1", "group_title": "Neuroscience", "publisher": "Cold Spring Harbor Laboratory"})[1] != "Neuroscience"
+            # a paper added by its DOI (or a dropped PDF filed at once) is filed under its series, as in the review dialog: SSRN, not "SSRN Electronic Journal"
+            old_rec = dict(pre, doi="10.2139/ssrn.4400002", url="https://doi.org/10.2139/ssrn.4400002", type="journal-article", container="SSRN Electronic Journal", group_title="")
+            import open_copies as oc_
+            keep_ = (importer.crossref_meta, importer._file, dl.try_unpaywall, oc_.find_open_copy)
+            try:
+                importer.crossref_meta = lambda d: old_rec if d.lower() == old_rec["doi"] else None
+                importer._file = lambda p, data, note, after=None: {"p": p}
+                dl.try_unpaywall = lambda *a, **k: None
+                oc_.find_open_copy = lambda *a, **k: (b"%PDF", "an open copy")
+                got_ = importer.add_doi(old_rec["doi"])["p"]
+                assert (got_["journal"], got_["abbr"]) == ("SSRN", "SSRN"), (got_["journal"], got_["abbr"])
+            finally:
+                importer.crossref_meta, importer._file, dl.try_unpaywall, oc_.find_open_copy = keep_
             keep_ = (ls_.notes_of, ls_.summary_of, ls_.card_text)       # words found in a paper's highlights do not hide the papers after it (a loop once reused the name of the type filter)
             try:
                 ls_.notes_of = lambda r: {"highlights": [{"text": "a zebra crossing"}], "cards": []}; ls_.summary_of = ls_.card_text = lambda r: ""
@@ -2163,6 +2227,8 @@ print("OK")
         assert dl.plain("&#8220;Generate&#8221; the Future") == "\u201cGenerate\u201d the Future"
         name, _, _ = fx_.venue_route({"container": "Journal of Economic Behavior &amp;amp; Organization", "issn": []}, "", "10.1016/x", [])
         assert name == "Journal of Economic Behavior & Organization", name
+        n1_, a1_, _ = fx_.venue_route({"container": "Journal of Economic Behavior &amp; Organization", "issn": []}, "", "10.1016/x", [])
+        assert n1_ == "Journal of Economic Behavior & Organization" and a1_ == fx_.venue_abbr("Journal of Economic Behavior &amp; Organization"), a1_      # (the abbreviation as before: no second group for papers saved earlier)
         saved_dl = (dl.PAPERS, dl.ROOT); dl.PAPERS, dl.ROOT = pl_.PAPERS, pl_.ROOT          # (the library the pipeline lists)
         idx_ = os.path.join(dl.PAPERS, "_index.csv"); saved_ = open(idx_, encoding="utf-8").read() if os.path.exists(idx_) else None
         pdf_ = os.path.join(dl.PAPERS, "2025-01", "JEBO", "amp.pdf"); os.makedirs(os.path.dirname(pdf_), exist_ok=True); open(pdf_, "wb").write(b"%PDF")
@@ -2170,11 +2236,22 @@ print("OK")
             import csv as _csv
             dl.save_index({"doi": "10.9/amp1", "title": "Winners &amp; losers", "journal": "Journal of Economic Behavior &amp; Organization", "abbr": "JEBO"}, os.path.relpath(pdf_, dl.ROOT), "ok")
             row = [r for r in _csv.DictReader(open(idx_, newline="", encoding="utf-8")) if r["doi"] == "10.9/amp1"][0]
-            assert row["journal"] == "Journal of Economic Behavior & Organization" and row["title"] == "Winners & losers", row
+            assert row["journal"] == "Journal of Economic Behavior & Organization" and row["title"] == "Winners &amp; losers", row       # (the title as it came: a paper without a DOI is keyed by it)
             with open(idx_, "a", newline="", encoding="utf-8") as fh:            # a row written by an older version, still escaped
                 w = _csv.DictWriter(fh, dl.INDEX_COLS); w.writerow(dict(row, doi="10.9/amp2", title="Old &amp; escaped", journal="Old &amp;amp; Journal"))
-            lib_ = {r["doi"]: r for r in pl_.library()}
-            assert lib_["10.9/amp2"]["journal"] == "Old & Journal" and lib_["10.9/amp2"]["title"] == "Old & escaped", lib_["10.9/amp2"]
+                w.writerow(dict(row, doi="", title="No DOI &amp;amp; an old title", journal="J"))      # (keyed by its title as stored)
+            import folders as fo_, readstate as rs_
+            fid_ = fo_.create("Amp test")["id"]; fo_.add(fid_, ["no doi &amp;amp; an old title"]); rs_.update("no doi &amp;amp; an old title", {"status": "reading"})
+            try:
+                lib_ = {r["doi"] or r["title"]: r for r in pl_.library()}
+                assert lib_["10.9/amp2"]["journal"] == "Old & Journal" and lib_["10.9/amp2"]["title"] == "Old & escaped", lib_["10.9/amp2"]
+                assert lib_["10.9/amp1"]["title"] == "Winners & losers"
+                nd_ = lib_["No DOI & an old title"]
+                assert nd_["key"] == "no doi &amp;amp; an old title" and fid_ in nd_["folders"] and nd_["state"].get("status") == "reading", (nd_["key"], nd_["folders"], nd_["state"])
+                import importer as im_
+                assert im_._same({"doi": "", "title": "No DOI &amp;amp; an old title"}, {"doi": "", "title": "No DOI & an old title"}), "'&amp;' and '&' are the same title"
+            finally:
+                fo_.delete(fid_); rs_.update("no doi &amp;amp; an old title", {"status": ""})
         finally:
             if saved_ is None:
                 os.path.exists(idx_) and os.remove(idx_)

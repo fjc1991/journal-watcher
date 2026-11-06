@@ -305,6 +305,13 @@ def audit(progress=None, use_kept=False):
 
 
 def remove(file):
+    """(One writer of Papers/_index.csv at a time: see _remove.)"""
+    import download as dl
+    with dl.INDEX_LOCK:
+        return _remove(file)
+
+
+def _remove(file):
     """Take a PDF out of the library without deleting anything: the PDF and its notes, summary, card and skim files move to Papers/_removed/<time>/ (same sub-folders),
     and its row in Papers/_index.csv becomes status "removed" (so the library no longer lists it and a download can try again). Returns the row's data for a new download
     ({title, doi, authors, journal, date}) and where the files went."""

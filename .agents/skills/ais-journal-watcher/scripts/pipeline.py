@@ -187,13 +187,13 @@ def library():
             for r in csv.DictReader(f):
                 if r["status"] != "ok" or not r["file"]:
                     continue
-                r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (rows written before the names were unescaped)
+                key = dl.index_key(r)                # (from the title as stored: folders, reading status and runs know a paper without a DOI by it)
+                r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (shown with "&" for "&amp;"; the key above is unchanged)
                 md = r["file"][:-4] + ".md"
                 r["summary"] = md if os.path.exists(os.path.join(ROOT, md)) else None
                 r["notes"] = ns.counts(os.path.join(ROOT, r["file"]))  # reader highlights/cards, None if none
                 r["card"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".card.json"))   # paper card (papercard.py)
                 r["skim"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".skim.json"))   # skim layer (skim.py)
-                key = dl.index_key(r)
                 r["key"], r["state"], r["folders"] = key, state.get(key) or {}, member.get(key, [])
                 if r.get("journal") == "Books":      # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
                     r["book"] = dl.load_json(os.path.join(ROOT, r["file"][:-4] + ".book.json"), {})
@@ -1383,6 +1383,20 @@ def has_file(p):
     return bool(p.get("file")) and os.path.exists(os.path.join(ROOT, p["file"]))
 
 
+def _adopt(p):
+    """The paper is in the library already (another run, or a PDF you added to it on another run's card, while this download was running): the run's paper points to that
+    copy, and nothing is downloaded. A copy you added yourself is not summarised by itself. True if it was there."""
+    import importer
+    ex = importer._existing(p)
+    if not ex:
+        return False
+    row = next((r for r in importer.library_rows() if r["file"] == ex), {})
+    md = ex[:-4] + ".md"
+    p.update(file=ex, dl_status="ok", summary=md if os.path.exists(os.path.join(ROOT, md)) else None, dl_note=row.get("note") or p.get("dl_note"),
+             summary_by_hand=bool(p.get("summary_by_hand") or str(row.get("note") or "").startswith("added by you")), lib_key=dl.index_key(row) if row else paper_key(p))
+    return True
+
+
 def _attachable(run, pid):
     p = run.papers.get(str(pid or ""))
     if not p:
@@ -1404,7 +1418,7 @@ def _attach_file(run, p, data, note, save):
         key = dl.index_key(row) if row else paper_key(p)
         md = res["file"][:-4] + ".md"
         upd = dict(dl_status="ok", file=res["file"], dl_note=note if not res["existing"] else "already in your library",
-                   summary=md if os.path.exists(os.path.join(ROOT, md)) else None, summary_by_hand=True)      # (its summary is asked for in the Library, with the cost first)
+                   summary=md if os.path.exists(os.path.join(ROOT, md)) else None, summary_by_hand=True, lib_key=key)      # (its summary is asked for in the Library, with the cost first)
         if p.get("verdict") != "download":                       # (you wanted it: it is no longer shown as skipped)
             upd.update(ai_verdict=p.get("ai_verdict") or p.get("verdict"), verdict="download", user_set=True)
         p.update(upd)                                            # (one update: a running job may be saving this run)
@@ -1567,7 +1581,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         if p.get("dl_status") != "ok":
             p["dl_status"] = "ok"
             emit_dl(p)
-        _into_folder(p)
+        _into_folder(p, p.get("lib_key"))                   # (the key of the copy in the library: one you had may be keyed by its title)
         finished(p, final=False)
 
     def nudge(host, state, pub):
@@ -1589,6 +1603,14 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
 
     def open_one(br, host, stay):
         if host not in deferred or host in given_up or not hasattr(br, "open_check"):
+            return
+        if all(has_file(q) for q in deferred[host]):        # you added the PDFs of every paper waiting for this check yourself: nothing to open
+            for q in deferred.pop(host):
+                finished(q, final=False)
+            for k in [k for k, v in waiting_pub.items() if v == host]:
+                waiting_pub.pop(k)
+            emit("challenge", {"host": host, "state": "cleared", "msg": ""})
+            emit("log", {"msg": "No check to open for %s: you added the PDFs of the papers that waited for it." % host, "level": "ok"})
             return
         try:
             ok = br.open_check(host, stay=stay)
@@ -1666,8 +1688,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                             break
                     if quiet and not auto_open and not stop.is_set():       # another site's paper starts: the check can be opened while it downloads, so say so now
                         release_quiet()
-                    with ATTACH_LOCK:                                # (you may have added its PDF yourself during the wait)
-                        late = has_file(p)
+                    with ATTACH_LOCK:                                # (you may have added its PDF yourself during the wait, here or on another run's card)
+                        late = has_file(p) or _adopt(p)
                         if not late:
                             p["dl_status"] = "downloading"
                     if late:

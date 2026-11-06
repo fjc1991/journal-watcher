@@ -55,7 +55,9 @@ def from_crossref(meta):
     if t in ("", "journal-article", "journal-issue", "journal"):
         return ("preprint", series, "") if series else ("journal", cont, "")
     if t in ("posted-content",):
-        return "preprint", series or str(m.get("group_title") or "") or str(m.get("institution") or "") or str(m.get("publisher") or ""), ""
+        gt = str(m.get("group_title") or "")                    # (bioRxiv's group-title is a subject, "Neuroscience": only a server's or a series' name is a venue)
+        gt = gt if re.search(r"rxiv|preprint|working paper|discussion paper|ssrn|research square|repec", gt, re.I) else ""
+        return "preprint", series or gt or str(m.get("institution") or "") or str(m.get("publisher") or ""), ""
     if t in ("proceedings-article", "proceedings", "proceedings-series"):
         return "conference", cont or str(m.get("event") or ""), ""
     if t in ("book-chapter", "book-section", "book-part", "reference-entry") and CONF_WORDS.search(cont):
@@ -90,18 +92,19 @@ def from_text(text):
         return "preprint", "SSRN", ""
     told = re.compile(r"presented|earlier version|previous version|based on|accepted|forthcoming", re.I)      # a footnote about a talk is not the paper's own venue
     edge_lines = lines[:12] + lines[-8:]
-    for ln in edge_lines:
+    said = lambda i: told.search(edge_lines[i]) or (i and told.search(edge_lines[i - 1][-60:]))      # (a footnote wrapped over two lines: "…presented at the Fortieth" / "International Conference…")
+    for i, ln in enumerate(edge_lines):
         y = re.search(r"\b(19|20)\d{2}\b", ln)
-        if not y or told.search(ln):
+        if not y or said(i):
             continue
         for rx, name in _CONF_NAMES:
             if rx.search(ln):
                 return "conference", name + " " + y.group(0), ""
-    for ln in edge_lines:
+    for i, ln in enumerate(edge_lines):
         m = re.search(r"Proceedings of the [^|]{3,90}?(Conference|Symposium|Workshop)[^,|]{0,40}", ln)
-        if m and not told.search(ln):
+        if m and not said(i):
             return "conference", m.group(0).strip(), ""
-    if re.search(r"(a thesis submitted|doctoral dissertation|in partial fulfil{1,2}ment of the requirements)", str(text or "")[:4000], re.I):
+    if re.search(r"(a (doctoral |master'?s )?(thesis|dissertation) submitted|in partial fulfil{1,2}ment of the requirements)", str(text or "")[:4000], re.I):
         return "other", "", "Thesis"
     if re.search(r"^\s*technical report\b", edge, re.I | re.M):
         return "other", "", "Report"

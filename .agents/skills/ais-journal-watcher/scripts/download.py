@@ -166,11 +166,13 @@ def _save_index(p, file, status, note):
     topics = p.get("topics") or list((p.get("topics_hit") or {}).keys())
     row = dict(zip(INDEX_COLS, [
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        plain(p.get("journal", "")), p.get("abbr", ""), plain(p.get("title", "")),
+        plain(p.get("journal", "")), p.get("abbr", ""), p.get("title", ""),          # (the title as it came: a paper without a DOI is keyed by it, in runs, folders and reading status)
         "; ".join(p.get("authors") or []), p.get("doi") or "",
         p.get("url") or "", "; ".join(topics),
         p.get("score", ""), file, status, note,
     ]))
+    if status != "ok" and any(index_key(r) == index_key(row) and r.get("status") == "ok" and r.get("file") and os.path.exists(os.path.join(ROOT, r["file"])) for r in rows):
+        return                     # (a download that failed never takes a paper out of the library: its PDF came meanwhile, by another run or by you)
     rows = [r for r in rows if index_key(r) != index_key(row)] + [row]
     tmp = tmp_path(idx)
     with open(tmp, "w", newline="") as f:

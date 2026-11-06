@@ -254,7 +254,7 @@ def _download_emit(base):
                 JOBS.waiting[data["host"]] = data
             elif data.get("state") == "done":
                 JOBS.waiting.clear()
-            elif data.get("state") in ("open", "passed", "failed"):
+            elif data.get("state") in ("open", "passed", "failed", "cleared"):
                 JOBS.waiting.pop(data.get("host"), None)
         base(event, data)
     return emit

@@ -1618,6 +1618,10 @@ fx.fetch_journal = lambda j: []                                                 
                   row_ and row_[-1]["status"] == "ok" and row_[-1]["note"].startswith("added by you") and re.search(r"Papers/\d{4}-\d{2}/.*_10\.1234-abc_the-platform-classic\.pdf$", row_[-1]["file"])
                   and "10.1234/abc" in lab_.get("papers", []) and len(SEEN) == n_seen_, (row_[-1:] if row_ else None, lab_.get("papers")))
             ct_ = page.inner_text(C_)
+            page.evaluate("""(sel) => { const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array([37, 80, 68, 70])], "again.pdf", {type: "application/pdf"}));
+              const t = document.querySelector(sel + " .ptitle"); t.dispatchEvent(new DragEvent("dragover", {dataTransfer: dt, bubbles: true, cancelable: true})); }""", C_)
+            page.wait_for_function("document.querySelector('#toast') && /already in your library/.test(document.querySelector('#toast').textContent)", timeout=5000)
+            page.evaluate("document.dispatchEvent(new DragEvent('dragend', {bubbles: true}))")
             check("…the card says Downloaded and 'No summary yet', with no 'Retry summary' (its summary is asked for in the Library, with the cost first), and it takes no more drops",
                   "No summary yet" in ct_ and "Retry summary" not in ct_ and "can-attach" not in (page.get_attribute(C_, "class") or ""), ct_[:300])
             # (the checks after this one expect the library as it was: the paper is deleted again, and its "deleted" row taken out of the index)
@@ -1687,7 +1691,7 @@ fx.fetch_journal = lambda j: []                                                 
             _d = _pm.open(); _pg = _d.new_page(); _pg.insert_textbox(_pm.Rect(60, 60, 535, 200), "A dropped paper about platform governance and complementors in software ecosystems.", fontsize=12)
             _d.embfile_add("padding", os.urandom(45000)); drop_b64 = base64.b64encode(_d.tobytes()).decode(); _d.close()      # (the importer refuses PDFs under 40 KB as probably cut off)
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile")
-            check("the Library has a Folders tab showing each folder as a tile with its paper count", page.locator(".fp-tile[data-id]").count() == 2 and "Lab" in page.inner_text(".fp-tile[data-id='lab'] .fp-name") and page.text_content(".fp-tile[data-id='lab'] .fp-num") == "3")
+            check("the Library has a Folders tab showing each folder as a tile with its paper count", page.locator(".fp-tile[data-id]").count() == 2 and "Lab" in page.inner_text(".fp-tile[data-id='lab'] .fp-name") and page.text_content(".fp-tile[data-id='lab'] .fp-num") == "3", str([(f_["id"], f_["name"], f_["count"]) for f_ in api("/api/folders")]))
             check("…and what is inside: cards and what else the folder holds", "3 papers · 3 with a card" in page.inner_text(".fp-tile[data-id='lab'] .fp-meta") and "💡" in page.inner_text(".fp-tile[data-id='lab'] .fp-flags") and "▦" in page.inner_text(".fp-tile[data-id='lab'] .fp-flags"))
             shot(page, "17-folders")
             page.evaluate("document.documentElement.dataset.theme = 'dark'"); page.wait_for_timeout(300); shot(page, "18-folders-dark"); page.evaluate("document.documentElement.dataset.theme = 'light'")
@@ -1775,6 +1779,48 @@ fx.fetch_journal = lambda j: []                                                 
             check("each tool in a folder has its own colour on its tab icon", len(set(tool_cols)) >= 8 and len(tool_cols) == 10, str(tool_cols))
             page.click("#settingsbtn"); page.wait_for_selector("#settings.hide", state="attached")
             check("…and the page you were on is lit again", page.eval_on_selector(".navbtn.on", "e => e.dataset.nav") == "folders")
+
+            print("paper kinds: a preprint's PDF, its type and venue, the Type filter and Change type")
+            import pymupdf as _pmK
+            import base64 as _b64K
+            _dk = _pmK.open(); _pk = _dk.new_page(); _pk.insert_textbox(_pmK.Rect(60, 30, 540, 50), "arXiv:2401.01234v1 [econ.GN] 3 Jan 2024", fontsize=8)
+            _pk.insert_textbox(_pmK.Rect(60, 60, 540, 200), "Kappa evidence on platform pricing experiments in two-sided markets", fontsize=16)
+            _pk.insert_textbox(_pmK.Rect(60, 210, 540, 780), "Kim Kappa. We run pricing experiments on a two-sided platform. " * 20, fontsize=9)
+            _dk.embfile_add("padding", os.urandom(45000)); kappa_ = _b64K.b64encode(_dk.tobytes()).decode(); _dk.close()
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); nk0_ = len(api("/api/library"))
+            page.evaluate(JS_DROP, [".fp-path", [[kappa_, "kappa.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=30000)
+            check("a PDF with an arXiv stamp is offered as a preprint, with arXiv in its box, and the box is named for a repository or series",
+                  page.eval_on_selector('[data-ptype="0"]', "e => e.value") == "preprint" and page.input_value('[data-k="journal"][data-i="0"]') == "arXiv" and "Repository or series" in page.inner_text("#ir-c0"), page.inner_text("#ir-c0")[:400])
+            page.select_option('[data-ptype="0"]', "conference")
+            check("…changing the type renames the box at once and keeps what is in it (nothing is read again)", "Conference or proceedings" in page.inner_text("#ir-c0") and page.input_value('[data-k="journal"][data-i="0"]') == "arXiv")
+            page.fill('[data-k="journal"][data-i="0"]', "Kappa Workshop 2024"); page.select_option("#ir-to", "lib"); page.click("#ir-go")
+            page.wait_for_selector(".di-snack:has-text('Added 1 paper')", timeout=15000)
+            kr_ = next((r_ for r_ in api("/api/library") if r_.get("title", "").startswith("Kappa evidence")), {})
+            side_ = json.load(open(os.path.join(TMP, kr_["file"])[:-4] + ".paper.json")) if kr_.get("file") else {}
+            check("…it is filed as a conference paper under the venue you typed, and its type is kept next to the PDF (not in the index)",
+                  kr_.get("kind") == "conference" and kr_.get("journal") == "Kappa Workshop 2024" and side_.get("kind") == "conference" and "kind" not in open(os.path.join(TMP, "Papers", "_index.csv"), encoding="utf-8").readline(), (kr_.get("kind"), kr_.get("journal"), side_))
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]')
+            page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.select_option("#lf-kind", "conference"); page.keyboard.press("Escape")
+            page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
+            check("the Type filter on its own lists the conference papers and nothing else (it used to count as no filter at all)",
+                  page.locator("#lib-results .librow").count() == 1 and "Conference paper" in page.inner_text('#lib-results .librow:has-text("Kappa evidence") .tag.kind'), page.inner_text("#lib-results")[:300])
+            page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
+            page.check('#kind-dlg input[name="kd"][value="other"]'); page.select_option("#kd-lab", "Thesis"); page.click("#kd-go"); page.wait_for_selector("#kind-dlg", state="detached")
+            side_ = json.load(open(os.path.join(TMP, kr_["file"])[:-4] + ".paper.json"))
+            check("Change type writes only the file beside the PDF: now a thesis", side_.get("kind") == "other" and side_.get("label") == "Thesis", side_)
+            page.select_option("#lf-kind", "") if page.is_visible("#lf-kind") else None
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]'); page.fill("#lf-q", "Kappa evidence")
+            page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
+            page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
+            check("…and the dialog opened again shows it as a thesis (the word is not lost when you only look)", page.is_checked('#kind-dlg input[name="kd"][value="other"]') and page.input_value("#kd-lab") == "Thesis" and page.is_visible("#kd-lab"))
+            page.click("#kd-no"); page.fill("#lf-q", "")
+            api("/api/library/delete", {"files": [kr_["file"]]})                # (the checks that follow count the library as it was)
+            idx_ = os.path.join(TMP, "Papers", "_index.csv")
+            with open(idx_, newline="", encoding="utf-8") as f_:
+                rd_ = csv.DictReader(f_); cols_ = rd_.fieldnames; keep_ = [r_ for r_ in rd_ if not r_.get("title", "").startswith("Kappa evidence")]
+            with open(idx_, "w", newline="", encoding="utf-8") as f_:
+                w_ = csv.DictWriter(f_, cols_); w_.writeheader(); w_.writerows(keep_)
+            check("(the paper is gone again for the checks that follow)", len(api("/api/library")) == nk0_)
 
             print("drag and drop PDFs you already have")
             def mkpdf(text, authors=None):

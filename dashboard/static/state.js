@@ -114,7 +114,7 @@ export function progress(el, m) {
     if (p) clearInterval(p.timer);
     el.innerHTML = `<span class="jw-prog" role="progressbar" aria-label="Working" aria-valuemin="0" aria-valuemax="100"><span class="jw-bar"><i></i></span><span class="jw-pmsg" aria-live="polite"></span></span>`;
     p = {node: el.firstElementChild, t0: Date.now(), m: {}};
-    p.timer = setInterval(() => { if (!el.contains(p.node)) { clearInterval(p.timer); PROG.delete(el); return; } paint(p); }, 1000);
+    p.timer = setInterval(() => { if (!el.isConnected || !el.contains(p.node)) { clearInterval(p.timer); PROG.delete(el); return; } paint(p); }, 1000);     // (written over, or taken off the page)
     PROG.set(el, p);
   }
   p.m = m;

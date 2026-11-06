@@ -710,15 +710,15 @@ async function genSummary(fresh) {
     for (;;) {
       const {value, done: fin} = await rd.read(); if (fin) break; buf += dec.decode(value, {stream: true}); let i;
       while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue; const m = JSON.parse(line);
-        if (S.file !== forFile) return;                // (another paper was opened meanwhile: its tab is not written over)
+        if (S.file !== forFile) { rd.cancel().catch(() => {}); return; }       // (another paper was opened meanwhile: its tab is not written over)
         if (m.type === "text") { text += m.delta; el.innerHTML = sumFrame(text, {live: true, key: "gen", title: tplName}); } else if (m.type === "error") throw new Error(m.error); else if (m.type === "done") done = m; }
     }
     el._gen = text; el._model = done ? done.model : "";
     el.innerHTML = sumFrame(text, {key: "gen", title: tplName, meta: [done && {t: done.provider + " · " + done.model}, done && (done.cached ? {t: "cached"} : done.cost != null ? {t: "$" + done.cost.toFixed(3)} : null), {t: "not saved yet", cls: "edited", title: "Use the buttons below to keep it"}]});
     act.innerHTML = `<button class="rd-btn" data-sx="notes">→ Save to notes</button><button class="rd-btn" data-sx="replace">${S.meta.summary ? "Replace the saved summary" : "Save as this paper’s summary"}</button><button class="rd-btn" data-sx="copy">Copy</button><button class="rd-btn" data-sx="again" title="Generate again, ignoring the stored answer">⟳</button>`;
     act.classList.remove("hide"); $("#sum-saved", root).classList.toggle("hide", !S.meta.summary);
-  } catch (e) { el.innerHTML = errBox(e, {retry: 'data-sx="again"'}); }
-  $("#sum-go", root).disabled = false;
+  } catch (e) { if (S.file === forFile) el.innerHTML = errBox(e, {retry: 'data-sx="again"'}); }
+  finally { $("#sum-go", root).disabled = false; }            // (also when another paper was opened meanwhile: its Generate button works)
 }
 async function replaceSummary(text) {
   if (S.meta.summary && !confirm("Replace the saved summary of this paper with this one?\nThe old one is kept in state/summary_backups/.")) return;

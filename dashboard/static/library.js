@@ -428,7 +428,7 @@ async function fulltext(opts) {
   const open = i => { const it = res.items[i], row = lib()[byFile(it.file)]; if (row) ctx.readPaper(row, {goto: {page: it.page, quote: it.quote}}); };
   box.querySelectorAll("[data-ft]").forEach(c => { c.onclick = () => open(+c.dataset.ft); c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(+c.dataset.ft); } }; });
 }
-const active = () => !!(F.q || F.status || F.star || F.folder || F.journal || F.year || F.tag || F.notes || F.list);
+const active = () => !!(F.q || F.status || F.star || F.folder || F.journal || F.year || F.tag || F.kind || F.notes || F.list);
 let seq = 0;
 async function results(opts) {
   const box = $("#lib-results"); if (!box) return;
@@ -566,12 +566,13 @@ function actionbar() {
 function setKind(files) {
   files = files.filter(f => { const r = lib()[byFile(f)]; return r && !r.book; }); if (!files.length) return;
   const r0 = lib()[byFile(files[0])], cur = files.every(f => (lib()[byFile(f)].kind || "journal") === (r0.kind || "journal")) ? (r0.kind || "journal") : "";
+  const lab0 = cur === "other" && files.every(f => (lib()[byFile(f)].kind_label || "") === (r0.kind_label || "")) ? (r0.kind_label || "") : "";      // (a Report or Thesis keeps its word)
   $("#kind-dlg") && $("#kind-dlg").remove();
   const d = document.createElement("dialog"); d.id = "kind-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "kind-h");
   d.innerHTML = `<h2 id="kind-h">What ${files.length === 1 ? "is this paper" : "are these " + files.length + " papers"}?</h2>
     <p class="pmeta">Only the type is changed: the files stay where they are and keep their journal or source name.</p>
     <div class="di-list" role="radiogroup" aria-label="Type">${KINDS.map(([v, , one]) => `<label class="di-opt"><input type="radio" name="kd" value="${v}"${cur === v ? " checked" : ""}> ${one}</label>`).join("")}</div>
-    <label class="hide" id="kd-lab-w">Which one <select id="kd-lab"><option value="">Other</option><option>Report</option><option>Thesis</option><option>Chapter</option><option>Dataset</option></select></label>
+    <label class="${cur === "other" ? "" : "hide"}" id="kd-lab-w">Which one <select id="kd-lab">${[["", "Other"], ...["Report", "Thesis", "Chapter", "Dataset"].map(x => [x, x])].map(([v, t]) => `<option value="${v}"${v === lab0 ? " selected" : ""}>${t}</option>`).join("")}</select></label>
     <div class="row di-btns"><button class="btn" id="kd-no">Cancel</button><button class="btn primary" id="kd-go"${cur ? "" : " disabled"}>Save</button></div>`;
   document.body.append(d); d.showModal();
   const pick = () => (d.querySelector("input[name=kd]:checked") || {}).value || "";

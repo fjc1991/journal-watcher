@@ -196,7 +196,7 @@ async function review(files, w, o = {}) {
     d.addEventListener("change", e => {
       if (e.target.id === "ir-all") {                              // every paper whose type you have not set yourself
         const v = e.target.value; if (!v) return;
-        cards.forEach(c => { if (c.kind !== "book" && !c.ptypeTouched) { c.ptype = v; c.label = ""; relabel(c); } });
+        cards.forEach(c => { if (c.kind !== "book" && !c.ptypeTouched) { c.ptype = v; c.ptypeTouched = true; c.label = ""; relabel(c); } });     // (you chose it: a card still being read keeps it)
         return;
       }
       if (e.target.dataset.ptype !== undefined) {                  // a paper's type: only the words of its venue box change (nothing is read again)
