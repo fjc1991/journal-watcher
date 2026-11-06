@@ -937,6 +937,12 @@ The author installed the dry-run build (from the release workflow, run #2) on th
 
 **Not verified.** OpenAlex's live answers (merged ids, how fast new works appear) and the cost of a full listing per followed author each week (one call per 200 works).
 
+### Review of items 32–37 (2026-11-06)
+
+A review workflow (four reviewers by area, a skeptic for each) kept 18 of 26 findings; 17 are fixed in the same PR. Keys: a line in the older layout's `.env` stayed after a move and the page said none was left (both files are now cleaned, and a key still in a file is reported as such; a move no longer overwrites a Keychain key with an old line; Elsevier's API is named as the app). Human checks: a page saved as a PDF could not use the kept window of the second "Open the check" (it now waits there); with `auto_open=False` a notification asked for a press when nothing could wait for it (now only once another site's paper starts); 1.2.6's "waiting for you" note was no longer cleaned on load; "Summarise N papers" was refused during a download that writes no summaries. Backup model: a $0 model without ":free" could be chosen; a batch that failed counted as screened by the backup; the savings of reused verdicts were priced at the wrong model; the page did not follow a Settings change. Whole book: a part with no body text (a bibliography, an index) failed every time, so no overview could ever be written (it is now noted as empty and left out); when the overview input was cut, the chapters of a book whose top level is Parts were dropped (now the deepest level goes first, and the note says what); another book's job showed under this one. Follow: a deleted folder's warning never showed and following silently went on in a new folder (now paused and listed); a co-authored work went into one folder only; the run said "followed" after a failed listing; "Download whole queue" summarised the followed works without the Library's estimate (they are now downloaded only). Each fix's test fails on the code before it, except four small UI-only ones (the summaries refusal, the Settings listener, the savings figure, the other book's job), checked by reading.
+
+Kept as decided with the author, and flagged in the PR: the backup model screens the rest of the run by itself (the run says so afterwards) rather than asking first; a reviewer rated that high because the cost shown before the run was the configured model's.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
