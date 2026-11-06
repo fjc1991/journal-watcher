@@ -731,7 +731,7 @@ async function replaceSummary(text) {
 let SUM_FOR = "";
 async function loadSum() {
   const el = $("#sum-body", root), path = S.meta.summary, book = !!(S.meta && S.meta.journal === "Books");
-  if (SUM_FOR !== S.file) { SUM_FOR = S.file; delete el.dataset.file; el._gen = ""; el._title = ""; $("#sum-act", root).classList.add("hide"); }      // (another paper: nothing of the last one stays)
+  if (SUM_FOR !== S.file) { SUM_FOR = S.file; delete el.dataset.file; el._gen = ""; el._title = ""; $("#sum-act", root).classList.add("hide"); $("#sum-go", root).disabled = false; }      // (a summary of the last paper may still be coming: it stops at its next line)      // (another paper: nothing of the last one stays)
   $("#sum-t", root).classList.toggle("hide", book); $("#sum-go", root).classList.toggle("hide", book); $("#sum-bk", root).classList.toggle("hide", !book);
   if (book) { $("#sum-saved", root).classList.add("hide"); $("#sum-act", root).classList.add("hide"); if (await loadBookSum(el)) return; }
   if (!path) { delete el.dataset.file; el.innerHTML = book ? el.innerHTML : `<div class="rd-empty">No summary has been written for this paper yet.<br>Pick a template above and press Generate.</div>`; return; }

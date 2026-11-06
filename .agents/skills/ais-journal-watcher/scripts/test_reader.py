@@ -439,6 +439,36 @@ def fake_dl5(p, env, browser=None, dry=False):
 dl.download_paper, dl.open_browser = fake_dl5, _BrB
 pl.download_and_summarize(runF, [E5["id"], W5["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=tick, clock=lambda: clk[0], checks=checks, summarize=False)
 assert not opened and runF.papers[E5["id"]]["dl_status"] == "ok" and any(e == "challenge" and d.get("state") == "cleared" and d.get("host") == SD for e, d in ev_log), (opened, [d for e, d in ev_log if e == "challenge"])
+# (14f) a paper with the same title as one you have WITHOUT a DOI is another paper: it is downloaded, not pointed at your file
+he = os.path.join(dl.PAPERS, "2024-05", "x_editorial.pdf"); open(he, "wb").write(R["small"])
+dl.save_index({"doi": "", "title": "Editorial", "journal": "MIS Quarterly", "abbr": "MISQ"}, os.path.relpath(he, dl.ROOT), "ok", "added by you")
+ED = paper(id="doi:10.1287/isre.ed", doi="10.1287/isre.ed", title="Editorial"); runG = mkrun([ED]); seen_dl.clear()
+dl.download_paper, dl.open_browser = fake_dl4, _Br
+pl.download_and_summarize(runG, [ED["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+assert seen_dl == [ED["id"]] and runG.papers[ED["id"]].get("file") != os.path.relpath(he, dl.ROOT), (seen_dl, runG.papers[ED["id"]])
+# (14g) the download fails, but the paper's PDF came meanwhile on another run's card: the card shows it as in the library, not as failed
+Y = paper(id="doi:10.1287/mnsc.2024.0016", doi="10.1287/mnsc.2024.0016"); runY = mkrun([Y]); runY2 = mkrun([dict(Y)])
+def fake_dl6(p, env, browser=None, dry=False):
+    pl.attach_pdf(runY2, Y["id"], R["right"]); return False, None, "no PDF on any route"
+dl.download_paper = fake_dl6
+pl.download_and_summarize(runY, [Y["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+assert runY.papers[Y["id"]]["dl_status"] == "ok" and runY.papers[Y["id"]]["file"] == runY2.papers[Y["id"]]["file"], runY.papers[Y["id"]]
+# (14h) the papers that waited for a site's check got their PDFs on another run's cards: pressing "Open the check" opens nothing
+E6 = paper(id="doi:10.1287/mnsc.2024.0017", doi="10.1287/mnsc.2024.0017", publisher="elsevier")
+W6 = paper(id="doi:10.1002/w6", doi="10.1002/w6", title="Wiley paper six", publisher="wiley")
+runH = mkrun([E6, W6]); runH2 = mkrun([dict(E6)]); checks = queue.Queue(); ev_log.clear(); clk[0] = 0.0; opened.clear()
+def fake_dl7(p, env, browser=None, dry=False):
+    if p["publisher"] == "elsevier":
+        browser.ch(SD, "pending"); return False, None, "challenge:%s" % SD
+    pl.attach_pdf(runH2, E6["id"], R["right"]); checks.put(SD)
+    f = dl.out_path(dict(p)); open(f, "wb").write(R["small"]); return True, f, "browser"
+dl.download_paper, dl.open_browser = fake_dl7, _BrB
+pl.download_and_summarize(runH, [E6["id"], W6["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=tick, clock=lambda: clk[0], checks=checks, summarize=False)
+assert not opened and runH.papers[E6["id"]]["dl_status"] == "ok" and any(e == "download" and d.get("id") == E6["id"] and d.get("dl_status") == "ok" for e, d in ev_log), (opened, runH.papers[E6["id"]]["dl_status"])
+# (14i) a followed work's co-author folder gets the key its library copy has (a copy keyed by its title)
+runJ = pl.Run("weekly", {}); runJ.add_paper(paper(id="doi:10.7777/j.1", doi="10.7777/j.1", title="Jay", folder=fidF, openalex="https://openalex.org/W50", also_folders=[[fid2, "https://openalex.org/W51"]], dl_status="ok", lib_key="a title key"))
+pl.follow_settle(runJ, ["doi:10.7777/j.1"])
+assert "a title key" in fo.get(fid2)["papers"], fo.get(fid2)["papers"]
 # (14e) Check my PDFs' "Remove" writes the index under the same lock as a download
 keep_rm = identity._remove
 identity._remove = lambda f: dl.INDEX_LOCK._is_owned()
@@ -1665,6 +1695,9 @@ print("JSON" + json.dumps(out))
             assert kd.from_text(body_ + "This paper is based on the first author's doctoral dissertation.\nJournal of X 2020") == (None, "", "")
             assert kd.from_text(body_ + "An earlier version was presented at the Fortieth\nInternational Conference on Information Systems, Munich, 2019.") == (None, "", "")
             assert kd.from_text("A thesis submitted for the degree of Doctor of Philosophy\nJane Doe") == ("other", "", "Thesis")
+            assert kd.from_text(body_ + "the next section of this paper, which was accepted\nForty-Fourth International Conference on Information Systems, Hyderabad, India 2023\n1") == ("conference", "ICIS 2023", ""), "a real footer stays a conference whatever the body line above it says"
+            assert kd.from_text("A study\n* This article is based on the first author's doctoral dissertation, submitted in partial fulfillment of the requirements for the PhD at X University.\n" + "t\n" * 30) == (None, "", "")
+            assert kd.from_text("Aalto University\nDOCTORAL DISSERTATIONS 12/2020\nJane Doe") == ("other", "", "Thesis")
             assert kd.from_crossref({"type": "posted-content", "doi": "10.1101/2020.01.01.1", "group_title": "Neuroscience", "publisher": "Cold Spring Harbor Laboratory"})[1] != "Neuroscience"
             # a paper added by its DOI (or a dropped PDF filed at once) is filed under its series, as in the review dialog: SSRN, not "SSRN Electronic Journal"
             old_rec = dict(pre, doi="10.2139/ssrn.4400002", url="https://doi.org/10.2139/ssrn.4400002", type="journal-article", container="SSRN Electronic Journal", group_title="")

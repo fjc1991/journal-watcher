@@ -695,7 +695,7 @@ def follow_settle(run, ids, keys=None):
                 authors.follow_mark(fid2, [oa2])
                 if p.get("dl_status") == "ok":
                     try:
-                        authors.file_new(fid2, (keys or {}).get(i) or paper_key(p))
+                        authors.file_new(fid2, (keys or {}).get(i) or p.get("lib_key") or paper_key(p))
                     except Exception:  # noqa: BLE001
                         pass
             ok += 1
@@ -1387,13 +1387,13 @@ def _adopt(p):
     """The paper is in the library already (another run, or a PDF you added to it on another run's card, while this download was running): the run's paper points to that
     copy, and nothing is downloaded. A copy you added yourself is not summarised by itself. True if it was there."""
     import importer
-    ex = importer._existing(p)
-    if not ex:
+    k = paper_key(p)                                 # (the same key exactly, as mark_downloaded: an "Editorial" without a DOI is not another journal's "Editorial")
+    row = next((r for r in importer.library_rows() if k and dl.index_key(r) == k and os.path.exists(os.path.join(ROOT, r["file"]))), None)
+    if not row:
         return False
-    row = next((r for r in importer.library_rows() if r["file"] == ex), {})
-    md = ex[:-4] + ".md"
-    p.update(file=ex, dl_status="ok", summary=md if os.path.exists(os.path.join(ROOT, md)) else None, dl_note=row.get("note") or p.get("dl_note"),
-             summary_by_hand=bool(p.get("summary_by_hand") or str(row.get("note") or "").startswith("added by you")), lib_key=dl.index_key(row) if row else paper_key(p))
+    ex, md = row["file"], row["file"][:-4] + ".md"
+    p.update(file=ex, summary=md if os.path.exists(os.path.join(ROOT, md)) else None, dl_note=row.get("note") or p.get("dl_note"),
+             summary_by_hand=bool(p.get("summary_by_hand") or str(row.get("note") or "").startswith("added by you")), lib_key=k)      # (have_it marks it "ok" and tells the page)
     return True
 
 
@@ -1604,9 +1604,11 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     def open_one(br, host, stay):
         if host not in deferred or host in given_up or not hasattr(br, "open_check"):
             return
-        if all(has_file(q) for q in deferred[host]):        # you added the PDFs of every paper waiting for this check yourself: nothing to open
+        with ATTACH_LOCK:
+            nothing = all(has_file(q) or _adopt(q) for q in deferred[host])
+        if nothing:                                         # you added the PDFs of every paper waiting for this check yourself (here or on another run's card): nothing to open
             for q in deferred.pop(host):
-                finished(q, final=False)
+                have_it(q)
             for k in [k for k, v in waiting_pub.items() if v == host]:
                 waiting_pub.pop(k)
             emit("challenge", {"host": host, "state": "cleared", "msg": ""})
@@ -1624,10 +1626,12 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             again = []
             for q in back:                                  # no longer waiting for the user (a Stop before they come up leaves them as never tried)
                 with ATTACH_LOCK:
-                    if has_file(q):                         # (you added its PDF yourself while it waited: it stays as it is)
-                        finished(q, final=False)
-                        continue
-                    q.update(dl_status=None, dl_note=None)
+                    mine = has_file(q) or _adopt(q)         # (you added its PDF while it waited, here or on another run's card)
+                    if not mine:
+                        q.update(dl_status=None, dl_note=None)
+                if mine:
+                    have_it(q)
+                    continue
                 emit_dl(q)
                 again.append(q)
             todo_q.extendleft(reversed(again))              # the site's papers, back to the front of the queue (still paced)
@@ -1723,6 +1727,12 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         run.save()
                         continue
                     else:
+                        with ATTACH_LOCK:                            # (its PDF came meanwhile, on another run's card or by another run: the library keeps it, and so does this card)
+                            came = _adopt(p)
+                        if came:
+                            have_it(p)
+                            run.save()
+                            continue
                         own = re.sub(r"wrong paper via [^|]*", "", note)           # what the routes said, without what a refused PDF said about itself (its headline is not a status)
                         p.update(dl_status="needs_library" if ("needs_library_login" in own or "library_setup:" in own) else
                                  "unavailable" if "not_in_library" in own else
@@ -1755,12 +1765,14 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         for host, ps in deferred.items():
             for p in ps:
                 with ATTACH_LOCK:
-                    mine = has_file(p)                      # (you added its PDF yourself while it waited)
+                    mine = has_file(p) or _adopt(p)         # (you added its PDF while it waited, here or on another run's card)
                     if not mine:
                         p.update(dl_status="needs_check", dl_note=NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), host))
-                if not mine:
+                if mine:
+                    have_it(p)
+                else:
                     emit_dl(p)
-                finished(p, final=not mine)
+                    finished(p)
         left = sum(1 for v in deferred.values() for p in v if p.get("dl_status") == "needs_check")
         if left:
             emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % left, "level": "warn"})

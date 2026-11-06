@@ -412,7 +412,7 @@ def _read(data):
     except Exception:  # noqa: BLE001
         pass
     kind, venue, label = kinds.from_text(first) if first else (None, "", "")
-    if kind is None and re.search(r"(a (doctoral |master'?s )?(thesis|dissertation) submitted|in partial fulfil{1,2}ment of the requirements)", r["text"][:6000], re.I):
+    if kind is None and kinds.thesis_in(r["text"][:6000]):
         kind, label = "other", "Thesis"
     return {"dois": dois[:4], "title": re.sub(r"\s+", " ", title or "").strip(), "pages": r["pages_read"], "scan": bool(r["pages_read"] and r["scans"] * 2 >= r["pages_read"] and r["words"] < 60),
             "kind": kind, "venue": venue, "label": label}

@@ -81,12 +81,12 @@ function wire() {
   const cardAt = e => e.target && e.target.closest ? e.target.closest("#papers .paper") : null;
   document.addEventListener("dragover", e => {
     if (!hasFiles(e)) return;
-    const c = cardAt(e); if (!c) { unmark(); return; }
+    const c = cardAt(e); if (!c) { unmark(); told = null; return; }
     e.preventDefault(); if (window.DropImport && DropImport.off) DropImport.off();
     if (c.classList.contains("can-attach")) { e.dataTransfer.dropEffect = "copy"; if (over !== c) { unmark(); over = c; c.classList.add("at-over"); } }
     else {                                       // (the browser then cancels the drop: say why now, once for this card)
       e.dataTransfer.dropEffect = "none"; unmark();
-      if (told !== c) { told = c; const p = window.RunView && RunView.paper(c.dataset.id);
+      if (!told || told.c !== c || Date.now() - told.t > 4000) { told = {c, t: Date.now()}; const p = window.RunView && RunView.paper(c.dataset.id);
         toast(p && p.dl_status === "downloading" ? "This paper is being downloaded right now. Wait until it is done; if it does not come, add your PDF then." : "This paper is already in your library."); }
     }
   }, true);

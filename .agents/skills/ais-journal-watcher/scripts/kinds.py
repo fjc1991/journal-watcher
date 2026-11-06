@@ -92,7 +92,9 @@ def from_text(text):
         return "preprint", "SSRN", ""
     told = re.compile(r"presented|earlier version|previous version|based on|accepted|forthcoming", re.I)      # a footnote about a talk is not the paper's own venue
     edge_lines = lines[:12] + lines[-8:]
-    said = lambda i: told.search(edge_lines[i]) or (i and told.search(edge_lines[i - 1][-60:]))      # (a footnote wrapped over two lines: "…presented at the Fortieth" / "International Conference…")
+    seam = min(12, len(lines))                     # (the head's last line and the foot's first are not neighbours)
+    begun = re.compile(r"\b(presented|appeared)\s+(at|in)\b[^.]{0,40}$|\b(earlier|previous) version\b[^.]{0,60}$", re.I)
+    said = lambda i: told.search(edge_lines[i]) or (0 < i != seam and len(lines) > 20 and begun.search(edge_lines[i - 1]))      # (a footnote wrapped over two lines: "…presented at the Fortieth" / "International Conference…")
     for i, ln in enumerate(edge_lines):
         y = re.search(r"\b(19|20)\d{2}\b", ln)
         if not y or said(i):
@@ -104,11 +106,21 @@ def from_text(text):
         m = re.search(r"Proceedings of the [^|]{3,90}?(Conference|Symposium|Workshop)[^,|]{0,40}", ln)
         if m and not said(i):
             return "conference", m.group(0).strip(), ""
-    if re.search(r"(a (doctoral |master'?s )?(thesis|dissertation) submitted|in partial fulfil{1,2}ment of the requirements)", str(text or "")[:4000], re.I):
+    if thesis_in(text):
         return "other", "", "Thesis"
     if re.search(r"^\s*technical report\b", edge, re.I | re.M):
         return "other", "", "Report"
     return None, "", ""
+
+
+_THESIS = re.compile(r"\b(a (doctoral |master'?s )?(thesis|dissertation) submitted|in partial fulfil{1,2}ment of the requirements|submitted (in partial fulfil{1,2}ment|for the degree))", re.I)
+_ABOUT = re.compile(r"based on|draws on|this (article|paper|study|work)|chapter of|from (my|the author'?s?|the first author'?s?) (doctoral|phd|master)", re.I)
+
+
+def thesis_in(text):
+    """Does the cover (the first 25 lines) say this is a thesis? A line that says the article is based on a dissertation (a footnote) does not count."""
+    lines = [l.strip() for l in str(text or "").splitlines() if l.strip()][:25]
+    return any(_THESIS.search(l) and not _ABOUT.search(l) for l in lines) or any(re.fullmatch(r"doctoral dissertations?( \d+/\d{4})?", l, re.I) for l in lines)
 
 
 _DEVICE = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)

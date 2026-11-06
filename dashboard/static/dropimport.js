@@ -149,13 +149,13 @@ async function review(files, w, o = {}) {
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
       if (c.sel >= 0) {
         const cand = c.a.candidates[c.sel]; c.fields = fieldsOf(cand, c.kind);
-        if (c.kind !== "book" && !c.ptypeTouched) { c.ptype = cand.kind || "journal"; c.label = cand.label || ""; }
+        if (c.kind !== "book" && !c.ptypeTouched && !c.ptypeAll) { c.ptype = cand.kind || "journal"; c.label = cand.label || ""; }
       } else {
         const typed = c.kind !== "book" && c.fields && c.fields.journal;     // (a venue you typed stays; else what the PDF itself says, if anything)
         c.fields = blank(c.kind, c.a.pdf.title);
         if (c.kind !== "book") {
           c.fields.journal = typed || c.a.pdf.venue || "";
-          if (!c.ptypeTouched) { c.ptype = c.a.pdf.kind || "journal"; c.label = c.a.pdf.label || ""; }
+          if (!c.ptypeTouched && !c.ptypeAll) { c.ptype = c.a.pdf.kind || "journal"; c.label = c.a.pdf.label || ""; }
         }
       }
     };
@@ -195,8 +195,14 @@ async function review(files, w, o = {}) {
     (async () => { for (const c of cards) { if (closed) break; if (!(await look(c)) && closed) break; } })();
     d.addEventListener("change", e => {
       if (e.target.id === "ir-all") {                              // every paper whose type you have not set yourself
-        const v = e.target.value; if (!v) return;
-        cards.forEach(c => { if (c.kind !== "book" && !c.ptypeTouched) { c.ptype = v; c.ptypeTouched = true; c.label = ""; relabel(c); } });     // (you chose it: a card still being read keeps it)
+        const v = e.target.value;
+        cards.forEach(c => {                                           // (a card still being read keeps it: take() leaves a type chosen here alone; a type chosen on a card itself wins)
+          if (c.kind === "book" || c.ptypeTouched) return;
+          c.ptypeAll = !!v;
+          const own = c.state !== "ok" ? null : c.sel >= 0 ? c.a.candidates[c.sel] : c.a.pdf;            // ("as each one says": its own type and word again)
+          c.ptype = v || (own ? own.kind || "journal" : c.ptype); c.label = v ? "" : (own && own.label) || "";
+          relabel(c);
+        });
         return;
       }
       if (e.target.dataset.ptype !== undefined) {                  // a paper's type: only the words of its venue box change (nothing is read again)

@@ -1624,8 +1624,13 @@ fx.fetch_journal = lambda j: []                                                 
                 page.wait_for_function("document.querySelector('#toast') && /already in your library/.test(document.querySelector('#toast').textContent)", timeout=5000); told_ = True
             except Exception:  # noqa: BLE001
                 told_ = False
+            page.evaluate("document.querySelector('#toast') && (document.querySelector('#toast').textContent = '')")
+            page.evaluate("""(sel) => { const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array([37, 80, 68, 70])], "again.pdf", {type: "application/pdf"}));
+              const o = {dataTransfer: dt, bubbles: true, cancelable: true}; document.querySelector("#runmeta").dispatchEvent(new DragEvent("dragover", o));
+              document.querySelector(sel + " .ptitle").dispatchEvent(new DragEvent("dragover", o)); }""", C_)
+            told2_ = page.evaluate("/already in your library/.test((document.querySelector('#toast') || {}).textContent || '')")
             page.evaluate("document.dispatchEvent(new DragEvent('dragend', {bubbles: true}))")
-            check("…dragging a PDF over it now says it is already in your library (a browser cancels a drop there, so it is said while you drag)", told_)
+            check("…dragging a PDF over it now says it is already in your library (a browser cancels a drop there, so it is said while you drag), and says it again on the next drag", told_ and told2_)
             check("…the card says Downloaded and 'No summary yet', with no 'Retry summary' (its summary is asked for in the Library, with the cost first), and it takes no more drops",
                   "No summary yet" in ct_ and "Retry summary" not in ct_ and "can-attach" not in (page.get_attribute(C_, "class") or ""), ct_[:300])
             # (the checks after this one expect the library as it was: the paper is deleted again, and its "deleted" row taken out of the index)
@@ -1792,6 +1797,15 @@ fx.fetch_journal = lambda j: []                                                 
             _pk.insert_textbox(_pmK.Rect(60, 210, 540, 780), "Kim Kappa. We run pricing experiments on a two-sided platform. " * 20, fontsize=9)
             _dk.embfile_add("padding", os.urandom(45000)); kappa_ = _b64K.b64encode(_dk.tobytes()).decode(); _dk.close()
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-tile"); nk0_ = len(api("/api/library"))
+            _dk = _pmK.open(); _pk = _dk.new_page(); _pk.insert_textbox(_pmK.Rect(60, 60, 540, 200), "Lambda notes on marketplace design for gig work platforms", fontsize=16)
+            _pk.insert_textbox(_pmK.Rect(60, 210, 540, 780), "Lee Lambda. We study marketplace design. " * 20, fontsize=9); _dk.embfile_add("padding", os.urandom(45000)); lambda_ = _b64K.b64encode(_dk.tobytes()).decode(); _dk.close()
+            page.evaluate(JS_DROP, [".fp-path", [[kappa_, "kappa.pdf", "application/pdf"], [lambda_, "lambda.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]")
+            page.wait_for_selector("#ir-c0 .ir-f", timeout=30000); page.wait_for_selector("#ir-c1 .ir-f", timeout=30000)
+            types_ = lambda: [page.eval_on_selector('[data-ptype="%d"]' % i_, "e => e.value") for i_ in (0, 1)]
+            page.select_option("#ir-all", "other"); t1_ = types_(); page.select_option("#ir-all", "conference"); t2_ = types_(); page.select_option("#ir-all", ""); t3_ = types_()
+            check("'Set every paper's type' sets them all, again when you choose another, and '(as each one says)' gives each its own type back",
+                  t1_ == ["other", "other"] and t2_ == ["conference", "conference"] and t3_ == ["preprint", "journal"], str([t1_, t2_, t3_]))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
             page.evaluate(JS_DROP, [".fp-path", [[kappa_, "kappa.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=30000)
             check("a PDF with an arXiv stamp is offered as a preprint, with arXiv in its box, and the box is named for a repository or series",
                   page.eval_on_selector('[data-ptype="0"]', "e => e.value") == "preprint" and page.input_value('[data-k="journal"][data-i="0"]') == "arXiv" and "Repository or series" in page.inner_text("#ir-c0"), page.inner_text("#ir-c0")[:400])
@@ -1805,7 +1819,10 @@ fx.fetch_journal = lambda j: []                                                 
                   kr_.get("kind") == "conference" and kr_.get("journal") == "Kappa Workshop 2024" and side_.get("kind") == "conference" and "kind" not in open(os.path.join(TMP, "Papers", "_index.csv"), encoding="utf-8").readline(), (kr_.get("kind"), kr_.get("journal"), side_))
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]')
             page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.select_option("#lf-kind", "conference"); page.keyboard.press("Escape")
-            page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
+            try:
+                page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
+            except Exception:  # noqa: BLE001      (the check below says it failed; the next ones still run)
+                pass
             check("the Type filter on its own lists the conference papers and nothing else (it used to count as no filter at all)",
                   page.locator("#lib-results .librow").count() == 1 and page.inner_text('#lib-results .librow:has-text("Kappa evidence") .tag.kind').strip() == "Conference", page.inner_text("#lib-results")[:300])
             page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
