@@ -498,6 +498,9 @@ def main():
                 assert "no outline" in str(ex)
             # --- the job: the two parts without a summary, in the book's order, then one overview from the summaries; the saved one is kept
             reset(); answers(); n0 = len(mine())
+            v = bk.overview_view(bk.info_at(bpdf))       # what the book's page and the reader show: no overview yet, 1 of 3 parts summarised
+            assert v == {"overview": None, "overview_stale": False, "parts": 3, "parts_done": 1, "parts_summarised": 1}, v
+            assert bk.is_book(brel) and not bk.is_book(rel) and not bk.is_book("Papers/nowhere/none.pdf"), "a book is told by its .book.json; a paper is not a book"
             assert bj.start(brel, "A Test Book") is True and bj.start(brel, "A Test Book") is False          # one at a time
             st = wait()
             new = mine()[n0:]
@@ -508,6 +511,7 @@ def main():
             assert "S-Part I (p. 2)." in ov_body and "PRESAVED part two" in ov_body and "S-Sec 2.1" in ov_body and "[3] " not in ov_body and "Book: A Test Book" in ov_body, ov_body[:400]
             assert ov_body.index("S-Part I") < ov_body.index("PRESAVED") < ov_body.index("S-Sec 2.1"), "the summaries in the book's order"
             assert info["overview"]["text"] == "OV (p. 2)." and info["overview"]["parts"] == 3 and info["overview"]["model"] == "m1", info["overview"]     # (its references copied as written: not relabelled)
+            v = bk.overview_view(info); assert v["overview"]["text"] == "OV (p. 2)." and not v["overview_stale"] and (v["parts"], v["parts_done"], v["parts_summarised"]) == (3, 3, 3), v
             assert st["made"] == 2 and st["overview"] is True and not st["failed"] and st["stopped"] == "" and st["total"] == 3, st
             js = [j for j in act_.snapshot() if j["kind"] == "summary" and j["label"].startswith("Book summary")]
             assert js and js[0]["status"] == "done" and js[0]["scope"] == {"library": True, "ltab": "books"}, js[:1]
@@ -517,6 +521,9 @@ def main():
             answers(chapter=lambda b: ["REWRITTEN (p. 3)."])
             list(bk.summary_stream(brel, 0, "A Test Book", fresh=True))
             assert bk.overview_pending(bk.info_at(bpdf)) and bk.overview_stale(bk.info_at(bpdf))
+            v = bk.overview_view(bk.info_at(bpdf)); assert v["overview"]["text"] == "OV (p. 2)." and v["overview_stale"] is True, "an out-of-date overview is still shown, marked as such"
+            ie = {"pages": 4, "toc": toc, "summaries": {"1-3": {"empty": True}, "3-4": {"empty": True}, "4-4": {"empty": True}}}
+            assert bk.overview_view(ie) == {"overview": None, "overview_stale": False, "parts": 3, "parts_done": 3, "parts_summarised": 0}, "parts with no text are done but not summarised"
             n1 = len(mine()); assert bj.start(brel, "A Test Book") is True; wait()
             assert len(mine()) - n1 == 1 and sysof(mine()[-1]).startswith("You write an OVERVIEW") and "REWRITTEN" in mine()[-1]["messages"][-1]["content"]
             assert not bk.overview_pending(bk.info_at(bpdf)) and not bk.overview_stale(bk.info_at(bpdf))
@@ -1303,6 +1310,14 @@ print("JSON" + json.dumps(out))
             hits_ = ls_.search(rows_, kind="conference"); hits_ = hits_.get("results", hits_) if isinstance(hits_, dict) else hits_
             assert {x["file"] for x in hits_} == {rc["file"]}, [x["file"] for x in hits_]
             assert sm_.clean_filters({"kind": "preprint", "q": "x"}).get("kind") == "preprint"
+            keep_ = (ls_.notes_of, ls_.summary_of, ls_.card_text)       # words found in a paper's highlights do not hide the papers after it (a loop once reused the name of the type filter)
+            try:
+                ls_.notes_of = lambda r: {"highlights": [{"text": "a zebra crossing"}], "cards": []}; ls_.summary_of = ls_.card_text = lambda r: ""
+                three_ = [{"file": "Papers/a%d.pdf" % i, "title": "T%d" % i, "authors": "", "journal": "J", "abbr": "J"} for i in range(3)]
+                assert [x["file"] for x in ls_.search(three_, "zebra")] == [r_["file"] for r_ in three_], "every paper whose highlight has the words is found"
+                assert [x["file"] for x in ls_.search(three_, "zebra", kind="journal")] == [r_["file"] for r_ in three_]
+            finally:
+                ls_.notes_of, ls_.summary_of, ls_.card_text = keep_
             # the sidecar goes with the paper when it is deleted
             sp = os.path.join(dl.ROOT, rc["file"])[:-4] + ".paper.json"
             assert os.path.exists(sp) and sp in __import__("notes_store").sidecars(os.path.join(dl.ROOT, rc["file"]))

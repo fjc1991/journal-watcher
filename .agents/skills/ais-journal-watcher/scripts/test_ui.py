@@ -1850,7 +1850,7 @@ fx.fetch_journal = lambda j: []                                                 
             book_b64 = mk_epub("Platforms and Their Governance", "978-0-201-83595-3")
             n_all = lambda: len(api("/api/library")); n_before_books = n_all()
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
-            check("the Library has a Books tab next to Papers", [b_.inner_text().strip() for b_ in page.locator(".libtabs button").all()][:2] == ["Papers", "Books"])
+            check("the Library has a Books tab next to Papers", [b_.inner_text().strip() for b_ in page.locator(".libtabs button .tn").all()][:2] == ["Papers", "Books"], str(page.locator(".libtabs button .tn").all_inner_texts()))
             page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-add")
             check("it is empty at first and says how to add books", "No books yet" in page.inner_text("#lib-books") and page.locator("#lib-papers:not(.hide)").count() == 0)
             ov = page.evaluate(JS_DROP, ["#lib-books", [EP(book_b64, "governance.epub")], True])
@@ -2035,6 +2035,38 @@ fx.fetch_journal = lambda j: []                                                 
                   "FAKE BOOK OVERVIEW" in page.inner_text("#bk-list .chap-overview") and page.inner_text("#bk-list [data-chap-whole]").strip() == "Book summary")
             page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("#bk-list [data-whole] .ok", timeout=10000)
             check("…pressing it says everything is done, and asks nothing", len(chat_calls("You write an OVERVIEW")) - n_ov0 == 1 and "up to date" in page.inner_text("#bk-list [data-whole]"))
+            print("book: the overview on the book's page and in the reader")
+            bk_row_ = '#bk-list .librow:has-text("Platforms and Their Governance")'
+            check("the book's row has the green 'ready' bar once its overview is written", "ready" in (page.get_attribute(bk_row_, "class") or ""), page.get_attribute(bk_row_, "class"))
+            page.click(bk_row_ + " .ptitle"); page.wait_for_selector("#drawer.on #dbook")
+            page.wait_for_function("!/Reading the book/.test(document.querySelector('#dbook').innerText)", timeout=10000)
+            check("…the book's page shows the overview of the whole book (it used to say 'No summary yet.')",
+                  "FAKE BOOK OVERVIEW from 3 summaries" in page.inner_text("#dbook") and "No summary yet" not in page.inner_text("#drawer") and "has changed since" not in page.inner_text("#dbook"), page.inner_text("#drawer")[:400])
+            page.click("#dchap"); page.wait_for_selector("#bk-list .chap-ol li", timeout=10000)
+            check("…its Chapters button closes the page and opens that book's chapters in Library → Books",
+                  not page.locator("#drawer.on").count() and page.get_attribute(bk_row_ + " [data-chap]", "aria-expanded") == "true" and "FAKE BOOK OVERVIEW" in page.inner_text("#bk-list .chap-overview"))
+            bj_path_ = os.path.join(TMP, ep_row["file"])[:-4] + ".book.json"; bj_keep_ = open(bj_path_, encoding="utf-8").read()
+            bj_ = json.loads(bj_keep_); bj_["overview"]["fingerprint"] = "changed-since"; open(bj_path_, "w", encoding="utf-8").write(json.dumps(bj_))   # (as if a chapter's summary had been written again)
+            page.click(bk_row_ + " .ptitle"); page.wait_for_selector("#drawer.on #dbook .chap-overview", timeout=10000)
+            check("…an overview older than a chapter's summary is still shown, and says it is out of date and how to bring it up to date",
+                  "FAKE BOOK OVERVIEW" in page.inner_text("#dbook") and "has changed since this overview was written" in page.inner_text("#dbook") and "Summarise the whole book" in page.inner_text("#dbook"), page.inner_text("#dbook")[:400])
+            page.click("#dread"); page.wait_for_selector(".rd-band .textLayer span", timeout=60000)
+            page.click('.rd-tabs button[data-tab="sum"]')
+            page.wait_for_function("/FAKE BOOK OVERVIEW/.test(document.querySelector('#sum-body').innerText)", timeout=10000)
+            check("…the reader's Summary tab shows the same overview, marked out of date, with no paper template or Generate button for a book",
+                  "FAKE BOOK OVERVIEW" in page.inner_text("#sum-body") and "has changed since" in page.inner_text("#sum-body") and not page.is_visible("#sum-go") and not page.is_visible("#sum-t")
+                  and "chapter by chapter" in page.inner_text("#sum-bk"), page.inner_text("#reader .rd-sub")[:300])
+            open(bj_path_, "w", encoding="utf-8").write(bj_keep_)
+            def post_code_(path, body):
+                try:
+                    urllib.request.urlopen(urllib.request.Request(base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})); return 200
+                except urllib.error.HTTPError as e_:
+                    return e_.code
+            n_any_ = len(chat_calls(""))
+            check("…a paper-template summary of a book is refused by the server (it would send the whole book with no estimate), and nothing is sent; nor is one saved",
+                  post_code_("/api/ai/summary", {"file": ep_row["file"], "template": "tldr"}) == 400 and len(chat_calls("")) == n_any_
+                  and post_code_("/api/doc/summary", {"file": ep_row["file"], "text": "A summary written by hand for the whole book."}) == 400 and not os.path.exists(os.path.join(TMP, ep_row["file"])[:-4] + ".md"))
+            page.click('.rd-bar [data-a="back"]')
 
             print("command palette (Ctrl+K)")
             page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#libitem"); page.wait_for_function("!document.querySelector('#palettebtn').disabled")
