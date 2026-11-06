@@ -433,15 +433,16 @@ def resolve(ids):
 
 
 def saved():
-    """The authors with a folder that still exists, for the Authors tab: [{folder, folder_name, name, ids, follow, follow_last, follow_warn, known}]."""
+    """The authors with a folder, for the Authors tab: [{folder, folder_name ("" when it was deleted), name, ids, follow, follow_last, follow_warn, known}]. A deleted
+    folder is listed only with the note that paused following."""
     import folders as fo
     with _lock:
         recs = [dict(r) for r in load()["authors"] if r.get("folder")]
     out = []
     for r in recs:
         f = fo.get(r["folder"])
-        if not f:
+        if not f and not r.get("follow_warn"):            # (a folder you deleted is listed only when following it was paused because of that: the note says so)
             continue
-        out.append({"folder": r["folder"], "folder_name": f.get("name", ""), "name": r.get("name", ""), "ids": r.get("ids") or [], "follow": bool(r.get("follow")),
+        out.append({"folder": r["folder"], "folder_name": (f or {}).get("name", ""), "name": r.get("name", ""), "ids": r.get("ids") or [], "follow": bool(r.get("follow")),
                     "follow_last": r.get("follow_last") or "", "follow_warn": r.get("follow_warn") or "", "known": len(r.get("follow_known") or [])})
     return sorted(out, key=lambda r: r["name"].lower())

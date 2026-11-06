@@ -238,7 +238,7 @@ const BSCOPE = {file: "", from: 0, to: 0, title: "", book: ""};                 
 const placeOf = (R, p) => R.source === "epub" ? "location " + p : R.offset ? (p > R.offset ? "p. " + (p - R.offset) : "front matter") : "file page " + p;
 function drawChapters(box, file, R) {
   box._R = R;
-  const allDone = R.chapters.length && R.chapters.every(c => c.summary) && R.overview && !R.overview_stale;
+  const allDone = R.chapters.length && R.chapters.every(c => c.summary || c.empty) && R.overview && !R.overview_stale;
   box.innerHTML = `<div class="chap-h"><b>Chapters and sections</b> <small>${R.source === "epub" ? "an EPUB has no printed pages: a place is “location N” in the reading copy" : R.offset ? `printed page = file page − ${R.offset}` : "file pages (set where printed page 1 is below to cite printed pages)"}</small>
       ${R.chapters.length ? ` <button class="btn small${allDone ? "" : " primary"}" data-chap-whole title="${allDone ? "Every chapter and section has its summary, and the overview of the book is written" : "Summarise every chapter and section that has no summary yet, then write an overview of the whole book from those summaries (you see what it costs first)"}">${allDone ? "Book summary" : "Summarise the whole book…"}</button>` : ""}</div>
     <div class="whole-box hide" data-whole></div>
@@ -258,15 +258,19 @@ async function wholeBook(card, box, b) {                        // the estimate 
   if (!out.classList.contains("hide") && !out.dataset.running) { out.classList.add("hide"); return; }
   out.classList.remove("hide"); out.innerHTML = `<div class="pmeta">Working out what it would cost…</div>`;
   let e; try { e = await api("/api/book/whole?file=" + encodeURIComponent(file)); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
-  if (e.status && e.status.running) { follow(card, box, out, file, e.status); return; }
+  if (e.status && e.status.running) {
+    if (e.status.file === file) follow(card, box, out, file, e.status);
+    else out.innerHTML = `<p class="pmeta">Another book (“${esc(e.status.title || e.status.file)}”) is being summarised. Press this again when it has finished.</p>`;
+    return;
+  }
   if (!e.todo && !e.overview) { out.innerHTML = `<p class="pmeta ok">✓ Every chapter and section (${e.parts}) has its summary, and the overview is up to date. “Write it again” on a chapter changes it.</p>`; return; }
   out.innerHTML = `<div class="sum-est whole-est"><p>${e.todo ? `This summarises the <b>${e.todo} part${e.todo === 1 ? "" : "s"}</b> of the book that have no summary yet (${e.done} of ${e.parts} already have one: they are not asked again)` : `Every part has its summary`}${e.overview ? `, then writes <b>one overview</b> of the whole book from those summaries` : ""}, with <b>${esc(e.provider)} · ${esc(e.model)}</b>.
-      ${e.nested && e.todo ? " Sections are summarised as well as the chapters that hold them, so their pages are sent twice." : ""}${e.left_out ? ` ${e.left_out} long part${e.left_out === 1 ? " is" : "s are"} read from the start and the end only.` : ""}</p>
+      ${e.nested && e.todo ? " Sections are summarised as well as the chapters that hold them, so their pages are sent twice." : ""}${e.left_out ? ` ${e.left_out} long part${e.left_out === 1 ? " is" : "s are"} read from the start and the end only.` : ""}${e.empty ? ` ${e.empty} part${e.empty === 1 ? " has" : "s have"} no text to summarise (a bibliography or an index, say): left out, nothing is sent for ${e.empty === 1 ? "it" : "them"}.` : ""}</p>
     <p>Cost: <b>${esc(money(e.cost))}</b>${e.cost != null && e.todo && e.overview ? ` (${esc(money(e.parts_cost))} for the parts, ${esc(money(e.overview_cost))} for the overview)` : ""}. It runs in the background (the AI activity tray can cancel it), one part at a time, and your monthly budget applies.</p>
     <div class="row" style="gap:8px"><button class="btn primary small" data-whole-go>Summarise</button><button class="btn small" data-whole-no>Cancel</button></div></div>`;
   $("[data-whole-no]", out).onclick = () => { out.innerHTML = ""; out.classList.add("hide"); };
   $("[data-whole-go]", out).onclick = async () => {
-    try { const r = await api("/api/book/whole", {file, title}); follow(card, box, out, file, r.status); } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }
+    try { const r = await api("/api/book/whole", {file, title}); follow(card, box, out, file, r.status); } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }     // (409 while another book's job runs: its words say so)
   };
 }
 function follow(card, box, out, file, st) {                    // the job's progress, every 3 s, until it ends; then the chapters again, with what it did
@@ -275,13 +279,14 @@ function follow(card, box, out, file, st) {                    // the job's prog
   show(st);
   const tick = async () => {
     let s; try { s = (await api("/api/book/whole?file=" + encodeURIComponent(file) + "&status=1")).status; } catch (er) { setTimeout(tick, 3000); return; }
+    if (s.file !== file) { delete out.dataset.running; out.innerHTML = `<p class="pmeta">Another book is being summarised now.</p>`; return; }
     if (s.running) { show(s); setTimeout(tick, 3000); return; }
     delete out.dataset.running;
     let R; try { R = await api("/api/book?file=" + encodeURIComponent(file)); } catch (er) { out.innerHTML = `<div class="pmeta bad">${esc(er.message)}</div>`; return; }
     drawChapters(box, file, R);
     const o = $("[data-whole]", box); o.classList.remove("hide");
     o.innerHTML = s.stopped === "cancelled" ? `<p class="pmeta">Cancelled: ${s.made} part${s.made === 1 ? "" : "s"} summarised before that are kept.</p>`
-      : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(money(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
+      : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.skipped ? ` (${s.skipped} with no text left out)` : ""}${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(money(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
   };
   setTimeout(tick, 1500);
 }

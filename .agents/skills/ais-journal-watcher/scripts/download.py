@@ -41,10 +41,15 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+def env_files():
+    """The .env files the app reads: the skill folder's (older layout), then the data home's."""
+    return (os.path.join(BASE, ".env"), os.path.join(ROOT, ".env"))
+
+
 def read_dotenv():
     """Only the .env files: project-root .env, then the skill-folder .env (older layout)."""
     env = {}
-    for p in (os.path.join(BASE, ".env"), os.path.join(ROOT, ".env")):
+    for p in env_files():
         if os.path.exists(p):
             for line in open(p):
                 line = line.strip()

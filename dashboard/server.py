@@ -132,6 +132,7 @@ class Jobs:
         self.kind = None       # what the job is doing: fetch | download | login
         self.checks = queue.Queue()     # a download: the hosts whose "verify you are human" check the user asked to open (pipeline.download_and_summarize)
         self.waiting = {}      # a download: host -> its last 'challenge' event while that check waits for the user (a page opened or reloaded shows it again)
+        self.summarizing = True    # a download: whether it writes its papers' summaries itself (the weekly check's followed authors do not)
 
     def busy(self):
         return self.thread is not None and self.thread.is_alive()
@@ -263,10 +264,12 @@ def follow_download(run, ids, emit):
     """The weekly check, after the screening: download the followed authors' new works into their folders. A human check never opens by itself here (you started
     the check for the feeds, not for these papers): the page offers "Open the check", as for any download. No summary is written (no AI call): the Library's
     "Summarise N papers…" does that, with its estimate first. A work that does not come is tried again next week (pipeline.follow_settle)."""
+    JOBS.summarizing = False
     JOBS.set_kind("download")
     try:
         pl.download_and_summarize(run, ids, _download_emit(emit), JOBS.stop, checks=JOBS.checks, auto_open=False, summarize=False)
     finally:
+        JOBS.summarizing = True
         ok, again = pl.follow_settle(run, ids)
         JOBS.waiting.clear()
         JOBS.set_kind("fetch")
@@ -346,11 +349,11 @@ def sources_state():
 
 
 def _key_where(name):
-    """"Keychain", ".env file", "environment" or "" (as ai.key_where, without needing the AI modules)."""
-    if keychain.values([name]).get(name):
-        return "Keychain"
+    """".env file", "Keychain", "environment" or "" (as ai.key_where, without needing the AI modules)."""
     if pl.dl.read_dotenv().get(name):
         return ".env file"
+    if keychain.values([name]).get(name):
+        return "Keychain"
     return "environment" if os.environ.get(name) else ""
 
 
@@ -396,7 +399,7 @@ def sources_save(b):
                 keychain.delete(name)
         except ValueError:                     # a key the Keychain helper cannot take safely: the file, as before
             pass
-    gone = [n for n, v in new.items() if not v]
+    gone = [n for n, v in new.items() if not v] + sorted(in_kc)          # (a key now in the Keychain leaves the older layout's file too)
     old_env = os.path.join(paths.BASE, ".env")                  # (the older layout kept keys in the settings folder: a removed key must go from there too)
     if gone and os.path.exists(old_env) and os.path.abspath(old_env) != os.path.abspath(os.path.join(ROOT, ".env")):
         keep_ = [l for l in open(old_env, encoding="utf-8").read().splitlines() if not any(re.match(r"\s*%s\s*=" % re.escape(n), l) for n in gone)]
@@ -607,7 +610,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ids or not name:
             return self.send_json({"error": "Pick the author first."}, 400)
         fid, _ = authors.folder_for(ids, name, str(b.get("institution") or ""))
-        run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name), "follow": bool(follow)})
+        run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name)})
         run.stage, run.status = "ready", "stopped"
         run.save(force=True)
         JOBS.run = run
@@ -633,6 +636,7 @@ class Handler(BaseHTTPRequestHandler):
             if follow:                            # followed once the listing worked; what it listed (complete or not) is not new next week (it would all be downloaded again)
                 authors.set_follow(fid, True)
                 authors.follow_mark(fid, [w.get("id") for w in ws], seed=True)
+                run.params["follow"] = True                    # (said on the run's page only now: a listing that failed follows no one)
             kept, excluded = authors.select(ws)
             new, have, gone = authors.split(authors.to_papers(kept, fid, name))
             authors.file_have(fid, have)
@@ -1054,7 +1058,8 @@ class Handler(BaseHTTPRequestHandler):
             if not info:
                 return self.send_json({"error": "that is not a book in your library"}, 404)
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
-                                   "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)],
+                                   "chapters": [dict(c, summary=s_ if s_ and s_.get("text") else None, empty=bool(s_ and s_.get("empty")))
+                                                for c in books.chapters(info) for s_ in [(info.get("summaries") or {}).get(books.chapter_key(c))]],
                                    "overview": info.get("overview"), "overview_stale": books.overview_stale(info)})
         if path == "/api/authors":      # the Authors tab's "Your authors": each author with a folder, whether you follow them, when the weekly check last listed them
             return self.send_json({"authors": authors.saved()})
@@ -1781,6 +1786,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(e)}, 400)
         if path == "/api/download":
             ids = [i for i in b.get("ids") or [] if JOBS.run and i in JOBS.run.papers]
+            ids = [i for i in ids if not (JOBS.run.papers[i].get("summary_by_hand") and JOBS.run.papers[i].get("dl_status") == "ok")]    # (a followed author's work is downloaded: its summary comes from the Library, with its estimate)
             if not ids:
                 return self.send_json({"error": "nothing selected"}, 400)
             return self.started(start_download(ids), JOBS.run)
@@ -1865,7 +1871,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "files must be a list"}, 400)
             if summaries.status()["running"]:
                 return self.send_json({"error": "Summaries are already being written: see the AI activity tray."}, 409)
-            if JOBS.busy() and JOBS.kind == "download":         # that job summarises what it downloads: two jobs on the same paper would pay for it twice
+            if JOBS.busy() and JOBS.kind == "download" and JOBS.summarizing:         # that job summarises what it downloads: two jobs on the same paper would pay for it twice
                 return self.send_json({"error": "A download is running and writes its papers’ summaries itself. Press this again when it has finished."}, 409)
             if not summaries.start([str(f) for f in files] if files is not None else None):
                 return self.send_json({"error": "Every one of these papers has a summary already."}, 400)

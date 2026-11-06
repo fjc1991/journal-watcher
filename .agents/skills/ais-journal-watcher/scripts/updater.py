@@ -91,7 +91,7 @@ def version():
 
 
 # The scholarly databases the app asks. They are told plainly who is asking (user_agent below); publisher sites and feeds are not on this list.
-API_HOSTS = {"api.openalex.org", "api.crossref.org", "api.unpaywall.org", "api.semanticscholar.org", "openlibrary.org"}
+API_HOSTS = {"api.openalex.org", "api.crossref.org", "api.unpaywall.org", "api.semanticscholar.org", "openlibrary.org", "api.elsevier.com"}
 
 
 def user_agent():

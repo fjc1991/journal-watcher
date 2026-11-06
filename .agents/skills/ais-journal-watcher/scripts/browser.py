@@ -466,6 +466,16 @@ class Browser:
         and its check is the one to open)."""
         if url in self._prefetched:
             return self._prefetched.pop(url)
+        host = urllib.parse.urlsplit(url).netloc
+        if host in self.checked_hosts and self.interactive:
+            # the user passed this site's check and chose to keep its window (the second "Open the check"): the page is shown there, a check it asks again is
+            # waited for in the window (never ticked here), and the page is then saved in the background, where Chromium can print it
+            if not self.visible:
+                self._launch(visible=True)
+            data, note, still = self._page_check(url, min_chars)
+            if still:
+                self._notify(host, "waiting")
+            return data, note
         data, note, chall = self._page_pdf(url, min_chars)
         if chall and self.ask and self.interactive and chall not in self.pending:
             self.pending[chall] = (url, None, urllib.parse.urlsplit(url).netloc)

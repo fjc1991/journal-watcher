@@ -230,8 +230,8 @@ def _offline():
 
 def structured_models(provider, cfg=None):
     """{model id: in + out price per million tokens} of the models at `provider` that can answer in a JSON schema (what screening needs), or None when the app has
-    no such list for that provider. OpenRouter: its public model list (read now if the saved one is missing or of an older layout), without the ":free" models
-    (heavily rate-limited, and their providers may keep prompts) and without models too small for a batch of papers. Claude: every model in BUILTIN."""
+    no such list for that provider. OpenRouter: its public model list (read now if the saved one is missing or of an older layout), without the free models
+    (":free" or priced $0: heavily rate-limited, and their providers may keep prompts) and without models too small for a batch of papers. Claude: every model in BUILTIN."""
     cfg = cfg or _cfg()
     p = _provider(cfg, provider)
     if is_openrouter(p):
@@ -243,7 +243,7 @@ def structured_models(provider, cfg=None):
         if d.get("format") != FORMAT:
             return {}
         return {mid: round(e["in"] + e["out"], 6) for mid, e in (d.get("models") or {}).items()
-                if e.get("json") and not mid.endswith(":free") and (e.get("ctx") or MIN_CTX) >= MIN_CTX and (e.get("max_out") or MIN_OUT) >= MIN_OUT}
+                if e.get("json") and not mid.endswith(":free") and e["in"] + e["out"] > 0 and (e.get("ctx") or MIN_CTX) >= MIN_CTX and (e.get("max_out") or MIN_OUT) >= MIN_OUT}
     if p.get("type") == "anthropic" or provider == "anthropic":
         return {mid: round(e["in"] + e["out"], 6) for mid, e in BUILTIN["anthropic"].items()}
     return None

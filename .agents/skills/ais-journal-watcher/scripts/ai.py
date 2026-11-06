@@ -222,30 +222,34 @@ def _write_env_file(name, key):
 
 
 def _drop_from_env_file(name):
-    """Remove the line for `name` from the data home's .env (a key now lives in the Keychain). Other lines stay as they are. True if a line was removed."""
-    path = _env_path()
-    if not os.path.exists(path):
-        return False
-    lines = open(path, encoding="utf-8").read().splitlines()
-    kept = [l for l in lines if not re.match(r"\s*(export\s+)?%s\s*=" % re.escape(name), l)]
-    if len(kept) == len(lines):
-        return False
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(kept) + ("\n" if kept else ""))
-    os.replace(tmp, path)
-    return True
+    """Remove the line for `name` from every .env file the app reads (the data home's, and the settings folder's of the older layout; both are inside the
+    synced data folder): a key now lives in the Keychain. Other lines stay as they are. True if a line was removed."""
+    removed = False
+    for path in dict.fromkeys(os.path.abspath(p) for p in dl.env_files()):
+        if not os.path.exists(path):
+            continue
+        lines = open(path, encoding="utf-8").read().splitlines()
+        kept = [l for l in lines if not re.match(r"\s*(export\s+)?%s\s*=" % re.escape(name), l)]
+        if len(kept) == len(lines):
+            continue
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+        os.replace(tmp, path)
+        removed = True
+    return removed
 
 
 def key_where(name):
-    """Where a provider's key is kept: "Keychain", ".env file", "environment" (set outside the app) or ""."""
+    """Where a provider's key is kept: ".env file" (also when the Keychain has it too: the line is still in the synced folder, and moving it removes it),
+    "Keychain", "environment" (set outside the app) or ""."""
     if not name:
         return ""
-    if keychain.values([name]).get(name):
-        return "Keychain"
     if dl.read_dotenv().get(name):
         return ".env file"
+    if keychain.values([name]).get(name):
+        return "Keychain"
     return "environment" if os.environ.get(name) else ""
 
 
@@ -260,6 +264,10 @@ def move_keys_to_keychain():
     for name in sorted(names):
         val = env.get(name)
         if not val:
+            continue
+        if keychain.get(name):                 # the Keychain has one already (it is the key in use: it wins over a line): only the old line goes
+            _drop_from_env_file(name)
+            moved.append(name)
             continue
         try:
             keychain.set(name, val)

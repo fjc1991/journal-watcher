@@ -737,8 +737,8 @@ function paintAuthBtn() {
 async function loadAuthSaved() {                  // "Your authors": each author with a folder, and whether the weekly check follows them
   let r; try { r = (await api("/api/authors")).authors || []; } catch (e) { return; }
   const box = $("#authsaved"); box.classList.toggle("hide", !r.length);
-  box.innerHTML = `<div class="lbl">Your authors</div>` + r.map(a => `<div class="authrow"><span><b>${esc(a.name)}</b><small>folder “${esc(a.folder_name)}”${a.follow ? (a.follow_last ? ` · last checked ${esc(a.follow_last)}` : " · followed") : ""}</small>${a.follow_warn ? `<small class="warn">${esc(a.follow_warn)}</small>` : ""}</span>
-      <label title="The weekly check downloads their new works into this folder"><input type="checkbox" data-follow="${esc(a.folder)}"${a.follow ? " checked" : ""}${BUSY && !a.follow ? " disabled" : ""}> Follow</label></div>`).join("");
+  box.innerHTML = `<div class="lbl">Your authors</div>` + r.map(a => `<div class="authrow"><span><b>${esc(a.name)}</b><small>${a.folder_name ? `folder “${esc(a.folder_name)}”` : "folder deleted"}${a.follow ? (a.follow_last ? ` · last checked ${esc(a.follow_last)}` : " · followed") : ""}</small>${a.follow_warn ? `<small class="warn">${esc(a.follow_warn)}</small>` : ""}</span>
+      <label title="${a.folder_name ? "The weekly check downloads their new works into this folder" : "Tick to follow again: their works go into a new folder"}"><input type="checkbox" data-follow="${esc(a.folder)}"${a.follow ? " checked" : ""}${BUSY && !a.follow ? " disabled" : ""}> Follow</label></div>`).join("");
 }
 $("#authsaved").onchange = async e => {
   const c = e.target.closest("[data-follow]"); if (!c) return;
@@ -813,11 +813,14 @@ function updateScreenBtn() {
 }
 $("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.params && RUN.params.terms), {n} = screenPending();
   try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { toast(e.message); } };
+window.addEventListener("jw-settings-changed", async () => {      // a model changed in Settings: the page's estimates and the backup note follow it
+  try { CFG = await api("/api/config"); if (RUN) render(); } catch (e) {}
+});
 $("#makebackup").onclick = async e => {          // the backup that screened this run becomes the screening model (Settings → AI → Screening new papers)
   const b = e.currentTarget;
   try {
     await api("/api/ai/config", {features: {screen: {provider: b.dataset.provider, model: b.dataset.model}}});
-    CFG = await api("/api/config"); window.dispatchEvent(new Event("jw-settings-changed")); render();
+    window.dispatchEvent(new Event("jw-settings-changed"));
     toast(`${b.textContent.replace(/^Make | the screening model$/g, "")} now screens your papers.`);
   } catch (er) { toast(er.message); }
 };
@@ -999,7 +1002,7 @@ function renderMeta() {
   $("#vt-bl").textContent = ` (${c("borderline")})`;
   $("#selrec").textContent = pr.terms ? "Select all matches" : "Select all “download”";
   updateScreenBtn();
-  const needsWork = p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary);
+  const needsWork = queueNeeds;
   const queued = ps.filter(needsWork).length;
   $("#vt-q").textContent = ` (${queued} to get${got ? `, ${ps.filter(p => p.verdict === "download" && p.dl_status === "ok").length} done` : ""})`;
   $("#qbtn").textContent = `Download whole queue (${queued})`;
@@ -1202,8 +1205,10 @@ $("#dlbtn").onclick = async () => {
 $("#allpapers").onclick = e => { e.preventDefault(); go({j: "*"}); };
 document.querySelectorAll("#viewtabs button").forEach(b => b.onclick = () => go({j: b.dataset.vt || null}));
 $("#jsel").onchange = () => renderList();
+// a paper the queue still has work for: not downloaded, or without its summary (a followed author's work is downloaded only: its summary comes from the Library)
+function queueNeeds(p) { return p.verdict === "download" && (p.dl_status !== "ok" || (!p.summary && !p.summary_by_hand)); }
 $("#qbtn").onclick = async () => {
-  const ids = [...papers.values()].filter(p => p.verdict === "download" && (p.dl_status !== "ok" || !p.summary)).map(p => p.id);
+  const ids = [...papers.values()].filter(queueNeeds).map(p => p.id);
   try { await api("/api/download", {ids}); toast(`Downloading ${ids.length} queued papers in the background.`); }
   catch (e) { toast(e.message); }
 };

@@ -334,7 +334,7 @@ class Run:
                 # interrupted (dashboard closed mid-download): ready to retry
                 p["dl_status"] = "ok" if p.get("file") and os.path.exists(os.path.join(ROOT, p["file"])) else None
                 p["dl_note"] = "interrupted — press Download again"
-            elif p.get("dl_status") == "needs_check" and p.get("dl_note") == WAITING_NOTE:
+            elif p.get("dl_status") == "needs_check" and str(p.get("dl_note") or "").startswith("waiting for you"):     # (this version's note, or an earlier one's)
                 p["dl_note"] = NEEDS_CHECK_NOTE % SITE_NAMES.get(p.get("publisher"), p.get("publisher") or "Its site")     # (the app quit while it waited)
             terms_rule(r, p)                    # a search by terms screened before 1.2.1: its skipped and borderline matches become downloads (the model's word is kept)
             r.add_paper(p)
@@ -468,7 +468,7 @@ def slim(p):
     keys = ("id", "journal", "abbr", "title", "authors", "doi", "url", "pub_date", "abstract",
             "keywords", "publisher", "verdict", "relevance", "topics", "method", "reason", "dl_status",
             "ai_verdict", "user_set", "model_verdict",
-            "dl_note", "file", "summary", "manual_url", "term_hits")
+            "dl_note", "file", "summary", "manual_url", "term_hits", "summary_by_hand")
     return {k: p.get(k) for k in keys}
 
 
@@ -579,7 +579,8 @@ def follow_list(run, emit, stop):
             break
         fid, name = rec["folder"], rec.get("name") or "an author"
         if not fo.get(fid):
-            authors.set_follow_warn(fid, "Its folder was deleted, so following is paused. Press Follow again to start a new folder.")
+            authors.set_follow(fid, False)                    # (paused for real: tick Follow on the Authors tab to start a new folder)
+            authors.set_follow_warn(fid, "Its folder was deleted, so following is paused. Tick Follow to start a new folder.")
             emit("log", {"msg": "Followed author %s: the folder was deleted, so following is paused (Authors tab)." % name, "level": "warn"})
             continue
         ids = rec.get("ids") or []
@@ -629,16 +630,21 @@ def follow_list(run, emit, stop):
             q = run.papers.get(p["id"])
             if q is None and authors.tkey(p["title"]):
                 q = next((x for x in by_title.get((authors.tkey(p["title"]), p.get("abbr")), []) if not (x.get("doi") and p.get("doi"))), None)
+            if q is not None and q["id"] in todo:              # a work of two authors you follow: one download, filed into both folders (follow_settle)
+                if q.get("folder") != fid:
+                    q.setdefault("also_folders", []).append([fid, p["openalex"]])
+                continue
             if q is not None:                                 # the feeds brought it already this week: the same paper, now one to download into the folder
                 if q.get("user_set"):                         # (unless you set its verdict yourself)
                     authors.follow_mark(fid, [p["openalex"]])
                     continue
-                q.update(verdict="download", folder=fid, openalex=p["openalex"], reason=p["reason"], source=q.get("source") or "author")
+                q.update(verdict="download", folder=fid, openalex=p["openalex"], reason=p["reason"], source=q.get("source") or "author", summary_by_hand=True)
                 q.pop("model_verdict", None)
                 emit("verdict", {k: q.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
                 todo.append(q["id"])
             else:
                 p["source_mode"] = "weekly"
+                p["summary_by_hand"] = True                   # (downloaded only: its summary comes from the Library's "Summarise N papers…", with its estimate first)
                 run.add_paper(p)
                 emit("paper", slim(p))
                 todo.append(p["id"])
@@ -667,6 +673,13 @@ def follow_settle(run, ids):
             continue
         if p.get("dl_status") in ("ok", "deleted"):
             authors.follow_mark(p["folder"], [p["openalex"]])
+            for fid2, oa2 in p.get("also_folders") or []:     # (a co-author you also follow)
+                authors.follow_mark(fid2, [oa2])
+                if p.get("dl_status") == "ok":
+                    try:
+                        authors.file_new(fid2, paper_key(p))
+                    except Exception:  # noqa: BLE001
+                        pass
             ok += 1
         else:
             again += 1
@@ -1074,8 +1087,9 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
     prog = {"done": 0}
     valid = set(topic_labels())
 
-    def reuse(papers, fp):
-        """The papers of `papers` still to ask (a verdict saved for this question and text is taken instead: no second payment)."""
+    def reuse(papers, fp, est=None):
+        """The papers of `papers` still to ask (a verdict saved for this question and text is taken instead: no second payment). est: what one paper would cost
+        with the model of this pass (None: the screening model's)."""
         known = known_verdicts(fp, papers, reuse_days())
         if not known:
             return papers
@@ -1088,7 +1102,8 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                 emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
         run.reused += len(known)
         prog["done"] += len(known)
-        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question%s" % (len(known), " (about $%.2f not paid for again)" % (len(known) * est) if (est := est_screen_cost_per_paper()) is not None else "")})
+        est = est if est is not None else est_screen_cost_per_paper()
+        emit("log", {"msg": "%d papers already had a verdict from an earlier screening with the same question%s" % (len(known), " (about $%.2f not paid for again)" % (len(known) * est) if est is not None else "")})
         run.save(force=True)
         return [p for p in papers if p["id"] not in known]
 
@@ -1132,7 +1147,8 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                     emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
                 if res is None:                                # not sent (see one): left unscreened, to pick up later
                     continue
-                answered += 1
+                if res:
+                    answered += 1                              # (a batch that failed gave no verdict: it does not count as screened by this model)
                 for n, p in enumerate(batch, 1):
                     r = res.get(n)
                     if not r:
@@ -1182,7 +1198,11 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             ov = {"provider": prov, "model": b["model"]}
             fp2 = screen_fingerprint(system, ov)
             reused0 = run.reused
-            rest = reuse(rest, fp2)
+            try:
+                est2 = ai.cost_of(b["model"], {"in": int(EST_SCREEN_CHARS / 3.3), "out": EST_SCREEN_OUT}, 0, prov)
+            except Exception:  # noqa: BLE001
+                est2 = None
+            rest = reuse(rest, fp2, est2)
             blocked2, answered2 = run_pass(rest, ov, fp2)
             if answered2 or run.reused > reused0:
                 run.screen_backup = {**b, "instead_of": mine, "why": str(blocked)[:300], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -1440,6 +1460,12 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         emit("log", {"msg": msg, "level": "warn"})
         _notify_user("A human check is waiting", "%s wants to check you're human. Open Journal Watcher and press “Open the check”." % site)
 
+    def release_quiet():
+        for q in quiet:
+            if q[0] in deferred and q[0] not in given_up:
+                nudge(*q)
+        quiet.clear()
+
     def open_one(br, host, stay):
         if host not in deferred or host in given_up or not hasattr(br, "open_check"):
             return
@@ -1512,6 +1538,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                                 sleep(min(1.0, max(0.0, due - clock())))
                         if stop.is_set():
                             break
+                    if quiet and not auto_open and not stop.is_set():       # another site's paper starts: the check can be opened while it downloads, so say so now
+                        release_quiet()
                     current.clear()
                     current["pub"] = pub
                     p["dl_status"] = "downloading"
@@ -1532,10 +1560,11 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         first = host not in deferred and host not in given_up
                         set_aside(p, host, pub)
                         if first and not stop.is_set():
-                            if count["final"] or not auto_open:
+                            if count["final"]:
                                 nudge(host, state, pub)
                             else:
-                                quiet.append((host, state, pub))     # (told when another paper gets its answer; if none does, the check opens by itself)
+                                quiet.append((host, state, pub))     # (told when another paper gets its answer; if none does, the check opens by itself, or with
+                                                                     # auto_open=False the papers just end as needing a check, with nobody told to press a button)
                         run.save()
                         continue
                     else:
@@ -1551,10 +1580,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     finished(p)
                     run.save()
                     if quiet and not stop.is_set():                  # a paper got its answer: the end of the batch will not open the checks by itself, so say so now
-                        for q in quiet:
-                            if q[0] in deferred and q[0] not in given_up:
-                                nudge(*q)
-                        quiet.clear()
+                        release_quiet()
                 if ask and not stop.is_set():
                     serve(br)                                        # a press made during the last paper is still served
                     if todo_q:

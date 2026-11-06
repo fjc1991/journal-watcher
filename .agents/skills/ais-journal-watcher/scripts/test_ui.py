@@ -1486,6 +1486,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("…only the new work (the 46th) was downloaded, into their folder, without screening, and the run says so",
                   open(marker).read() == "doi:10.7777/au.45" and wk_["kind"] == "weekly" and fp_ and fp_[0]["verdict"] == "download" and fp_[0]["folder"] == ffid and fp_[0]["reason"].startswith("followed author")
                   and "W77045" not in (ann().get("follow_known") or []), str((open(marker).read() if os.path.exists(marker) else "no marker", [(p_.get("id"), p_.get("verdict"), p_.get("reason")) for p_ in wk_["papers"]][:3])))
+            check("…and the page knows its summary comes from the Library (the queue does not count it for a summary)", bool(fp_) and fp_[0].get("summary_by_hand") is True, str(fp_[:1])[:300])
             AUTHOR_EXTRA[0] = 0
             for x_ in (marker + ".check", marker + ".checked"):
                 if os.path.exists(x_): os.remove(x_)

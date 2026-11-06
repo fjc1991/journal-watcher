@@ -1,12 +1,13 @@
 """Summarise a whole book in one go: the Chapters panel's "Summarise the whole book…" button.
 
     bookjob.start(rel, title)     one background job in the activity tray (Cancel works there); False while one is running or when there is nothing to do
-    bookjob.status()              {running, file, title, done, total, made, failed: [{key, title, error}], cost, stopped, overview, ended}
+    bookjob.status()              {running, file, title, done, total, made, skipped (parts with no text), failed: [{key, title, error}], cost, stopped, overview, ended}
 
 Every entry of the book's outline (chapters and their sections: books.parts) that has no summary yet is summarised, one after another, exactly as the per-chapter
 "Summarise…" button does (books._summarise: the "Paper summaries" model in Settings → AI, the budgeted AI layer, the summary saved in the book's .book.json). A part
 summarised meanwhile (by that button, or on another computer that shares the data folder) is skipped, not paid for twice: the book's file is read again before each
-part. When every part has its summary, one overview of the whole book is written from those summaries (books.write_overview), never from the book's text.
+part. A part with no body text (a bibliography, an index) is noted as such and left out, with nothing asked. When every part has its summary, one overview of
+the whole book is written from those summaries (books.write_overview), never from the book's text.
 
 What stops the job: Cancel; a problem that would hit every part (ai.Blocked: no key, budget used up, local-only; or 401, 402, 403, 404) at once; three parts in a row
 that fail. Any other failure is noted against that part and the job goes on, but then no overview is written (it would leave a part out): pressing the button again
@@ -26,7 +27,7 @@ STOP_ALL = frozenset({401, 402, 403, 404})       # key, credit, permission, mode
 MAX_IN_A_ROW = 3
 
 _lock = threading.Lock()
-_state = {"running": False, "file": "", "title": "", "done": 0, "total": 0, "made": 0, "failed": [], "cost": 0.0, "stopped": "", "overview": False, "ended": None}
+_state = {"running": False, "file": "", "title": "", "done": 0, "total": 0, "made": 0, "skipped": 0, "failed": [], "cost": 0.0, "stopped": "", "overview": False, "ended": None}
 
 
 def status():
@@ -53,14 +54,14 @@ def start(rel, title=""):
     with _lock:
         if _state["running"]:
             return False
-        _state.update(running=True, file=rel, title=title, done=0, total=len(todo) + 1, made=0, failed=[], cost=0.0, stopped="", overview=False, ended=None)
+        _state.update(running=True, file=rel, title=title, done=0, total=len(todo) + 1, made=0, skipped=0, failed=[], cost=0.0, stopped="", overview=False, ended=None)
     threading.Thread(target=_run, args=(rel, title, pdf, todo), daemon=True).start()
     return True
 
 
 def _run(rel, title, pdf, todo):
     job = act.start("summary", "Book summary · %s" % (title or os.path.basename(rel))[:80], scope={"library": True, "ltab": "books"}, total=len(todo) + 1)
-    made, failed, in_a_row, stopped, cost, wrote = 0, [], 0, "", 0.0, False
+    made, failed, in_a_row, stopped, cost, wrote, skipped = 0, [], 0, "", 0.0, False, 0
     try:
         blocks = books.bl.extract(pdf) if todo else None
         for i, c in enumerate(todo):
@@ -84,6 +85,12 @@ def _run(rel, title, pdf, todo):
                         rec = fin.value
                         break
                 cost += rec.get("cost") or 0.0
+            except books.NoText:                                    # a bibliography, an index: nothing to summarise (noted, so it is not tried again)
+                books.mark_empty(pdf, c)
+                skipped += 1
+                _note(done=i + 1, skipped=skipped)
+                job.update(done=i + 1)
+                continue
             except ai.Cancelled:
                 stopped = "cancelled"
                 break

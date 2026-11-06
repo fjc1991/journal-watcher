@@ -411,6 +411,10 @@ def _relabel(text, info):
     return re.sub(r"\(pp?\.\s*(\d+)(?:\s*[–-]\s*(\d+))?\)", one, text)
 
 
+class NoText(ValueError):
+    """A part of a book with no body text to summarise (a bibliography, an index, a scanned image)."""
+
+
 def _summarise(pdf, info, c, title="", fresh=False, override=None, blocks=None):
     """Write the summary of chapter c and save it in the book's .book.json. A generator: yields ("status", msg) and ("text", delta) as the answer arrives, and
     returns the saved record ({"title", "start", "end", "text", "provider", "model", "cost", "left_out", "at"}). Raises ValueError (no text) or ai.AIError (Blocked,
@@ -421,7 +425,7 @@ def _summarise(pdf, info, c, title="", fresh=False, override=None, blocks=None):
     yield "status", "Reading the chapter…"
     text, used, left_out = chapter_text(pdf, c, blocks)
     if not text.strip():
-        raise ValueError("No text could be read from this chapter (a scanned image?).")
+        raise NoText("No text could be read from this chapter (a scanned image?).")
     messages = [{"role": "user", "content": "Book: %s\nChapter: %s (pages %d–%d of the file)\n\nText of the chapter:\n\n%s" % (title or "a book", c["title"], c["start"], c["end"], text)}]
     yield "status", "Writing the summary…"
     res = None
@@ -449,7 +453,7 @@ def summary_stream(rel, i, title="", fresh=False, override=None):
     try:
         pdf, info, c = _chapter(rel, i)
         saved = (info.get("summaries") or {}).get(chapter_key(c))
-        if saved and not fresh:
+        if saved and saved.get("text") and not fresh:
             yield {"type": "text", "delta": saved["text"]}
             yield {"type": "final", "text": saved["text"]}
             yield {"type": "done", "provider": saved.get("provider", ""), "model": saved.get("model", ""), "cost": 0.0, "cached": True, "saved": True}
@@ -507,6 +511,21 @@ def _book(rel):
     return pdf, info
 
 
+def _done(sums, c):
+    """A part needs nothing more: its summary is saved, or it was found to have no text to summarise (a bibliography, an index; marked "empty")."""
+    s = sums.get(chapter_key(c)) or {}
+    return bool(s.get("text") or s.get("empty"))
+
+
+def mark_empty(pdf, c):
+    """Note that this part has no body text (nothing is asked of the AI for it, and the overview leaves it out)."""
+    with _BOOKLOCK:
+        cur = info_at(pdf)
+        cur.setdefault("summaries", {})[chapter_key(c)] = {"title": c["title"], "start": c["start"], "end": c["end"], "text": "", "empty": True,
+                                                            "at": datetime.now().isoformat(timespec="seconds")}
+        _write_info(pdf, cur)
+
+
 def _fingerprint(info, ps):
     """What the overview was written from: the parts and their summaries. A summary written again (or a part added) makes the overview out of date."""
     import hashlib
@@ -519,7 +538,7 @@ def overview_pending(info):
     """True when every part has a summary and the overview is missing, or was written from other summaries (out of date)."""
     ps = parts(info)
     sums = info.get("summaries") or {}
-    if not ps or any(not (sums.get(chapter_key(c)) or {}).get("text") for c in ps):
+    if not ps or any(not _done(sums, c) for c in ps) or not any((sums.get(chapter_key(c)) or {}).get("text") for c in ps):
         return False
     return (info.get("overview") or {}).get("fingerprint") != _fingerprint(info, ps)
 
@@ -535,25 +554,31 @@ def whole_plan(rel):
     pdf, info = _book(rel)
     ps = parts(info)
     sums = info.get("summaries") or {}
-    return pdf, info, [c for c in ps if not (sums.get(chapter_key(c)) or {}).get("text")], ps
+    return pdf, info, [c for c in ps if not _done(sums, c)], ps
 
 
 def _overview_input(info, ps):
     """(text sent for the overview, cut): the stored summaries in the book's order, each under its title and pages."""
     sums = info.get("summaries") or {}
     items = [(c, (sums.get(chapter_key(c)) or {}).get("text", "")) for c in ps]
-    head = lambda c: "%s %s (%s – %s)" % ("##" if c["level"] <= 1 else "###", c["title"], place(info, c["start"]), place(info, c["end"]))  # noqa: E731
-    cut = ""
-    if sum(len(t) + 80 for _, t in items) > OVERVIEW_MAX_CHARS:
-        top = min(c["level"] for c, _ in items)
-        items = [(c, t) for c, t in items if c["level"] == top] or items
+    items = [(c, t) for c, t in items if t]                                   # (a part with no text to summarise is left out)
+    size = lambda its: sum(len(t) + 80 for _, t in its)                      # noqa: E731
+    head = lambda c: "%s %s (%s – %s)" % ("#" * min(4, c["level"] + 1), c["title"], place(info, c["start"]), place(info, c["end"]))  # noqa: E731
+    cut, dropped = "", None
+    while size(items) > OVERVIEW_MAX_CHARS and len({c["level"] for c, _ in items}) > 1:     # the deepest level goes first (sections before chapters, chapters before parts)
+        dropped = max(c["level"] for c, _ in items)
+        items = [(c, t) for c, t in items if c["level"] < dropped]
         cut = "sections"
-    if sum(len(t) + 80 for _, t in items) > OVERVIEW_MAX_CHARS:
+    if size(items) > OVERVIEW_MAX_CHARS:
         each = max(300, OVERVIEW_MAX_CHARS // max(1, len(items)) - 80)
         items = [(c, t if len(t) <= each else t[:each].rsplit(" ", 1)[0] + " …") for c, t in items]
         cut = "shortened"
-    note = {"sections": "[Note: the summaries of the sections are left out here because the book is long; the chapters' summaries are all given.]\n\n",
-            "shortened": "[Note: the book is long, so only the chapters are given and each summary is shortened.]\n\n"}.get(cut, "")
+    notes = []
+    if dropped is not None:
+        notes.append("the summaries of the entries below outline level %d are left out here because the book is long" % (dropped - 1 if dropped > 1 else 1))
+    if cut == "shortened":
+        notes.append("each summary given is shortened")
+    note = "[Note: %s.]\n\n" % "; ".join(notes) if notes else ""
     return note + "\n\n".join(head(c) + "\n" + t for c, t in items), cut
 
 
@@ -564,18 +589,21 @@ def whole_estimate(rel):
     import ai
     pdf, info, todo, ps = whole_plan(rel)
     blocks = bl.extract(pdf) if todo else None
-    costs, left = [], 0
+    costs, left, empty = [], 0, 0
     for c in todo:
         text, used, lo = chapter_text(pdf, c, blocks)
+        if not text.strip():                       # (a bibliography, an index: nothing is sent for it)
+            empty += 1
+            continue
         left += bool(lo)
         costs.append(ai.estimate("summarize", used + len(SUMMARY_SYSTEM) + 300, SUMMARY_OUT_TOKENS))
     sums = info.get("summaries") or {}
-    ov_in = min(OVERVIEW_MAX_CHARS, sum(len((sums.get(chapter_key(c)) or {}).get("text", "")) + 80 for c in ps) + EST_SUMMARY_CHARS * len(todo)) + len(OVERVIEW_SYSTEM)
-    ov = bool(todo) or overview_pending(info)
+    ov_in = min(OVERVIEW_MAX_CHARS, sum(len((sums.get(chapter_key(c)) or {}).get("text", "")) + 80 for c in ps) + EST_SUMMARY_CHARS * (len(todo) - empty)) + len(OVERVIEW_SYSTEM)
+    ov = (len(todo) > empty or (bool(todo) and any((sums.get(chapter_key(c)) or {}).get("text") for c in ps))) or overview_pending(info)
     ov_cost = ai.estimate("summarize", ov_in, OVERVIEW_OUT_TOKENS) if ov else 0.0
     parts_cost = sum(costs) if all(c is not None for c in costs) else None
     provider, model = ai.feature_model("summarize")
-    return {"parts": len(ps), "done": len(ps) - len(todo), "todo": len(todo), "nested": any(c["level"] > 1 for c in ps), "overview": ov,
+    return {"parts": len(ps), "done": len(ps) - len(todo), "todo": len(todo) - empty, "empty": empty, "nested": any(c["level"] > 1 for c in ps), "overview": ov,
             "parts_cost": parts_cost, "overview_cost": ov_cost, "cost": parts_cost + ov_cost if parts_cost is not None and ov_cost is not None else None,
             "provider": provider, "model": model, "left_out": left}
 
@@ -587,7 +615,7 @@ def write_overview(rel, title="", override=None):
     pdf, info = _book(rel)
     ps = parts(info)
     sums = info.get("summaries") or {}
-    if any(not (sums.get(chapter_key(c)) or {}).get("text") for c in ps):
+    if any(not _done(sums, c) for c in ps) or not any((sums.get(chapter_key(c)) or {}).get("text") for c in ps):
         raise ValueError("Every chapter and section needs its summary before the overview is written.")
     body, cut = _overview_input(info, ps)
     messages = [{"role": "user", "content": "Book: %s\n\nSummaries of its chapters and sections, in the book's order:\n\n%s" % (title or "a book", body)}]
