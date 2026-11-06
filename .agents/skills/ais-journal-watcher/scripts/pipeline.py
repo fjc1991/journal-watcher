@@ -1173,7 +1173,7 @@ def _summarize_one(run, p, emit):
 
 
 NOTIFY = None       # the Mac app sets a function (title, text) that shows a notification: a human check is waiting for the user (app/jw_app.py)
-WAITING_NOTE = "waiting for you: press “Open the check” at the top of the page"
+WAITING_NOTE = "waiting for you: its site wants a “verify you are human” check (the app asks you to open it)"
 NEEDS_CHECK_NOTE = "%s wants a human check: select the paper and press Download again (or open it in your browser)"
 
 
@@ -1185,7 +1185,7 @@ def _notify_user(title, text):
             pass
 
 
-def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=None):
+def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=None, auto_open=True, summarize=True):
     """Download the papers `ids` (one browser, a site's papers together), then summarise them. Papers from the same publisher are spaced out (pace_gap); the
     waiting time is used to summarise papers already downloaded, so a careful pace costs little time overall. `sleep`/`clock` are for the tests.
 
@@ -1194,7 +1194,12 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     A press is served between two papers or during a pace wait: the check opens in a window on that one page, and when the user has ticked the box the
     site's papers come back to the front of the queue, in the background. A site that asks again after a pass gets one more nudge; that time its window
     stays for its remaining papers. Papers still set aside when the rest is done end as needs_check (no waiting), except when nothing else was being
-    downloaded: then the check opens at once, as the command line does. Without `checks` the check window opens at once (browser.Browser's default)."""
+    downloaded: then the check opens at once, as the command line does (and the user is not first told to press "Open the check": until some paper gets a
+    final answer, a check met is told only once one does). Without `checks` the check window opens at once (browser.Browser's default).
+
+    auto_open=False: a check never opens by itself, even when nothing else was downloaded (the user did not start this for these papers: the weekly check's
+    followed authors); the user is told at once. summarize=False: the papers are downloaded only (no AI call; the Library offers their summaries, with an
+    estimate first)."""
     import collections
     import queue as queue_mod
     env = dl.load_env()
@@ -1215,6 +1220,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     nudged = {}             # host -> times the user was asked in this batch (at most twice)
     given_up = set()        # hosts whose check was not passed, or that asked a third time: their papers end as needs_check
     count = {"done": 0, "final": 0}         # papers finished; papers that got a final answer from a site in this batch (not set aside)
+    quiet = []              # (host, state, pub) of checks met before any paper got a final answer: told once one does (a batch of nothing else opens them at once instead)
     emit("progress", {"stage": "downloading", "label": "Downloading", "done": 0, "total": total})
     current = {}
 
@@ -1328,7 +1334,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                                 round(due - clock()), SITE_NAMES.get(pub, p.get("journal") or pub), pace)})
                         while clock() < due and not stop.is_set():
                             serve(br)                                # a press is served while waiting
-                            ready = next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
+                            ready = summarize and next((q for q in got if not q.get("summary") and q.get("dl_status") == "ok"), None)
                             if ready and due - clock() > 5:
                                 _summarize_one(run, ready, emit)         # use the wait: this paper becomes "Ready to read" sooner
                             else:
@@ -1355,7 +1361,10 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         first = host not in deferred and host not in given_up
                         set_aside(p, host, pub)
                         if first and not stop.is_set():
-                            nudge(host, state, pub)
+                            if count["final"] or not auto_open:
+                                nudge(host, state, pub)
+                            else:
+                                quiet.append((host, state, pub))     # (told when another paper gets its answer; if none does, the check opens by itself)
                         run.save()
                         continue
                     else:
@@ -1370,6 +1379,11 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     emit_dl(p)
                     finished(p)
                     run.save()
+                    if quiet and not stop.is_set():                  # a paper got its answer: the end of the batch will not open the checks by itself, so say so now
+                        for q in quiet:
+                            if q[0] in deferred and q[0] not in given_up:
+                                nudge(*q)
+                        quiet.clear()
                 if ask and not stop.is_set():
                     serve(br)                                        # a press made during the last paper is still served
                     if todo_q:
@@ -1377,7 +1391,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                 # the rest is done. Papers set aside: when nothing else was being downloaded (say, a retry of papers that need a check), the user started this
                 # for them, so their check opens at once (the window then stays for that site's papers); otherwise they end as needs_check, without waiting.
                 waiting = [h for h in deferred if h not in given_up]
-                if ask and waiting and not stop.is_set() and count["final"] == 0 and br is not None:
+                if ask and auto_open and waiting and not stop.is_set() and count["final"] == 0 and br is not None:
+                    quiet.clear()                                    # (the window's own message tells the user: no "press Open the check" first)
                     for h in waiting:
                         nudged[h] = max(nudged.get(h, 0), 2)
                         open_one(br, h, stay=True)
@@ -1394,7 +1409,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % sum(len(v) for v in deferred.values()), "level": "warn"})
             emit("challenge", {"host": "", "state": "done", "msg": ""})
     run.save()
-    todo = [p for p in got if not p.get("summary")]
+    todo = [p for p in got if not p.get("summary")] if summarize else []
     for n, p in enumerate(todo, 1):
         if stop.is_set():
             break

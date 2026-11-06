@@ -189,6 +189,7 @@ class Browser:
         self.pending = {}       # ask mode: host of a check page -> (url asked for, doi, host of that url), until the user opens it
         self.cleared = set()    # ask mode: hosts whose check the user passed in this batch
         self._prefetched = {}   # url -> (pdf, note) a check window already got: the paper's retry takes it instead of asking the site again
+        self._page_checks = {}  # url -> min_chars: a noted check that page_to_pdf met (open_check then saves that web page, it has no PDF link to wait for)
         self.stop = None
         self.ctx = None
         self._ua = None
@@ -436,7 +437,10 @@ class Browser:
         self._notify(host, "open")
         try:
             self._launch(visible=True)
-            data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
+            if url in self._page_checks:
+                data, note, still = self._page_check(url, self._page_checks.pop(url))
+            else:
+                data, note, still = self._fetch(url, wait_s=USER_WAIT, doi=doi)
         except PWError:                                     # the user closed the window (or the browser went away): a check not passed, never a crash
             data, still = None, True
         if data:
@@ -457,7 +461,45 @@ class Browser:
             self._launch(visible=False)
 
     def page_to_pdf(self, url, min_chars=5000):
-        """Save an article web page (HBR) as a PDF. Needs the headless browser."""
+        """Save an article web page (HBR, ACM's full text) as a PDF. Needs the headless browser. Both callers pass the paper's own page, so in ask mode a check
+        page met here is noted for "Open the check", as fetch_pdf(own=True) does (unless that site already has a check noted: ACM's PDF address is asked first,
+        and its check is the one to open)."""
+        if url in self._prefetched:
+            return self._prefetched.pop(url)
+        data, note, chall = self._page_pdf(url, min_chars)
+        if chall and self.ask and self.interactive and chall not in self.pending:
+            self.pending[chall] = (url, None, urllib.parse.urlsplit(url).netloc)
+            self._page_checks[url] = min_chars
+            self._notify(chall, "again" if chall in self.cleared else "pending")
+        return data, note
+
+    def _page_check(self, url, min_chars):
+        """open_check for a page that is saved as a PDF: show it in the window and wait (up to USER_WAIT; Stop ends the wait) until the user's tick has cleared
+        the check (the app never ticks it), then save the page in the background, where Chromium can print it. Returns (pdf | None, note, still a check)."""
+        page = self.ctx.new_page()
+        try:
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            except PWError:
+                pass
+            deadline = time.time() + USER_WAIT
+            while time.time() < deadline and is_challenge(page):
+                if self.stop is not None and self.stop.is_set():
+                    break
+                page.wait_for_timeout(1000)
+            still = is_challenge(page)
+        finally:
+            try:
+                page.close()
+            except PWError:
+                pass
+        if still:
+            return None, "challenge:%s" % urllib.parse.urlsplit(url).netloc, True
+        data, note, chall = self._page_pdf(url, min_chars)
+        return data, note, bool(chall)
+
+    def _page_pdf(self, url, min_chars):
+        """page_to_pdf's work: (pdf | None, note, host of a check page met, or None)."""
         if self.visible:
             self._launch(visible=False)
         page = self.ctx.new_page()
@@ -468,7 +510,8 @@ class Browser:
                 pass
             page.wait_for_timeout(2000)
             if is_challenge(page):
-                return None, "challenge:%s" % urllib.parse.urlsplit(url).netloc
+                h = urllib.parse.urlsplit(url).netloc
+                return None, "challenge:%s" % h, h
             # keep cookie/consent overlays out of the saved copy
             page.evaluate("""() => {
                 document.querySelectorAll("#onetrust-consent-sdk, .fc-consent-root, .fc-dialog-overlay,"
@@ -484,10 +527,10 @@ class Browser:
                 document.body.style.setProperty("overflow", "visible", "important");
             }""")
             if len(page.inner_text("body")) < min_chars:
-                return None, "page too short to be the full article (paywall?)"
+                return None, "page too short to be the full article (paywall?)", None
             data = page.pdf(format="A4", print_background=False,
                             margin={"top": "15mm", "bottom": "15mm", "left": "12mm", "right": "12mm"})
-            return (data, "page saved as PDF") if is_pdf(data) else (None, "page too short (paywall?)")
+            return (data, "page saved as PDF", None) if is_pdf(data) else (None, "page too short (paywall?)", None)
         finally:
             page.close()
 

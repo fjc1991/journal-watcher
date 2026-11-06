@@ -1017,7 +1017,7 @@ function dlText(p) {
     case "not_yet": return `<span class="dl bad" title="Brand-new “articles in advance” reach the library’s EBSCO once they’re in an issue — retry in a few weeks.">Not in the library’s EBSCO yet</span>`;
     case "unavailable": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Not in your library’s holdings</span>`;
     case "needs_check": return p.dl_note && p.dl_note.startsWith("waiting for you")
-      ? `<span class="dl wait" title="Its site wants a “verify you are human” check. Press “Open the check” at the top of the page when you are ready.">Waiting for your check</span>`
+      ? `<span class="dl wait" title="Its site wants a “verify you are human” check. The app asks you to open it: an “Open the check” button at the top of the page once the other papers have had their turn, or, when nothing else is downloading, a window that opens by itself.">Waiting for your check</span>`
       : `<span class="dl bad" title="Its site wants a “verify you are human” check that was not done. Select the paper and press Download again: when nothing else is downloading, the check opens straight away and you tick the box yourself.">Needs a human check</span>`;
     case "wrong_paper": return `<span class="dl bad" title="${esc(p.dl_note || "")}">Wrong PDF refused</span>`;
     case "failed": return `<span class="dl bad">Couldn’t download</span>`;
