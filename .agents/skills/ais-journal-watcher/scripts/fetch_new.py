@@ -31,10 +31,20 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 # ---------- http ----------
 
+def _api_ua(url, h):
+    """OpenAlex and Crossref (and a JW_OPENALEX_URL mirror, see _openalex) are told plainly who is asking; feeds keep UA."""
+    try:
+        import updater
+        return updater.api_headers(url, h)
+    except Exception:  # noqa: BLE001
+        return h
+
+
 def http_get(url, timeout=40, headers=None):
     h = {"User-Agent": UA, "Accept": "*/*"}
     if headers:
         h.update(headers)
+    _api_ua(url, h)
     for attempt in range(4):
         req = urllib.request.Request(url, headers=h)
         try:
@@ -400,6 +410,7 @@ def _openalex(path):
     if not single and openalex_spent():
         return None
     h = {"Accept": "application/json"}
+    _api_ua("https://api.openalex.org/", h)        # (also when the address is a mirror or a test server)
     if key:
         h["Authorization"] = "Bearer " + key
     try:

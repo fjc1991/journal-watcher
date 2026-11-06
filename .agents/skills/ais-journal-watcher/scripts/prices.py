@@ -107,6 +107,14 @@ def parse_openrouter(payload):
     return out
 
 
+def _ua():
+    try:
+        import updater
+        return updater.user_agent()
+    except Exception:  # noqa: BLE001
+        return "JournalWatcher/dev"
+
+
 def refresh(force=False):
     """Read OpenRouter's list if the saved one is older than a day (or force). Returns the number of models known afterwards. Never raises: a failed read keeps the old list."""
     with _lock:
@@ -115,7 +123,7 @@ def refresh(force=False):
         if not force and d.get("models") and age < OR_MAX_AGE:
             return len(d["models"])
         try:
-            req = urllib.request.Request(OR_URL, headers={"User-Agent": "JournalWatcher (price list)", "Accept": "application/json"})
+            req = urllib.request.Request(OR_URL, headers={"User-Agent": _ua(), "Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=20) as r:
                 models = parse_openrouter(json.load(r))
         except Exception:  # noqa: BLE001      (offline, a changed format: keep what we had)

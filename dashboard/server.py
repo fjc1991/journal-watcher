@@ -300,7 +300,7 @@ def sources_state():
 
 def _check_openalex(key):
     """Ask OpenAlex whether the key is good: one free lookup (by ID) with the key. 401/403 = a key OpenAlex does not know. None when OpenAlex cannot be reached."""
-    req = urllib.request.Request("https://api.openalex.org/works/W2741809807", headers={"Authorization": "Bearer " + key, "User-Agent": "JournalWatcher"})
+    req = urllib.request.Request("https://api.openalex.org/works/W2741809807", headers={"Authorization": "Bearer " + key, "User-Agent": updater.user_agent()})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return r.status == 200

@@ -180,10 +180,9 @@ def _ua():
     """Open Library asks the programs that use its API to say who they are: this one does (its name, version and project page)."""
     try:
         import updater
-        v = updater.version()
+        return updater.user_agent()
     except Exception:  # noqa: BLE001
-        v = ""
-    return "JournalWatcher/%s (an open-source tool for reading academic papers; https://github.com/fjc1991/journal-watcher)" % (v or "dev")
+        return "JournalWatcher/dev (an open-source tool for reading academic papers; https://github.com/fjc1991/journal-watcher)"
 
 
 def openlibrary_search(title="", authors=None, isbn="", rows=4):

@@ -79,6 +79,11 @@ def http_get(url, timeout=25, headers=None):
     h = {"User-Agent": UA, "Accept": "*/*"}
     if headers:
         h.update(headers)
+    try:
+        import updater          # scholarly databases (Crossref, Unpaywall, Semantic Scholar, Open Library) are told who is asking; publishers keep UA
+        updater.api_headers(url, h)
+    except Exception:  # noqa: BLE001
+        pass
     req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read(), dict(r.headers)
@@ -224,7 +229,7 @@ def try_unpaywall(doi, email):
     url = "https://api.unpaywall.org/v2/%s?email=%s" % (
         urllib.parse.quote(doi, safe=""), urllib.parse.quote(email))
     try:
-        raw, _ = http_get(url, headers={"Accept": "application/json", "User-Agent": UA})
+        raw, _ = http_get(url, headers={"Accept": "application/json"})
         d = json.loads(raw.decode())
         loc = d.get("best_oa_location") or {}
         return loc.get("url_for_pdf") or loc.get("url")

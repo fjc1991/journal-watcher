@@ -1542,6 +1542,46 @@ print("OK")
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("books: the outline as chapter page ranges, where a page is in words you could cite (chapter and printed page; location for an EPUB), the printed-page offset (checked, kept), and a search inside one chapter", t_book_chapters)
+    def t_api_identity():
+        """The scholarly databases (OpenAlex, Crossref, Unpaywall, Semantic Scholar, Open Library, the price list) are told plainly who is asking: the app's name, version
+        and project page, never an e-mail address. Publisher pages and feeds are asked as before (a browser's User-Agent): only the listed API hosts change."""
+        import urllib.request as ur_
+        import fetch_new as fx_, download as dl_, updater as up_
+        seen = []
+        class R:
+            headers = {}
+            status = 200
+            def __init__(s, req): s.req = req
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+            def read(s): return b'{"message": {"items": []}, "results": [], "data": []}'
+            def geturl(s): return s.req.full_url
+        real, old_url, old_v = ur_.urlopen, os.environ.get("JW_OPENALEX_URL"), os.environ.get("JW_VERSION")
+        ur_.urlopen = lambda req, timeout=None: (seen.append((req.full_url, req.get_header("User-agent"))), R(req))[1]
+        os.environ["JW_OPENALEX_URL"] = "http://127.0.0.1:9/"; os.environ["JW_VERSION"] = "9.8.7"
+        try:
+            fx_.http_get("https://api.crossref.org/works?query.bibliographic=x")
+            fx_.http_get("https://api.openalex.org/works?search=x")
+            fx_._openalex("works?search=y")                          # through the mirror/test address: still named
+            dl_.http_get("https://api.crossref.org/works/10.1/x")
+            dl_.try_unpaywall("10.1/x", "me@example.org")
+            dl_.http_get("https://api.semanticscholar.org/graph/v1/paper/DOI:10.1/x")
+            fx_.http_get("https://www.example-journal.org/rss.xml")      # a feed
+            dl_.http_get("https://www.publisher.example/doi/pdf/10.1/x")    # a publisher's PDF
+            dl_.http_get("https://api.crossref.org.evil.example/x")          # (not a listed host, only a look-alike)
+        finally:
+            ur_.urlopen = real
+            for k, v in (("JW_OPENALEX_URL", old_url), ("JW_VERSION", old_v)):
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        ua = dict(seen)
+        api = [u for u, _ in seen if "example" not in urllib.parse.urlsplit(u).hostname]
+        assert len(api) == 6, seen
+        for u in api:
+            assert ua[u].startswith("JournalWatcher/9.8.7 (") and "github.com/fjc1991/journal-watcher" in ua[u] and "@" not in ua[u] and "Mozilla" not in ua[u], (u, ua[u])
+        for u in ("https://www.example-journal.org/rss.xml", "https://www.publisher.example/doi/pdf/10.1/x", "https://api.crossref.org.evil.example/x"):
+            assert ua[u].startswith("Mozilla/5.0"), (u, ua[u])
+        assert "@" not in up_.user_agent() and up_.user_agent().startswith("JournalWatcher/")
+    check("identity: the scholarly databases (OpenAlex, Crossref, Unpaywall, Semantic Scholar) are told the app's name, version and project page (never an e-mail address); feeds and publisher pages are asked as before", t_api_identity)
     def t_keychain_keys():
         """On a Mac a pasted API key goes to that Mac's Keychain (not into a file in a folder that is synced to other computers); a key already in the .env file can be moved there; a Keychain
         key wins over an old line; what cannot be held there stays in the file."""
