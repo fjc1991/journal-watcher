@@ -1586,7 +1586,12 @@ fx.fetch_journal = lambda j: []                                                 
             check("a paper whose download failed takes a dropped PDF, and its card offers 'Add the PDF I downloaded…' beside 'Open in my browser'",
                   "can-attach" in (page.get_attribute(C_, "class") or "") and page.locator(C_ + ' [data-act="attach"]').count() == 1 and page.locator(C_ + " a:has-text('Open in my browser')").count() == 1, page.inner_text(C_)[:300])
             n_lib_, n_seen_ = len(api("/api/library")), len(SEEN)
-            check("…dragging a PDF over the card marks the card (the page-wide 'add to the Library' overlay stays away)", page.evaluate(JS_DROP, [C_ + " .ptitle", [[right_, "x.pdf", "application/pdf"]], True]) is None and "at-over" in (page.get_attribute(C_, "class") or ""))
+            ov_ = page.evaluate("""([sel, b64]) => { const dt = new DataTransfer(), bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+              dt.items.add(new File([u], "x.pdf", {type: "application/pdf"})); const t = document.querySelector(sel + " .ptitle"), o = {dataTransfer: dt, bubbles: true, cancelable: true};
+              t.dispatchEvent(new DragEvent("dragenter", o)); const ev = new DragEvent("dragover", o); t.dispatchEvent(ev);
+              const pill = document.querySelector(".di-ov:not(.hide) .di-pill"); return [pill ? pill.textContent : null, document.querySelector(sel).classList.contains("at-over"), ev.defaultPrevented]; }""", [C_, right_])
+            page.evaluate("document.dispatchEvent(new DragEvent('dragend', {bubbles: true}))")
+            check("…dragging a PDF over the card marks the card (the page-wide 'add to the Library' overlay stays away)", ov_ == [None, True, True], str(ov_))
             page.evaluate(JS_DROP, [C_ + " .ptitle", [[_b64A.b64encode(b"just notes").decode(), "notes.txt", "text/plain"]], False])
             page.wait_for_function("document.querySelector('#toast') && /Only a PDF can be added/.test(document.querySelector('#toast').textContent)", timeout=5000)
             check("…a file that is not a PDF is refused by name, and nothing is added", len(api("/api/library")) == n_lib_ and not page.locator("#ir-dlg[open]").count())
@@ -1615,6 +1620,14 @@ fx.fetch_journal = lambda j: []                                                 
             ct_ = page.inner_text(C_)
             check("…the card says Downloaded and 'No summary yet', with no 'Retry summary' (its summary is asked for in the Library, with the cost first), and it takes no more drops",
                   "No summary yet" in ct_ and "Retry summary" not in ct_ and "can-attach" not in (page.get_attribute(C_, "class") or ""), ct_[:300])
+            # (the checks after this one expect the library as it was: the paper is deleted again, and its "deleted" row taken out of the index)
+            api("/api/library/delete", {"files": [row_[-1]["file"]]})
+            idx_ = os.path.join(TMP, "Papers", "_index.csv")
+            with open(idx_, newline="", encoding="utf-8") as f_:
+                rd_ = csv.DictReader(f_); cols_ = rd_.fieldnames; keep_ = [r_ for r_ in rd_ if r_.get("doi") != "10.1234/abc"]
+            with open(idx_, "w", newline="", encoding="utf-8") as f_:
+                w_ = csv.DictWriter(f_, cols_); w_.writeheader(); w_.writerows(keep_)
+            check("(the paper is out of the library and the folder again for the checks that follow)", len(api("/api/library")) == n_lib_ and "10.1234/abc" not in json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.json"))).get("papers", []))
 
 
             print("round 2d: skim layer")
