@@ -76,9 +76,10 @@ Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`: it builds on a macO
 ## Privacy and safety
 
 - No analytics, no accounts, no server of ours. Network calls: journal feeds, Crossref, OpenAlex, Unpaywall, the publishers you sign in to, the AI provider you configured, and (if you keep it on) the update feed.
+- The scholarly databases (OpenAlex, Crossref, Unpaywall, Semantic Scholar, Open Library, OpenRouter's public model list) are told plainly who is asking: `JournalWatcher/<version>` and this project's page, never an e-mail address. (Unpaywall asks for an e-mail with each lookup: only the one you type in Settings → Paper sources, and only to Unpaywall.) Publisher pages and feeds are read as a browser reads them.
 - A friendly reminder that the app is free and takes tips (the author's tip page is set in `dashboard/static/author.json`) appears at most three times, weeks apart, and can be switched off under **About**. To decide when, the app counts on your computer how often you open it (`support.json` in your data folder); the count is never sent anywhere.
 - Passwords are typed into the publisher's or your library's own page in a browser window; the app never sees them. It keeps the browser's signed-in session on your computer.
-- API keys are stored in your data folder's `.env`, never in the repository. **Do not commit your data folder.**
+- API keys (the AI providers', OpenAlex's and Elsevier's) are kept in the Mac's Keychain in the Mac app, and otherwise in your data folder's `.env`; never in the repository. **Do not commit your data folder.**
 
 ## License
 
