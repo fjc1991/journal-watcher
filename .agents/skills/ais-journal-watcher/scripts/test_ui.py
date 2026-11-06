@@ -404,7 +404,7 @@ def main():
             "        emit('challenge', {'host': 'www.sciencedirect.com', 'state': 'pending', 'site': 'ScienceDirect', 'msg': 'ScienceDirect wants to check you are human. Press Open the check.'})\n"
             "        import queue\n"
             "        try:\n            h = checks.get(timeout=60)\n        except queue.Empty:\n            h = ''\n"
-            "        open(%r, 'w').write(h)\n"
+            "        open(%r + '.tmp', 'w').write(h); os.replace(%r + '.tmp', %r)      # (written whole: a reader never sees it empty)\n"
             "        emit('challenge', {'host': h, 'state': 'open', 'msg': 'A Chromium window is open on ' + h})\n"
             "        emit('challenge', {'host': h, 'state': 'passed', 'msg': h + ' check passed'})\n"
             "    for i in ids:\n        p = run.papers[i]\n"
@@ -413,7 +413,7 @@ def main():
             "        p['dl_note'] = ('wrong paper via browser: this PDF is titled \\u201cTwo-stage differences in differences\\u201d: its title is not on the first pages (0%% found)' if wrong else 'test: no real downloads')\n"
             "        p['manual_url'] = 'https://example.org/the-paper'\n"
             "        emit('download', {'id': i, 'dl_status': p['dl_status'], 'dl_note': p['dl_note'], 'manual_url': p['manual_url']})\n"
-            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".check", marker + ".checked", marker + ".wrong"))
+            "pl.download_and_summarize = fake\n" % (os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "scripts"), marker, marker + ".check", marker + ".checked", marker + ".checked", marker + ".checked", marker + ".wrong"))
     tail = "sys.argv = ['server.py', '--port', %r, '--no-open']\nrunpy.run_path(%r, run_name='__main__')\n" % (str(port), os.path.join(TMP, "dashboard", "server.py"))
     search_fakes = r"""
 import zlib, fetch_new as fx
@@ -1480,10 +1480,11 @@ fx.fetch_journal = lambda j: []                                                 
             t_seen = time.time()
             ok_chk = api("/api/check", {"host": "www.sciencedirect.com"}).get("ok")
             for _ in range(240):
-                if os.path.exists(marker + ".checked"): break
+                if os.path.exists(marker + ".checked") and open(marker + ".checked").read(): break
                 time.sleep(0.25)
+            t_got = time.time()
             chk_txt = open(marker + ".checked").read() if os.path.exists(marker + ".checked") else "(not written)"
-            check("…'Open the check' reaches that download", ok_chk is True and chk_txt == "www.sciencedirect.com", "ok=%r checked=%r clicks %.1fs, check seen after %.1fs, state=%s" % (ok_chk, chk_txt, t_clicked - t_click, t_seen - t_clicked, str({k_: v_ for k_, v_ in api("/api/state").items() if k_ != "run"})[:300]))
+            check("…'Open the check' reaches that download", ok_chk is True and chk_txt == "www.sciencedirect.com", "ok=%r checked=%r clicks %.1fs, check seen after %.1fs, answered after %.1fs, state=%s" % (ok_chk, chk_txt, t_clicked - t_click, t_seen - t_clicked, t_got - t_seen, str({k_: v_ for k_, v_ in api("/api/state").items() if k_ != "run"})[:300]))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=30000)
             wk_ = api("/api/runs/" + api("/api/state")["run"]["id"])
             fp_ = [p_ for p_ in wk_["papers"] if p_.get("openalex") == "W77045"]
