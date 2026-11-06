@@ -1803,7 +1803,7 @@ fx.fetch_journal = lambda j: []                                                 
             page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.select_option("#lf-kind", "conference"); page.keyboard.press("Escape")
             page.wait_for_selector('#lib-results .librow:has-text("Kappa evidence")', timeout=10000)
             check("the Type filter on its own lists the conference papers and nothing else (it used to count as no filter at all)",
-                  page.locator("#lib-results .librow").count() == 1 and "Conference paper" in page.inner_text('#lib-results .librow:has-text("Kappa evidence") .tag.kind'), page.inner_text("#lib-results")[:300])
+                  page.locator("#lib-results .librow").count() == 1 and page.inner_text('#lib-results .librow:has-text("Kappa evidence") .tag.kind').strip() == "Conference", page.inner_text("#lib-results")[:300])
             page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
             page.check('#kind-dlg input[name="kd"][value="other"]'); page.select_option("#kd-lab", "Thesis"); page.click("#kd-go"); page.wait_for_selector("#kind-dlg", state="detached")
             side_ = json.load(open(os.path.join(TMP, kr_["file"])[:-4] + ".paper.json"))
