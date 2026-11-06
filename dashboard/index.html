@@ -92,6 +92,12 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .authc { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 13px; }
 .authc small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
 .authc input { margin-top: 3px; }
+#authfollow { margin-top: 6px; }
+.authsaved { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 13px; }
+.authsaved .lbl { margin-bottom: 4px; }
+.authrow { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; }
+.authrow small { display: block; color: var(--ink-3); font-size: 12px; } .authrow .warn { color: var(--bl); }
+.authrow label { margin-left: auto; white-space: nowrap; display: flex; gap: 4px; align-items: center; }
 .banner .chk { margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .runhead { padding: 16px 18px; }
 .runhead h1 { font: 600 22px var(--serif); margin: 0 0 4px; }
@@ -296,12 +302,14 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <div class="est">Starts a new run. To narrow the list you’re viewing, use the filters above the results.</div>
       </div>
       <div class="pane" id="pane-authors">
-        <p>Every journal article, conference paper and working paper of one author (from OpenAlex), downloaded into a folder named after them. No screening: each paper gets a summary, as any download does.</p>
+        <p>Every journal article, conference paper and working paper of one author (from OpenAlex), downloaded into a folder named after them. No screening: each paper gets a summary, as any download does. <b>Follow</b> does the same, then the weekly check brings their new works into the folder (downloaded only: no summary is written by itself).</p>
         <label class="lbl" for="authname">Author <span>(a name, or an ORCID iD)</span></label>
         <div class="row"><input type="text" id="authname" placeholder="e.g. Ann Lee" autocomplete="off"><button class="btn small" id="authgo" type="button">Find</button></div>
         <div id="authlist" class="authlist"></div>
         <div class="est hide" id="authhint">Tick more than one if they are the same person: OpenAlex sometimes lists one person twice (after a move, say).</div>
         <button class="btn primary full hide" id="authdl" type="button">Download all</button>
+        <button class="btn full hide" id="authfollow" type="button" title="Download all their works now, then their new works each week with the weekly check (into the same folder, no screening, no summary by itself)">Follow</button>
+        <div id="authsaved" class="authsaved hide"></div>
       </div>
       <div class="pane" id="pane-terms">
         <p>Every paper of the chosen journals and years whose title, abstract or keywords contain <b>any</b> of your terms. No AI and no cost: the matches are listed as they are found. You can still rank them with AI afterwards.</p>
@@ -587,6 +595,7 @@ function renderNav() {
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("on", p.id === "pane-" + b.dataset.tab));
+  if (b.dataset.tab === "authors") loadAuthSaved();
 });
 function chip(label, on, cb) {
   const c = document.createElement("span"); c.className = "chip" + (on ? " on" : ""); c.textContent = label;
@@ -720,11 +729,26 @@ $("#searchbtn").onclick = async () => {
 let AUTH = [], AUTHSEQ = 0;
 const authPicked = () => [...document.querySelectorAll("#authlist [data-ai]:checked")].map(c => AUTH[+c.dataset.ai]);
 function paintAuthBtn() {
-  const p = authPicked(), b = $("#authdl");
-  b.classList.toggle("hide", !p.length); $("#authhint").classList.toggle("hide", AUTH.length < 2);
-  if (p.length) b.textContent = "Download all into their folder";
-  b.disabled = BUSY;
+  const p = authPicked(), b = $("#authdl"), f = $("#authfollow");
+  b.classList.toggle("hide", !p.length); f.classList.toggle("hide", !p.length); $("#authhint").classList.toggle("hide", AUTH.length < 2);
+  if (p.length) { b.textContent = "Download all into their folder"; f.textContent = "Follow: download all now, then new works each week"; }
+  b.disabled = f.disabled = BUSY;
 }
+async function loadAuthSaved() {                  // "Your authors": each author with a folder, and whether the weekly check follows them
+  let r; try { r = (await api("/api/authors")).authors || []; } catch (e) { return; }
+  const box = $("#authsaved"); box.classList.toggle("hide", !r.length);
+  box.innerHTML = `<div class="lbl">Your authors</div>` + r.map(a => `<div class="authrow"><span><b>${esc(a.name)}</b><small>folder “${esc(a.folder_name)}”${a.follow ? (a.follow_last ? ` · last checked ${esc(a.follow_last)}` : " · followed") : ""}</small>${a.follow_warn ? `<small class="warn">${esc(a.follow_warn)}</small>` : ""}</span>
+      <label title="The weekly check downloads their new works into this folder"><input type="checkbox" data-follow="${esc(a.folder)}"${a.follow ? " checked" : ""}${BUSY && !a.follow ? " disabled" : ""}> Follow</label></div>`).join("");
+}
+$("#authsaved").onchange = async e => {
+  const c = e.target.closest("[data-follow]"); if (!c) return;
+  try {
+    const r = await api("/api/authors/follow", {folder: c.dataset.follow, on: c.checked});
+    if (r.run) { toast("Following: listing their works, then downloading what you do not have yet…"); startedRun(r.run); go({view: "run", j: "~queue"}); }
+    else toast(c.checked ? "Following again: the weekly check brings their new works." : "Not followed any more: the folder and its papers stay.");
+    loadAuthSaved();
+  } catch (er) { c.checked = !c.checked; notifyError(er); }
+};
 $("#authgo").onclick = async () => {
   const name = $("#authname").value.trim(); if (!name) return;
   const seq = ++AUTHSEQ;
@@ -741,14 +765,16 @@ $("#authgo").onclick = async () => {
 };
 $("#authname").onkeydown = e => { if (e.key === "Enter") $("#authgo").click(); };
 $("#authlist").onchange = paintAuthBtn;
-$("#authdl").onclick = async () => {
+async function authStart(follow) {
   const p = authPicked(); if (!p.length) return;
   try {
-    const r = await api("/api/authors/download", {ids: p.map(a => a.id), name: p[0].name, institution: (p[0].institutions || [])[0] || ""});
-    toast(`Listing ${p[0].name}'s works, then downloading them into the folder “${r.run.params.folder_name}”…`);
+    const r = await api(follow ? "/api/authors/follow" : "/api/authors/download", {ids: p.map(a => a.id), name: p[0].name, institution: (p[0].institutions || [])[0] || "", on: true});
+    toast(`Listing ${p[0].name}'s works, then downloading them into the folder “${r.run.params.folder_name}”…${follow ? " The weekly check then brings their new works there." : ""}`);
     startedRun(r.run); go({view: "run", j: "~queue"});
   } catch (e) { notifyError(e); }
-};
+}
+$("#authdl").onclick = () => authStart(false);
+$("#authfollow").onclick = () => authStart(true);
 const runWord = r => r.kind === "weekly" ? "weekly check" : r.kind === "author" ? "author's run" : r.kind === "picks" ? "download" : "search";   // (what the run is called in its menus)
 function startedRun(run) {
   SEL.clear(); FILTER = "relevant"; JST = {};
@@ -938,7 +964,7 @@ function renderMeta() {
   const nc = (RUN.checks || []).length;
   const li = pr.listing || {};
   const scope = RUN.kind === "picks" ? `Papers you chose in Discover: ${pr.label || "related papers"}`
-    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "")
+    : RUN.kind === "author" ? `Works by ${pr.label} (OpenAlex), into the folder “${pr.folder_name || pr.label}”` + (li.error ? ` · listing failed: ${li.error}` : li.stopped ? " · stopped while listing: nothing downloaded" : li.listed !== undefined ? ` · ${li.listed} works listed${li.complete === false ? " (incomplete: OpenAlex stopped answering; search again later for the rest)" : ""}, ${li.have} already in your library, ${li.deleted} you deleted, ${li.new} to download` : "") + (pr.follow ? " · followed: the weekly check brings their new works into the folder" : "")
     : RUN.kind === "weekly"
     ? `Weekly checks: newest papers from all journals (not limited to a year) · ${nc} check${nc === 1 ? "" : "s"} this week` +
       (RUN.updated ? `, last ${fmtWhen(RUN.updated)}` : "")
@@ -1385,7 +1411,8 @@ function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;
   $("#statustext").textContent = busy ? ({fetch: "Working", download: "Downloading", login: "Waiting for login"}[kind] || "Working") : "Idle";
   $("#status").classList.toggle("busy", busy);
-  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl", "#makebackup"].forEach(s => $(s).disabled = busy);
+  ["#weeklybtn", "#searchbtn", "#termsbtn", "#authdl", "#authfollow", "#makebackup"].forEach(s => $(s).disabled = busy);
+  document.querySelectorAll("#authsaved [data-follow]:not(:checked)").forEach(c => c.disabled = busy);      // (switching a follow on starts a download; switching one off is always allowed)
   updateScreenBtn();
   paintSignins();                 // the Sign-ins menu stays openable (to see what state each sign-in is in); its rows wait while a task runs
   $("#stopbtn").classList.toggle("hide", !busy || kind === "login");
@@ -1418,6 +1445,7 @@ function connect() {
     if (!d.busy) {
       loadRuns(); loadLibrary();
       if (window.LibraryUI && LibraryUI.refreshFolders) LibraryUI.refreshFolders();      // (an author's new folder appears in the sidebar)
+      if ($("#pane-authors").classList.contains("on")) loadAuthSaved();
       if (d.run && RUN && d.run.id === RUN.id) api("/api/runs/" + RUN.id).then(r => { setRun(r); render(); });
     }
   });

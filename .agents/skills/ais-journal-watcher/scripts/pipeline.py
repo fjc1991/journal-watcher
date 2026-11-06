@@ -557,6 +557,122 @@ def fetch_weekly(run, emit, stop):
     emit("progress", {"stage": "fetching", "label": "Fetched", "done": len(js), "total": len(js)})
 
 
+def follow_list(run, emit, stop):
+    """The weekly check, before the feeds: the new works of every author you follow (Authors tab → Follow) go into this week's run as papers to download, into
+    the author's folder, without screening (you chose the author). Returns the run ids of the papers to download; nothing is downloaded here (follow_download,
+    after the screening). A work the feeds will bring too is the same paper: one already in the run is marked for download in place, and the followed papers'
+    keys go into state/seen.json so a feed read afterwards does not add them again.
+
+    For each author: their full OpenAlex list minus the works already dealt with (authors.follow_known). Those that are not a kind that is downloaded (books,
+    a preprint of a paper whose published version is listed), already in the library (filed into the folder) or deleted by you are dealt with at once; the
+    rest are new. An author followed with no record of what was dealt with yet (followed from another computer, an older record) is set up silently: everything
+    listed now counts as dealt with, and new works start from next week. A folder you deleted pauses following (with a note on the Authors tab)."""
+    import authors
+    import folders as fo
+    recs = authors.followed()
+    if not recs:
+        return []
+    seen_path = os.path.join(STATE, "seen.json")
+    todo, n_new = [], 0
+    for rec in recs:
+        if stop.is_set():
+            break
+        fid, name = rec["folder"], rec.get("name") or "an author"
+        if not fo.get(fid):
+            authors.set_follow_warn(fid, "Its folder was deleted, so following is paused. Press Follow again to start a new folder.")
+            emit("log", {"msg": "Followed author %s: the folder was deleted, so following is paused (Authors tab)." % name, "level": "warn"})
+            continue
+        ids = rec.get("ids") or []
+        try:
+            ws, complete, total = authors.works(ids, stop=stop)
+        except authors.AuthorError as e:
+            emit("log", {"msg": "Followed author %s: %s Trying again next week." % (name, e), "level": "warn"})
+            continue
+        if stop.is_set():
+            break
+        if "follow_known" not in rec:
+            authors.follow_mark(fid, [w.get("id") for w in ws], seed=True)
+            emit("log", {"msg": "Following %s is set up: %d works listed now; their new works come from next week." % (name, len(ws))})
+            continue
+        known = {str(k).upper() for k in rec.get("follow_known") or []}
+        if not ws and known:                                  # an id OpenAlex merged into another lists nothing any more: ask OpenAlex which id it is now
+            now = authors.resolve(ids)
+            if now is None or fx.openalex_spent():
+                emit("log", {"msg": "Followed author %s: OpenAlex did not answer; trying again next week." % name, "level": "warn"})
+                continue
+            if set(now) - set(ids):
+                authors.add_ids(fid, now)
+                try:
+                    ws, complete, total = authors.works(now, stop=stop)
+                except authors.AuthorError as e:
+                    emit("log", {"msg": "Followed author %s: %s Trying again next week." % (name, e), "level": "warn"})
+                    continue
+            if not ws:
+                msg = "OpenAlex lists no works for %s any more (the author's record may have been merged or removed). Search for them again and press Follow." % name
+                authors.set_follow_warn(fid, msg)
+                emit("log", {"msg": msg, "level": "warn"})
+                continue
+        kept_all, _ = authors.select(ws)                      # (on the full list: a new preprint of a paper whose published version is listed is still left out)
+        kept = [w for w in kept_all if authors._short(w.get("id")).upper() not in known]
+        kept_ids = {authors._short(w.get("id")).upper() for w in kept}
+        authors.follow_mark(fid, [w.get("id") for w in ws if authors._short(w.get("id")).upper() not in known | kept_ids])   # (not a kind that is downloaded: dealt with)
+        papers = authors.to_papers(kept, fid, name)
+        for p in papers:
+            p["reason"] = "followed author · " + p["reason"]
+        new, have, gone = authors.split(papers)
+        authors.file_have(fid, have)
+        authors.follow_mark(fid, [p["openalex"] for p, _ in have] + [p["openalex"] for p in gone])
+        by_title = {}
+        for q in run.papers.values():
+            by_title.setdefault((authors.tkey(q.get("title")), q.get("abbr")), []).append(q)
+        for p in new:
+            q = run.papers.get(p["id"])
+            if q is None and authors.tkey(p["title"]):
+                q = next((x for x in by_title.get((authors.tkey(p["title"]), p.get("abbr")), []) if not (x.get("doi") and p.get("doi"))), None)
+            if q is not None:                                 # the feeds brought it already this week: the same paper, now one to download into the folder
+                if q.get("user_set"):                         # (unless you set its verdict yourself)
+                    authors.follow_mark(fid, [p["openalex"]])
+                    continue
+                q.update(verdict="download", folder=fid, openalex=p["openalex"], reason=p["reason"], source=q.get("source") or "author")
+                q.pop("model_verdict", None)
+                emit("verdict", {k: q.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
+                todo.append(q["id"])
+            else:
+                p["source_mode"] = "weekly"
+                run.add_paper(p)
+                emit("paper", slim(p))
+                todo.append(p["id"])
+            n_new += 1
+        seen = load_json(seen_path, {})
+        for p in new + [p for p, _ in have] + gone:
+            for k in {p["id"], fx.key_for(None, p.get("journal") or "", p.get("title") or "")}:
+                seen.setdefault(k, {"journal": p.get("journal"), "title": p.get("title"), "added": datetime.now(timezone.utc).date().isoformat(), "follow": True})
+        os.makedirs(STATE, exist_ok=True)
+        with open(seen_path, "w") as f:
+            json.dump(seen, f, indent=1)
+        emit("log", {"msg": "Followed author %s: %d new work%s%s; %d already in your library (in the folder too), %d you deleted." % (
+            name, len(new), "" if len(new) == 1 else "s", "" if complete else " (OpenAlex stopped answering: the rest next week)", len(have), len(gone))})
+    run.save(force=True)
+    return todo
+
+
+def follow_settle(run, ids):
+    """After the followed works were downloaded: those that came (or that you deleted meanwhile) are dealt with; the others (a human check, a sign-in, no access)
+    are not, so next week's check tries them again. Returns (dealt with, to try again)."""
+    import authors
+    ok, again = 0, 0
+    for i in ids:
+        p = run.papers.get(i) or {}
+        if not p.get("folder") or not p.get("openalex"):
+            continue
+        if p.get("dl_status") in ("ok", "deleted"):
+            authors.follow_mark(p["folder"], [p["openalex"]])
+            ok += 1
+        else:
+            again += 1
+    return ok, again
+
+
 FETCHED = os.path.join(dl.LOCAL, "fetched")       # what a journal's year range returned, abstracts included (a saved copy: asking Crossref again takes minutes)
 FETCH_KEEP_DAYS = 7        # a past year's articles hardly change ...
 FETCH_KEEP_DAYS_NOW = 1    # ... but the current year's list grows every week

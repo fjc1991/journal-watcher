@@ -207,6 +207,7 @@ OA = {w["id"]: w for w in (
 
 
 AUTHOR_ASKED = []
+AUTHOR_EXTRA = [0]          # works OpenAlex lists for Ann Lee beyond the 45 (a new work, for the weekly check of a followed author)
 
 
 class FakeOA(BaseHTTPRequestHandler):
@@ -227,10 +228,10 @@ class FakeOA(BaseHTTPRequestHandler):
                        {"id": "https://openalex.org/A5000000222", "display_name": "Ann Lee", "works_count": 2, "last_known_institutions": [{"display_name": "Elsewhere University"}], "topics": []}]
                 body = {"results": res}
             else:
-                body = {"meta": {"count": 45, "next_cursor": None}, "results": [
+                body = {"meta": {"count": 45 + AUTHOR_EXTRA[0], "next_cursor": None}, "results": [
                     {"id": "https://openalex.org/W77%03d" % k, "doi": "https://doi.org/10.7777/au.%d" % k, "display_name": "Author paper %d" % k, "publication_date": "2024-01-01",
                      "publication_year": 2024, "type": "article", "primary_location": {"source": {"display_name": "Author Test Journal", "type": "journal"}},
-                     "authorships": [{"author": {"display_name": "Ann Lee"}}]} for k in range(45)]}
+                     "authorships": [{"author": {"display_name": "Ann Lee"}}]} for k in range(45 + AUTHOR_EXTRA[0])]}
             data = json.dumps(body).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         kind, vals = q["filter"][0].split(":", 1); vals = [up.unquote(v) for v in vals.split("|")]
@@ -447,6 +448,7 @@ def fake_ol(title='', authors=None, isbn='', rows=4):                           
     return []
 bks.openlibrary_search = fake_ol
 bks.crossref_books = lambda title, rows=3: []
+fx.fetch_journal = lambda j: []                                                   # the weekly check reads no real feed (only the followed authors bring papers)
 """.replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1430,6 +1432,71 @@ bks.crossref_books = lambda title, rows=3: []
             check("…when OpenAlex does not answer for the works, the run says the listing failed and why (not just 'No papers in this run')",
                   "didn't answer" in page.inner_text("#runmeta") and "could not be listed" in page.inner_text("#papers"), page.inner_text("#runmeta"))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            print("follow an author: all their works now, then the new ones with the weekly check")
+            store_p = os.path.join(TMP, "Papers", "_authors.json")
+            rdir_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "runs")
+            st_dir = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state")
+            saved_state = {n_: (open(os.path.join(st_dir, n_)).read() if os.path.exists(os.path.join(st_dir, n_)) else None) for n_ in ("seen.json", "judged.json", "new_papers.json")}
+            runs_before = set(os.listdir(rdir_))
+            ann = lambda: next(r_ for r_ in json.load(open(store_p))["authors"] if "A5000000111" in r_["ids"])      # noqa: E731
+            if os.path.exists(marker): os.remove(marker)
+            page.click('.tabs button[data-tab="authors"]'); page.fill("#authname", "Ann Lee"); page.click("#authgo"); page.wait_for_selector("#authlist .authc"); page.check("#authlist [data-ai='0']")
+            check("ticking an author offers Follow beside Download all", page.is_visible("#authfollow") and "Follow" in page.inner_text("#authfollow"))
+            page.click("#authfollow")
+            for _ in range(80):
+                if os.path.exists(marker): break
+                page.wait_for_timeout(250)
+            fids_ = open(marker).read().split(",") if os.path.exists(marker) else []
+            check("…Follow downloads all their works now, as Download all does, and notes what was listed (only newer works are new)",
+                  len(fids_) == 45 and ann().get("follow") is True and len(ann().get("follow_known") or []) == 45 and "followed" in page.inner_text("#runmeta"), "%d ids, %s" % (len(fids_), {k_: (v_ if not isinstance(v_, list) else len(v_)) for k_, v_ in ann().items()}))
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
+            ffid = ann()["folder"]
+            page.click('.tabs button[data-tab="search"]'); page.click('.tabs button[data-tab="authors"]'); page.wait_for_selector('#authsaved [data-follow="%s"]' % ffid, timeout=10000)
+            check("'Your authors' lists them, with Follow ticked", page.is_checked('#authsaved [data-follow="%s"]' % ffid) and "Ann Lee" in page.inner_text("#authsaved"), page.inner_text("#authsaved"))
+            os.remove(marker)
+            page.uncheck('#authsaved [data-follow="%s"]' % ffid)
+            for _ in range(40):
+                if ann().get("follow") is False: break
+                page.wait_for_timeout(250)
+            check("…unticking stops following: no job starts, and the folder stays", ann().get("follow") is False and api("/api/state")["busy"] is False and not os.path.exists(marker))
+            page.check('#authsaved [data-follow="%s"]' % ffid)
+            for _ in range(40):
+                if ann().get("follow") is True: break
+                page.wait_for_timeout(250)
+            page.wait_for_timeout(500)
+            check("…ticking it again follows again without downloading everything again", ann().get("follow") is True and api("/api/state")["busy"] is False and not os.path.exists(marker))
+            AUTHOR_EXTRA[0] = 1                                                                            # OpenAlex now lists a 46th work
+            open(marker + ".check", "w").write("1")                                                        # (and its download meets a human check)
+            page.click('.tabs button[data-tab="weekly"]'); page.click("#weeklybtn")
+            st_ = {}
+            for _ in range(80):
+                st_ = api("/api/state")
+                if st_.get("checks"): break
+                time.sleep(0.25)
+            check("the weekly check downloads the followed author's new work as a download: its human check is offered with 'Open the check' (it does not open by itself)",
+                  st_.get("busy") and st_.get("kind") == "download" and any(c_["host"] == "www.sciencedirect.com" for c_ in st_.get("checks") or []), str({k_: st_.get(k_) for k_ in ("busy", "kind", "checks")}))
+            ok_chk = api("/api/check", {"host": "www.sciencedirect.com"}).get("ok")
+            for _ in range(80):
+                if os.path.exists(marker + ".checked"): break
+                time.sleep(0.25)
+            check("…'Open the check' reaches that download", ok_chk is True and os.path.exists(marker + ".checked") and open(marker + ".checked").read() == "www.sciencedirect.com")
+            page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=30000)
+            wk_ = api("/api/runs/" + api("/api/state")["run"]["id"])
+            fp_ = [p_ for p_ in wk_["papers"] if p_.get("openalex") == "W77045"]
+            check("…only the new work (the 46th) was downloaded, into their folder, without screening, and the run says so",
+                  open(marker).read() == "doi:10.7777/au.45" and wk_["kind"] == "weekly" and fp_ and fp_[0]["verdict"] == "download" and fp_[0]["folder"] == ffid and fp_[0]["reason"].startswith("followed author")
+                  and "W77045" not in (ann().get("follow_known") or []), str((open(marker).read() if os.path.exists(marker) else "no marker", [(p_.get("id"), p_.get("verdict"), p_.get("reason")) for p_ in wk_["papers"]][:3])))
+            AUTHOR_EXTRA[0] = 0
+            for x_ in (marker + ".check", marker + ".checked"):
+                if os.path.exists(x_): os.remove(x_)
+            for f_ in set(os.listdir(rdir_)) - runs_before:                                                # (this week's run and the state files back as they were, for the checks after this one)
+                os.remove(os.path.join(rdir_, f_))
+            for n_, txt_ in saved_state.items():
+                if txt_ is None:
+                    os.path.exists(os.path.join(st_dir, n_)) and os.remove(os.path.join(st_dir, n_))
+                else:
+                    open(os.path.join(st_dir, n_), "w").write(txt_)
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached")
             for f_ in os.listdir(fdir_):                                                                   # (leave the folders and runs the later checks count as they were)
                 if f_.endswith(".json") and "." not in f_[:-5] and json.load(open(os.path.join(fdir_, f_)))["name"].startswith("Ann Lee"):
                     os.remove(os.path.join(fdir_, f_))

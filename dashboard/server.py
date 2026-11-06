@@ -136,6 +136,11 @@ class Jobs:
     def busy(self):
         return self.thread is not None and self.thread.is_alive()
 
+    def set_kind(self, kind):
+        """What the running job does now (the weekly check downloads its followed authors' works as a download: "Open the check" works then)."""
+        self.kind = kind
+        HUB.emit("job", {"busy": True, "kind": kind, "run": self.run.to_dict(full=False) if self.run else None})
+
     def start(self, kind, fn, run=None):
         with self.lock:
             if self.busy():
@@ -203,7 +208,16 @@ def start_fetch(run):
                 run.checks.append(datetime.now(timezone.utc).isoformat())
             emit("log", {"msg": ("Started: %s" % run.title()) if len(run.checks) < 2 else
                          "Continuing your saved search: %s (%d papers are already in it; only papers without a verdict are screened)" % (run.title(), len(run.order))})
+        follow_ids = []
         if run.kind == "weekly":
+            try:
+                follow_ids = pl.follow_list(run, emit, JOBS.stop)         # the authors you follow: their new works (before the feeds, which then do not add them again)
+            except Exception as e:  # noqa: BLE001      (a problem with one of them must not stop the week's check)
+                traceback.print_exc()
+                run.errors.append("followed authors: %s" % str(e)[:200])
+                emit("log", {"msg": "The followed authors could not be checked: %s" % str(e)[:200], "level": "warn"})
+            if JOBS.stop.is_set():
+                return
             pl.fetch_weekly(run, emit, JOBS.stop)
         else:
             pl.fetch_search(run, emit, JOBS.stop)
@@ -214,8 +228,16 @@ def start_fetch(run):
                 return
             emit("log", {"msg": "Finished: %d papers contain your terms. Tick the ones you want and press Download, or press “Screen with AI” to rank them against your interests." % len(run.order), "level": "ok"})
             return
+        failed = None
         if not JOBS.stop.is_set() and run.order:
-            pl.screen(run, emit, JOBS.stop)
+            try:
+                pl.screen(run, emit, JOBS.stop)
+            except Exception as e:  # noqa: BLE001      (the followed authors' works are downloaded all the same; the error is raised again after them)
+                failed = e
+        if follow_ids and not JOBS.stop.is_set():
+            follow_download(run, follow_ids, emit)
+        if failed is not None:
+            raise failed
         n_dl = sum(1 for p in run.papers.values() if p.get("verdict") == "download")
         n_bl = sum(1 for p in run.papers.values() if p.get("verdict") == "borderline")
         emit("log", {"msg": "Finished: %d papers, %d to download, %d borderline · $%.2f"
@@ -223,14 +245,10 @@ def start_fetch(run):
     return JOBS.start("fetch", job, run)
 
 
-def start_download(ids, prepare=None):
-    """Download these papers of the open run in the background. `prepare(emit)`, when given, runs first inside the same job and returns the ids (an author's works
-    are listed there: it can take a while, and a "verify you are human" check during the downloads works as for any download)."""
-    run = JOBS.run
-    base = emit_for(run)
-
+def _download_emit(base):
+    """emit for a download: it also keeps which checks wait for the user, so that a page opened (or reloaded) later still offers "Open the check"."""
     def emit(event, data):
-        if event == "challenge":                 # which checks wait for the user: kept so that a page opened (or reloaded) later still offers "Open the check"
+        if event == "challenge":
             if data.get("state") in ("pending", "again"):
                 JOBS.waiting[data["host"]] = data
             elif data.get("state") == "done":
@@ -238,6 +256,31 @@ def start_download(ids, prepare=None):
             elif data.get("state") in ("open", "passed", "failed"):
                 JOBS.waiting.pop(data.get("host"), None)
         base(event, data)
+    return emit
+
+
+def follow_download(run, ids, emit):
+    """The weekly check, after the screening: download the followed authors' new works into their folders. A human check never opens by itself here (you started
+    the check for the feeds, not for these papers): the page offers "Open the check", as for any download. No summary is written (no AI call): the Library's
+    "Summarise N papers…" does that, with its estimate first. A work that does not come is tried again next week (pipeline.follow_settle)."""
+    JOBS.set_kind("download")
+    try:
+        pl.download_and_summarize(run, ids, _download_emit(emit), JOBS.stop, checks=JOBS.checks, auto_open=False, summarize=False)
+    finally:
+        ok, again = pl.follow_settle(run, ids)
+        JOBS.waiting.clear()
+        JOBS.set_kind("fetch")
+        emit("log", {"msg": "Followed authors: %d new work%s downloaded into their folders%s. Their summaries are not written by themselves: Library → “Summarise N papers…”." % (
+            ok, "" if ok == 1 else "s", ", %d to try again next week" % again if again else ""), "level": "ok"})
+        if ok and indexer:
+            indexer.kick(3)
+
+
+def start_download(ids, prepare=None):
+    """Download these papers of the open run in the background. `prepare(emit)`, when given, runs first inside the same job and returns the ids (an author's works
+    are listed there: it can take a while, and a "verify you are human" check during the downloads works as for any download)."""
+    run = JOBS.run
+    emit = _download_emit(emit_for(run))
 
     def job():
         todo = prepare(emit) if prepare else ids
@@ -555,6 +598,56 @@ class Handler(BaseHTTPRequestHandler):
             want = set(q["file"])
             return [r for r in rows if r["file"] in want]
         return rows
+
+    def author_download(self, b, follow=False):
+        """Every work of the author ids in b (journal, conference, working papers) into the author's folder, as one download job. follow=True also follows the
+        author: what this listing found counts as dealt with, and the weekly check brings the works OpenAlex lists after it."""
+        ids = [authors._short(x).upper() for x in (b.get("ids") or []) if re.fullmatch(r"[Aa]\d{4,12}", authors._short(x))][:10]
+        name = re.sub(r"\s+", " ", str(b.get("name") or "")).strip()[:60]
+        if not ids or not name:
+            return self.send_json({"error": "Pick the author first."}, 400)
+        fid, _ = authors.folder_for(ids, name, str(b.get("institution") or ""))
+        run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name), "follow": bool(follow)})
+        run.stage, run.status = "ready", "stopped"
+        run.save(force=True)
+        JOBS.run = run
+
+        def prepare(emit):
+            lab = "Listing %s's works on OpenAlex" % name
+            emit("progress", {"stage": "listing", "label": lab, "done": 0, "total": 0})
+
+            def said(listing, msg, level):        # the run says what came of the listing (its page shows it at once, and after a reload)
+                run.params["listing"] = listing
+                run.save(force=True)
+                emit("run", {"id": run.id, "params": run.params})
+                emit("log", {"msg": msg, "level": level})
+            try:
+                ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": lab, "done": n, "total": t}), stop=JOBS.stop)
+            except authors.AuthorError as e:
+                run.errors.append(str(e))
+                said({"error": str(e)}, "Listing %s's works failed: %s" % (name, e), "error")
+                return []
+            if JOBS.stop.is_set():
+                said({"stopped": True, "listed": len(ws)}, "Stopped while listing %s's works: nothing was downloaded or filed." % name, "warn")
+                return []
+            if follow:                            # followed once the listing worked; what it listed (complete or not) is not new next week (it would all be downloaded again)
+                authors.set_follow(fid, True)
+                authors.follow_mark(fid, [w.get("id") for w in ws], seed=True)
+            kept, excluded = authors.select(ws)
+            new, have, gone = authors.split(authors.to_papers(kept, fid, name))
+            authors.file_have(fid, have)
+            added = [p for p in new if run.add_paper(p)]
+            for p in added:
+                emit("paper", pl.slim(p))
+            said({"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded, "have": len(have), "deleted": len(gone), "new": len(added)},
+                 "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download.%s" % (
+                     name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(added),
+                     " Followed: the weekly check brings their new works into the folder." if follow else ""),
+                 "ok" if complete else "warn")
+            return [p["id"] for p in added]
+        if not start_download([], prepare=prepare):
+            return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+        return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})
 
     def folder_rows(self, fid):
         f = fo.get(fid)
@@ -963,6 +1056,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"file": one("file"), "source": info.get("source"), "pages": info.get("pages"), "isbn": info.get("isbn"), "publisher": info.get("publisher"), "offset": info.get("offset") or 0,
                                    "chapters": [dict(c, summary=(info.get("summaries") or {}).get(books.chapter_key(c))) for c in books.chapters(info)],
                                    "overview": info.get("overview"), "overview_stale": books.overview_stale(info)})
+        if path == "/api/authors":      # the Authors tab's "Your authors": each author with a folder, whether you follow them, when the weekly check last listed them
+            return self.send_json({"authors": authors.saved()})
         if path == "/api/book/whole":   # ?file=: what summarising the whole book would cost (no AI call) and the job's state; &status=1: only the job's state
             if not bookjob:
                 return self.send_json({"error": "AI features aren't installed"}, 501)
@@ -1200,48 +1295,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/authors/download":  # {ids: [A…], name, institution}: every work of those ids (journal, conference, working papers) into the author's folder
             if JOBS.busy():
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
-            ids = [authors._short(x).upper() for x in (b.get("ids") or []) if re.fullmatch(r"[Aa]\d{4,12}", authors._short(x))][:10]
-            name = re.sub(r"\s+", " ", str(b.get("name") or "")).strip()[:60]
-            if not ids or not name:
-                return self.send_json({"error": "Pick the author first."}, 400)
-            fid, _ = authors.folder_for(ids, name, str(b.get("institution") or ""))
-            run = pl.Run("author", {"label": name, "author_ids": ids, "folder": fid, "folder_name": (fo.get(fid) or {}).get("name", name)})
-            run.stage, run.status = "ready", "stopped"
-            run.save(force=True)
-            JOBS.run = run
-
-            def prepare(emit):
-                lab = "Listing %s's works on OpenAlex" % name
-                emit("progress", {"stage": "listing", "label": lab, "done": 0, "total": 0})
-
-                def said(listing, msg, level):        # the run says what came of the listing (its page shows it at once, and after a reload)
-                    run.params["listing"] = listing
-                    run.save(force=True)
-                    emit("run", {"id": run.id, "params": run.params})
-                    emit("log", {"msg": msg, "level": level})
-                try:
-                    ws, complete, total = authors.works(ids, progress=lambda n, t: emit("progress", {"stage": "listing", "label": lab, "done": n, "total": t}), stop=JOBS.stop)
-                except authors.AuthorError as e:
-                    run.errors.append(str(e))
-                    said({"error": str(e)}, "Listing %s's works failed: %s" % (name, e), "error")
-                    return []
-                if JOBS.stop.is_set():
-                    said({"stopped": True, "listed": len(ws)}, "Stopped while listing %s's works: nothing was downloaded or filed." % name, "warn")
-                    return []
-                kept, excluded = authors.select(ws)
-                new, have, gone = authors.split(authors.to_papers(kept, fid, name))
-                authors.file_have(fid, have)
-                added = [p for p in new if run.add_paper(p)]
-                for p in added:
-                    emit("paper", pl.slim(p))
-                said({"complete": complete, "listed": len(ws), "total": total, "kept": len(kept), "excluded": excluded, "have": len(have), "deleted": len(gone), "new": len(added)},
-                     "%s: %d works listed%s; %d already in your library (now in the folder too), %d you deleted (left out), %d to download." % (
-                         name, len(ws), "" if complete else " (OpenAlex stopped answering: the list is incomplete; search again later for the rest)", len(have), len(gone), len(added)),
-                     "ok" if complete else "warn")
-                return [p["id"] for p in added]
-            if not start_download([], prepare=prepare):
+            return self.author_download(b, follow=False)
+        if path == "/api/authors/follow":    # {folder, on: false} stops following; {ids, name, institution, on: true} (or {folder, on: true}): download all now, then new works each week
+            on = bool(b.get("on"))
+            fid0 = str(b.get("folder") or "")
+            if not on:
+                if not authors.set_follow(fid0, False):
+                    return self.send_json({"error": "No author has that folder."}, 404)
+                return self.send_json({"ok": True, "authors": authors.saved()})
+            if JOBS.busy():
                 return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
-            return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})
+            if fid0 and not b.get("ids"):
+                rec = next((r for r in authors.load()["authors"] if r.get("folder") == fid0), None)
+                if rec is None:
+                    return self.send_json({"error": "No author has that folder."}, 404)
+                if fo.get(fid0) and "follow_known" in rec:      # followed before, folder still there: just on again (the weekly check picks up what is new since)
+                    authors.set_follow(fid0, True)
+                    return self.send_json({"ok": True, "authors": authors.saved()})
+                b = {"ids": rec.get("ids") or [], "name": rec.get("name") or "", "institution": ""}
+            return self.author_download(b, follow=True)
         if path == "/api/related/download":   # {items: [{id, doi, title, authors, year, venue, date, reason}], label}: straight into the download pipeline
             if not related:
                 return self.send_json({"error": "AI features aren't installed"}, 501)

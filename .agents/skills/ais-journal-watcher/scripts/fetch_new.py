@@ -407,10 +407,11 @@ def openalex_spent():
     return time.time() < OPENALEX_SPENT["until"] and OPENALEX_SPENT["keyed"] == bool(openalex_key())
 
 
-def _openalex(path):
+def _openalex(path, missing=None):
     """GET an OpenAlex path. Without a key OpenAlex gives everyone on your network a small shared daily budget ($0.10: about 1,000 list calls or 100 searches); with a
     free key (Settings → Paper sources, or OPENALEX_API_KEY in .env) it is $1 a day of your own. Lookups of one work by DOI or ID are free either way. The key is sent
-    in the Authorization header (not in the address, which ends up in logs). When the budget is used up the call returns None at once instead of waiting."""
+    in the Authorization header (not in the address, which ends up in logs). When the budget is used up the call returns None at once instead of waiting.
+    missing: what to return when OpenAlex answers 404 (it does not know the thing asked for), instead of None (no answer)."""
     key = openalex_key()
     url = (os.environ.get("JW_OPENALEX_URL") or "https://api.openalex.org/") + path     # (the override is for tests and mirrors)
     single = bool(re.match(r"works/(doi:|W\d)", path)) and "?" not in path
@@ -427,6 +428,8 @@ def _openalex(path):
         wait = (e.headers.get("Retry-After") if e.headers else None) or ""
         if e.code == 429 and wait.isdigit() and int(wait) > 60:
             OPENALEX_SPENT.update(until=time.time() + int(wait), keyed=bool(key))
+        if e.code == 404 and missing is not None:
+            return missing
         return None
     except Exception:
         return None

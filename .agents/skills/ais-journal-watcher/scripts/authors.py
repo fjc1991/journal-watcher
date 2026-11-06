@@ -7,6 +7,17 @@
     authors.split(papers)           -> (new, have, deleted): new ones to download; ones already in the library (their index keys); ones you deleted (never fetched again)
     authors.folder_for(ids, name, institution) -> the folder id for this author (made, or found again through Papers/_authors.json)
 
+Following an author (the weekly check downloads their new works into the folder; pipeline.follow_list):
+    authors.set_follow(fid, on)     switch it on or off for the author whose folder is fid
+    authors.followed()              the records being followed (read from the file each time: another computer may have changed it)
+    authors.follow_mark(fid, wids)  OpenAlex work ids dealt with (downloaded, already in the library, deleted, or not a kind that is downloaded): never asked about again
+    authors.saved()                 the authors with a folder, for the Authors tab's "Your authors" list
+
+A record in _authors.json: {ids, name, folder, filed} and, once followed, {follow, follow_on, follow_known: [W ids], follow_last, follow_warn}. "New" means a work
+in the author's full OpenAlex list that is not in follow_known (no date filter: a work OpenAlex lists late, or backdated, is still new). Only works that were dealt
+with join follow_known, so one that could not be downloaded is tried again the next week. The writes are unions, so a write lost to the other computer is made
+again a week later. No e-mail address or key is kept there.
+
 OpenAlex is reached through fetch_new._openalex: your OpenAlex key, if you set one, goes in the Authorization header; no e-mail address is sent.
 The record of which folder belongs to which author ids is Papers/_authors.json (in the data folder, so both computers share it).
 """
@@ -33,8 +44,8 @@ class AuthorError(Exception):
     pass
 
 
-def _fetch(path):
-    return fx._openalex(path)
+def _fetch(path, missing=None):
+    return fx._openalex(path, missing) if missing is not None else fx._openalex(path)
 
 
 def _answer(path):
@@ -337,3 +348,100 @@ def file_new(rec_folder, key):
             rec["filed"] = sorted(set(rec.get("filed") or []) | {key})
             _save(d)
         return True
+
+
+
+# ---------------------------------------------------------------- following an author (the weekly check)
+
+def _rec(d, fid):
+    return next((r for r in d["authors"] if r.get("folder") == fid), None)
+
+
+def set_follow(fid, on):
+    """Follow (or stop following) the author whose folder is fid. Returns the record, or None when there is none."""
+    from datetime import date
+    with _lock:
+        d = load()
+        rec = _rec(d, fid)
+        if rec is None:
+            return None
+        rec["follow"] = bool(on)
+        if on:
+            rec.setdefault("follow_on", date.today().isoformat())
+            rec["follow_warn"] = ""
+        _save(d)
+        return dict(rec)
+
+
+def followed():
+    """Copies of the records being followed, read from the file now (no cache)."""
+    with _lock:
+        return [dict(r) for r in load()["authors"] if r.get("follow") and r.get("folder")]
+
+
+def follow_mark(fid, wids, seed=False):
+    """Add these OpenAlex work ids to what was dealt with for this author (a union: nothing is ever taken out), note today as the last good listing and clear any
+    warning. seed=True writes follow_known even when wids is empty (the Follow button's listing: from now on only newer works are new)."""
+    from datetime import date
+    ws = {_short(w).upper() for w in wids if _short(w)}
+    with _lock:
+        d = load()
+        rec = _rec(d, fid)
+        if rec is None:
+            return False
+        if ws or seed or "follow_known" in rec:
+            rec["follow_known"] = sorted(set(rec.get("follow_known") or []) | ws)
+        rec["follow_last"] = date.today().isoformat()
+        rec["follow_warn"] = ""
+        _save(d)
+        return True
+
+
+def set_follow_warn(fid, msg):
+    with _lock:
+        d = load()
+        rec = _rec(d, fid)
+        if rec is not None:
+            rec["follow_warn"] = str(msg or "")[:300]
+            _save(d)
+
+
+def add_ids(fid, ids):
+    with _lock:
+        d = load()
+        rec = _rec(d, fid)
+        if rec is not None:
+            rec["ids"] = sorted(set(rec.get("ids") or []) | {_short(i).upper() for i in ids if _short(i)})
+            _save(d)
+
+
+def resolve(ids):
+    """The author ids as OpenAlex has them now: an id that OpenAlex merged into another answers with the other (the lookup follows it). None when OpenAlex did
+    not answer (the daily allowance, the network): nothing can be said then."""
+    out, answered = set(), False
+    for i in ids:
+        i = _short(i).upper()
+        if not re.fullmatch(r"A\d{4,12}", i):
+            continue
+        r = _fetch("authors/%s?select=id" % i, missing={})
+        if r is None:
+            continue
+        answered = True
+        if r.get("id"):                     # (OpenAlex knows it: as itself, or as the id it was merged into; {} = it knows no such author any more)
+            out.update({i, _short(r["id"]).upper()})
+    return sorted(out) if answered else None
+
+
+def saved():
+    """The authors with a folder that still exists, for the Authors tab: [{folder, folder_name, name, ids, follow, follow_last, follow_warn, known}]."""
+    import folders as fo
+    with _lock:
+        recs = [dict(r) for r in load()["authors"] if r.get("folder")]
+    out = []
+    for r in recs:
+        f = fo.get(r["folder"])
+        if not f:
+            continue
+        out.append({"folder": r["folder"], "folder_name": f.get("name", ""), "name": r.get("name", ""), "ids": r.get("ids") or [], "follow": bool(r.get("follow")),
+                    "follow_last": r.get("follow_last") or "", "follow_warn": r.get("follow_warn") or "", "known": len(r.get("follow_known") or [])})
+    return sorted(out, key=lambda r: r["name"].lower())

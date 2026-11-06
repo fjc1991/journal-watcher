@@ -4939,6 +4939,140 @@ print("OK")
             srv_.shutdown()
     check("author search: the name is sent as OpenAlex reads it, the candidates say who they are, every page of works (or 'incomplete'), journal/conference/working papers kept and a working paper only without its published version, each paper's route without a Crossref call, papers in the library or deleted not downloaded, the author's folder found again and never another's", t_authors)
 
+    def t_follow():
+        """Following an author (authors.py, pipeline.follow_list / follow_settle) against a local fake OpenAlex: the record is a union of works dealt with; the weekly
+        check adds only works not dealt with, marks a feed paper of the same work for download in place (no second copy) and keeps the feed from adding it again;
+        works that are not a kind that is downloaded, already in the library or deleted are dealt with at once; only works that came are dealt with after the
+        downloads (the others are tried next week); a merged OpenAlex id is followed to the new one; a follow with no record yet is set up silently; a deleted
+        folder pauses it; nothing about following is kept on the run."""
+        import copy, authors as au, fetch_new as fx_, folders as fo_, pipeline as pl_
+        asked = []
+        WORKS, MERGED = {}, {}
+        def W(i, title, doi=None, src=None, typ="article"):
+            return {"id": "https://openalex.org/W%d" % i, "doi": ("https://doi.org/" + doi) if doi else None, "display_name": title, "publication_date": "2026-10-01",
+                    "publication_year": 2026, "type": typ, "primary_location": {"source": src, "landing_page_url": "https://example.org/w%d" % i},
+                    "best_oa_location": {}, "authorships": [{"author": {"display_name": "Ann Lee"}}]}
+        class OA(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                asked.append(self.path)
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                m = re.match(r"/authors/(A\d+)\?select=id", self.path)
+                if m:
+                    to = MERGED.get(m.group(1))
+                    if to in (404, 500):
+                        self.send_response(to); self.end_headers(); return
+                    body = json.dumps({"id": "https://openalex.org/" + (to or m.group(1))}).encode()
+                elif self.path.startswith("/works?"):
+                    ids = re.match(r"author\.id:([A0-9|]+)", q["filter"][0]).group(1).split("|")
+                    data = [w for i in ids for w in WORKS.get(i, [])]
+                    body = json.dumps({"meta": {"count": len(data), "next_cursor": None}, "results": data}).encode()
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        srv_ = ThreadingHTTPServer(("127.0.0.1", 0), OA); threading.Thread(target=srv_.serve_forever, daemon=True).start()
+        old_url = os.environ.get("JW_OPENALEX_URL"); os.environ["JW_OPENALEX_URL"] = "http://127.0.0.1:%d/" % srv_.server_address[1]
+        saved_key = fx_.openalex_key; fx_.openalex_key = lambda: None
+        store_ = os.path.join(dl.PAPERS, "_authors.json"); seen_p = os.path.join(pl_.STATE, "seen.json"); idx_ = os.path.join(dl.PAPERS, "_index.csv")
+        saved_files = {p_: (open(p_, encoding="utf-8").read() if os.path.exists(p_) else None) for p_ in (store_, seen_p, idx_)}
+        made = []
+        events = []
+        emit = lambda ev, d=None: events.append((ev, d))     # noqa: E731
+        try:
+            fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            if os.path.exists(store_):
+                os.remove(store_)
+            j = next(x for x in pl_.journals() if x.get("issn"))
+            J = {"display_name": j["name"], "type": "journal", "issn": [j["issn"]]}
+            O = {"display_name": "Other Journal", "type": "journal", "issn": ["9999-0001"]}
+            fid, _ = au.folder_for(["A5000000111"], "Ann Lee", "MIT"); made.append(fid)
+            # --- the record: follow on, a union of works dealt with, read fresh every time
+            assert au.set_follow(fid, True)["follow"] is True and [r["folder"] for r in au.followed()] == [fid]
+            au.follow_mark(fid, ["W1", "https://openalex.org/W2"]); au.follow_mark(fid, ["W3"])
+            assert au.followed()[0]["follow_known"] == ["W1", "W2", "W3"], au.followed()[0]
+            d_ = json.load(open(store_)); d_["authors"][0]["follow_known"] = ["W0"]; json.dump(d_, open(store_, "w"))      # (changed on another computer)
+            assert au.followed()[0]["follow_known"] == ["W0"]
+            # --- the weekly check: a feed paper of a followed work is the same paper; new ones are added; the rest are dealt with
+            pdf_ = os.path.join(dl.PAPERS, "2026-10", "FW", "have.pdf"); os.makedirs(os.path.dirname(pdf_), exist_ok=True); open(pdf_, "wb").write(b"%PDF")
+            dl.save_index({"doi": "10.7/have", "title": "Already Have It"}, os.path.relpath(pdf_, dl.ROOT), "ok")
+            dl.save_index({"doi": "10.7/gone", "title": "You Deleted It"}, "", "deleted")
+            WORKS["A5000000111"] = [W(0, "Old Known Work", "10.7/old", O), W(1, "First Followed Paper", "10.7/a", J), W(2, "Second Followed Paper", "10.7/b", O),
+                                    W(3, "Third Followed Paper", None, J), W(5, "A Whole Book", "10.7/book", O, typ="book"),
+                                    W(6, "First followed paper", "10.2139/ssrn.777", {"display_name": "SSRN", "type": "repository"}, typ="preprint"),
+                                    W(7, "Already Have It", "10.7/have", O), W(8, "You Deleted It", "10.7/gone", O)]
+            run = pl_.Run("weekly", {"topics": [], "query": ""})
+            run.add_paper({"id": "doi:10.7/a", "doi": "10.7/a", "title": "First Followed Paper", "abbr": j["abbr"], "journal": j["name"], "pub_date": "2026-10-01"})
+            run.add_paper({"id": "doi:10.7/c", "doi": "10.7/c", "title": "Third Followed Paper", "abbr": j["abbr"], "journal": j["name"], "pub_date": "2026-10-01"})   # (OpenAlex has no DOI for it)
+            params0 = copy.deepcopy(run.params)
+            todo = pl_.follow_list(run, emit, threading.Event())
+            assert sorted(todo) == ["doi:10.7/a", "doi:10.7/b", "doi:10.7/c"], todo
+            assert len(run.papers) == 3 and run.papers["doi:10.7/a"]["verdict"] == "download" and run.papers["doi:10.7/a"]["folder"] == fid and run.papers["doi:10.7/a"]["openalex"] == "W1"
+            assert run.papers["doi:10.7/c"]["verdict"] == "download" and run.papers["doi:10.7/c"]["openalex"] == "W3", run.papers["doi:10.7/c"]                # the same work by its title
+            assert run.papers["doi:10.7/b"]["reason"].startswith("followed author · ") and run.papers["doi:10.7/b"]["folder"] == fid
+            assert any(ev == "verdict" and d["id"] == "doi:10.7/a" for ev, d in events) and any(ev == "paper" and d["id"] == "doi:10.7/b" for ev, d in events)
+            known = set(au.followed()[0]["follow_known"])
+            assert {"W0", "W5", "W6", "W7", "W8"} <= known and not known & {"W1", "W2", "W3"}, known       # the book, the preprint, the one you have, the one you deleted: dealt with
+            assert dl.index_key({"doi": "10.7/have"}) in fo_.get(fid)["papers"], fo_.get(fid)
+            seen = json.load(open(seen_p))
+            for k_ in ("doi:10.7/a", "doi:10.7/b", fx_.key_for(None, j["name"], "Third Followed Paper"), fx_.key_for(None, "Other Journal", "Second Followed Paper")):
+                assert k_ in seen and seen[k_].get("follow"), (k_, list(seen)[:8])                         # the feeds will not add them again
+            # --- after the downloads: only what came is dealt with; the rest comes back next week
+            run.papers["doi:10.7/a"]["dl_status"] = "ok"; run.papers["doi:10.7/b"]["dl_status"] = "needs_check"; run.papers["doi:10.7/c"]["dl_status"] = "deleted"
+            assert pl_.follow_settle(run, todo) == (2, 1)
+            known = set(au.followed()[0]["follow_known"])
+            assert {"W1", "W3"} <= known and "W2" not in known, known
+            WORKS["A5000000111"].append(W(60, "First Followed Paper", "10.2139/ssrn.888", {"display_name": "SSRN", "type": "repository"}, typ="preprint"))   # a new preprint of a paper you have
+            run2 = pl_.Run("weekly", {"topics": [], "query": ""})
+            assert pl_.follow_list(run2, emit, threading.Event()) == ["doi:10.7/b"], list(run2.papers)
+            assert "W60" in au.followed()[0]["follow_known"], "a new working paper whose published version is listed is not downloaded"
+            # --- nothing about following is kept on the run
+            assert run.params == params0 and not any(k_.startswith("follow") for k_ in run.to_dict()) and not any(k_.startswith("follow") for k_ in vars(run))
+            # --- an id that OpenAlex merged into another: followed to the new one
+            fid2, _ = au.folder_for(["A5000000333"], "Bo Chen", ""); made.append(fid2); au.set_follow(fid2, True); au.follow_mark(fid2, ["W90"])
+            MERGED["A5000000333"] = "A5000000444"; WORKS["A5000000444"] = [W(91, "Bo New One", "10.8/1", O), W(92, "Bo New Two", "10.8/2", O)]
+            au.set_follow(fid, False)
+            run3 = pl_.Run("weekly", {"topics": [], "query": ""}); n_ask = len(asked)
+            t3 = pl_.follow_list(run3, emit, threading.Event())
+            rec2 = next(r for r in au.followed() if r["folder"] == fid2)
+            assert rec2["ids"] == ["A5000000333", "A5000000444"] and sorted(t3) == ["doi:10.8/1", "doi:10.8/2"], (rec2, t3)
+            assert not any("A5000000111" in a_ for a_ in asked[n_ask:]), "an author not followed any more is not asked about"
+            # ...and when OpenAlex does not know the old id at all: a note on the Authors tab, nothing marked; when it does not answer: no note
+            fid3, _ = au.folder_for(["A5000000555"], "Cy Doe", ""); made.append(fid3); au.set_follow(fid3, True); au.follow_mark(fid3, ["W95"]); au.set_follow(fid2, False)
+            MERGED["A5000000555"] = 500; events.clear()
+            pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event())
+            rec3 = next(r for r in au.followed() if r["folder"] == fid3)
+            assert not rec3.get("follow_warn") and rec3["follow_known"] == ["W95"] and any("did not answer" in d["msg"] for ev, d in events if ev == "log"), rec3
+            MERGED["A5000000555"] = 404; events.clear()
+            pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event())
+            rec3 = next(r for r in au.followed() if r["folder"] == fid3)
+            assert "no works" in rec3["follow_warn"] and rec3["follow_known"] == ["W95"] and any(d.get("level") == "warn" for ev, d in events if ev == "log"), rec3
+            WORKS["A5000000555"] = [W(96, "Cy Back Again", "10.9/1", O)]
+            pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event())
+            assert not next(r for r in au.followed() if r["folder"] == fid3)["follow_warn"], "a listing that works clears the note"
+            # --- followed with no record of what was dealt with (another computer, an older record): set up silently, nothing downloaded
+            fid4, _ = au.folder_for(["A5000000666"], "Di Ng", ""); made.append(fid4); au.set_follow(fid4, True); au.set_follow(fid3, False)
+            WORKS["A5000000666"] = [W(97, "Di One", "10.10/1", O), W(98, "Di Two", "10.10/2", O)]
+            r5 = pl_.Run("weekly", {"topics": [], "query": ""})
+            assert pl_.follow_list(r5, emit, threading.Event()) == [] and not r5.papers and next(r for r in au.followed() if r["folder"] == fid4)["follow_known"] == ["W97", "W98"]
+            # --- the folder was deleted: following pauses, OpenAlex is not asked
+            fo_.delete(fid4); n_ask = len(asked)
+            assert pl_.follow_list(pl_.Run("weekly", {"topics": [], "query": ""}), emit, threading.Event()) == [] and len(asked) == n_ask
+            assert "folder was deleted" in json.load(open(store_))["authors"][-1]["follow_warn"]
+            assert [a_["name"] for a_ in au.saved()] == ["Ann Lee", "Bo Chen", "Cy Doe"] and au.saved()[0]["follow"] is False and au.saved()[0]["known"] >= 7
+        finally:
+            fx_.openalex_key = saved_key; fx_.OPENALEX_SPENT.update(until=0.0, keyed=None)
+            os.environ.pop("JW_OPENALEX_URL", None) if old_url is None else os.environ.__setitem__("JW_OPENALEX_URL", old_url)
+            srv_.shutdown()
+            for x in made:
+                if fo_.get(x):
+                    fo_.delete(x)
+            for p_, txt in saved_files.items():
+                if txt is None:
+                    os.path.exists(p_) and os.remove(p_)
+                else:
+                    open(p_, "w", encoding="utf-8").write(txt)
+    check("following an author: a union of works dealt with; the weekly check adds only works not dealt with (a feed paper of the same work is marked for download, not copied; the feeds do not add it again), deals at once with what is not downloaded, in the library or deleted; only works that came are dealt with afterwards; a merged id is followed; set up silently with no record; a deleted folder pauses it; nothing on the run", t_follow)
+
     def t_author_downloads():
         """An author run: the run's name and file; a downloaded paper, or one already on disk, goes into the author's folder; and papers from publishers the app has
         no route for are spaced out and set aside per site (their DOI prefix), so one site's human check does not hold up another's papers."""
