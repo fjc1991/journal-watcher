@@ -84,7 +84,7 @@ def _window(text, tok, n=70):
     return ("…" if a else "") + re.sub(r"\s+", " ", text[a:b]).strip() + ("…" if b < len(text) else "")
 
 
-def search(rows, q="", status="", star=False, folder="", journal="", year="", tag="", notes=False, sort=""):
+def search(rows, q="", status="", star=False, folder="", journal="", year="", tag="", notes=False, sort="", kind=""):
     toks = _tokens(q or "")
     out = []
     for r in rows:
@@ -100,6 +100,8 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
         if journal and r.get("abbr") != journal:
             continue
         if year and r.get("year") != year:
+            continue
+        if kind and (r.get("kind") or "journal") != kind:          # (kinds.py: journal | preprint | conference | other)
             continue
         if notes and not r.get("notes"):
             continue

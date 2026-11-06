@@ -1225,6 +1225,108 @@ print("JSON" + json.dumps(out))
             importer.crossref_meta, importer.crossref_search = saved
             shutil.rmtree(importer.STAGING, ignore_errors=True)
     check("drop a PDF: it is analysed before anything is filed (records by its printed DOI and by its title, each checked against the PDF; a cited paper's DOI does not win), confirm files it with your details, a token works once, cancel forgets it", t_import_review)
+    def t_kinds():
+        """A paper you add can be a journal article, a preprint or working paper, a conference paper, or a report, thesis or other (kinds.py): its type comes from the
+        Crossref record, or from what the PDF prints (an arXiv stamp beats a published version found only by its title); it is filed under its own venue with a short
+        abbreviation, and kept in <stem>.paper.json (never a column of the index, which older versions refuse); the library lists it with its type; Change type writes
+        only that file; a stale file from another paper is ignored; the index writers keep columns they do not know."""
+        import csv, io, pymupdf, kinds as kd, deletion as dele_, identity as idy, smart as sm_, library_search as ls_, pipeline as pl_
+        pre = {"title": "Platform Rules and Entry: Evidence from App Stores", "authors": ["Jane Doe"], "container": "", "issn": [], "doi": "10.2139/ssrn.4400001", "pub_date": "2024-05",
+               "url": "https://doi.org/10.2139/ssrn.4400001", "volume": "", "issue": "", "pages": "", "publisher": "Elsevier BV", "type": "posted-content", "group_title": "SSRN", "abstract": None, "keywords": []}
+        pub = dict(pre, title="Transparent Governance of Digital Platforms", doi="10.9999/pub.1", url="https://doi.org/10.9999/pub.1", type="journal-article", container="Journal of Platform Studies", group_title="")
+        saved = (importer.crossref_meta, importer.crossref_search, dl.PAPERS, dl.ROOT)
+        importer.crossref_meta = lambda d: {pre["doi"]: pre}.get(d.lower())
+        importer.crossref_search = lambda t, rows=4: [pub] if "transparent governance" in t.lower() else []
+        dl.PAPERS, dl.ROOT = pl_.PAPERS, pl_.ROOT
+        idx_ = os.path.join(dl.PAPERS, "_index.csv"); saved_idx = open(idx_, encoding="utf-8").read() if os.path.exists(idx_) else None
+        def pdf(title, first="", authors="Jane Doe"):
+            d = pymupdf.open(); pg = d.new_page()
+            pg.insert_textbox(pymupdf.Rect(50, 20, 545, 45), first, fontsize=8)
+            pg.insert_textbox(pymupdf.Rect(50, 50, 545, 120), title, fontsize=20); pg.insert_textbox(pymupdf.Rect(50, 125, 545, 150), authors, fontsize=11)
+            pg.insert_textbox(pymupdf.Rect(50, 160, 545, 780), "We study how platform owners govern complementors with transparent rules. " * 25, fontsize=10)
+            for _ in range(60):
+                d.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 780), "\n".join(os.urandom(20).hex() for _ in range(60)), fontsize=8)
+            data = d.tobytes(); d.close(); return data
+        try:
+            # the record says preprint (and names its series): the dialog gets the type and the venue
+            a = importer.analyse_pdf(pdf(pre["title"], "doi: 10.2139/ssrn.4400001"), "pre.pdf")
+            assert a["kind"] == "preprint" and a["candidates"][0]["kind"] == "preprint" and a["candidates"][0]["journal"] == "SSRN" and "preprint" in a["kind_hint"], (a["kind"], a["candidates"][:1], a["kind_hint"])
+            # confirming it files it under SSRN, abbreviation SSRN, with its type in <stem>.paper.json; the index keeps its columns exactly
+            r = importer.confirm(a["token"], {"title": pre["title"], "authors": "Jane Doe", "journal": "SSRN", "pub_date": "2024-05", "doi": pre["doi"], "source": "crossref", "kind": "preprint", "type": "posted-content"})
+            assert r["file"].startswith("Papers/2024-05/SSRN/"), r
+            side = json.load(open(os.path.join(dl.ROOT, r["file"])[:-4] + ".paper.json"))
+            assert side["kind"] == "preprint" and side["for"] == "10.2139/ssrn.4400001" and side["crossref_type"] == "posted-content", side
+            rd = csv.DictReader(open(idx_, newline="", encoding="utf-8")); rows = list(rd)
+            assert rd.fieldnames == dl.INDEX_COLS and [x for x in rows if x["doi"] == pre["doi"]][0]["abbr"] == "SSRN", (rd.fieldnames, rows[-1])
+            lib_ = {x["file"]: x for x in pl_.library()}
+            assert lib_[r["file"]]["kind"] == "preprint", lib_[r["file"]].get("kind")
+            # an arXiv-stamped PDF whose title finds only the published version: the PDF wins (preprint, arXiv, the journal's DOI is not taken)
+            b = importer.analyse_pdf(pdf(pub["title"], "arXiv:2401.01234v2 [cs.CY] 3 Jan 2024"), "arx.pdf")
+            assert b["pick"] == -1 and b["kind"] == "preprint" and b["pdf"]["venue"] == "arXiv" and "published version" in b["kind_hint"] and b["candidates"][0]["doi"] == "10.9999/pub.1", (b["pick"], b["kind"], b["kind_hint"])
+            importer.discard([b["token"]])
+            # a conference paper with no record: the PDF's ICIS footer gives the type and the venue; filed under it with abbreviation ICIS
+            c = importer.analyse_pdf(pdf("Algorithmic Pricing on Marketplaces", "Forty-Fourth International Conference on Information Systems, Hyderabad 2023"), "icis.pdf")
+            assert c["kind"] == "conference" and c["pdf"]["venue"] == "ICIS 2023" and "conference" in c["kind_hint"], (c["kind"], c["pdf"])
+            rc = importer.confirm(c["token"], {"title": "Algorithmic Pricing on Marketplaces", "authors": "Jane Doe", "journal": "ICIS 2023", "pub_date": "2023-12", "doi": "", "source": "hand", "kind": "conference"})
+            rowc = [x for x in csv.DictReader(open(idx_, newline="", encoding="utf-8")) if x["file"] == rc["file"]][0]
+            assert rc["file"].startswith("Papers/2023-12/ICIS 2023/") and rowc["abbr"] == "ICIS", (rc, rowc)
+            # the same venue typed again in another case: the same folder and abbreviation
+            d2 = importer.analyse_pdf(pdf("Second ICIS Paper on Fees"), "icis2.pdf")
+            rd2 = importer.confirm(d2["token"], {"title": "Second ICIS Paper on Fees", "authors": "Bo Chen", "journal": "icis 2023", "pub_date": "2023-12", "doi": "", "source": "hand", "kind": "conference"})
+            assert rd2["file"].startswith("Papers/2023-12/ICIS 2023/"), rd2
+            # a journal article's footnote about a talk is not a conference
+            e = importer.analyse_pdf(pdf("A Journal Paper About Fees", "An earlier version was presented at the International Conference on Information Systems 2022."), "j.pdf")
+            assert e["kind"] == "journal", e["kind"]; importer.discard([e["token"]])
+            # the kind sent is checked: missing, "paper" or anything else files a journal article (as before)
+            for bad in (None, "", "paper", "zzz", 42):
+                g = importer.analyse_pdf(pdf("Kind Check Paper %s" % bad), "k.pdf")
+                rg = importer.confirm(g["token"], {"title": "Kind Check Paper %s" % bad, "authors": "X Y", "journal": "Journal of Kind Checks", "pub_date": "2022", "doi": "", "source": "hand", "kind": bad})
+                assert json.load(open(os.path.join(dl.ROOT, rg["file"])[:-4] + ".paper.json"))["kind"] == "journal"
+            # journal_for: a conference with an AIS DOI and no venue is not filed as JAIS; a watched journal by its exact name is that journal for any kind
+            jb = tempfile.mkdtemp(prefix="jw-journals-"); shutil.copy(os.path.join(HERE, "..", "defaults", "journals.json"), jb); base0 = dl.BASE; dl.BASE = jb
+            assert importer.journal_for({"container": "", "doi": "10.17705/9conf.1", "issn": []}, "conference") == ("Conference papers", "CONF")
+            assert importer.journal_for({"container": "", "doi": "10.17705/1jais.1", "issn": []}, "journal")[1] == "JAIS"
+            assert importer.journal_for({"container": "", "doi": "10.3386/w31234", "issn": []}, "preprint")[1] == "NBER"
+            assert importer.journal_for({"container": "MS", "doi": "", "issn": []}, "conference")[1] != "MS" and importer.journal_for({"container": "Management Science", "doi": "", "issn": []}, "conference")[1] == "MS"
+            assert importer.journal_for({"container": "Some Journal", "doi": "", "issn": ["1536-9323"]}, "journal")[1] == "JAIS", "the ISSN decides"
+            dl.BASE = base0
+            # Change type writes only the sidecar: the index is byte-identical
+            before = open(idx_, "rb").read()
+            kd.write_sidecar(os.path.join(dl.ROOT, rd2["file"]), "other", "ICIS 2023", "Report", dl.index_key([x for x in csv.DictReader(open(idx_, newline="", encoding="utf-8")) if x["file"] == rd2["file"]][0]))
+            assert open(idx_, "rb").read() == before and {x["file"]: x for x in pl_.library()}[rd2["file"]]["kind_label"] == "Report"
+            # a stale sidecar (written for another paper) is ignored; with none, a DOI of a preprint series still reads as a preprint
+            json.dump({"kind": "conference", "for": "10.1/other"}, open(os.path.join(dl.ROOT, r["file"])[:-4] + ".paper.json", "w"))
+            assert {x["file"]: x for x in pl_.library()}[r["file"]]["kind"] == "preprint", "the stale file is ignored; SSRN's DOI says preprint"
+            assert kd.of_row({"journal": "Books", "abbr": "BOOK"}) == ("book", "") and kd.of_row({"journal": "X", "doi": "10.1/x"}) == ("journal", "")
+            # the type filter, and a saved search keeps it
+            rows_ = pl_.library()
+            hits_ = ls_.search(rows_, kind="conference"); hits_ = hits_.get("results", hits_) if isinstance(hits_, dict) else hits_
+            assert {x["file"] for x in hits_} == {rc["file"]}, [x["file"] for x in hits_]
+            assert sm_.clean_filters({"kind": "preprint", "q": "x"}).get("kind") == "preprint"
+            # the sidecar goes with the paper when it is deleted
+            sp = os.path.join(dl.ROOT, rc["file"])[:-4] + ".paper.json"
+            assert os.path.exists(sp) and sp in __import__("notes_store").sidecars(os.path.join(dl.ROOT, rc["file"]))
+            # the index writers keep a column a later version adds (an older writer refused it: two computers on different versions)
+            hdr = open(idx_, encoding="utf-8").read().split("\n", 1)
+            open(idx_, "w", encoding="utf-8").write(hdr[0] + ",future\n" + "\n".join(l + ",kept" if l.strip() else l for l in hdr[1].split("\n")))
+            dl.save_index({"doi": "10.9/fut", "title": "Future Column Paper", "journal": "J", "abbr": "J"}, "", "deleted")
+            rd = csv.DictReader(open(idx_, newline="", encoding="utf-8")); rows = list(rd)
+            assert rd.fieldnames[-1] == "future" and all(x["future"] == "kept" for x in rows if x["doi"] != "10.9/fut"), rd.fieldnames
+            old_paths = (idy.paths.ROOT, idy.paths.PAPERS); idy.paths.ROOT, idy.paths.PAPERS = dl.ROOT, dl.PAPERS
+            try:
+                gone = idy.remove(rd2["file"])
+            finally:
+                idy.paths.ROOT, idy.paths.PAPERS = old_paths
+            assert gone["kind"] == "other" and gone["label"] == "Report", gone        # (its type goes with the download that replaces it)
+            rd = csv.DictReader(open(idx_, newline="", encoding="utf-8")); rows = list(rd)
+            assert "future" in rd.fieldnames and all(x["future"] == "kept" for x in rows if x["doi"] != "10.9/fut"), "identity.remove keeps it too"
+        finally:
+            importer.crossref_meta, importer.crossref_search, dl.PAPERS, dl.ROOT = saved
+            if saved_idx is None:
+                os.path.exists(idx_) and os.remove(idx_)
+            else:
+                open(idx_, "w", encoding="utf-8").write(saved_idx)
+    check("paper kinds: a paper you add is a journal article, a preprint, a conference paper or other (from Crossref, or from the PDF's stamp or footer; an arXiv stamp beats a published version found by title), filed under its venue with a short abbreviation, kept next to the PDF (not in the index), listed with its type, changed without touching the index; the index writers keep unknown columns", t_kinds)
     def t_import_review_rules():
         """The rules behind the review dialog that a reviewer found missing: a token is claimed atomically and expires, a name clash never overwrites, dates are real dates, a paper
         is recognised with or without a DOI, the confirmed journal is kept, and 'confirmed' needs more than a title."""

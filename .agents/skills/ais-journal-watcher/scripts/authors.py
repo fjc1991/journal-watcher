@@ -32,11 +32,12 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import fetch_new as fx  # noqa: E402
+import kinds  # noqa: E402
 
 TYPES = "article|preprint|report|review|book-chapter"      # asked of OpenAlex; book chapters are kept only when they are conference papers (select)
 PER_PAGE = 200
 MAX_PAGES = 50                                               # 10,000 works: beyond that the list is marked incomplete, never cut silently
-PREPRINT_PREFIXES = ("10.2139", "10.48550", "10.31219", "10.31234", "10.31235", "10.21203", "10.20944", "10.3386", "10.36227", "10.22541")   # SSRN, arXiv, OSF, Research Square, Preprints.org, NBER, TechRxiv, Authorea
+PREPRINT_PREFIXES = tuple(kinds.PREPRINT_SERIES)            # SSRN, arXiv, NBER, OSF, PsyArXiv, SocArXiv, Research Square, Preprints.org, TechRxiv, Authorea (one table: kinds.py)
 _lock = threading.Lock()
 
 
@@ -208,7 +209,7 @@ def to_papers(ws, fid, label):
         out.append({"id": pid, "title": title, "authors": [a for a in authors_ if a], "doi": doi, "url": url, "journal": name, "abbr": abbr,
                     "pub_date": date, "topics": [], "publisher": publisher, "abstract": None, "keywords": None, "source": "author", "verdict": "download",
                     "reason": {"journal": "journal article", "conference": "conference paper", "working": "working paper"}[w["_kind"]] + " by " + str(label)[:60],
-                    "openalex": _short(w.get("id")), "folder": fid})
+                    "openalex": _short(w.get("id")), "folder": fid, "kind": kinds.FROM_AUTHORS.get(w["_kind"], "journal")})
     return out
 
 

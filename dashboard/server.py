@@ -991,7 +991,7 @@ class Handler(BaseHTTPRequestHandler):
             bk_ = one("books")
             rows_ = [r for r in pl.library() if bk_ == "all" or (r.get("journal") == "Books") == (bk_ == "only")]
             return self.send_json(ls.search(rows_, one("q"), one("status"), one("star") == "1", one("folder"), one("journal"),
-                                            one("year"), one("tag"), one("notes") == "1", one("sort")))
+                                            one("year"), one("tag"), one("notes") == "1", one("sort"), one("kind")))
         if path == "/api/library/highlights":
             return self.send_json(ls.highlights(pl.library(), one("q"), one("tag") or None, one("color") or None, one("folder") or None, one("journal") or None))
         if path == "/api/tags/usage":
@@ -1876,6 +1876,24 @@ class Handler(BaseHTTPRequestHandler):
             if not summaries.start([str(f) for f in files] if files is not None else None):
                 return self.send_json({"error": "Every one of these papers has a summary already."}, 400)
             return self.send_json({"ok": True, "status": summaries.status()})
+        if path == "/api/library/kind":          # {files: [...], kind, label?}: what these papers are (journal article, preprint, conference paper, other): only <stem>.paper.json is written
+            import kinds
+            k = str(b.get("kind") or "")
+            if k not in kinds.PAPER_KINDS:
+                return self.send_json({"error": "Choose a type: journal article, preprint or working paper, conference paper, or report, thesis or other."}, 400)
+            files = [str(f) for f in (b.get("files") or []) if isinstance(f, str)][:5000]
+            by = {r["file"]: r for r in pl.library()}
+            done = 0
+            for f in files:
+                r = by.get(f)
+                if not r or r.get("kind") == "book":
+                    continue
+                pdf = ns.pdf_path(f)
+                if not pdf:
+                    continue
+                kinds.write_sidecar(pdf, k, r.get("journal") or "", str(b.get("label") or "") if k == "other" else "", r.get("key") or pl.dl.index_key(r))
+                done += 1
+            return self.send_json({"ok": True, "changed": done})
         if path == "/api/library/delete":        # {files: [...]}: delete these papers or books for good (files, notes, summary, card, search index); a run never downloads them again
             files = b.get("files")
             if not isinstance(files, list) or not files or len(files) > 500:
@@ -1928,6 +1946,8 @@ class Handler(BaseHTTPRequestHandler):
                 if papers:
                     run = pl.Run("picks", {"label": "Download again: " + re.sub(r"\s+", " ", gone["title"])[:40]})
                     for p in papers:
+                        if gone.get("kind"):
+                            p["kind"], p["kind_label"] = gone["kind"], gone.get("label") or ""        # (a conference paper stays one)
                         run.add_paper(p)
                     run.stage, run.status = "ready", "stopped"
                     run.save(force=True)

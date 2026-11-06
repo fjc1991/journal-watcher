@@ -4,9 +4,12 @@
 import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress} from "./state.js";
 
 let ctx = null;
-const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false, sort: "", list: false, tab: "papers"};
+const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
 let FOLDERS = [], TAGS = [], SMART = [];
-const FILTER_KEYS = ["q", "status", "folder", "journal", "year", "tag"];
+const FILTER_KEYS = ["q", "status", "folder", "journal", "year", "tag", "kind"];
+// what kind of work a paper is (kinds.py): the tag on its row and the Type filter
+const KINDS = [["journal", "Journal articles", "Journal article"], ["preprint", "Preprints and working papers", "Preprint or working paper"], ["conference", "Conference papers", "Conference paper"], ["other", "Reports, theses and other", "Report, thesis or other"]];
+const kindTag = r => r.kind === "preprint" ? "Preprint" : r.kind === "conference" ? "Conference" : r.kind === "other" ? (r.kind_label || "Other") : "";
 const SEL = new Set();
 const ST = {toread: "To read", reading: "Reading", read: "Read"};
 const lib = () => ctx.getLib();
@@ -37,7 +40,7 @@ function row(r, i, snips) {
       <div class="pauth">${esc(authors(r.authors))}</div>
       <div class="pmeta">${r.book ? esc("Book" + (r.book.publisher ? " · " + r.book.publisher : "") + (r.year ? " · " + r.year : "") + (r.book.pages ? " · " + r.book.pages + " pages" : "") + (r.book.source === "epub" ? " · EPUB" : " · PDF") + ((r.book.toc || []).length ? " · outline of " + r.book.toc.length + " item" + (r.book.toc.length === 1 ? "" : "s") : "")) : `${esc(r.journal)} · ${esc(r.year || "")}${r.matched_topics ? " · " + esc(r.matched_topics) : ""}`}</div>
       ${st.takeaway ? `<div class="take" data-take="${esc(r.file)}" title="Click to edit">“${esc(st.takeaway)}”</div>` : ""}
-      <div class="tags">${st.status ? `<span class="tag stt st-${esc(st.status)}" title="Reading status">${esc(ST[st.status] || st.status)}</span>` : ""}${nt}${r.card ? `<span class="tag you" data-card="${esc(r.file)}" title="This paper has a card (question, theory, method, findings, limitations…). Click to open it." style="cursor:pointer">📇 card</span>` : ""}${fl.map(f => `<span class="tag fol" data-openfolder="${esc(f.id)}">📁 ${esc(f.name)}</span>`).join("")}${prog}</div>
+      <div class="tags">${kindTag(r) ? `<span class="tag kind k-${esc(r.kind)}" title="${esc((KINDS.find(k => k[0] === r.kind) || [, , ""])[2])}: not a journal article">${esc(kindTag(r))}</span>` : ""}${st.status ? `<span class="tag stt st-${esc(st.status)}" title="Reading status">${esc(ST[st.status] || st.status)}</span>` : ""}${nt}${r.card ? `<span class="tag you" data-card="${esc(r.file)}" title="This paper has a card (question, theory, method, findings, limitations…). Click to open it." style="cursor:pointer">📇 card</span>` : ""}${fl.map(f => `<span class="tag fol" data-openfolder="${esc(f.id)}">📁 ${esc(f.name)}</span>`).join("")}${prog}</div>
       ${sn}
     </div>
     <div class="row actions">
@@ -51,6 +54,7 @@ function row(r, i, snips) {
           <a target="_blank" href="${fileUrl(r.file)}" role="menuitem">${ico("papers", "sm")} Open the PDF</a>
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
+          ${r.book ? "" : `<button data-setkind="${esc(r.file)}" role="menuitem">${ico("papers", "sm")} Type: ${esc((KINDS.find(k => k[0] === (r.kind || "journal")) || KINDS[0])[2])}…</button>`}
           <button data-delitem="${esc(r.file)}" role="menuitem" class="danger">${ico("x", "sm")} Delete this ${r.book ? "book" : "paper"}…</button>
         </div></span>
     </div>${r.book ? `<div class="chaplist hide"></div>` : ""}</div>`;
@@ -80,7 +84,7 @@ function top(el, opts) {
           <span class="menuwrap"><button class="btn" id="lf-filters" aria-haspopup="true" title="Filter by status, folder, journal, year, tag, notes">${ico("filter")} Filters <span class="nn" id="lf-nf"></span></button>
             <div class="menu card hide lf-pop" id="lf-pop">
               <label>Status<select id="lf-status"><option value="">Any status</option><option value="toread">To read</option><option value="reading">Reading</option><option value="read">Read</option><option value="none">No status</option></select></label>
-              <label>Folder<select id="lf-folder"></select></label><label>Journal<select id="lf-journal"></select></label><label>Year<select id="lf-year"></select></label><label>Tag<select id="lf-tag"></select></label>
+              <label>Folder<select id="lf-folder"></select></label><label>Type<select id="lf-kind"><option value="">Any type</option>${KINDS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label><label>Journal or source<select id="lf-journal"></select></label><label>Year<select id="lf-year"></select></label><label>Tag<select id="lf-tag"></select></label>
               <button class="btn small" id="lf-notes" title="Only papers where you made highlights or notes">✎ Only papers with my notes</button></div></span>
           <button class="btn" id="lf-star" title="Only starred papers">☆ Starred</button>
           <select id="lf-sort" aria-label="Sort"><option value="">Sort: best match / newest</option><option value="title">Sort: title</option><option value="journal">Sort: journal</option><option value="opened">Sort: last opened</option><option value="notes">Sort: most highlights</option></select>
@@ -102,7 +106,7 @@ function top(el, opts) {
   bind("lf-q", "input", e => { F.q = e.target.value; refresh(); });
   bind("lf-q", "keydown", e => { if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); fulltext(opts); } });
   bind("lf-ft", "click", () => fulltext(opts));
-  [["lf-status", "status"], ["lf-folder", "folder"], ["lf-journal", "journal"], ["lf-year", "year"], ["lf-tag", "tag"], ["lf-sort", "sort"]]
+  [["lf-status", "status"], ["lf-folder", "folder"], ["lf-kind", "kind"], ["lf-journal", "journal"], ["lf-year", "year"], ["lf-tag", "tag"], ["lf-sort", "sort"]]
     .forEach(([id, k]) => bind(id, "change", e => { F[k] = e.target.value; results(opts); }));
   bind("lf-star", "click", () => { F.star = !F.star; results(opts); });
   bind("lf-notes", "click", () => { F.notes = !F.notes; results(opts); });
@@ -112,7 +116,7 @@ function top(el, opts) {
   bind("lf-filters", "click", e => { e.stopPropagation(); const m = $("#lf-pop", el), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); });
   $("#lf-chips", el).addEventListener("click", async e => {
     if (e.target.closest("[data-savesearch]")) { const n = prompt("Name this search (it will be kept next to your folders):", F.q || ""); if (!n || !n.trim()) return; try { SMART = (await api("/api/smart", {action: "add", name: n.trim(), filters: pickFilters()})).searches; toast("Saved."); fillControls(el); } catch (er) { notifyError(er); } return; }
-    const c = e.target.closest("[data-unf]"); if (!c) return; if (c.dataset.unf === "all") Object.assign(F, {status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false}); else F[c.dataset.unf] = c.dataset.unf === "star" || c.dataset.unf === "notes" ? false : ""; fillControls(el); results(opts); });
+    const c = e.target.closest("[data-unf]"); if (!c) return; if (c.dataset.unf === "all") Object.assign(F, {status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false}); else F[c.dataset.unf] = c.dataset.unf === "star" || c.dataset.unf === "notes" ? false : ""; fillControls(el); results(opts); });
   bind("lf-export", "click", e => { e.stopPropagation(); exportMenu($("#lf-exportmenu", el), {}); });
   $$(".libtabs button", el).forEach(b => b.onclick = () => { F.tab = b.dataset.tab; tabs(el, opts); });
   if (opts && opts.browse) {                                      // the Library's home: the journal tiles first, then Continue reading and Up next below them
@@ -183,7 +187,8 @@ function fillControls(el) {
   const ys = [...new Set(P.map(r => r.year).filter(Boolean))].sort().reverse();
   $("#lf-q", el).value = F.q; $("#lf-status", el).value = F.status; $("#lf-sort", el).value = F.sort;
   $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + FOLDERS.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")", F.folder)).join("");
-  $("#lf-journal", el).innerHTML = opt("", "Any journal", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
+  $("#lf-kind", el).value = F.kind || "";
+  $("#lf-journal", el).innerHTML = opt("", "Any journal or source", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
   $("#lf-year", el).innerHTML = opt("", "Any year", F.year) + ys.map(y => opt(y, y, F.year)).join("");
   $("#lf-tag", el).innerHTML = opt("", "Any tag", F.tag) + TAGS.map(t => opt(t.id, (t.category ? t.category + ": " : "") + t.name, F.tag)).join("");
   $("#lf-star", el).classList.toggle("on", F.star); $("#lf-notes", el).classList.toggle("on", F.notes); $("#lf-list", el).classList.toggle("on", F.list);
@@ -192,7 +197,7 @@ function fillControls(el) {
     `<span class="chip" id="lf-newfolder">＋ New folder</span>`;
   $$("[data-smart]", el).forEach(c => c.onclick = e => { const del = e.target.closest("[data-smartdel]");
     if (del) { e.stopPropagation(); if (confirm("Forget the saved search “" + (SMART.find(s => s.id === del.dataset.smartdel) || {}).name + "”? The papers are not affected.")) api("/api/smart", {action: "delete", id: del.dataset.smartdel}).then(r => { SMART = r.searches; fillControls(el); }).catch(notifyError); return; }
-    const s = SMART.find(x => x.id === c.dataset.smart); if (!s) return; Object.assign(F, {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", notes: false, list: false}, s.filters); F.tab = "papers"; tabs(el, TOP && TOP.opts); fillControls(el); results(TOP && TOP.opts); });
+    const s = SMART.find(x => x.id === c.dataset.smart); if (!s) return; Object.assign(F, {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, list: false}, s.filters); F.tab = "papers"; tabs(el, TOP && TOP.opts); fillControls(el); results(TOP && TOP.opts); });
   $("#lf-newfolder", el).onclick = () => newFolder();
   const gt = $('[data-gotab="folders"]', el); if (gt) gt.onclick = () => openTab("folders");
 }
@@ -420,12 +425,12 @@ async function results(opts) {
   actionbar();
 }
 const pickFilters = () => ({...Object.fromEntries(FILTER_KEYS.filter(k => F[k]).map(k => [k, F[k]])), ...(F.star ? {star: true} : {}), ...(F.notes ? {notes: true} : {})});
-const smartText = s => { const f = s.filters, t = []; if (f.q) t.push("“" + f.q + "”"); if (f.status) t.push(ST[f.status] || f.status); if (f.star) t.push("starred"); if (f.folder) t.push("folder " + folderName(f.folder)); if (f.journal) t.push(f.journal); if (f.year) t.push(f.year); if (f.tag) t.push("tag"); if (f.notes) t.push("with my notes"); return t.join(" · "); };
+const smartText = s => { const f = s.filters, t = []; if (f.q) t.push("“" + f.q + "”"); if (f.status) t.push(ST[f.status] || f.status); if (f.star) t.push("starred"); if (f.folder) t.push("folder " + folderName(f.folder)); if (f.journal) t.push(f.journal); if (f.year) t.push(f.year); if (f.kind) t.push((KINDS.find(k => k[0] === f.kind) || [, f.kind])[1].toLowerCase()); if (f.tag) t.push("tag"); if (f.notes) t.push("with my notes"); return t.join(" · "); };
 function drawChips() {
   const box = $("#lf-chips"); if (!box) return;
   const sel = id => { const s = $("#" + id); return s && s.selectedOptions[0] ? s.selectedOptions[0].textContent.replace(/^📁\s*/, "").replace(/\s*\(\d+\)$/, "") : ""; };
   const cs = [F.status && ["status", "Status: " + (ST[F.status] || "No status")], F.star && ["star", "★ Starred"], F.folder && ["folder", "Folder: " + sel("lf-folder")], F.journal && ["journal", "Journal: " + sel("lf-journal")],
-    F.year && ["year", "Year: " + F.year], F.tag && ["tag", "Tag: " + sel("lf-tag")], F.notes && ["notes", "✎ With my notes"]].filter(Boolean);
+    F.year && ["year", "Year: " + F.year], F.kind && ["kind", "Type: " + (KINDS.find(k => k[0] === F.kind) || [, F.kind])[1]], F.tag && ["tag", "Tag: " + sel("lf-tag")], F.notes && ["notes", "✎ With my notes"]].filter(Boolean);
   const can = Object.keys(pickFilters()).length > 0;
   box.classList.toggle("hide", !can);
   box.innerHTML = cs.map(([k, t]) => `<span class="chip on" data-unf="${k}" title="Remove this filter">${esc(t)} ${ico("x", "sm")}</span>`).join("") + (cs.length > 1 ? `<button class="linkbtn" data-unf="all">Clear all</button>` : "") + (can ? `<button class="linkbtn" data-savesearch title="Keep this search and its filters as a chip next to your folders">${ico("search", "sm")} Save this search</button>` : "");
@@ -482,6 +487,8 @@ function wireRows() {
     if (more) { e.stopPropagation(); const m = more.parentElement.querySelector(".menu"), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); return; }
     const pick = e.target.closest(".rowmenu button, .rowmenu a"); if (pick) pick.closest(".menu").classList.add("hide");
     const star = e.target.closest("[data-star]"), fold = e.target.closest("[data-fold]"), take = e.target.closest("[data-take]"), of = e.target.closest("[data-openfolder]"), cd = e.target.closest("[data-card]"), del = e.target.closest("[data-delitem]");
+    const sk = e.target.closest("[data-setkind]");
+    if (sk) { setKind([sk.dataset.setkind]); return; }
     if (del) deleteItems([del.dataset.delitem]);
     else if (cd) { const i = byFile(cd.dataset.card); if (i >= 0) ctx.readPaper(lib()[i], {tab: "card"}); }
     else if (star) { const r = lib()[byFile(star.dataset.star)]; setState(star.dataset.star, {star: !(r.state || {}).star}).catch(er => notifyError(er)); }
@@ -522,11 +529,34 @@ function actionbar() {
   bar.classList.toggle("hide", !SEL.size);
   if (!SEL.size) return;
   bar.innerHTML = `<b>${SEL.size} selected</b><span class="menuwrap"><button class="btn small" id="ab-fold">📁 Add to folder ▾</button></span>
-    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
+    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small" id="ab-kind" title="Say what these papers are: journal articles, preprints, conference papers, or reports, theses and other">Set type…</button><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
+  $("#ab-kind").onclick = () => setKind([...SEL]);
   $("#ab-del").onclick = () => deleteItems([...SEL]);
   $("#ab-clear").onclick = () => { SEL.clear(); $$(".rsel").forEach(c => c.checked = false); actionbar(); };
   $("#ab-fold").onclick = e => { e.stopPropagation(); folderPop(e.currentTarget, [...SEL], true); };
   $("#ab-exp").onclick = e => { e.stopPropagation(); exportMenu($("#ab-expmenu"), {files: [...SEL]}); };
+}
+
+// ---------------------------------------------------------------- what kind of work papers are: a journal article, a preprint, a conference paper, or other (kinds.py)
+function setKind(files) {
+  files = files.filter(f => { const r = lib()[byFile(f)]; return r && !r.book; }); if (!files.length) return;
+  const r0 = lib()[byFile(files[0])], cur = files.every(f => (lib()[byFile(f)].kind || "journal") === (r0.kind || "journal")) ? (r0.kind || "journal") : "";
+  $("#kind-dlg") && $("#kind-dlg").remove();
+  const d = document.createElement("dialog"); d.id = "kind-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "kind-h");
+  d.innerHTML = `<h2 id="kind-h">What ${files.length === 1 ? "is this paper" : "are these " + files.length + " papers"}?</h2>
+    <p class="pmeta">Only the type is changed: the files stay where they are and keep their journal or source name.</p>
+    <div class="di-list" role="radiogroup" aria-label="Type">${KINDS.map(([v, , one]) => `<label class="di-opt"><input type="radio" name="kd" value="${v}"${cur === v ? " checked" : ""}> ${one}</label>`).join("")}</div>
+    <label class="hide" id="kd-lab-w">Which one <select id="kd-lab"><option value="">Other</option><option>Report</option><option>Thesis</option><option>Chapter</option><option>Dataset</option></select></label>
+    <div class="row di-btns"><button class="btn" id="kd-no">Cancel</button><button class="btn primary" id="kd-go"${cur ? "" : " disabled"}>Save</button></div>`;
+  document.body.append(d); d.showModal();
+  const pick = () => (d.querySelector("input[name=kd]:checked") || {}).value || "";
+  d.addEventListener("change", () => { $("#kd-go", d).disabled = !pick(); $("#kd-lab-w", d).classList.toggle("hide", pick() !== "other"); });
+  $("#kd-no", d).onclick = () => d.close();
+  $("#kd-go", d).onclick = async () => {
+    try { const r = await api("/api/library/kind", {files, kind: pick(), label: pick() === "other" ? $("#kd-lab", d).value : ""}); d.close(); toast(`Type saved for ${r.changed} paper${r.changed === 1 ? "" : "s"}.`); await ctx.reload(); results(TOP && TOP.opts); }
+    catch (er) { notifyError(er); }
+  };
+  d.addEventListener("close", () => d.remove(), {once: true});
 }
 
 // ---------------------------------------------------------------- folders

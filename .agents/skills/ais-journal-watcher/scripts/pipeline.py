@@ -27,6 +27,7 @@ import anthropic
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS)
 import download as dl  # noqa: E402
+import kinds  # noqa: E402
 import signins  # noqa: E402
 import terms as tm  # noqa: E402
 import fetch_new as fx  # noqa: E402
@@ -196,6 +197,7 @@ def library():
                 r["key"], r["state"], r["folders"] = key, state.get(key) or {}, member.get(key, [])
                 if r.get("journal") == "Books":      # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
                     r["book"] = dl.load_json(os.path.join(ROOT, r["file"][:-4] + ".book.json"), {})
+                r["kind"], r["kind_label"] = kinds.of_row(r, kinds.read_sidecar(os.path.join(ROOT, r["file"]), key))     # journal article, preprint, conference paper, other (kinds.py)
                 # Papers/YYYY-MM/<Journal>/... -> publication year for grouping
                 m = re.match(r"Papers/(\d{4})-\d{2}/", r["file"])
                 r["year"] = m.group(1) if m else ""
@@ -1329,6 +1331,15 @@ def site_key(p):
     return ("host:" + host) if host else "other"
 
 
+def _write_kind(p, path):
+    """A paper that knows its kind (an author's working or conference paper, a re-download from Check my PDFs) gets its sidecar next to the PDF (kinds.py)."""
+    if p.get("kind") in kinds.PAPER_KINDS:
+        try:
+            kinds.write_sidecar(path, p["kind"], p.get("journal") or "", p.get("kind_label") or "", dl.index_key(p))
+        except OSError:
+            pass
+
+
 def _into_folder(p):
     """A paper of an author run is filed into the author's folder once it is in the library."""
     fid = p.get("folder")
@@ -1550,6 +1561,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     last_at[pub] = clock()
                     if ok:
                         p.update(dl_status="ok", file=os.path.relpath(path, ROOT), dl_note=note)
+                        _write_kind(p, path)
                         got.append(p)
                         _into_folder(p)
                     elif ask and chall and hasattr(br, "open_check"):

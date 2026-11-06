@@ -143,10 +143,12 @@ def plain(s):
 def save_index(p, file, status, note=""):
     """Upsert one row per paper (keyed by DOI, else title)."""
     idx = os.path.join(PAPERS, "_index.csv")
-    rows = []
+    rows, extra = [], []
     if os.path.exists(idx):
         with open(idx, newline="") as f:
-            rows = list(csv.DictReader(f))
+            rd = csv.DictReader(f)
+            rows = list(rd)
+            extra = [c for c in (rd.fieldnames or []) if c and c not in INDEX_COLS]       # (columns a later version may add: kept, not refused)
     topics = p.get("topics") or list((p.get("topics_hit") or {}).keys())
     row = dict(zip(INDEX_COLS, [
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -157,7 +159,7 @@ def save_index(p, file, status, note=""):
     ]))
     rows = [r for r in rows if index_key(r) != index_key(row)] + [row]
     with open(idx, "w", newline="") as f:
-        w = csv.DictWriter(f, INDEX_COLS)
+        w = csv.DictWriter(f, INDEX_COLS + extra, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
 

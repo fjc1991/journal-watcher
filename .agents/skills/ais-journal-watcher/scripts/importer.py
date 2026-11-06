@@ -22,6 +22,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
+import kinds  # noqa: E402
 import fetch_new as fx  # noqa: E402
 import identity  # noqa: E402
 
@@ -57,7 +58,9 @@ def _meta_from_item(it, doi=""):
             "container": dl.plain((it.get("container-title") or [""])[0]), "issn": it.get("ISSN") or [], "doi": it.get("DOI", doi),
             "pub_date": fx.fmt_date_parts((it.get("published") or it.get("issued") or {}).get("date-parts")),
             "url": it.get("URL") or "https://doi.org/" + (it.get("DOI") or doi), "volume": it.get("volume", ""), "issue": it.get("issue", ""),
-            "pages": it.get("page", ""), "publisher": it.get("publisher", ""), "type": it.get("type", ""),
+            "pages": it.get("page", ""), "publisher": it.get("publisher", ""), "type": it.get("type", ""), "subtype": it.get("subtype", ""),
+            "group_title": dl.plain(it.get("group-title") or ""), "institution": dl.plain(((it.get("institution") or [{}])[0] or {}).get("name", "") if isinstance(it.get("institution"), list) else ""),
+            "event": dl.plain((it.get("event") or {}).get("name", "") if isinstance(it.get("event"), dict) else ""),
             "abstract": fx.cr_strip_jats(it.get("abstract")), "keywords": it.get("subject") or []}
 
 
@@ -75,29 +78,61 @@ def crossref_search(title, rows=4):
     return [m for m in (_meta_from_item(it) for it in items) if m and m.get("doi")]
 
 
-def journal_for(meta):
-    """(name, abbr) — one of the watched journals, else the journal's own name. In order: the ISSN; the journal's name or abbreviation (what Crossref said, or what you
-    typed); and only when no journal name is known, a DOI prefix that belongs to ONE watched journal (a publisher's prefix such as 10.1287 is shared by several)."""
+def _watched():
+    """The watched journals, and SSRN (pipeline.journals adds it the same way: archive searches file SSRN papers as journal "SSRN", abbr "SSRN")."""
     js = dl.load_json(os.path.join(dl.BASE, "journals.json"), {"journals": []})["journals"]
+    if not any(j.get("abbr") == "SSRN" for j in js):
+        js = js + [{"name": "SSRN", "abbr": "SSRN", "doi_prefix": fx.SSRN_PREFIX, "crossref_type": "posted-content"}]
+    return js
+
+
+def _is_series(j):
+    """A watched entry that is a preprint or working-paper series (NBER, SSRN), not a journal."""
+    return j.get("doi_prefix") in kinds.PREPRINT_SERIES or j.get("crossref_type") == "posted-content"
+
+
+def journal_for(meta, kind="journal"):
+    """(name, abbr) where a paper of this kind is filed. In order: a watched journal by ISSN, or by its exact name (for any kind: it really is that journal); by its
+    abbreviation, or a DOI prefix that belongs to ONE watched entry when no venue is known (only for a journal article, or for a preprint when the entry is a preprint
+    series such as NBER); the spelling of a venue already in your library (same name, any case: the same folder and abbreviation); else the venue's own name (made safe
+    as a folder name) with a new abbreviation that no other venue uses. A preprint with no venue is named by its DOI's series (SSRN, arXiv…)."""
+    kind = kind if kind in kinds.PAPER_KINDS else "journal"
+    js = _watched()
     issns = {str(x).strip() for x in (meta.get("issn") or [])}
-    cont = re.sub(r"\s+", " ", meta.get("container") or "").strip()
+    cont = re.sub(r"\s+", " ", dl.plain(meta.get("container") or "")).strip()
     for j in js:
         if j.get("issn") and j["issn"] in issns:
             return j["name"], j["abbr"]
     for j in js:
-        if cont and cont.lower() in (j["name"].lower(), j["abbr"].lower()):
+        if cont and cont.lower() == j["name"].lower():
+            return j["name"], j["abbr"]
+    for j in js:
+        if cont and cont.lower() == j["abbr"].lower() and (kind == "journal" or (kind == "preprint" and _is_series(j))):
             return j["name"], j["abbr"]
     if not cont:
-        hits = [j for j in js if j.get("doi_prefix") and (meta.get("doi") or "").startswith(j["doi_prefix"] + "/")]
+        hits = [j for j in js if j.get("doi_prefix") and (meta.get("doi") or "").startswith(j["doi_prefix"] + "/") and (kind == "journal" or (kind == "preprint" and _is_series(j)))]
         if len(hits) == 1:
             return hits[0]["name"], hits[0]["abbr"]
-    name = re.sub(r"[\\/:*?\"<>|]+", " ", cont).strip() or "Other"
-    abbr = "".join(w[0] for w in re.findall(r"[A-Za-z][A-Za-z]+", name) if w[0].isupper() and w.lower() not in ("of", "the", "and"))[:6].upper()
-    return name, abbr or "OTH"
+        if kind == "preprint":
+            cont = kinds.series_of(meta.get("doi"))
+    rows = library_rows()
+    watched = {j["abbr"].upper() for j in js}
+    if cont:
+        same = next((r for r in rows if (r.get("journal") or "").strip().lower() == cont.lower() and r.get("journal") != "Books"), None)
+        if same:
+            return same["journal"], same.get("abbr") or kinds.venue_abbr(same["journal"], kind, watched)
+    name = kinds.clean_venue(cont, kind) if kind != "journal" or cont else "Other"
+    if name == "Other":
+        return "Other", "OTH"
+    same = next((r for r in rows if (r.get("journal") or "").strip().lower() == name.lower()), None)
+    if same:
+        return same["journal"], same.get("abbr") or "OTH"
+    taken = watched | {(r.get("abbr") or "").upper() for r in rows if (r.get("journal") or "").strip().lower() != name.lower()}
+    return name, kinds.venue_abbr(name, kind, taken)
 
 
-def _paper(meta):
-    name, abbr = journal_for(meta)
+def _paper(meta, kind="journal"):
+    name, abbr = journal_for(meta, kind)
     pd = meta.get("pub_date") or ""
     if re.fullmatch(r"\d{4}", pd):
         pd += "-01"
@@ -196,7 +231,9 @@ def add_pdf(data, filename="paper.pdf", doi=""):
     doi = clean_doi(doi) or sniffed
     meta = crossref_meta(doi) if doi else None
     if meta:
-        p, note = _paper(meta), "added by you (metadata from Crossref)"
+        kind, _, label = kinds.from_crossref(meta)
+        p, note = _paper(meta, kind), "added by you (metadata from Crossref)"
+        return _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), meta.get("type") or ""))
     else:
         title = title or re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(filename))[0]).strip() or "Untitled paper"
         p = {"title": title, "authors": [], "doi": doi, "url": "https://doi.org/" + doi if doi else "", "journal": "Other", "abbr": "OTH",
@@ -212,7 +249,8 @@ def add_doi(doi):
     meta = crossref_meta(doi)
     if not meta:
         raise ValueError("Crossref doesn’t know that DOI (or can’t be reached).")
-    p = _paper(meta)
+    kind, _, label = kinds.from_crossref(meta)
+    p = _paper(meta, kind)
     ex = _existing(p)
     if ex:
         return {"file": ex, "title": p["title"], "existing": True, "note": "already in your library"}
@@ -239,7 +277,7 @@ def add_doi(doi):
     if not data:
         raise ValueError("No free copy of “%s” was found%s. Download the PDF through your library and drop it onto the Library page — "
                          "the DOI will be recognised." % (p["title"][:80], " (a PDF came back, but it is not this paper: %s)" % refused.split(": ", 1)[-1] if refused else ""))
-    return _file(p, data, note)
+    return _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), meta.get("type") or ""))
 
 
 # ---------------------------------------------------------------- review before filing: analyse, then confirm
@@ -323,7 +361,18 @@ def _read(data):
             if d.lower() not in seen:
                 seen.add(d.lower()); dois.append(d)
     title = r["meta_title"] if len(r["meta_title"]) >= 8 and not r["meta_title"].lower().endswith((".pdf", ".docx", ".tex", ".doc")) else r["headline"]
-    return {"dois": dois[:4], "title": re.sub(r"\s+", " ", title or "").strip(), "pages": r["pages_read"], "scan": bool(r["pages_read"] and r["scans"] * 2 >= r["pages_read"] and r["words"] < 60)}
+    first = ""
+    try:
+        import pymupdf
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            first = doc[0].get_text() if len(doc) else ""
+    except Exception:  # noqa: BLE001
+        pass
+    kind, venue, label = kinds.from_text(first) if first else (None, "", "")
+    if kind is None and re.search(r"(a thesis submitted|doctoral dissertation|in partial fulfil{1,2}ment of the requirements)", r["text"][:6000], re.I):
+        kind, label = "other", "Thesis"
+    return {"dois": dois[:4], "title": re.sub(r"\s+", " ", title or "").strip(), "pages": r["pages_read"], "scan": bool(r["pages_read"] and r["scans"] * 2 >= r["pages_read"] and r["words"] < 60),
+            "kind": kind, "venue": venue, "label": label}
 
 
 def _candidate(meta, source, data, printed):
@@ -331,9 +380,10 @@ def _candidate(meta, source, data, printed):
     verdict, reason, ev = identity.check({"title": meta["title"], "doi": "", "authors": meta.get("authors") or []}, data)
     pd = meta.get("pub_date") or ""
     au = ev.get("authors")
-    return {"title": meta["title"], "authors": meta.get("authors") or [], "journal": meta.get("container") or "", "pub_date": pd, "year": pd[:4], "doi": meta.get("doi") or "",
+    kind, venue, label = kinds.from_crossref(meta)
+    return {"title": meta["title"], "authors": meta.get("authors") or [], "journal": venue or "", "pub_date": pd, "year": pd[:4], "doi": meta.get("doi") or "",
             "url": meta.get("url") or "", "source": source, "doi_printed": printed, "verdict": verdict, "reason": reason, "title_score": ev.get("title") or 0.0,
-            "authors_found": au is not None and au >= identity.AUTHORS_MIN}
+            "authors_found": au is not None and au >= identity.AUTHORS_MIN, "type": meta.get("type") or "", "kind": kind, "label": label, "issn": list(meta.get("issn") or [])}
 
 
 def _strong(c):
@@ -366,9 +416,24 @@ def analyse_pdf(data, filename="paper.pdf"):
     cands.sort(key=lambda c: (c["verdict"] == "match", c["verdict"] != "mismatch", c["doi_printed"], c["title_score"]), reverse=True)
     cands = cands[:3]
     pick = 0 if cands and cands[0]["verdict"] != "mismatch" else -1
+    hint = ""
+    if pick == 0 and info["kind"] == "preprint" and cands[0]["kind"] == "journal" and cands[0]["source"] == "title" and not cands[0]["doi_printed"]:
+        # the PDF is stamped as a preprint (arXiv, NBER, SSRN) and the record was found only by its title: that is the published version, not this PDF
+        hint = "Crossref has a published version in %s; this PDF looks like the %s preprint." % (cands[0]["journal"] or "a journal", info["venue"] or "")
+        pick = -1
     top = cands[pick] if pick >= 0 else {"doi": "", "title": guess}
+    kind = top.get("kind") if pick >= 0 else (info["kind"] or "journal")
+    if not hint:
+        if pick >= 0 and top.get("kind") != "journal":
+            hint = "Crossref lists this as %s." % {"preprint": "a preprint", "conference": "a conference paper"}.get(top["kind"], ("a " + top["label"].lower()) if top.get("label") else "something other than a journal article")
+            if top.get("type") in ("book", "monograph", "edited-book"):
+                hint = "Crossref lists this as a whole book: choose Book to add it with its chapters."
+        elif pick < 0 and info["kind"]:
+            hint = "The PDF says it is %s." % ("an %s preprint" % info["venue"] if info["kind"] == "preprint" and info["venue"] in ("arXiv",) else "a %s working paper" % info["venue"].replace(" Working Papers", "") if info["kind"] == "preprint" and info["venue"] else
+                                             "a preprint" if info["kind"] == "preprint" else "a conference paper" if info["kind"] == "conference" else "a " + (info["label"] or "report").lower())
     ex = _existing({"doi": top.get("doi"), "title": top.get("title")})
-    return {"token": _stage(data), "name": filename, "pdf": {"title": guess, "dois": info["dois"], "pages": info["pages"], "scan": info["scan"]}, "candidates": cands, "pick": pick,
+    return {"token": _stage(data), "name": filename, "pdf": {"title": guess, "dois": info["dois"], "pages": info["pages"], "scan": info["scan"], "kind": info["kind"], "venue": info["venue"], "label": info["label"]},
+            "candidates": cands, "pick": pick, "kind": kind or "journal", "kind_hint": hint,
             "confidence": "none" if not cands else "high" if pick == 0 and _strong(cands[0]) else "check", "existing": ex or ""}
 
 
@@ -409,7 +474,10 @@ def confirm(token, fields):
     authors = re.split(r"\s*;\s*", str(authors or "")) if not isinstance(authors, list) else authors
     authors = [a for a in (_clean_text(x, 120) for x in authors[:100]) if a]
     doi = clean_doi(f.get("doi")) if str(f.get("doi") or "").strip() else ""
-    meta = {"title": title, "authors": authors, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "container": _clean_text(f.get("journal"), 120), "issn": [], "pub_date": date}
+    kind = f.get("kind") if f.get("kind") in kinds.PAPER_KINDS else "journal"          # (missing, "paper" or anything else: a journal article, as before)
+    issn = [str(x)[:12] for x in (f.get("issn") or []) if isinstance(x, str)][:4] if isinstance(f.get("issn"), list) else []
+    meta = {"title": title, "authors": authors, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "container": _clean_text(f.get("journal"), 120), "issn": issn, "pub_date": date}
+    label = f.get("label") if f.get("label") in kinds.LABELS and kind == "other" else ""
     note = {"crossref": "added by you (metadata from Crossref, confirmed by you)", "edited": "added by you (metadata from Crossref, edited by you)"}.get(f.get("source"), "added by you (details typed by you)")
     claimed = path + ".claimed"
     try:
@@ -419,7 +487,8 @@ def confirm(token, fields):
     try:
         with open(claimed, "rb") as fh:
             data = fh.read()
-        res = _file(_paper(meta), data, note)
+        p = _paper(meta, kind)
+        res = _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), f.get("type") or ""))
     except Exception:
         try:
             os.replace(claimed, path)                    # filing failed: the PDF waits again
