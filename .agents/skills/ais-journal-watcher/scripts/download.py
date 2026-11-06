@@ -54,9 +54,12 @@ def read_dotenv():
     return env
 
 
+SOURCE_KEYS = ("OPENALEX_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INSTTOKEN")      # (Settings → Paper sources; the Unpaywall email is not a secret and stays in .env)
+
+
 def key_names():
-    """The names of the API keys the AI providers use (from ai.json), for looking them up in the Keychain."""
-    names = {"ANTHROPIC_API_KEY"}
+    """The names of the API keys the AI providers use (from ai.json) and of the paper sources' keys (OpenAlex, Elsevier), for looking them up in the Keychain."""
+    names = {"ANTHROPIC_API_KEY"} | set(SOURCE_KEYS)
     for ai_json in (os.path.join(BASE, "ai.json"),):
         for p in ((load_json(ai_json, {}) or {}).get("providers") or {}).values():
             if isinstance(p, dict) and p.get("key_env"):

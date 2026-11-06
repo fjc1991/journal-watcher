@@ -54,6 +54,7 @@ import support  # noqa: E402
 import syncinfo  # noqa: E402
 import uiprefs  # noqa: E402
 import updater  # noqa: E402
+import keychain  # noqa: E402
 import smart  # noqa: E402
 import readstate as rs  # noqa: E402
 import refs as rf  # noqa: E402
@@ -285,6 +286,7 @@ def start_pdfcheck():
 # ---------------------------------------------------------------- where papers come from: OpenAlex, Unpaywall, Elsevier (Settings → Paper sources)
 
 SOURCES = {"openalex_key": "OPENALEX_API_KEY", "unpaywall_email": "UNPAYWALL_EMAIL", "elsevier_key": "ELSEVIER_API_KEY", "elsevier_insttoken": "ELSEVIER_INSTTOKEN"}
+SECRET_SOURCES = set(pl.dl.SOURCE_KEYS)          # the keys among them: kept in this Mac's Keychain where there is one (the data folder is synced), as the AI keys are
 
 
 def _env_get(name):
@@ -295,7 +297,17 @@ def sources_state():
     """What is set (keys are never sent back: only whether there is one; the Unpaywall email is shown, it is yours and not a secret)."""
     return {"openalex_key": bool(_env_get("OPENALEX_API_KEY")), "unpaywall_email": _env_get("UNPAYWALL_EMAIL"),
             "elsevier_key": bool(_env_get("ELSEVIER_API_KEY")), "elsevier_insttoken": bool(_env_get("ELSEVIER_INSTTOKEN")),
-            "openalex_spent": pl.fx.openalex_spent()}
+            "openalex_spent": pl.fx.openalex_spent(), "keychain": keychain.available(),
+            "where": {f: _key_where(n) for f, n in SOURCES.items() if n in SECRET_SOURCES}}
+
+
+def _key_where(name):
+    """"Keychain", ".env file", "environment" or "" (as ai.key_where, without needing the AI modules)."""
+    if keychain.values([name]).get(name):
+        return "Keychain"
+    if pl.dl.read_dotenv().get(name):
+        return ".env file"
+    return "environment" if os.environ.get(name) else ""
 
 
 def _check_openalex(key):
@@ -311,7 +323,9 @@ def _check_openalex(key):
 
 
 def sources_save(b):
-    """Save the fields sent ({openalex_key, unpaywall_email, elsevier_key, elsevier_insttoken}; "" removes one) in the data home's .env (mode 600)."""
+    """Save the fields sent ({openalex_key, unpaywall_email, elsevier_key, elsevier_insttoken}; "" removes one). A key goes to this Mac's Keychain where there is
+    one (and its line leaves the synced .env file); without a Keychain, or for a key it cannot hold, it goes into the data home's .env (mode 600), as before.
+    The Unpaywall email, which is not a secret, always goes into .env."""
     new = {}
     for field, name in SOURCES.items():
         if field not in b:
@@ -324,6 +338,20 @@ def sources_save(b):
         if v and field == "openalex_key" and _check_openalex(v) is False:
             raise ValueError("OpenAlex does not recognise that key. Copy it again from openalex.org/settings/api.")
         new[name] = v
+    in_kc = set()
+    for name in sorted(SECRET_SOURCES & set(new)):
+        if not keychain.available():
+            break
+        v = new[name]
+        try:
+            if v:
+                keychain.set(name, v)
+                if keychain.get(name) == v:            # (read back before its line leaves the file)
+                    in_kc.add(name)
+            elif keychain.get(name):
+                keychain.delete(name)
+        except ValueError:                     # a key the Keychain helper cannot take safely: the file, as before
+            pass
     gone = [n for n, v in new.items() if not v]
     old_env = os.path.join(paths.BASE, ".env")                  # (the older layout kept keys in the settings folder: a removed key must go from there too)
     if gone and os.path.exists(old_env) and os.path.abspath(old_env) != os.path.abspath(os.path.join(ROOT, ".env")):
@@ -332,7 +360,7 @@ def sources_save(b):
             f.write("\n".join(keep_) + ("\n" if keep_ else ""))
     path = os.path.join(ROOT, ".env")
     lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
-    lines = [l for l in lines if not any(re.match(r"\s*%s\s*=" % re.escape(n), l) for n in new)] + ["%s=%s" % (n, v) for n, v in new.items() if v]
+    lines = [l for l in lines if not any(re.match(r"\s*(export\s+)?%s\s*=" % re.escape(n), l) for n in new)] + ["%s=%s" % (n, v) for n, v in new.items() if v and n not in in_kc]
     tmp = path + ".sources.tmp"                                    # (not ai.set_key's .env.tmp: two saves at once must not write the same scratch file)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:

@@ -293,7 +293,8 @@ def config():
     provs = {n: {"type": p.get("type"), "base_url": p.get("base_url", ""), "models": p.get("models", []), "key_env": p.get("key_env", ""),
                  "configured": not p.get("key_env") or bool(_key(p["key_env"])), "key_where": key_where(p.get("key_env")), "local": is_local(p),
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
-    return {"providers": provs, "keychain": keychain.available(), "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
+    in_env = [n for n in dl.key_names() if key_where(n) == ".env file"]          # every key still in the synced .env file: the AI providers' and the paper sources'
+    return {"providers": provs, "keychain": keychain.available(), "keys_in_env": in_env, "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
             "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
 
 

@@ -1659,6 +1659,59 @@ print("OK")
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True); shutil.rmtree(os.path.dirname(fake), ignore_errors=True)
     check("keys: a pasted key goes to this Mac's Keychain and leaves the file, keys in the file can be moved there (read back first), a Keychain key wins over an old line, a key it cannot hold stays in the file, no Keychain = as before", t_keychain_keys)
+    def t_source_keys_keychain():
+        """The paper sources' keys (OpenAlex, Elsevier key and token) are kept like the AI keys: a key saved in Settings → Paper sources goes to this Mac's Keychain
+        and not into the synced .env file; one already in the file is moved with the same button as the AI keys; OpenAlex reads it from there. The Unpaywall email,
+        not a secret, stays in the file. Without a Keychain nothing changes."""
+        import subprocess
+        home, loc, fake = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-"), os.path.join(tempfile.mkdtemp(prefix="jw-kc-"), "kc.json")
+        child = r'''
+import importlib.util, json, os, sys
+sys.path.insert(0, %r)
+import paths; paths.seed_home()
+import keychain, ai, fetch_new as fx, download as dl
+spec = importlib.util.spec_from_file_location("jw_server", os.path.join(paths.DASHBOARD, "server.py")); sv = importlib.util.module_from_spec(spec); spec.loader.exec_module(sv)
+sv._check_openalex = lambda k: True            # (no network)
+env_path = os.path.join(paths.ROOT, ".env")
+open(env_path, "w").write("UNPAYWALL_EMAIL=old@example.org\nELSEVIER_INSTTOKEN=tok-in-file-1\n")
+keyc = keychain.available()
+assert keyc == bool(os.environ.get("JW_EXPECT_KC")), keyc
+st = sv.sources_save({"openalex_key": "oa-key-123", "elsevier_key": "els-key-456", "unpaywall_email": "me@example.org"})
+txt = open(env_path).read()
+if keyc:
+    assert keychain.get("OPENALEX_API_KEY") == "oa-key-123" and keychain.get("ELSEVIER_API_KEY") == "els-key-456", "the keys go to the Keychain"
+    assert "oa-key-123" not in txt and "els-key-456" not in txt and "UNPAYWALL_EMAIL=me@example.org" in txt and "old@example.org" not in txt, txt
+    assert st["keychain"] is True and st["where"] == {"openalex_key": "Keychain", "elsevier_key": "Keychain", "elsevier_insttoken": ".env file"}, st
+    assert st["openalex_key"] and st["elsevier_key"] and st["elsevier_insttoken"] and st["unpaywall_email"] == "me@example.org", st
+    # OpenAlex reads its key from the Keychain (nothing in the environment, nothing in the file)
+    os.environ.pop("OPENALEX_API_KEY", None); keychain._cache.clear()
+    assert fx.openalex_key() == "oa-key-123"
+    # the token still in the file is counted with the AI keys and moved by the same button; the Elsevier download reads it from there
+    assert "ELSEVIER_INSTTOKEN" in ai.config()["keys_in_env"], ai.config()["keys_in_env"]
+    r = ai.move_keys_to_keychain()
+    assert r["moved"] == ["ELSEVIER_INSTTOKEN"], r
+    assert "ELSEVIER_INSTTOKEN" not in open(env_path).read() and keychain.get("ELSEVIER_INSTTOKEN") == "tok-in-file-1" and ai.config()["keys_in_env"] == []
+    os.environ.pop("ELSEVIER_API_KEY", None)
+    assert dl.load_env()["ELSEVIER_INSTTOKEN"] == "tok-in-file-1" and dl.load_env()["ELSEVIER_API_KEY"] == "els-key-456"
+    # removing a key removes it from the Keychain too
+    sv.sources_save({"openalex_key": ""}); assert keychain.get("OPENALEX_API_KEY") == "" and not sv.sources_state()["openalex_key"]
+    # a key the Keychain helper cannot take safely goes into the file, as before
+    sv.sources_save({"elsevier_key": "els$dollar"}); assert "ELSEVIER_API_KEY=els$dollar" in open(env_path).read()
+else:
+    assert "OPENALEX_API_KEY=oa-key-123" in txt and "ELSEVIER_API_KEY=els-key-456" in txt and st["keychain"] is False, txt
+print("OK")
+''' % HERE
+        try:
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "JW_NO_KEYCHAIN", "JW_KEYCHAIN", "OPENALEX_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INSTTOKEN")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_FAKE_KEYCHAIN=fake, JW_EXPECT_KC="1"), capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+            home2 = tempfile.mkdtemp(prefix="jw-home-")
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home2, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=120)
+            shutil.rmtree(home2, ignore_errors=True)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True); shutil.rmtree(os.path.dirname(fake), ignore_errors=True)
+    check("keys: the OpenAlex and Elsevier keys go to this Mac's Keychain (not the synced .env file), one in the file is moved with the AI keys, OpenAlex reads it from there, the Unpaywall email stays in the file; no Keychain = as before", t_source_keys_keychain)
 
     def t_real_keychain():
         """The real macOS `security` tool, in a temporary keychain: the key goes in on standard input, comes back, is replaced, and is deleted."""

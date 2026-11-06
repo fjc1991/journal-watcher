@@ -383,6 +383,13 @@ def openalex_key():
     key = os.environ.get("OPENALEX_API_KEY")
     if key:
         return key
+    try:
+        import keychain                    # (this Mac's Keychain: a key saved or moved there; cached for a minute, nothing under JW_NO_KEYCHAIN)
+        key = keychain.values(["OPENALEX_API_KEY"]).get("OPENALEX_API_KEY")
+        if key:
+            return key
+    except Exception:  # noqa: BLE001      (no Keychain: the file, as before)
+        pass
     p = os.path.join(ROOT, ".env")
     if os.path.exists(p):
         for line in open(p):
