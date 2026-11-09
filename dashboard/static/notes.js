@@ -9,6 +9,7 @@ export async function load(file) {
   const d = await api("/api/doc?file=" + encodeURIComponent(file));
   S.meta = {...(S.meta || {}), ...d.meta};
   S.notes = d.notes; S.rev = d.notes.rev || 0;
+  if (d.notes.unreadable) { delete d.notes.unreadable; setTimeout(() => toast("This paper’s notes file could not be read (it may still be syncing, or it is damaged). Your earlier highlights are not shown and nothing will be saved over the file: close the paper and open it again in a minute."), 300); }
   S.notes.frames = S.notes.frames || []; S.notes.links = S.notes.links || []; S.notes.paper_note = S.notes.paper_note || "";
   S.tags = d.tags.tags; S.tagsRev = d.tags.rev || 0;
   S.save = "saved";

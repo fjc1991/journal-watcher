@@ -633,6 +633,38 @@ def main():
         assert ns.save_tags([{"id": "t1", "name": "a"}, {"bad": 1}], 0)["tags"] == [{"id": "t1", "name": "a"}]
     check("sidecar created on first save, rev conflict, tags", t_notes)
 
+    def t_notes_unreadable():
+        """A notes file that is there but cannot be read (half-synced, damaged) is not taken for 'no notes': the page is told, a save is refused (the next
+        highlight used to replace the whole file), and a copy is kept beside it. The same for the tags file."""
+        import glob
+        np = ns.notes_path(pdf); good = open(np, encoding="utf-8").read()
+        tp = ns.TAGS_PATH; good_t = open(tp, encoding="utf-8").read()
+        try:
+            for bad in ('{"version": 1, "rev": 2, "highlights": [{"id": "h1"', '[1, 2]'):
+                open(np, "w", encoding="utf-8").write(bad)
+                n = ns.load(pdf, {"id": "10.1/x"})
+                assert n.get("unreadable") is True and n["rev"] == 0 and n["highlights"] == [], n
+                n["highlights"].append({"id": "new", "page": 1})
+                try:
+                    ns.save(pdf, n, 0); raise AssertionError("an unreadable notes file was written over")
+                except ns.Unreadable as e:
+                    assert "could not be read" in str(e) and "nothing is saved over it" in str(e)
+                assert open(np, encoding="utf-8").read() == bad, "the file is as it was"
+            kept = glob.glob(np[:-5] + ".unreadable-*.json")
+            assert kept and open(kept[0], encoding="utf-8").read() in ('{"version": 1, "rev": 2, "highlights": [{"id": "h1"', '[1, 2]'), kept
+            open(tp, "w", encoding="utf-8").write('{"version": 1, "tags": [{"id"')
+            try:
+                ns.save_tags([{"id": "t9", "name": "z"}], 0); raise AssertionError("an unreadable tags file was written over")
+            except ns.Unreadable:
+                pass
+            assert open(tp, encoding="utf-8").read() == '{"version": 1, "tags": [{"id"'
+        finally:
+            open(np, "w", encoding="utf-8").write(good); open(tp, "w", encoding="utf-8").write(good_t)
+            for f_ in glob.glob(np[:-5] + ".unreadable-*.json") + glob.glob(tp[:-5] + ".unreadable-*.json"):
+                os.remove(f_)
+        assert "unreadable" not in ns.load(pdf) and ns.load(pdf)["rev"] == 2 and ns.save(pdf, ns.load(pdf), 2)["rev"] == 3, "a readable file is saved as before"
+    check("notes: a notes or tags file that cannot be read is never taken for empty and written over; a copy is kept and the page is told", t_notes_unreadable)
+
     print("blocks")
     bs = bl.extract(pdf)
 
