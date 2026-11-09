@@ -1879,6 +1879,46 @@ print("JSON" + json.dumps(out))
             assert rx.check(REC["wiki"], "Completely different words about platforms (1999).")[0] == ""
             assert rx.check(REC["koning"], "Koning, R. (2022). Experimentation and start-up performance. Management Science.")[0] == "found", "the subtitle left out"
             assert rx.check(REC["koning"], "Experimentation and start-up performance: Evidence from A/B testing")[0] == "unsure", "the title alone, no author and no year: not sure"
+            # another paper is not "found": a record whose title is only part of the reference's title, the journal's name, a "Reply"; the author is looked for among the authors
+            KIM = "Kim, S. (2020). Trust in online markets for used goods. Journal of Management Information Systems, 37(1), 1-20."
+            assert rx.check({"title": "Trust in Online Markets", "authors": ["Zed Quill"], "pub_date": "2019"}, KIM)[0] == "unsure"
+            assert rx.check({"title": "Management Information Systems", "authors": ["Zed Quill"], "pub_date": "2021"}, KIM)[0] == "", "the journal's name is not the title"
+            assert rx.check({"title": "Trust in online markets for used goods: Reply", "authors": ["Other One"], "pub_date": "2021"}, KIM)[0] != "found"
+            assert rx.check({"title": "Trust in online markets for used goods", "authors": ["Li He"], "pub_date": "2012"}, "Kim, S. (2020). Trust in online markets for used goods when he sells. JMIS.")[0] != "found", "'He' is not among the authors"
+            assert rx.check({"title": "What’s trending in difference-in-differences? A synthesis of the recent econometrics literature", "authors": ["Jonathan Roth"], "pub_date": "2023-08"},
+                            "Roth, J., and Poe, J. (2023). What's trending in difference-in-differences? A synthesis of the recent econometrics literature. Journal of Econometrics, 235.")[0] == "found", "a title with a question mark"
+            assert rx.check({"title": "Long-term effects of socio-economic status on health", "authors": ["Ann Kim"], "pub_date": "2020"}, "Kim, A. (2020). Longterm effects of socio-economic status on health. J.")[0] == "found", "a word joined at a line's end"
+            # styles and names: Chicago with a middle initial, Vancouver, capitals of other alphabets, more particles, hyphenated initials
+            for good in ("Orlikowski, Wanda J. 1992. The duality of technology: Rethinking the concept of technology. Organization Science 3(3).",
+                         "Smith JA, Jones KB. Effects of aspirin on outcomes in adults. Lancet. 2020;395:497-506.", "Østerlund, C., & Carlile, P. (2005). Relations in practice. The Information Society, 21(2).",
+                         "Müller, Jörg. 2018. A paper about things that matter. Journal X.", "vom Brocke, J., & Rosemann, M. (2015). Handbook on business process management.",
+                         'J.-P. Benoit and V. Krishna, "Finitely repeated games," Econometrica, 1985.'):
+                assert rx.looks_like_ref(good) and rx.parse_ref(good)["title"], good
+            assert rx.parse_ref("Smith JA, Jones KB. Effects of aspirin on outcomes in adults. Lancet. 2020;395:497-506.")["title"] == "Effects of aspirin on outcomes in adults"
+            # a long list of authors does not push the title out of what Crossref is asked
+            LONG = ", ".join("Surname%s, A. B." % chr(65 + i) for i in range(14)) + " (2020). The title that must reach Crossref whatever happens. Nature, 1, 2-3. A note."
+            q_ = rx.question(rx.parse_ref(LONG), LONG)
+            assert "title that must reach Crossref" in q_ and "A note" not in q_ and len(q_) <= 400, q_
+            # a DOI the document prints is kept when Crossref does not know it (arXiv, Zenodo)
+            e = rx.resolve("Smith, J. (2020). A preprint nobody at Crossref has heard of. https://doi.org/10.48550/arXiv.2001.00001")
+            assert e["status"] == "none" and e["doi"].lower() == "10.48550/arxiv.2001.00001" and not e["journal"], e
+            assert len(rx._dedupe([rx._entry("x", parsed={"title": "Заголовок один", "year": "", "venue": "", "doi": ""}), rx._entry("y", parsed={"title": "Другой заголовок", "year": "", "venue": "", "doi": ""})])) == 2
+            # a damaged or crafted file is read in a moment (it took minutes: every paragraph looked through the rest of the file)
+            import time as _t
+            t0 = _t.time(); rx._xml_paras("<w:p >" * 40000, "w:p", "w:t"); rx._rels("<Relationship " * 40000); rx._lines_to_entries(["Smith, John, 12 Some Street, Springfield, student"] * 8000)
+            assert _t.time() - t0 < 5, _t.time() - t0
+            assert rx._xml_paras("<w:p><w:r><w:t>one</w:t></w:r></w:p><w:p ><w:r><w:t xml:space=\"preserve\">two </w:t><w:tab/><w:t>three</w:t></w:r></w:p>", "w:p", "w:t") == ["one", "two three"]
+            # more references than are looked up at once: said, not dropped in silence; Crossref silent three times: not asked again for this document
+            keep_max = rx.MAX_CANDIDATES; rx.MAX_CANDIDATES = 2
+            try:
+                d3 = list(rx.extract_stream(("\n\n".join(c for c in cs[:4])).encode(), "four.txt"))[-1]
+                assert d3["candidates"] == 2 and d3["more"] == 2, (d3["candidates"], d3["more"])
+            finally:
+                rx.MAX_CANDIDATES = keep_max
+            fail["n"] = 99; asked.clear()
+            d4 = list(rx.extract_stream(("\n\n".join(cs[:6])).encode(), "six.txt"))[-1]
+            fail["n"] = 0
+            assert len(asked) == 6 and sum(1 for e in d4["entries"] if e.get("unasked")) == len(d4["entries"]) >= 5, (len(asked), d4["entries"])
             # Crossref gives no answer once: asked again; twice: said plainly, not "not on Crossref"
             fail["n"] = 1
             assert rx.resolve(APA)["status"] == "found"
@@ -1915,6 +1955,14 @@ print("JSON" + json.dumps(out))
             ae = am[-1]["entries"]
             assert am[-1]["type"] == "done" and am[-1]["cost"] == 0.012 and len(sent) == 1 and sent[0][0] == "refs" and sent[0][2].get("schema") and "Wikipedia matters" in sent[0][1][0]["content"], am[-1]
             assert [x["status"] for x in ae] == ["found", "none"] and ae[0]["doi"] == "10.1287/mnsc.2021.4209" and not ae[1]["doi"], ae
+            # the AI's own fields are used as they are; a DOI it gives that the document does not print is its guess; a cut-off answer keeps its complete references and says so
+            assert ae[1]["title"] == "A paper the model invented from thin air" and ae[1]["year"] == "2020", ae[1]
+            class R2:
+                text = '{"references": [{"authors": "Koning, R.", "year": "2022", "title": "Experimentation and start-up performance: Evidence from A/B testing", "venue": "Management Science", "doi": "10.1287/isre.2024.0001"}, {"authors": "Cut, O.", "year": "2020", "title": "A reference the answer sto'
+                cost, provider, model, stop = 0.02, "fake", "m1", "max_tokens"
+            ai_.chat = lambda feature, messages, **kw: R2()
+            a2 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
+            assert a2["short"] is True and len(a2["entries"]) == 1 and a2["entries"][0]["doi"] == "10.1287/mnsc.2021.4209" and "printed" not in a2["entries"][0]["why"], a2
             def boom(*a, **k):
                 raise ai_.AIError("This month's AI budget is used up.")
             ai_.chat = boom

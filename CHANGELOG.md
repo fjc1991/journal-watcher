@@ -2,6 +2,12 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.10
+
+- **Import the references of a document.** "Import references" (Library → Add a paper, or the command palette) now takes a document that cites papers, not only a .ris or .bib file: **Word**, **PowerPoint**, **PDF**, a text file or a list you paste (a syllabus, a reading list, a paper's bibliography). The references are found by how they are written, with no AI and nothing sent anywhere, then each is looked up on Crossref and checked against what your document prints: the title, and the author or the year. You see which ones you already have. A record that only resembles a reference is listed unticked ("not sure it is this one"), a whole book is not downloaded, and a reference Crossref does not know is listed for you to decide.
+- **You choose where they go**: the library only, one of your folders, or a new folder named after the document. The papers you already have go into the folder at once, the others when they arrive. They are downloaded by the usual routes: free copies first, then your publisher sign-ins and your university library.
+- **The AI as a backup.** If the list misses some, **Ask the AI** reads the document and lists its references too. The button shows what it costs first; what it lists is checked on Crossref like the rest, and a DOI it gives is used only if your document prints it.
+
 ## 1.2.9
 
 - **Put a run's papers into a folder after the run.** Every run's page has **📁 Add to a folder…**: choose a folder (or make one) and the run's papers that are in your library go in at once; the ones still to download go in when they arrive (a download, a retry, or a PDF you add). A Discover run made in a folder also has a one-click **Add all to “<folder>”**. An older Discover run called "Picks · this folder" takes the folder you choose, and its name ("Picks · Labor Market Papers").

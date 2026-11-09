@@ -23,22 +23,29 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importer  # noqa: E402
 
 MAX_BYTES = 150 * 1024 * 1024
-MAX_PART = 40 * 1024 * 1024          # one file inside a .docx / .pptx (a zip can claim any size)
+MAX_PART = 20 * 1024 * 1024          # one file inside a .docx / .pptx (a zip can claim any size)
+MAX_XML = 60 * 1024 * 1024           # all the parts of one file together
+MAX_ENTRY = 3000                     # a reference is never longer
 MAX_CANDIDATES = 400
 RETRY_WAIT = 1.5
 AI_MAX_CHARS = 120_000
+AI_OUT_TOKENS = 16000                # about 150 references; a longer answer is cut, and the page says so
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>{}|\\^`\]]+)", re.I)
 YEAR_RE = re.compile(r"(?<!\d)(1[89]\d\d|20\d\d)[a-z]?(?!\d)")
-PARTICLE = r"(?:de|van|von|der|den|la|le|di|da|dos|del|du|el|al|bin|ter|ten)"
-SURNAME = r"[A-Z][\w'’\-]+"
+PARTICLE = r"(?:de|van|von|vom|zu|zur|der|den|la|le|di|da|do|das|dos|des|del|du|el|al|af|av|bin|ter|ten|st\.)"
+UP = r"[^\W\d_a-z]"                 # a capital letter of any alphabet (Ø, Å, Ç…): a letter that is not a-z
+SURNAME = UP + r"[\w'’\-]+"
+INIT = UP + r"\.(?:-" + UP + r"\.)?"    # "J." or "J.-P."
 # how a reference begins: "Surname, I." / "Godinho de Matos, M." / "Surname, First" / "I. Surname" (IEEE) / "[12] …" / "12. …"
-AUTHOR_START = re.compile(r"^(?:(?:%s|%s)\s+){0,4}%s,\s*(?:[A-Z]\b\.?|[A-Z][a-z]+(?:\s+[A-Z]\.)?\s*[,.&(]|[A-Z][a-z]+\s+(?:and|&)\s)" % (SURNAME, PARTICLE, SURNAME))
-INITIAL_START = re.compile(r"^(?:[A-Z]\.\s?){1,3}(?:%s\s+)?%s\b" % (PARTICLE, SURNAME))
+AUTHOR_START = re.compile(r"^(?:(?:%s|%s)\s+){0,4}%s,\s*(?:%s|%s(?=[\s,])|%s[\w\-]+(?:\s+%s\.)?(?:\s*[,.&(]|\s+(?:and|&)\s|\s+(?:1[89]|20)\d\d|\s+[\"“]))"
+                          % (SURNAME, PARTICLE, SURNAME, INIT, UP, UP, UP))
+INITIAL_START = re.compile(r"^(?:%s\s?){1,3}(?:%s\s+)?%s\b" % (INIT, PARTICLE, SURNAME))
+VANCOUVER = re.compile(r"^(?:%s\s+)?%s\s+[A-Z]{1,3}[,.]\s" % (PARTICLE, SURNAME))            # "Smith JA, Jones KB. Title. Lancet. 2020;395:497."
 NUMBERED = re.compile(r"^\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}[.)])\s+")
 BULLET = re.compile(r"^\s*(?:[•·▪◦‣*\-–—]|o)\s+")
 HEADING = re.compile(r"^\s*(?:references?|bibliography|works cited|literature cited|reference list|further reading|readings?)\s*:?\s*$", re.I)
 NO_YEAR = re.compile(r"\b(forthcoming|in press|working paper|published online|online first|articles? in advance|accepted)\b", re.I)      # a reference with no year yet
-AUTHOR_LIST = re.compile(r"^(?P<a>(?:(?:(?:%s|%s)\s+){0,4}%s,\s*(?:[A-Z]\.\s?){1,4}(?:,\s*(?:and|&)\s+|\s+(?:and|&)\s+|,\s*)?)+)" % (SURNAME, PARTICLE, SURNAME))
+AUTHOR_LIST = re.compile(r"^(?P<a>(?:(?:(?:%s|%s)\s+){0,4}%s,\s*(?:%s\s?){1,4}(?:,\s*(?:and|&)\s+|\s+(?:and|&)\s+|,\s*)?)+)" % (SURNAME, PARTICLE, SURNAME, INIT))
 BOOK_TYPES = ("book", "monograph", "edited-book", "reference-book", "book-set", "book-series")
 
 
@@ -57,8 +64,12 @@ def _zip_part(z, name):
 def _xml_paras(xml, p_tag, t_tag, links=None):
     """The text of each <p_tag> paragraph of an Office XML part: its <t_tag> runs, tabs and line breaks as spaces; a link to doi.org inside it is added after the text."""
     out = []
-    for m in re.finditer(r"<%s[ >].*?</%s>" % (p_tag, p_tag), xml, re.S):
-        p = m.group(0)
+    start = re.compile(r"<%s[ >]" % p_tag)
+    for piece in xml.split("</%s>" % p_tag):            # (each piece is read once: split at the closing tag, the paragraph begins at the last opening tag in it)
+        opens = [m.start() for m in start.finditer(piece)]
+        if not opens:
+            continue
+        p = piece[opens[-1]:]
         p = re.sub(r"<(?:w:tab|w:br|a:br)\b[^>]*/>", "<%s> </%s>" % (t_tag, t_tag), p)
         text = html.unescape("".join(re.findall(r"<%s(?:\s[^>]*)?>([^<]*)</%s>" % (t_tag, t_tag), p)))
         if links:
@@ -73,8 +84,13 @@ def _xml_paras(xml, p_tag, t_tag, links=None):
 
 
 def _rels(xml):
-    return {m.group(1): html.unescape(m.group(2)) for m in re.finditer(r'<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"', xml)} | \
-           {m.group(2): html.unescape(m.group(1)) for m in re.finditer(r'<Relationship\b[^>]*\bTarget="([^"]+)"[^>]*\bId="([^"]+)"', xml)}
+    out = {}
+    for piece in xml.split("<Relationship")[1:]:          # (one tag at a time, each read once)
+        tag = piece.split(">", 1)[0][:4000]
+        i, t = re.search(r'\bId="([^"]+)"', tag), re.search(r'\bTarget="([^"]+)"', tag)
+        if i and t:
+            out[i.group(1)] = html.unescape(t.group(1))
+    return out
 
 
 def _docx(data):
@@ -91,29 +107,35 @@ def _pptx(data):
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         num = lambda n: int(re.search(r"(\d+)\.xml$", n).group(1))           # noqa: E731
         names = sorted((n for n in z.namelist() if re.fullmatch(r"ppt/(?:slides|notesSlides)/(?:slide|notesSlide)\d+\.xml", n)), key=lambda n: (num(n), n))
-        out = []
+        out, total = [], 0
         for n in names[:2000]:
             folder, base = n.rsplit("/", 1)
-            out += _xml_paras(_zip_part(z, n), "a:p", "a:t", _rels(_zip_part(z, "%s/_rels/%s.rels" % (folder, base))))
+            xml = _zip_part(z, n)
+            total += len(xml)
+            if total > MAX_XML:
+                break
+            out += _xml_paras(xml, "a:p", "a:t", _rels(_zip_part(z, "%s/_rels/%s.rels" % (folder, base))))
         return out
 
 
 def _lines_to_entries(lines):
     """Lines of text (a PDF's, a pasted list's) joined into entries: a blank line ends one, and so does a line that begins like a reference once the entry so far
     has its year (a reference wrapped over three lines stays one entry; a word cut at a line's end is put back together)."""
-    out, cur = [], ""
+    out, cur, year, head = [], "", False, False
     for ln in lines:
         ln = ln.strip()
         if not ln:
             if cur:
                 out.append(cur)
-            cur = ""
+            cur, year, head = "", False, False
             continue
-        starts = bool(NUMBERED.match(ln) or BULLET.match(ln) or AUTHOR_START.match(ln) or INITIAL_START.match(ln) or HEADING.match(ln))
-        if cur and (HEADING.match(cur) or (starts and YEAR_RE.search(cur))):
+        starts = bool(NUMBERED.match(ln) or BULLET.match(ln) or AUTHOR_START.match(ln) or INITIAL_START.match(ln) or VANCOUVER.match(ln) or HEADING.match(ln))
+        if cur and (head or (starts and year) or len(cur) > MAX_ENTRY):
             out.append(cur)
-            cur = ""
+            cur, year = "", False
+        head = not cur and bool(HEADING.match(ln))
         cur = (cur[:-1] + ln) if cur.endswith("-") and ln[:1].islower() else (cur + " " + ln if cur else ln)
+        year = year or bool(YEAR_RE.search(ln))
     if cur:
         out.append(cur)
     return [re.sub(r"\s+", " ", x).strip() for x in out]
@@ -190,14 +212,14 @@ def _lead(s):
 def looks_like_ref(s):
     """Does this paragraph begin like a reference (authors first) and carry a year? Or does it print a DOI?"""
     s = str(s or "")
-    if not 25 <= len(s) <= 3000:
+    if not 25 <= len(s) <= MAX_ENTRY:
         return False
     if DOI_RE.search(s):
         return True
     t = _lead(s)
     if not YEAR_RE.search(s):                               # ("…, forthcoming": no year yet, but a list of authors with initials and then a title)
         return bool(NO_YEAR.search(s) and AUTHOR_LIST.match(t))
-    return bool(AUTHOR_START.match(t) or INITIAL_START.match(t))
+    return bool(AUTHOR_START.match(t) or INITIAL_START.match(t) or VANCOUVER.match(t))
 
 
 def parse_ref(s):
@@ -218,34 +240,42 @@ def parse_ref(s):
     if m:
         out.update(authors=m.group("a").strip(" .,"), year=m.group("y"), title=m.group("t").strip().rstrip(".").strip())
         rest = s[m.end():].strip()
-        v = re.match(r"^(?:In:?\s+)?([^,.;()\d][^,.;()]{2,120})", rest)
+        v = re.match(r"^(?:In:?\s+)?(?!https?:)([^,.;()\d][^,.;()]{2,120})", rest)
         out["venue"] = v.group(1).strip() if v else ""
         out["cut"] = min(len(s), m.end() + 140)
         return out
     y = YEAR_RE.search(s)
     out["year"] = y.group(1) if y else ""
+    if VANCOUVER.match(s):                                  # Smith JA, Jones KB. Title. Journal. 2020;395:497.
+        m = re.match(r"^(?P<a>[^.]{3,400})\.\s+" + sent, s)
+        if m:
+            v = re.match(r"^([^,.;()\d][^,.;()]{2,120})", s[m.end():].strip())
+            out.update(authors=m.group("a").strip(), title=m.group("t").strip().rstrip(".").strip(), venue=v.group(1).strip() if v else "", cut=min(len(s), m.end() + 140))
+            return out
     a = AUTHOR_LIST.match(s)                                # Authors with initials, then the title, no year in its usual place ("… Management Science, forthcoming.")
     m = a and re.match(sent, s[a.end():])
     if m:
         rest = s[a.end() + m.end():].strip()
-        v = re.match(r"^(?:In:?\s+)?([^,.;()\d][^,.;()]{2,120})", rest)
+        v = re.match(r"^(?:In:?\s+)?(?!https?:)([^,.;()\d][^,.;()]{2,120})", rest)
         out.update(authors=a.group("a").strip(" .,"), title=m.group("t").strip().rstrip(".").strip(), venue=v.group(1).strip() if v else "", cut=min(len(s), a.end() + m.end() + 140))
     return out
 
 
 def candidates(paras):
-    """The references among the paragraphs, in the document's order, each once."""
+    """The references among the paragraphs, in the document's order, each once (at most MAX_CANDIDATES: count_candidates says how many there are)."""
     out, seen = [], set()
     for p in paras:
         if not looks_like_ref(p):
             continue
-        k = re.sub(r"[^a-z0-9]+", "", _lead(p).lower())[:160]
+        k = re.sub(r"[\W_]+", "", _lead(p).casefold())[:160]
         if k and k not in seen:
             seen.add(k)
             out.append(p)
-            if len(out) >= MAX_CANDIDATES:
-                break
     return out
+
+
+def _cap(refs):
+    return refs[:MAX_CANDIDATES], max(0, len(refs) - MAX_CANDIDATES)
 
 
 # ---------------------------------------------------------------- Crossref, checked against the text
@@ -275,26 +305,50 @@ def _in_order(hay, needle):
     return n / len(needle) if needle else 0.0
 
 
-def check(meta, ref):
-    """Is this Crossref record the reference the document prints? ("found" | "unsure" | "", why). Found: its title is in the reference's words (the whole title, or the
-    part before a colon when the document leaves the subtitle out) AND its first author's family name or its year is there too. Unsure: most of the title's words are
-    there. A record with a title of one or two words is found only when the author AND the year (two years either way: online first, then print) are there too."""
-    rw, tw = _words(ref), _words(meta.get("title"))
-    main = _words(str(meta.get("title") or "").split(":")[0])
-    whole = _contains(rw, tw) and len(tw) >= 3
-    part = not whole and len(main) >= 4 and _contains(rw, main)
-    share = _in_order(rw, tw)
+def _same_title(a, b):
+    """Two titles as word lists: the same words (a hyphen at a line's end may have joined two of them)."""
+    return bool(a) and (a == b or "".join(a) == "".join(b))
+
+
+def check(meta, ref, parsed=None):
+    """Is this Crossref record the reference the document prints? ("found" | "unsure" | "", why).
+
+    When the reference's own title could be read (parsed["title"]): found = the two titles are the same (or one is the other without its subtitle, the part after a
+    colon), AND the record's first author is among the reference's authors or its year is the reference's (one either way). A record whose title is only a PART of the
+    reference's title ("Trust in online markets" for "Trust in online markets for used goods"), or the journal's name, or the same title with "Reply" or "Erratum"
+    added, is another paper: unsure at most. A title of one or two words needs the author AND the year (two either way: online first, then print).
+    When no title could be read from the reference: the record's whole title must be in its words, with the author AND the year."""
+    p = parsed or parse_ref(ref)
+    tw = _words(meta.get("title"))
+    if not tw:
+        return "", ""
+    main = _words(re.split(r"[:?!]", str(meta.get("title") or ""))[0])          # (the title without its subtitle: the part before a colon or a question mark)
     fam = _words((meta.get("authors") or [""])[0])[-1:] if meta.get("authors") else []
-    has_author = bool(fam) and fam[0] in rw
-    yrs = {int(y) for y in YEAR_RE.findall(ref)}
-    my = int(str(meta.get("pub_date") or "0")[:4] or 0) if re.match(r"\d{4}", str(meta.get("pub_date") or "")) else 0
-    has_year = bool(my) and any(abs(my - y) <= 1 for y in yrs)
-    if 1 <= len(tw) < 3 and _contains(rw, tw) and has_author and bool(my) and any(abs(my - y) <= 2 for y in yrs):       # ("Wikipedia matters": two words prove little alone)
-        return "found", "the title, the author and the year match"
-    if (whole or part or (share >= 0.9 and len(tw) >= 5)) and (has_author or has_year):
-        return "found", "the title and the %s match" % ("author and year" if has_author and has_year else "author" if has_author else "year")
-    if (whole or part or share >= 0.6) and len(tw) >= 3:
-        return "unsure", "Crossref's nearest record has a similar title, but not the same %s" % ("author or year" if whole or part else "words")
+    aw = _words(p["authors"]) if p.get("authors") else _words(ref)
+    has_author = bool(fam) and fam[0] in aw
+    yrs = {int(y) for y in ([p["year"]] if p.get("year") else YEAR_RE.findall(ref))}
+    my = int(str(meta.get("pub_date"))[:4]) if re.match(r"\d{4}", str(meta.get("pub_date") or "")) else 0
+    near = lambda d: bool(my) and any(abs(my - y) <= d for y in yrs)            # noqa: E731
+    both, either = has_author and near(2), has_author or near(1)
+    said = "the title and the %s match" % ("author and year" if has_author and near(1) else "author" if has_author else "year")
+    pw = _words(p.get("title"))
+    if pw:
+        pmain = _words(re.split(r"[:?!]", str(p["title"]))[0])
+        other = re.search(r"\b(reply|rejoinder|erratum|errata|corrigendum|correction|comment|commentary|retract\w*|response)\b", " ".join(tw[len(main):]))     # ("…: Reply" is another paper)
+        same = _same_title(tw, pw) or (len(main) >= 3 and not other and _same_title(main, pw)) or (len(tw) >= 4 and _same_title(tw, pmain))
+        if same and len(tw) < 3:
+            return ("found", "the title, the author and the year match") if both else ("unsure", "a very short title, and the author or the year is not the same")
+        if same and either:
+            return "found", said
+        fwd, back = _in_order(pw, tw), _in_order(tw, pw)                          # the record's words in the reference's title, and the other way round
+        if same or (min(fwd, back) >= 0.6 and len(tw) >= 3) or (len(tw) >= 3 and _contains(pw, tw)):
+            return "unsure", "Crossref's nearest record has %s" % ("the same title, but not the same author or year" if same else "a similar title, not the same one")
+        return "", ""
+    rw = _words(ref)
+    if _contains(rw, tw) and len(tw) >= 3:
+        return ("found", "the title, the author and the year match") if both else ("unsure", "Crossref's nearest record has this title, but not the same author and year")
+    if _in_order(rw, tw) >= 0.6 and len(tw) >= 3:
+        return "unsure", "Crossref's nearest record has a similar title, not the same one"
     return "", ""
 
 
@@ -306,13 +360,23 @@ def _entry(ref, meta=None, status="none", why="", parsed=None):
     if meta:
         return {"ref": ref[:500], "title": meta.get("title") or "", "authors": list(meta.get("authors") or [])[:30], "year": str(meta.get("pub_date") or "")[:4], "journal": meta.get("container") or "",
                 "doi": importer.clean_doi(meta.get("doi")), "type": meta.get("type") or "", "status": status, "why": why}
-    return {"ref": ref[:500], "title": p["title"], "authors": [], "year": p["year"], "journal": p["venue"], "doi": "", "type": "", "status": "none",
+    return {"ref": ref[:500], "title": p["title"], "authors": [], "year": p["year"], "journal": p["venue"], "doi": importer.clean_doi(p.get("doi")) if p.get("doi") else "", "type": "", "status": "none",
             "why": why or "Crossref does not list it (a book, a working paper or a report, perhaps)"}
 
 
-def resolve(ref):
-    """One reference -> its entry. A DOI the document prints is asked for directly; otherwise Crossref is asked with the reference's own words and the answers are checked."""
-    p = parse_ref(ref)
+def question(p, text):
+    """What Crossref is asked: the reference's first authors, year, title and venue when they could be read (a list of fourteen authors must not push the title out
+    of the question); otherwise the reference's own beginning. Never the notes that follow it."""
+    if p.get("title"):
+        return re.sub(r"\s+", " ", "%s %s %s %s" % (str(p.get("authors") or "")[:90], p.get("year") or "", p["title"], str(p.get("venue") or "")[:80])).strip()[:400]
+    return text[:p.get("cut") or 400]
+
+
+def resolve(ref, parsed=None):
+    """One reference -> its entry. A DOI the document prints is asked for directly; otherwise Crossref is asked with the reference's own words and the answers are
+    checked. parsed: the reference's fields when they are already known (the AI's list)."""
+    p = parsed or parse_ref(ref)
+    p.setdefault("cut", 400)
     text = _lead(ref)
     if p["doi"]:
         meta = importer.crossref_meta(p["doi"])
@@ -321,7 +385,7 @@ def resolve(ref):
     hits = None
     for attempt in (0, 1):                                  # (Crossref now and then gives no answer: asked once more before saying so)
         try:
-            hits = importer.crossref_search(text[:p["cut"]], rows=4, strict=True) or []
+            hits = importer.crossref_search(question(p, text), rows=4, strict=True) or []
             break
         except OSError:
             if attempt == 0:
@@ -330,7 +394,7 @@ def resolve(ref):
         return dict(_entry(ref, parsed=p, why="Crossref did not answer for this one: read the document again in a moment"), unasked=True)
     best = None
     for n, meta in enumerate(hits):
-        st, why = check(meta, text[:max(p["cut"], 400)])
+        st, why = check(meta, text[:MAX_ENTRY], p)
         if not st:
             continue
         y = str(meta.get("pub_date") or "")[:4]
@@ -345,10 +409,17 @@ def resolve(ref):
     return _entry(ref, meta, st, why)
 
 
+def _resolve_or_skip(ref, done, parsed=None):
+    """resolve(), unless Crossref gave no answer for the last three references: then it is not asked again for this document (each would wait for its time-out)."""
+    if len(done) >= 3 and all(e.get("unasked") for e in done[-3:]):
+        return dict(_entry(ref, parsed=parsed, why="Crossref did not answer for this one: read the document again in a moment"), unasked=True)
+    return resolve(ref, parsed)
+
+
 def _dedupe(entries):
     out, seen = [], set()
     for e in entries:
-        k = ("d", e["doi"].lower()) if e["doi"] else ("t", re.sub(r"[^a-z0-9]+", "", (e["title"] or e["ref"]).lower())[:120])
+        k = ("d", e["doi"].lower()) if e["doi"] else ("t", (re.sub(r"[\W_]+", "", (e["title"] or "").casefold()) or re.sub(r"[\W_]+", "", e["ref"].casefold()))[:120])
         if k not in seen:
             seen.add(k)
             out.append(e)
@@ -361,7 +432,7 @@ def ai_estimate(chars, n_found):
     import ai
     provider, model = ai.feature_model("refs")
     sent = min(chars, AI_MAX_CHARS)
-    return {"cost": ai.estimate("refs", sent + len(AI_SYSTEM) + 200, 400 + 90 * max(n_found, 20)), "provider": provider, "model": model, "cut": chars > AI_MAX_CHARS}
+    return {"cost": ai.estimate("refs", sent + len(AI_SYSTEM) + 200, min(AI_OUT_TOKENS, 400 + 90 * max(n_found, 20))), "provider": provider, "model": model, "cut": chars > AI_MAX_CHARS}
 
 
 def extract_stream(data, name=""):
@@ -370,14 +441,14 @@ def extract_stream(data, name=""):
     try:
         yield {"type": "status", "msg": "Reading the document", "step": 1, "steps": 2}
         paras = paragraphs(data, name)
-        cands = candidates(paras)
+        cands, more = _cap(candidates(paras))
         out = []
         for i, c in enumerate(cands):
             yield {"type": "status", "msg": "Looking up the references on Crossref", "done": i, "total": len(cands), "step": 2, "steps": 2}
-            out.append(resolve(c))
+            out.append(_resolve_or_skip(c, out))
         chars = sum(len(p) + 1 for p in paras)
-        kept = [e for e in out if e["status"] != "none" or e["title"]]          # (a sentence that only began like a reference: nothing on Crossref, no title to read)
-        yield {"type": "done", "entries": _dedupe(kept), "paragraphs": len(paras), "candidates": len(cands), "chars": chars, "ai": ai_estimate(chars, len(cands))}
+        kept = [e for e in out if e["status"] != "none" or e["title"] or e.get("unasked")]          # (a sentence that only began like a reference: nothing on Crossref, no title to read)
+        yield {"type": "done", "entries": _dedupe(kept), "paragraphs": len(paras), "candidates": len(cands), "more": more, "chars": chars, "ai": ai_estimate(chars, len(cands))}
     except ValueError as e:
         yield {"type": "error", "error": str(e)}
 
@@ -393,15 +464,27 @@ AI_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["refe
 
 
 def _ai_refs(text):
+    """(the references of the AI's answer, whether the answer was cut off). A cut-off answer keeps every reference that is complete."""
+    text = str(text or "")
+    ok = lambda rs: [r for r in rs if isinstance(r, dict) and str(r.get("title") or "").strip()]            # noqa: E731
     try:
         d = json.loads(text)
+        return (ok(d.get("references") or []) if isinstance(d, dict) else []), False
     except ValueError:
-        m = re.search(r"\{.*\}", text or "", re.S)
+        pass
+    i = text.find("[", max(0, text.find('"references"')))
+    out, dec = [], json.JSONDecoder()
+    while i >= 0:
+        i = text.find("{", i)
+        if i < 0:
+            break
         try:
-            d = json.loads(m.group(0)) if m else {}
+            obj, end = dec.raw_decode(text, i)
         except ValueError:
-            d = {}
-    return [r for r in (d.get("references") or []) if isinstance(r, dict) and str(r.get("title") or "").strip()] if isinstance(d, dict) else []
+            break                                         # (the object the answer stopped in)
+        out.append(obj)
+        i = end
+    return ok(out), True
 
 
 def ai_stream(data, name=""):
@@ -413,16 +496,24 @@ def ai_stream(data, name=""):
         text = "\n".join(paragraphs(data, name))
         cut = len(text) > AI_MAX_CHARS
         yield {"type": "status", "msg": "The AI is listing the references", "step": 2, "steps": 3}
-        res = ai.chat("refs", [{"role": "user", "content": "Document: %s\n\n%s" % (name or "pasted text", text[:AI_MAX_CHARS])}], system=AI_SYSTEM, schema=AI_SCHEMA, max_tokens=8000)
-        refs = _ai_refs(res.text if res else "")[:MAX_CANDIDATES]
-        out = []
+        res = ai.chat("refs", [{"role": "user", "content": "Document: %s\n\n%s" % (name or "pasted text", text[:AI_MAX_CHARS])}], system=AI_SYSTEM, schema=AI_SCHEMA, max_tokens=AI_OUT_TOKENS)
+        refs, short = _ai_refs(res.text if res else "")
+        short = short or getattr(res, "stop", "") in ("max_tokens", "length")
+        refs, more = _cap(refs)
+        low, out = text.lower(), []
         for i, r in enumerate(refs):
             yield {"type": "status", "msg": "Looking up the references on Crossref", "done": i, "total": len(refs), "step": 3, "steps": 3}
-            y = (YEAR_RE.search(str(r.get("year") or "")) or [None, ""])[1] if YEAR_RE.search(str(r.get("year") or "")) else ""
-            doi = importer.clean_doi(r.get("doi")) if DOI_RE.search(str(r.get("doi") or "")) else ""
-            ref = "%s (%s). %s. %s.%s" % (str(r.get("authors") or "").strip(" ."), y or "n.d.", str(r["title"]).strip().rstrip("."), str(r.get("venue") or "").strip(" ."), " https://doi.org/" + doi if doi else "")
-            out.append(resolve(re.sub(r"\s+", " ", ref)))
-        yield {"type": "done", "entries": _dedupe(out), "cost": getattr(res, "cost", None), "provider": getattr(res, "provider", ""), "model": getattr(res, "model", ""), "cut": cut}
+            ym = YEAR_RE.search(str(r.get("year") or ""))
+            dm = DOI_RE.search(str(r.get("doi") or ""))
+            doi = importer.clean_doi(dm.group(1)) if dm else ""
+            if doi and doi.lower() not in low:               # (a DOI the document does not print is the model's guess: not used)
+                doi = ""
+            parsed = {"authors": str(r.get("authors") or "").strip(" ."), "year": ym.group(1) if ym else "", "title": re.sub(r"\s+", " ", str(r["title"])).strip().rstrip("."),
+                      "venue": str(r.get("venue") or "").strip(" ."), "doi": doi}
+            ref = re.sub(r"\s+", " ", "%s (%s). %s. %s.%s" % (parsed["authors"], parsed["year"] or "n.d.", parsed["title"], parsed["venue"], " https://doi.org/" + doi if doi else ""))
+            out.append(_resolve_or_skip(ref, out, parsed))
+        yield {"type": "done", "entries": _dedupe(out), "cost": getattr(res, "cost", None), "provider": getattr(res, "provider", ""), "model": getattr(res, "model", ""), "cut": cut,
+               "short": short, "more": more}
     except ValueError as e:
         yield {"type": "error", "error": str(e)}
     except ai.AIError as e:

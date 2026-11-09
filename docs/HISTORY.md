@@ -1005,6 +1005,22 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Not verified.** On the author's own library: their "Picks · this folder" run (its papers should go in through **Add to a folder…**).
 
+### Item 44. The references of a document (2026-11-09, the author's request)
+
+**Asked.** "Add a Word document… and other documents that contain references and then have the app extract the citations and download them", mostly through the university library. Decided with the author: rules and Crossref first, the AI as a backup with its cost shown; Word, PowerPoint, PDF, text and pasted text; the destination chosen each time (library, a folder, a new folder); the download routes in their usual order.
+
+**Changed.** New `refextract.py`: `paragraphs` (docx and pptx read as zip + XML with the standard library, links to doi.org kept with their paragraph; PDF and text lines joined into entries), `candidates`/`looks_like_ref` (APA, Chicago, Vancouver, IEEE and numbered lists; names of any alphabet), `parse_ref`, `question` (what Crossref is asked: authors, year, title, venue, never the notes after a reference), `check` (the record's title against the title the reference prints, both ways; the author among its authors; a part of the title, the journal's name or a "Reply" is another paper), `resolve` (a printed DOI asked for directly; among the answers the published article before the working paper; one more try when Crossref gives no answer, then said plainly), `extract_stream`, `ai_estimate`/`ai_stream` (one call through the budgeted layer, the model's fields used as they are, a DOI only if the document prints it, a cut-off answer keeps its complete references). `POST /api/refs/extract` (raw body, streamed progress). `bibdialog.js` rewritten: one dialog for bibliographies and documents, the destination select, the AI row. `importer.crossref_search(strict=)`.
+
+**Tried on the author's syllabus** (live Crossref, no AI): 27 references, 26 found from the doi.org links behind them and the 27th by its title; with the links taken out, 26 of 27 by text alone in one run (the 27th got no answer from Crossref that time).
+
+**Tests.** `t_refextract` (a docx built in the test, a pasted list, a PDF, a pptx; the check's rules; retry and give-up; the AI with a fake). Thirteen mutations of the first version, all caught (one after the test was strengthened). UI: a text document through the dialog, the destination, the folder made, what is sent to the download routes, an old .doc refused.
+
+**Review.** Two reviewers and a skeptic each kept 21 of 23 findings; all are fixed except three low ones noted below. The ones that mattered: a different paper could be "found" when its title was a part of the reference's title or the journal's name (the check now compares titles, not the whole reference); a cut-off AI answer was thrown away after being paid for; a damaged .docx could keep the server busy for minutes (the XML is now read piece by piece); Chicago and Vancouver styles and names such as Østerlund or vom Brocke were not recognised; a DOI the document prints was dropped when Crossref did not know it; a redraw re-enabled the paid AI button while it was running.
+
+**Not changed, by decision:** a title that itself contains a full stop ("Trade in the U.S. and China") is cut there when Crossref does not know the paper (only the displayed title is affected); a reference whose second line begins like an author's name can be split in a PDF; a .txt file of thousands of name-like lines with no year is read quickly now but lists nothing.
+
+**Not verified.** Real downloads through the author's library for these papers; PowerPoint and PDF files of the author's own (only generated ones); the AI path with a real provider (a fake in the tests, by the standing rule).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
