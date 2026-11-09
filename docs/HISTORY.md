@@ -1001,6 +1001,8 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Tests.** In the child of `t_attach_pdf`: the four kinds of paper (in the library, to download, skipped, waiting for an author's folder), the rename of a generic Discover run (and not of a named one), a paper added later going in, a paper taken out going back in when you choose it again, a missing folder, the endpoint (a new folder, a name that exists, a missing run), the Library filter and sort. Seven mutations, all caught. UI: the buttons on a Discover run made in a folder, the dialog, a new folder made there, a paper that already waits for another folder; the Library's filter, sort and Select all.
 
+**Review.** Two reviewers and a skeptic each kept 8 findings, all fixed, each Python fix with a check shown failing without it (five mutations): a paper waiting for the folder that reached the library another way was marked downloaded but never filed (`mark_downloaded` now files it); "Not in any folder" broke the search in the PDFs (`scope_rows`); a new folder was made before its run was found; a paper the running download had just brought in could be counted as still to come; a generic Discover run took the folder's name even when the papers still to come would not go there; a folder whose id is "new" clashed with the dialog's "New folder…"; the runs list kept the old name; a long folder name widened the bar on a narrow screen.
+
 **Not verified.** On the author's own library: their "Picks · this folder" run (its papers should go in through **Add to a folder…**).
 
 ## 2. How it runs now (CLI agent)
