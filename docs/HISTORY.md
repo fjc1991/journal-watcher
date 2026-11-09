@@ -993,6 +993,16 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Not changed, by decision:** a past "Picks · this folder" run cannot be named after its folder (it never recorded it); the author adds its papers to the folder by hand.
 
+### Item 43. A run's papers into a folder after the run; the tool tiles' icons (2026-11-09, the author's report after releasing 1.2.8)
+
+**Asked.** "The papers I added via the Discover tab in this folder … I cannot add these papers to the folder post-collection," and "the tab icons look broken." The author had found no way to do it (the Library's selection had "Add to folder", but nothing narrowed the library to those papers, and the run's page had nothing). Decided with the author: all three of a run-page action, a one-click button on a Discover run, and an easier Library selection.
+
+**Changed.** `pipeline.run_to_folder` (the run's papers in the library by their key, at once, whatever was filed before; with `pending`, the papers still to download carry the folder and go in when they arrive, unless they already wait for another folder; a Discover run with a generic name takes the folder and its name); `POST /api/run/folder` (an existing folder or a new one; the run read from its file under the same lock as adding a PDF). Page: **📁 Add to a folder…** and **Add all to “…”** on the run's page, with a dialog; the Library's Folder filter **Not in any folder** (`library_search.NO_FOLDER`), sort **Recently added**, and **Select all N** in the results' header. Tiles: the icon beside the name (18 px), the hint under both; an older rule that set the icon to 15 px and changed the padding is removed.
+
+**Tests.** In the child of `t_attach_pdf`: the four kinds of paper (in the library, to download, skipped, waiting for an author's folder), the rename of a generic Discover run (and not of a named one), a paper added later going in, a paper taken out going back in when you choose it again, a missing folder, the endpoint (a new folder, a name that exists, a missing run), the Library filter and sort. Seven mutations, all caught. UI: the buttons on a Discover run made in a folder, the dialog, a new folder made there, a paper that already waits for another folder; the Library's filter, sort and Select all.
+
+**Not verified.** On the author's own library: their "Picks · this folder" run (its papers should go in through **Add to a folder…**).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

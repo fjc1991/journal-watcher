@@ -20,7 +20,7 @@ const q2s = o => Object.entries(o).filter(([, v]) => v !== "" && v !== false && 
 async function loadFolders() { try { FOLDERS = await api("/api/folders"); } catch (e) { FOLDERS = []; } ctx && ctx.syncNav && ctx.syncNav(); }
 async function loadSmart() { try { SMART = (await api("/api/smart")).searches; } catch (e) { SMART = []; } }
 async function loadTags() { try { TAGS = (await api("/api/tags")).tags; } catch (e) { TAGS = []; } }
-const folderName = id => (FOLDERS.find(f => f.id === id) || {}).name || id;
+const folderName = id => id === "~none" ? "not in any folder" : (FOLDERS.find(f => f.id === id) || {}).name || id;
 const download = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 
 // a paper whose AI summary is written, or a book whose overview of the whole book is (read from its own record)
@@ -89,7 +89,7 @@ function top(el, opts) {
               <label>Folder<select id="lf-folder"></select></label><label>Type<select id="lf-kind"><option value="">Any type</option>${KINDS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label><label>Journal or source<select id="lf-journal"></select></label><label>Year<select id="lf-year"></select></label><label>Tag<select id="lf-tag"></select></label>
               <button class="btn small" id="lf-notes" title="Only papers where you made highlights or notes">✎ Only papers with my notes</button></div></span>
           <button class="btn" id="lf-star" title="Only starred papers">☆ Starred</button>
-          <select id="lf-sort" aria-label="Sort"><option value="">Sort: best match / newest</option><option value="title">Sort: title</option><option value="journal">Sort: journal</option><option value="opened">Sort: last opened</option><option value="notes">Sort: most highlights</option></select>
+          <select id="lf-sort" aria-label="Sort"><option value="">Sort: best match / newest</option><option value="title">Sort: title</option><option value="journal">Sort: journal</option><option value="opened">Sort: last opened</option><option value="added">Sort: recently added</option><option value="notes">Sort: most highlights</option></select>
           <button class="btn" id="lf-list" title="List every paper instead of browsing by journal">☰ List all</button>
           <button class="btn hide" id="lf-sum" title="Write the AI summary of every downloaded paper that has none yet (you see what it costs first)">${ico("sum")} Summarise…</button>
           <button class="btn primary" id="lf-add">＋ Add paper</button>
@@ -188,7 +188,7 @@ function fillControls(el) {
   const js = [...new Map(P.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const ys = [...new Set(P.map(r => r.year).filter(Boolean))].sort().reverse();
   $("#lf-q", el).value = F.q; $("#lf-status", el).value = F.status; $("#lf-sort", el).value = F.sort;
-  $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + FOLDERS.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")", F.folder)).join("");
+  $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + opt("~none", "Not in any folder", F.folder) + FOLDERS.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")", F.folder)).join("");
   $("#lf-kind", el).value = F.kind || "";
   $("#lf-journal", el).innerHTML = opt("", "Any journal or source", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
   $("#lf-year", el).innerHTML = opt("", "Any year", F.year) + ys.map(y => opt(y, y, F.year)).join("");
@@ -444,9 +444,10 @@ async function results(opts) {
   try { res = await api("/api/library/search?" + q2s(F)); } catch (e) { box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   if (my !== seq) return;
   const found = res.map(x => lib()[byFile(x.file)]).filter(Boolean);
-  box.innerHTML = `<div class="reshead">${res.length} paper${res.length === 1 ? "" : "s"}${F.q ? ` matching “${esc(F.q)}”` : ""}${found.length ? readyKey(found) : ""}</div>` +
+  box.innerHTML = `<div class="reshead">${res.length} paper${res.length === 1 ? "" : "s"}${F.q ? ` matching “${esc(F.q)}”` : ""}${res.length ? ` <button class="linkbtn" id="lr-selall" title="Tick every paper listed here: then Add to folder, Export, Set type…">Select all ${res.length}</button>` : ""}${found.length ? readyKey(found) : ""}</div>` +
     (res.map(x => { const i = byFile(x.file); return i < 0 ? "" : row(lib()[i], i, x.snippets); }).join("") || `<div class="card empty"><h2>Nothing matches</h2>Try fewer filters or other words.</div>`);
   bindRows(box);
+  const sa = $("#lr-selall", box); if (sa) sa.onclick = () => { res.forEach(x => SEL.add(x.file)); $$(".rsel", box).forEach(c => { c.checked = true; }); actionbar(); };
   actionbar();
 }
 const pickFilters = () => ({...Object.fromEntries(FILTER_KEYS.filter(k => F[k]).map(k => [k, F[k]])), ...(F.star ? {star: true} : {}), ...(F.notes ? {notes: true} : {})});

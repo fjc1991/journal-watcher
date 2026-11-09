@@ -117,7 +117,8 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .seg button { border: 0; background: var(--panel); padding: 5px 10px; cursor: pointer; font-size: 12px; color: var(--ink-2); }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button.on { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
-.selbar { padding: 10px 14px; display: flex; align-items: center; gap: 12px; }
+.selbar { padding: 10px 14px; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.selbar .btn { white-space: nowrap; }
 .papers { display: flex; flex-direction: column; gap: 10px; }
 .paper { display: grid; grid-template-columns: 22px 1fr auto; gap: 12px; padding: 14px 16px; }
 .paper.skip { opacity: .72; }
@@ -364,6 +365,8 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <button class="btn small" id="selrec">Select all “download”</button>
         <button class="btn small" id="selnone">Clear</button>
         <div class="spacer"></div>
+        <button class="btn small hide" id="fldone" title="This Discover run was made for this folder: every paper of it that is in your library goes in, the others when they arrive"></button>
+        <button class="btn small" id="fldbtn" title="Put this run's papers into one of your folders: those in your library now, the others when they arrive">📁 Add to a folder…</button>
         <button class="btn hide" id="qbtn">Download queue</button>
         <button class="btn primary" id="dlbtn" disabled>Download &amp; summarize</button>
       </div>
@@ -499,6 +502,7 @@ const NAVNAME = {watch: "Watch", library: "Library", review: "Review", folders: 
 let SBSIG = "";
 function renderSideFolders() {        // the folders as a list under the main pages (like pages in a notebook): one click opens one
   const fs = (window.LibraryUI && LibraryUI.folders && LibraryUI.folders()) || [], cur = typeof NAV.j === "string" && NAV.j[0] === "@" ? NAV.j.slice(1) : "", sig = JSON.stringify([fs.map(f => [f.id, f.name, f.count]), cur]);
+  if (RUN) drawFolderButtons();         // (the run's "Add all to …" names a folder: shown once the folders are known)
   if (sig === SBSIG) return; SBSIG = sig;
   $("#sbfolders").innerHTML = fs.length ? fs.map((f, i) => `<button class="sbf${f.id === cur ? " on" : ""}" role="listitem" data-fid="${esc(f.id)}" title="${esc(f.name)}"><span class="sbf-i" style="--fc:${["#5b7fa6", "#6a9a62", "#c0883a", "#a8607a", "#7f6ab0", "#3f9a96"][i % 6]}"><svg class="ico sm"><use href="/static/icons.svg#i-folders"/></svg></span><span class="sbf-n">${esc(f.name)}</span><span class="nn">${f.count}</span></button>`).join("") : `<div class="sb-none">No folders yet</div>`;
 }
@@ -956,7 +960,56 @@ function setRun(run) {
   if (!SEL.size && run.kind === "weekly") papers.forEach(p => { if (p.verdict === "download" && !["ok", "deleted"].includes(p.dl_status)) SEL.add(p.id); });
   $("#runtitle").textContent = run.title;
   setCost(run.cost, run.cost_detail);
+  drawFolderButtons();
 }
+// ---------- this run's papers into a folder (after the run): the papers in your library now, the others when they arrive
+function drawFolderButtons() {
+  const pr = (RUN && RUN.params) || {}, one = $("#fldone"), fs = (window.LibraryUI && LibraryUI.folders && LibraryUI.folders()) || [];
+  const f = RUN && RUN.kind === "picks" && pr.folder && fs.find(x => x.id === pr.folder);
+  one.classList.toggle("hide", !f); if (f) one.textContent = `📁 Add all to “${f.name}”`;
+  $("#fldbtn").classList.toggle("hide", !RUN || !papers.size);
+}
+const inLibrary = p => p.dl_status === "ok" && !!p.file;
+const stillToCome = p => p.verdict === "download" && !inLibrary(p) && p.dl_status !== "deleted";
+async function runToFolder(body) {
+  const r = await api("/api/run/folder", Object.assign({run_id: RUN.id}, body));
+  if (RUN && r.run && r.run.id === RUN.id) { RUN.params = r.run.params; RUN.title = r.run.title; $("#runtitle").textContent = r.run.title; renderMeta(); renderNav(); drawRuns(); }
+  const n = r.added + r.already;
+  toast((n ? `${r.added ? r.added + " paper" + (r.added === 1 ? "" : "s") + " added to" : "Nothing new for"} “${r.folder}”${r.already ? ` (${r.already} already in it)` : ""}.` : `None of this run's papers is in your library yet.`) +
+    (r.pending ? ` ${r.pending} more go${r.pending === 1 ? "es" : ""} in when ${r.pending === 1 ? "it arrives" : "they arrive"}.` : "") + (r.kept ? ` ${r.kept} already wait${r.kept === 1 ? "s" : ""} for another folder and go${r.kept === 1 ? "es" : ""} there.` : ""));
+  if (window.LibraryUI) await LibraryUI.refreshFolders();
+  await loadLibrary(); renderSideFolders(); drawFolderButtons();
+  return r;
+}
+async function folderDialog() {
+  if (!RUN) return;
+  const all = [...papers.values()], nIn = all.filter(inLibrary).length, nLater = all.filter(stillToCome).length;
+  let fs = []; try { fs = await api("/api/folders"); } catch (e) { return notifyError(e); }
+  $("#rf-dlg") && $("#rf-dlg").remove();
+  const d = document.createElement("dialog"); d.id = "rf-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "rf-h");
+  const pre = (RUN.params || {}).folder;
+  d.innerHTML = `<h2 id="rf-h">Add this run's papers to a folder</h2>
+    <p class="pmeta">${esc(RUN.title)}. Papers stay where they are: a folder is just a list.</p>
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center"><label for="rf-to">Folder</label><select id="rf-to">${fs.map(f => `<option value="${esc(f.id)}"${f.id === pre ? " selected" : ""}>${esc(f.name)}</option>`).join("")}<option value="new"${fs.length ? "" : " selected"}>New folder…</option></select>
+      <input id="rf-name" class="${fs.length ? "hide" : ""}" placeholder="Name of the new folder" maxlength="60" aria-label="Name of the new folder"></div>
+    <label class="di-opt"><input type="checkbox" id="rf-now" checked disabled> The ${nIn} paper${nIn === 1 ? "" : "s"} of this run in your library</label>
+    ${nLater ? `<label class="di-opt"><input type="checkbox" id="rf-later" checked> Also the ${nLater} still to download: each goes in when it arrives (a download, a retry, or a PDF you add)</label>` : ""}
+    <div class="pmeta bad" id="rf-err"></div>
+    <div class="row di-btns" style="margin-top:12px;justify-content:flex-end"><button class="btn" id="rf-no">Cancel</button><button class="btn primary" id="rf-go"${nIn || nLater ? "" : " disabled"}>Add</button></div>`;
+  document.body.append(d); d.showModal();
+  const to = $("#rf-to", d), nm = $("#rf-name", d);
+  to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") nm.focus(); };
+  $("#rf-no", d).onclick = () => d.close(); d.addEventListener("close", () => d.remove(), {once: true});
+  $("#rf-go", d).onclick = async () => {
+    const body = to.value === "new" ? {new_name: nm.value.trim()} : {folder: to.value};
+    if (to.value === "new" && !body.new_name) { $("#rf-err", d).textContent = "Give the new folder a name."; return nm.focus(); }
+    body.pending = !!($("#rf-later", d) && $("#rf-later", d).checked);
+    $("#rf-go", d).disabled = true;
+    try { await runToFolder(body); d.close(); } catch (e) { $("#rf-err", d).textContent = e.message; $("#rf-go", d).disabled = false; }
+  };
+}
+$("#fldbtn").onclick = () => folderDialog();
+$("#fldone").onclick = () => runToFolder({folder: RUN.params.folder, pending: true}).catch(e => notifyError(e));
 function renderMeta() {
   if (!RUN) return;
   const ps = [...papers.values()];
