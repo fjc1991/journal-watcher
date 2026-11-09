@@ -1843,7 +1843,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             emit("challenge", {"host": "", "state": "done", "msg": ""})
         for p in papers:                                    # (the batch ended here, by itself or by Stop: nothing is "still waiting" any more; only a quit leaves the marks)
             p.pop("dl_queued", None)
-    run.save()
+        run.save(force=True)
     todo = [p for p in got if not p.get("summary")] if summarize else []
     for n, p in enumerate(todo, 1):
         if stop.is_set():
