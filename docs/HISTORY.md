@@ -1029,6 +1029,8 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Tests.** `t_notes_unreadable`, `t_snapshots`, the delete child (undo, restore twice, bad tokens, 31 days), the attach child (browser not started, one paper's error, a full disk, the queue marks), the sync child (each kind of file, an unreadable copy changes nothing).
 
+**Review.** Five reviewers by area, each finding checked by a second; 12 were confirmed and fixed. A restore could remove the oldest snapshot it was restoring, or the copy of "what you had" (the before-a-restore copies are now counted apart, 5 kept, and the one in use is protected). A restore put the old library index over the current one, so papers added since were on disk but not in the list (the two are now joined and checked against the files that are there). Snapshots held the 30-day bin and EPUBs (left out now). `retag` wrote over a tags file it could not read. A restore now tests the zip first, holds the data locks, and answers a damaged snapshot in words. A full disk in the free-copy routes was swallowed as "no free copy" (it now stops the batch and is listed in the run's errors). The spending record could not be joined when one copy ended in a cut-off line. "In the library again" was said for a row whose file is gone. A sidecar in the way of a put-back is kept. A paper of a followed author, resumed, was summarised although set to "by hand".
+
 **Not verified.** A real half-synced Dropbox file; a real full disk; the restore and undo buttons by hand on a Mac (their server side is tested, their page side only by the UI suite's existing delete checks).
 
 ## 2. How it runs now (CLI agent)

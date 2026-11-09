@@ -729,9 +729,37 @@ def main():
                     af.restore_snapshot(bad); raise AssertionError("restored " + bad)
                 except KeyError:
                     pass
+            # restoring the OLDEST snapshot when the list is full does not delete it first; the copies kept before a restore are counted apart from the daily ones
             af.KEEP_SNAPSHOTS = 2
             af.snapshot(force=True); _t.sleep(1.1); last = af.snapshot(force=True)
-            assert len(af.snapshots()) == 2 and af.snapshots()[0]["name"] == last, af.snapshots()
+            daily = [x for x in af.snapshots() if not x["before_restore"]]
+            assert len(daily) == 2 and daily[0]["name"] == last, af.snapshots()
+            oldest = daily[-1]["name"]; _t.sleep(1.1)
+            assert af.restore_snapshot(oldest)["restored"] >= 1 and os.path.exists(os.path.join(af.SNAPSHOTS, oldest)) and len([x for x in af.snapshots() if not x["before_restore"]]) == 2
+            # a snapshot holds no EPUB, nothing from "Recently deleted", no copy of an unreadable file
+            for junk in (os.path.join(af.PAPERS, "_removed", "deleted-x", "_undo.json"), os.path.join(af.PAPERS, "2020-01", "b.epub"), np[:-5] + ".unreadable-1.json"):
+                os.makedirs(os.path.dirname(junk), exist_ok=True); open(junk, "w").write("{}")
+            _t.sleep(1.1); nm = zipfile.ZipFile(os.path.join(af.SNAPSHOTS, af.snapshot(force=True))).namelist()
+            assert not any("_removed" in n or n.endswith(".epub") or ".unreadable-" in n for n in nm), nm
+            for junk in (os.path.join(af.PAPERS, "_removed", "deleted-x"),):
+                shutil.rmtree(junk, ignore_errors=True)
+            os.remove(os.path.join(af.PAPERS, "2020-01", "b.epub")); os.remove(np[:-5] + ".unreadable-1.json")
+            # the library list after a restore is true to the disk: a paper added since keeps its row, a paper whose PDF is gone is not listed as present
+            then = "title,doi,file,status,note\r\nOld,10.1/old,Papers/gone.pdf,ok,\r\nKept,10.1/kept,%s,ok,then\r\n" % os.path.relpath(pdf, af.ROOT)
+            nowp = os.path.join(af.SNAPSHOTS, "now.csv"); open(nowp, "w", newline="").write("title,doi,file,status,note\r\nOld,10.1/old,,deleted,deleted by you\r\nNew,10.1/new,Papers/new.pdf,ok,\r\nKept,10.1/kept,%s,ok,now\r\n" % os.path.relpath(pdf, af.ROOT))
+            import csv as _c, io as _io
+            j = {r_["doi"]: r_ for r_ in _c.DictReader(_io.StringIO(af._join_index(then, nowp)))}
+            assert j["10.1/old"]["status"] == "deleted" and j["10.1/new"]["status"] == "ok" and j["10.1/kept"]["note"] == "then", j
+            # merging or deleting a tag never writes over a tags file that cannot be read
+            tp_ = ns.TAGS_PATH; good_t = open(tp_, encoding="utf-8").read(); open(tp_, "w", encoding="utf-8").write('{"version": 1, "tags": [{"id"')
+            try:
+                ns.retag("t1"); raise AssertionError("retag wrote over an unreadable tags file")
+            except ns.Unreadable:
+                assert open(tp_, encoding="utf-8").read() == '{"version": 1, "tags": [{"id"'
+            finally:
+                open(tp_, "w", encoding="utf-8").write(good_t)
+                for f_ in __import__("glob").glob(tp_[:-5] + ".unreadable-*.json"):
+                    os.remove(f_)
         finally:
             shutil.rmtree(af.SNAPSHOTS, ignore_errors=True); af.SNAPSHOTS, af.KEEP_SNAPSHOTS = keep
             open(np, "w", encoding="utf-8").write(good)
@@ -5256,10 +5284,8 @@ print("OK")
                      gated=("elsevier", "informs"))
             assert [o[1] for o in _Br.last.opened] == [False, True] and all(st(run, i) == "ok" for i in run.papers) and len(notes) == 2, (_Br.last.opened, {i: st(run, i) for i in run.papers}, notes)
             # 14) an error during the batch: the papers set aside do not stay 'waiting for you'
-            try:
-                go([("E1", "elsevier"), ("W1", "wiley")], raise_in="W1"); raise AssertionError("the error was swallowed")
-            except RuntimeError:
-                pass
+            go([("E1", "elsevier"), ("W1", "wiley")], raise_in="W1")          # (one paper's error is that paper's: it is marked failed with the reason and the batch ends in order)
+            assert S["run"].papers["W1"]["dl_status"] == "failed" and "could not be saved" in S["run"].papers["W1"]["dl_note"] and "something broke" in S["run"].papers["W1"]["dl_note"], S["run"].papers["W1"]
             assert S["run"].papers["E1"]["dl_status"] == "needs_check" and "press Download again" in S["run"].papers["E1"]["dl_note"], S["run"].papers["E1"]
             # 13) the app quit while papers waited: a run opened later says they need a check (not "press Open the check")
             run = pl_.Run("picks", {"label": "quit"})

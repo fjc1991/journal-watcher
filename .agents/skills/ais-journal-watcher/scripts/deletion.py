@@ -209,19 +209,22 @@ def restore(token):
             rows = list(csv.DictReader(f))
             cols = list(rows[0].keys()) if rows else list(dl.INDEX_COLS)
         key = dl.index_key(u["row"])
-        if any(dl.index_key(r) == key and r.get("status") == "ok" and r.get("file") for r in rows):
+        if any(dl.index_key(r) == key and r.get("status") == "ok" and r.get("file") and os.path.exists(os.path.join(dl.ROOT, r["file"])) for r in rows):
             raise ValueError("“%s” is in your library again already." % (u.get("title") or "It")[:80])
         base = os.path.realpath(dl.PAPERS)
         for rel in u.get("files") or []:
             src, dest = os.path.join(d, rel), os.path.realpath(os.path.join(base, rel))
             if not dest.startswith(base + os.sep) or not os.path.exists(src):
                 continue
-            if os.path.exists(dest):
+            if os.path.exists(dest) and rel.lower().endswith(".pdf"):
                 raise ValueError("A file is in the way: %s" % rel)
         for rel in u.get("files") or []:
             src, dest = os.path.join(d, rel), os.path.realpath(os.path.join(base, rel))
             if dest.startswith(base + os.sep) and os.path.exists(src):
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if os.path.exists(dest):                         # (notes or a summary written there meanwhile stay; the kept ones go beside them)
+                    stem, ext = os.path.splitext(dest)
+                    dest = "%s.put-back-%s%s" % (stem, time.strftime("%Y%m%d-%H%M%S"), ext)
                 shutil.move(src, dest)
         rows = [r for r in rows if dl.index_key(r) != key] + [u["row"]]
         tmp = dl.tmp_path(idx)

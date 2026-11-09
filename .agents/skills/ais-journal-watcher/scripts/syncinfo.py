@@ -420,9 +420,15 @@ def merge(rel):
             have = set(mine)
             new = [x for x in theirs if x.strip() and x not in have]
             if new:
+                def when(x):                                # (a line cut off mid-way sorts first; it is kept as it is)
+                    try:
+                        return str(json.loads(x).get("ts") or "")
+                    except (ValueError, AttributeError):
+                        return ""
+                text = "\n".join(sorted([x for x in mine if x.strip()] + new, key=when)) + "\n"
                 tmp = orig + ".join.tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
-                    f.write("\n".join(sorted([x for x in mine if x.strip()] + new, key=lambda x: (json.loads(x).get("ts") or "") if x.startswith("{") else "")) + "\n")
+                    f.write(text)
                 os.replace(tmp, orig)
             added, said = len(new), "Joined: %d AI spending records from the other copy." % len(new)
         else:

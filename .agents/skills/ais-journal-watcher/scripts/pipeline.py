@@ -1765,13 +1765,15 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                         emit("log", {"msg": ("The disk is full: the download stops here. Free some space, then press Download again." if full
                                              else "“%s” could not be saved (%s). The other papers go on." % ((p.get("title") or "")[:60], str(e)[:120])), "level": "error"})
                         if full:
+                            run.errors.append("The disk was full: the download stopped.")
                             stop.set()
                     chall = current.get("chall")
                     last_at[pub] = clock()
                     if ok:
                         p.update(dl_status="ok", file=os.path.relpath(path, ROOT), dl_note=note)
                         _write_kind(p, path)
-                        got.append(p)
+                        if not p.get("summary_by_hand"):             # (a followed author's work: its summary is asked for in the Library, with the cost first)
+                            got.append(p)
                         _into_folder(p)
                     elif ask and chall and hasattr(br, "open_check"):
                         host, state = chall

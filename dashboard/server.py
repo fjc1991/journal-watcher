@@ -22,6 +22,7 @@ import threading
 import traceback
 import urllib.error
 import urllib.parse
+import zipfile
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
@@ -1271,7 +1272,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tags/retag":   # {from, into?}: merge a tag into another (or delete it) across every paper
             if not b.get("from"):
                 return self.send_json({"error": "which tag?"}, 400)
-            return self.send_json({"ok": True, "changed": ns.retag(b["from"], b.get("into") or None)})
+            try:
+                return self.send_json({"ok": True, "changed": ns.retag(b["from"], b.get("into") or None)})
+            except ns.Unreadable as e:
+                return self.send_json({"error": str(e)}, 423)
         if path == "/api/folders":      # {action: create|rename|delete|add|remove, id, name, files:[Papers/…pdf]}
             act, fid = b.get("action"), b.get("id")
             keys = [r["key"] for r in pl.library() if r["file"] in set(b.get("files") or [])]
@@ -1561,6 +1565,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = ns.save(pdf, b.get("notes"), int(b.get("rev") or 0), self.doc_info(b["file"])[1])
             except ns.Conflict as c:
                 return self.send_json({"error": "These notes changed in another window.", "current": c.current}, 409)
+            except ns.Unreadable as e:
+                return self.send_json({"error": str(e)}, 423)
             except (ValueError, TypeError) as e:
                 return self.send_json({"error": str(e)[:120]}, 400)
             return self.send_json({"ok": True, "rev": out["rev"]})
@@ -1624,6 +1630,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, **aifiles.restore_snapshot(b.get("name")), "snapshots": aifiles.snapshots()})
             except KeyError:
                 return self.send_json({"error": "That snapshot is not there any more."}, 404)
+            except (ValueError, OSError, zipfile.BadZipFile) as e:
+                return self.send_json({"error": "The snapshot could not be restored (%s). What you had was kept in a snapshot of its own first." % (str(e)[:160] or e.__class__.__name__)}, 400)
         if path == "/api/snapshots/now":         # take one now
             return self.send_json({"ok": True, "name": aifiles.snapshot(force=True), "snapshots": aifiles.snapshots()})
         if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
@@ -1820,6 +1828,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = ns.save_tags(b.get("tags"), int(b.get("rev") or 0))
             except ns.Conflict as c:
                 return self.send_json({"error": "Tags changed in another window.", "current": c.current}, 409)
+            except ns.Unreadable as e:
+                return self.send_json({"error": str(e)}, 423)
             except (ValueError, TypeError) as e:
                 return self.send_json({"error": str(e)[:120]}, 400)
             return self.send_json({"ok": True, "rev": out["rev"]})

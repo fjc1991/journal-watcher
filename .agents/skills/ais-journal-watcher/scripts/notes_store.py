@@ -247,9 +247,12 @@ def retag(old, new=None):
     Returns how many highlights/cards changed. Close the reader first: an open tab would see its notes as changed (409)."""
     n = 0
     with _lock:
+        state, raw = _state(TAGS_PATH)
+        if state == "bad" or (state == "ok" and not (isinstance(raw, dict) and isinstance(raw.get("tags"), list))):
+            raise Unreadable(UNREADABLE % ("Your tags file", _set_aside(TAGS_PATH)))          # (before any paper's notes are changed)
         for root, _, files in os.walk(PAPERS):
             for fn in files:
-                if not fn.endswith(".notes.json"):
+                if not fn.endswith(".notes.json") or ".unreadable-" in fn:
                     continue
                 path = os.path.join(root, fn)
                 d = _read(path)

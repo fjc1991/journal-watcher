@@ -378,6 +378,8 @@ def download_paper(p, env, dry=False, browser=None):
             else:
                 attempts.append("unpaywall: not a PDF response")
         except Exception as e:
+            if isinstance(e, OSError) and getattr(e, "errno", None) == 28:      # (the disk is full: that is not this route's failure)
+                raise
             attempts.append("unpaywall: %s" % str(e)[:60])
 
     # 2) Elsevier API (DSS)
@@ -415,6 +417,8 @@ def download_paper(p, env, dry=False, browser=None):
             else:
                 attempts.append("%s: blocked/non-PDF" % name)
         except Exception as e:
+            if isinstance(e, OSError) and getattr(e, "errno", None) == 28:
+                raise
             attempts.append("%s: %s" % (name, str(e)[:40]))
 
     # 4) real browser with the user's saved sign-ins (HBR: article page saved as PDF). Every attempt is vetted on its own (a refused PDF does not end the route:

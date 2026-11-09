@@ -135,13 +135,19 @@ def restore(name):
 
 # ---------------------------------------------------------------- a backup of your own data
 
-def _data_files(include_pdfs):
+def _data_files(include_pdfs, snapshot=False):
+    """Your own files. snapshot: for the daily copies, without what is only held for a while (Papers/_removed, _conflicts), a book's EPUB (its source file, like
+    a PDF) and the copies kept of files that could not be read."""
     out = []
     for dp, dn, fn in os.walk(PAPERS):
+        if snapshot:
+            dn[:] = [x for x in dn if x not in ("_removed", "_conflicts")]
         for f in fn:
             if f.endswith(".pdf") and not include_pdfs:
                 continue
             if f.startswith(".") or f.endswith(".tmp"):
+                continue
+            if snapshot and (f.lower().endswith(".epub") or ".unreadable-" in f):
                 continue
             out.append(os.path.join(dp, f))
     for n in ("settings.json", "ui_prefs.json", "prompts.json", "library.json", "interests.json", "journals.json", "ai.json"):
@@ -172,6 +178,7 @@ def backup_size():
 
 SNAPSHOTS = os.path.join(LOCAL, "snapshots")
 KEEP_SNAPSHOTS = 14
+KEEP_BEFORE = 5                      # the copies kept just before a restore are counted apart: a restore never pushes a daily snapshot out
 SNAP_RE = re.compile(r"jw-snapshot-\d{8}-\d{6}(?:-before-restore)?\.zip")
 
 
@@ -186,13 +193,13 @@ def snapshots():
     return out
 
 
-def snapshot(force=False, tag=""):
+def snapshot(force=False, tag="", protect=""):
     """Keep a zip of your own files (notes, highlights, folders, tags, reading status, the library index, settings; no PDFs) in this computer's own folder, once a
     day (force: now). The oldest beyond KEEP_SNAPSHOTS are removed. Returns the snapshot's name, or None when today's is already there or there is nothing to keep."""
     today = time.strftime("%Y%m%d")
     if not force and any(s["name"][12:20] == today and not s["before_restore"] for s in snapshots()):
         return None
-    if not _data_files(False):
+    if not _data_files(False, True):
         return None
     os.makedirs(SNAPSHOTS, exist_ok=True)
     name = "jw-snapshot-%s%s.zip" % (time.strftime("%Y%m%d-%H%M%S"), "-before-restore" if tag else "")
@@ -201,9 +208,12 @@ def snapshot(force=False, tag=""):
         time.sleep(1.0 / n)
         name = "jw-snapshot-%s%s.zip" % (time.strftime("%Y%m%d-%H%M%S"), "-before-restore" if tag else "")
         n += 1
-    tmp = backup(False)
+    tmp = backup(False, snapshot=True)
     shutil.move(tmp, os.path.join(SNAPSHOTS, name))
-    for old in [s["name"] for s in snapshots()][KEEP_SNAPSHOTS:]:
+    every = snapshots()
+    for old in [s["name"] for s in every if not s["before_restore"]][KEEP_SNAPSHOTS:] + [s["name"] for s in every if s["before_restore"]][KEEP_BEFORE:]:
+        if old in (protect, name):                       # (never the one being restored, nor the one just made)
+            continue
         try:
             os.remove(os.path.join(SNAPSHOTS, old))
         except OSError:
@@ -211,12 +221,54 @@ def snapshot(force=False, tag=""):
     return name
 
 
+def _join_index(then, now_path):
+    """The library index after a restore: the snapshot's rows, made true to what is on disk now. A paper added since keeps its row; a paper whose PDF is no longer
+    there (you deleted it since) keeps the row it has now, so it is not listed as present and can still be put back from "Recently deleted"."""
+    import csv
+    import io
+    rd = csv.DictReader(io.StringIO(then))
+    snap, cols = list(rd), list(rd.fieldnames or dl.INDEX_COLS)
+    cur = []
+    if os.path.exists(now_path):
+        with open(now_path, newline="", encoding="utf-8") as f:
+            r2 = csv.DictReader(f)
+            cur = list(r2)
+            cols += [c for c in (r2.fieldnames or []) if c and c not in cols]
+    here = lambda r: bool(r.get("file")) and os.path.exists(os.path.join(ROOT, r["file"]))            # noqa: E731
+    by_now = {dl.index_key(r): r for r in cur if dl.index_key(r)}
+    out, seen = [], set()
+    for r in snap:
+        k = dl.index_key(r)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        n = by_now.get(k)
+        out.append(n if (r.get("status") == "ok" and not here(r) and n is not None) or (n is not None and n.get("status") == "ok" and here(n) and not here(r)) else r)
+    out += [r for r in cur if dl.index_key(r) and dl.index_key(r) not in seen]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, cols, extrasaction="ignore")
+    w.writeheader()
+    w.writerows(out)
+    return buf.getvalue()
+
+
 def restore_snapshot(name):
     """Put the files of a snapshot back as they were then. What is there now is kept first, in a snapshot of its own (so a restore can be undone by restoring
     that one). Only files of the kinds a snapshot holds are written, only inside the data folder, never a PDF; files made since the snapshot are left alone."""
     if not SNAP_RE.fullmatch(str(name or "")) or not os.path.exists(os.path.join(SNAPSHOTS, name)):
         raise KeyError("no such snapshot")
-    before = snapshot(force=True, tag="before-restore")
+    import deletion
+    import notes_store as ns
+    with zipfile.ZipFile(os.path.join(SNAPSHOTS, name)) as z:      # (read to its end before anything is changed: a damaged snapshot restores nothing)
+        if z.testzip() is not None:
+            raise ValueError("That snapshot is damaged and cannot be restored. Nothing was changed.")
+    before = snapshot(force=True, tag="before-restore", protect=name)
+    with deletion._lock, dl.INDEX_LOCK, ns._lock:                   # (no delete, download row or notes save in the middle of it)
+        done = _restore_files(name)
+    return {"restored": done, "before": before}
+
+
+def _restore_files(name):
     root = os.path.realpath(ROOT)
     ok_dirs = [os.path.realpath(PAPERS) + os.sep, os.path.realpath(STATE) + os.sep]
     ok_files = {os.path.realpath(os.path.join(BASE, n)) for n in ("settings.json", "ui_prefs.json", "prompts.json", "library.json", "interests.json", "journals.json", "ai.json")}
@@ -228,20 +280,26 @@ def restore_snapshot(name):
             dest = os.path.realpath(os.path.join(root, m.filename))
             if not (any(dest.startswith(d) for d in ok_dirs) or dest in ok_files):
                 continue                           # (only ever into the data folder's own places)
+            if any(dest.startswith(os.path.join(os.path.realpath(PAPERS), x) + os.sep) for x in ("_removed", "_conflicts")):
+                continue                           # (what is held for a while is not a snapshot's to bring back)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             tmp = dest + ".restore.tmp"
-            with z.open(m) as src, open(tmp, "wb") as out:
-                shutil.copyfileobj(src, out)
+            if dest == os.path.realpath(os.path.join(PAPERS, "_index.csv")):
+                with open(tmp, "w", newline="", encoding="utf-8") as out:
+                    out.write(_join_index(z.read(m).decode("utf-8", "replace"), dest))
+            else:
+                with z.open(m) as src, open(tmp, "wb") as out:
+                    shutil.copyfileobj(src, out)
             os.replace(tmp, dest)
             done += 1
-    return {"restored": done, "before": before}
+    return done
 
 
-def backup(include_pdfs=False):
+def backup(include_pdfs=False, snapshot=False):
     fd, path = tempfile.mkstemp(prefix="jw-backup-", suffix=".zip")
     os.close(fd)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED if not include_pdfs else zipfile.ZIP_STORED) as z:
-        for p in _data_files(include_pdfs):
+        for p in _data_files(include_pdfs, snapshot):
             try:
                 z.write(p, _arc(p))
             except OSError:
