@@ -665,6 +665,41 @@ def main():
         assert "unreadable" not in ns.load(pdf) and ns.load(pdf)["rev"] == 2 and ns.save(pdf, ns.load(pdf), 2)["rev"] == 3, "a readable file is saved as before"
     check("notes: a notes or tags file that cannot be read is never taken for empty and written over; a copy is kept and the page is told", t_notes_unreadable)
 
+    def t_snapshots():
+        """Your own files (not the PDFs) are kept once a day on this computer; a restore puts them back as they were, keeps what was there first, writes only
+        into the data folder and never a PDF; only the newest few are kept."""
+        import aifiles as af, zipfile, time as _t
+        keep = (af.SNAPSHOTS, af.KEEP_SNAPSHOTS); af.SNAPSHOTS = tempfile.mkdtemp(prefix="jw-snap-")
+        np = ns.notes_path(pdf); good = open(np, encoding="utf-8").read()
+        try:
+            first = af.snapshot()
+            assert first and af.snapshot() is None, "once a day"
+            names = zipfile.ZipFile(os.path.join(af.SNAPSHOTS, first)).namelist()
+            assert any(n.endswith(".notes.json") for n in names) and not any(n.lower().endswith(".pdf") for n in names) and not any(".env" in n for n in names), names[:8]
+            open(np, "w", encoding="utf-8").write('{"version": 1, "rev": 9, "highlights": [], "cards": []}')          # a bad save
+            pdf_bytes = open(pdf, "rb").read()
+            r = af.restore_snapshot(first)
+            assert open(np, encoding="utf-8").read() == good and r["restored"] >= 1 and r["before"] and "before-restore" in r["before"], r
+            assert '"rev": 9' in zipfile.ZipFile(os.path.join(af.SNAPSHOTS, r["before"])).read(os.path.relpath(np, af.ROOT)).decode(), "what was there is kept first"
+            assert open(pdf, "rb").read() == pdf_bytes
+            evil = os.path.join(af.SNAPSHOTS, "jw-snapshot-20200101-000000.zip")
+            with zipfile.ZipFile(evil, "w") as z:
+                z.writestr("../outside.txt", "x"); z.writestr("Papers/evil.pdf", "x"); z.writestr(os.path.relpath(np, af.ROOT), good)
+            r = af.restore_snapshot("jw-snapshot-20200101-000000.zip")
+            assert r["restored"] == 1 and not os.path.exists(os.path.join(os.path.dirname(af.ROOT), "outside.txt")) and not os.path.exists(os.path.join(af.PAPERS, "evil.pdf")), r
+            for bad in ("../x.zip", "nope.zip", ""):
+                try:
+                    af.restore_snapshot(bad); raise AssertionError("restored " + bad)
+                except KeyError:
+                    pass
+            af.KEEP_SNAPSHOTS = 2
+            af.snapshot(force=True); _t.sleep(1.1); last = af.snapshot(force=True)
+            assert len(af.snapshots()) == 2 and af.snapshots()[0]["name"] == last, af.snapshots()
+        finally:
+            shutil.rmtree(af.SNAPSHOTS, ignore_errors=True); af.SNAPSHOTS, af.KEEP_SNAPSHOTS = keep
+            open(np, "w", encoding="utf-8").write(good)
+    check("snapshots: your own files (no PDFs, no keys) are kept once a day on this computer; a restore puts them back, keeps what was there first, and writes nothing outside the data folder", t_snapshots)
+
     print("blocks")
     bs = bl.extract(pdf)
 

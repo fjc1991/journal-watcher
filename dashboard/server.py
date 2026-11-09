@@ -1106,6 +1106,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/aifiles":      # Settings → AI files: what the AI wrote or cached, how big it is, what was cleared lately, how big a backup is
             return self.send_json({"kinds": aifiles.scan(), "trash": aifiles.trash_list(), "backup": aifiles.backup_size(), "export_dir": prefs.get_settings().get("export_dir") or "",
                                    "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
+        if path == "/api/snapshots":    # the daily snapshots of your own files on this computer
+            return self.send_json({"snapshots": aifiles.snapshots(), "keep": aifiles.KEEP_SNAPSHOTS})
         if path == "/api/backup":       # ?pdfs=1: a zip of your own data (notes, cards, folders, tags, settings…), optionally with the PDFs
             name = "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M")
             return self.send_temp_file(aifiles.backup(one("pdfs", "") == "1"), "application/zip", name)
@@ -1613,6 +1615,15 @@ class Handler(BaseHTTPRequestHandler):
             except (KeyError, OSError) as e:
                 return self.send_json({"error": str(e.args[0] if e.args else e)[:120]}, 400)
             return self.send_json({"ok": True, **r, "kinds": aifiles.scan(), "trash": aifiles.trash_list()})
+        if path == "/api/snapshots/restore":     # {name}: your notes, folders, index and settings as they were then (what is there now is kept in a snapshot first)
+            if JOBS.busy():
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            try:
+                return self.send_json({"ok": True, **aifiles.restore_snapshot(b.get("name")), "snapshots": aifiles.snapshots()})
+            except KeyError:
+                return self.send_json({"error": "That snapshot is not there any more."}, 404)
+        if path == "/api/snapshots/now":         # take one now
+            return self.send_json({"ok": True, "name": aifiles.snapshot(force=True), "snapshots": aifiles.snapshots()})
         if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
             d = prefs.get_settings().get("export_dir") or ""
             if not d or not os.path.isdir(os.path.expanduser(d)):
@@ -2165,6 +2176,13 @@ def take_lock(port):
     return None
 
 
+def _daily_snapshot():
+    try:
+        aifiles.snapshot()
+    except Exception as e:  # noqa: BLE001      (a full disk, a locked file: the app starts all the same)
+        print("(no snapshot today: %s)" % str(e)[:120])
+
+
 def start(port=8765, quiet=False):
     """Everything main() does except waiting for requests. The Mac app runs the server in a thread of its own process with this.
     Returns (server, url), or (None, url) when a dashboard for this folder already runs (url is where)."""
@@ -2188,6 +2206,7 @@ def start(port=8765, quiet=False):
     importer.sweep()           # dropped PDFs nobody confirmed or cancelled within a day are forgotten (a confirmation of an older one is refused anyway)
     updater.start_background()
     threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)
+    threading.Thread(target=_daily_snapshot, daemon=True).start()                     # your notes, folders, index and settings, kept once a day on this computer
     if indexer:
         indexer.kick(25)       # read papers into the index for Ask a little after start-up (local model only, switchable in the activity tray)
     return srv, "http://localhost:%d" % port

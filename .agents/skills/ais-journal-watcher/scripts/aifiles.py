@@ -12,6 +12,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -165,6 +166,75 @@ def backup_size():
         else:
             other += sz
     return {"data_bytes": other, "pdf_bytes": pdf, "files": len(_data_files(False))}
+
+
+# ---------------------------------------------------------------- a snapshot of your own data, taken by itself once a day (kept on this computer, not in the synced folder)
+
+SNAPSHOTS = os.path.join(LOCAL, "snapshots")
+KEEP_SNAPSHOTS = 14
+SNAP_RE = re.compile(r"jw-snapshot-\d{8}-\d{6}(?:-before-restore)?\.zip")
+
+
+def snapshots():
+    """The snapshots on this computer, newest first: [{name, when, bytes, before_restore}]."""
+    out = []
+    if os.path.isdir(SNAPSHOTS):
+        for n in sorted(os.listdir(SNAPSHOTS), reverse=True):
+            if SNAP_RE.fullmatch(n):
+                p = os.path.join(SNAPSHOTS, n)
+                out.append({"name": n, "when": "%s-%s-%s %s:%s" % (n[12:16], n[16:18], n[18:20], n[21:23], n[23:25]), "bytes": os.path.getsize(p), "before_restore": "before-restore" in n})
+    return out
+
+
+def snapshot(force=False, tag=""):
+    """Keep a zip of your own files (notes, highlights, folders, tags, reading status, the library index, settings; no PDFs) in this computer's own folder, once a
+    day (force: now). The oldest beyond KEEP_SNAPSHOTS are removed. Returns the snapshot's name, or None when today's is already there or there is nothing to keep."""
+    today = time.strftime("%Y%m%d")
+    if not force and any(s["name"][12:20] == today and not s["before_restore"] for s in snapshots()):
+        return None
+    if not _data_files(False):
+        return None
+    os.makedirs(SNAPSHOTS, exist_ok=True)
+    name = "jw-snapshot-%s%s.zip" % (time.strftime("%Y%m%d-%H%M%S"), "-before-restore" if tag else "")
+    n = 2
+    while os.path.exists(os.path.join(SNAPSHOTS, name)):          # (two in the same second)
+        time.sleep(1.0 / n)
+        name = "jw-snapshot-%s%s.zip" % (time.strftime("%Y%m%d-%H%M%S"), "-before-restore" if tag else "")
+        n += 1
+    tmp = backup(False)
+    shutil.move(tmp, os.path.join(SNAPSHOTS, name))
+    for old in [s["name"] for s in snapshots()][KEEP_SNAPSHOTS:]:
+        try:
+            os.remove(os.path.join(SNAPSHOTS, old))
+        except OSError:
+            pass
+    return name
+
+
+def restore_snapshot(name):
+    """Put the files of a snapshot back as they were then. What is there now is kept first, in a snapshot of its own (so a restore can be undone by restoring
+    that one). Only files of the kinds a snapshot holds are written, only inside the data folder, never a PDF; files made since the snapshot are left alone."""
+    if not SNAP_RE.fullmatch(str(name or "")) or not os.path.exists(os.path.join(SNAPSHOTS, name)):
+        raise KeyError("no such snapshot")
+    before = snapshot(force=True, tag="before-restore")
+    root = os.path.realpath(ROOT)
+    ok_dirs = [os.path.realpath(PAPERS) + os.sep, os.path.realpath(STATE) + os.sep]
+    ok_files = {os.path.realpath(os.path.join(BASE, n)) for n in ("settings.json", "ui_prefs.json", "prompts.json", "library.json", "interests.json", "journals.json", "ai.json")}
+    done = 0
+    with zipfile.ZipFile(os.path.join(SNAPSHOTS, name)) as z:
+        for m in z.infolist():
+            if m.is_dir() or m.filename == "README-backup.txt" or m.filename.lower().endswith(".pdf") or m.file_size > 200 * 1024 * 1024:
+                continue
+            dest = os.path.realpath(os.path.join(root, m.filename))
+            if not (any(dest.startswith(d) for d in ok_dirs) or dest in ok_files):
+                continue                           # (only ever into the data folder's own places)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp = dest + ".restore.tmp"
+            with z.open(m) as src, open(tmp, "wb") as out:
+                shutil.copyfileobj(src, out)
+            os.replace(tmp, dest)
+            done += 1
+    return {"restored": done, "before": before}
 
 
 def backup(include_pdfs=False):

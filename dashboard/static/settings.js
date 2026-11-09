@@ -198,6 +198,7 @@ function renderPrompts(body) {
 
 // ---------------------------------------------------------------- reader preferences, colour legend, summary templates
 // ---------------------------------------------------------------- AI files & backup
+const snapHtml = S => { const xs = (S && S.snapshots) || []; return xs.length ? `<table class="st-table"><tr><th>Taken</th><th>Size</th><th></th></tr>${xs.map(x => `<tr><td>${esc(x.when)}${x.before_restore ? ` <span class="pill" title="What you had just before a restore">before a restore</span>` : ""}</td><td>${bytes(x.bytes)}</td><td><button class="btn small" data-snap="${esc(x.name)}" data-when="${esc(x.when)}">Restore…</button></td></tr>`).join("")}</table>` : `<p class="pmeta">None yet: the first is taken the next time the app starts (or press the button).</p>`; };
 const bytes = n => n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB" : (n / 1073741824).toFixed(1) + " GB";
 // ---- Check my PDFs: is each PDF the paper it is filed under? (identity.py; the server reads them in the background and keeps the answer until the app closes)
 let PC = null;
@@ -231,7 +232,7 @@ async function pcClick(body, e) {
 }
 async function renderFiles(body) {
   body.innerHTML = `<div class="card st-card"><span class="ask-status">Counting files…</span></div>`;
-  let R; try { R = await api("/api/aifiles"); } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
+  let R; try { R = await api("/api/aifiles"); R.snaps = await api("/api/snapshots").catch(() => null); } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
   const draw = () => {
     const total = R.kinds.reduce((a, k) => a + k.bytes, 0), b = R.backup, pdfs = $("#af-pdfs", body) ? $("#af-pdfs", body).checked : false;
     body.innerHTML = `<div class="card st-card" id="pc-card"><h2>Check my PDFs</h2>
@@ -240,6 +241,10 @@ async function renderFiles(body) {
       <p class="pmeta">A zip of everything that is yours: highlights and notes, paper cards, skims, conversations, folders with their matrices and idea boards, tags, reading status, the library index, your prompts and settings (no API keys). ${bytes(b.data_bytes)} in ${b.files} files.</p>
       <label class="chk"><input type="checkbox" id="af-pdfs"${pdfs ? " checked" : ""}> Include the PDFs too (${bytes(b.pdf_bytes)}; they stay where they are in <code>Papers/</code> either way)</label>
       <div class="row" style="gap:8px;margin-top:8px"><button class="btn primary" id="af-dl">Download the backup (.zip)</button>${R.export_dir ? `<button class="btn" id="af-save" title="${esc(R.export_dir)}">Save it into my export folder</button>` : `<span class="pmeta">Set an export folder in “Reader &amp; summaries” to save it there directly.</span>`}<span class="st-msg" id="af-msg"></span></div></div>
+    <div class="card st-card" id="snap-card"><h2>Daily snapshots <small>on this computer</small></h2>
+      <p class="pmeta">Once a day, when the app starts, a copy of everything that is yours (not the PDFs) is kept on this computer, outside the synced folder: the last ${(R.snaps || {}).keep || 14}. Restoring one puts your notes, folders, library index and settings back as they were then; what you have now is kept first, so a restore can be undone.</p>
+      <div id="snap-list">${snapHtml(R.snaps)}</div>
+      <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="snap-now">Take one now</button><span class="st-msg" id="snap-msg"></span></div></div>
     <div class="card st-card"><h2>What the AI has written or saved <small>${bytes(total)} in all</small></h2>
       <p class="pmeta">Your highlights and notes are never listed here and are never touched. Anything that is yours or hard to make again is zipped before it is cleared, and can be put back below.</p>
       <table class="st-table af"><tr><th>Kind</th><th>Files</th><th>Size</th><th></th></tr>${R.kinds.map(k => `<tr data-k="${k.id}"><td><b>${esc(k.name)}</b> ${k.human ? `<span class="pill" title="May contain lines you edited, cells you wrote or stars and notes you added">yours</span>` : k.regen ? `<span class="pill" title="Made again by itself, for free or nearly">comes back</span>` : ""}<div class="pmeta">${esc(k.what)}${k.note ? ` <b>${esc(k.note)}.</b>` : ""}</div></td>
@@ -258,6 +263,16 @@ async function renderFiles(body) {
     if (e.target.closest("#pc-card")) return pcClick(body, e);
     const m = $("#af-msg", body), c = e.target.closest("[data-clear]"), rs = e.target.closest("[data-restore]"), mc = e.target.closest("[data-mcpcopy]");
     if (mc) { try { await navigator.clipboard.writeText($("#" + mc.dataset.mcpcopy, body).textContent); toast("Copied."); } catch (er) { notifyError(er); } return; }
+    const sr = e.target.closest("[data-snap]");
+    if (sr) {
+      const n = sr.dataset.snap, when = sr.dataset.when;
+      if (!confirm(`Put your notes, highlights, folders, tags, reading status, library index and settings back as they were on ${when}?\n\nWhat you have now is kept first in a snapshot of its own, so you can undo this. PDFs are not touched.`)) return;
+      sr.disabled = true;
+      try { const r = await api("/api/snapshots/restore", {name: n}); toast(`Restored ${r.restored} files as of ${when}. Reloading…`); setTimeout(() => location.reload(), 1200); }
+      catch (er) { const sm = $("#snap-msg", body); if (sm) sm.innerHTML = errInline(er); sr.disabled = false; }
+      return;
+    }
+    if (e.target.closest("#snap-now")) { try { const r = await api("/api/snapshots/now", {}); R.snaps = {snapshots: r.snapshots, keep: (R.snaps || {}).keep}; $("#snap-list", body).innerHTML = snapHtml(R.snaps); $("#snap-msg", body).textContent = "Kept."; } catch (er) { $("#snap-msg", body).innerHTML = errInline(er); } return; }
     if (e.target.closest("#af-dl")) { const a = document.createElement("a"); a.href = "/api/backup?pdfs=" + ($("#af-pdfs", body).checked ? 1 : 0); a.download = ""; document.body.append(a); a.click(); a.remove(); if (m) m.textContent = "Building the zip… the download starts in a moment."; }
     else if (e.target.closest("#af-save")) { try { const r = await api("/api/backup/save", {pdfs: $("#af-pdfs", body).checked}); if (m) m.textContent = `Saved ${bytes(r.bytes)} to ${r.path}`; } catch (er) { if (m) m.innerHTML = errInline(er); } }
     else if (c) {
