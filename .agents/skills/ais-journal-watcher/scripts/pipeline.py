@@ -486,7 +486,7 @@ def slim(p):
     keys = ("id", "journal", "abbr", "title", "authors", "doi", "url", "pub_date", "abstract",
             "keywords", "publisher", "verdict", "relevance", "topics", "method", "reason", "dl_status",
             "ai_verdict", "user_set", "model_verdict",
-            "dl_note", "file", "summary", "manual_url", "term_hits", "summary_by_hand")
+            "dl_note", "file", "summary", "manual_url", "term_hits", "summary_by_hand", "dl_queued")
     return {k: p.get(k) for k in keys}
 
 
@@ -1567,6 +1567,9 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     pace = (signins.profile().get("pace") or "careful")
     last_at, challenged = {}, set()
     papers = [run.papers[i] for i in ids if i in run.papers]
+    for p in papers:                         # (what waits its turn is written down: if the app is quit mid-batch, the run offers to go on with the rest)
+        p["dl_queued"] = True
+    run.save(force=True)
     # same publisher back to back: after one manual "verify you are human" the
     # rest of that site's papers go through the same window
     papers.sort(key=lambda p: p.get("publisher") or "")
@@ -1607,6 +1610,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
 
     def finished(p, final=True):
+        p.pop("dl_queued", None)
         count["done"] += 1
         count["final"] += final
         emit("progress", {"stage": "downloading", "label": "Downloading", "done": count["done"], "total": total})
@@ -1837,6 +1841,8 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % left, "level": "warn"})
         if any(deferred.values()):
             emit("challenge", {"host": "", "state": "done", "msg": ""})
+        for p in papers:                                    # (the batch ended here, by itself or by Stop: nothing is "still waiting" any more; only a quit leaves the marks)
+            p.pop("dl_queued", None)
     run.save()
     todo = [p for p in got if not p.get("summary")] if summarize else []
     for n, p in enumerate(todo, 1):

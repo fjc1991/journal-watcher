@@ -503,6 +503,15 @@ stop9 = threading.Event()
 pl.download_and_summarize(runN2, [N1["id"], N2["id"], N3["id"]], lambda e, d: ev_log.append((e, d)), stop9, sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
 assert len(tried) == 1 and stop9.is_set() and any("disk is full" in d.get("msg", "") for e, d in ev_log if e == "log"), (tried, [d for e, d in ev_log if e == "log"])
 assert not any(v.get("dl_status") == "downloading" for v in runN2.papers.values()), "no paper is left 'downloading'"
+# (14k) what still waits is written down while the batch runs (a quit leaves it in the run's file, and the run offers to go on); a batch that ends leaves no mark
+runQ = mkrun([dict(N1, dl_status=None), dict(N2, dl_status=None), dict(N3, dl_status=None)]); on_disk = []
+def fake_dl10(p, env, browser=None, dry=False):
+    on_disk.append(sorted(x["id"] for x in json.load(open(os.path.join(pl.RUNS, runQ.id + ".json")))["papers"] if x.get("dl_queued")))
+    return False, None, "no PDF"
+dl.download_paper, dl.open_browser = fake_dl10, _Br
+pl.download_and_summarize(runQ, [N1["id"], N2["id"], N3["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+assert on_disk[0] == sorted([N1["id"], N2["id"], N3["id"]]) and all(N3["id"] in x for x in on_disk), on_disk        # (the file is saved at most every two seconds: it may also name papers already tried, which a retry does no harm to)
+assert not any(x.get("dl_queued") for x in json.load(open(os.path.join(pl.RUNS, runQ.id + ".json")))["papers"]) and "dl_queued" in pl.slim({"dl_queued": True}), "a finished batch leaves no mark"
 # (15) the index and a run's file, written by several threads at once: nothing lost, nothing half-written
 def many(tag):
     for i in range(150):
