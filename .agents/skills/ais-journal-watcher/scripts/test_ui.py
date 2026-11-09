@@ -1380,6 +1380,23 @@ fx.fetch_journal = lambda j: []                                                 
                       had_["run"] is None and had_["folder"] == "Lab" and "lab" in next(r_ for r_ in api("/api/library") if r_["file"] == out_[0]["file"]).get("folders", []), str(had_)[:300])
             else:
                 check("…a library paper in the folder exists for this check", False)
+            page.evaluate("openRun({id: %s})" % json.dumps(pick_rid_)); page.wait_for_selector("#listview:not(.hide)", timeout=10000)
+            try:
+                page.wait_for_selector("#fldone:not(.hide)", timeout=10000)
+            except Exception:  # noqa: BLE001      (the check below says so)
+                pass
+            check("after the run: a Discover run made in a folder offers 'Add all to “Lab”', and every run offers 'Add to a folder…'",
+                  page.is_visible("#fldone") and "Add all to “Lab”" in page.inner_text("#fldone") and page.is_visible("#fldbtn"), page.inner_text("#selbar")[:200])
+            page.click("#fldbtn"); page.wait_for_selector("#rf-dlg[open]")
+            check("…'Add to a folder…' asks which folder (the run's own first) and offers the papers still to download, which go in when they arrive",
+                  page.input_value("#rf-to") == "lab" and page.locator("#rf-later").count() == 1 and "still to download" in page.inner_text("#rf-dlg"), page.inner_text("#rf-dlg")[:300])
+            page.select_option("#rf-to", "~new"); page.fill("#rf-name", "Picked later"); page.click("#rf-go"); page.wait_for_selector("#rf-dlg", state="detached", timeout=10000)
+            fl_ = next((f_ for f_ in api("/api/folders") if f_["name"] == "Picked later"), None)
+            page.wait_for_function("document.querySelector('#toast') && /already wait/.test(document.querySelector('#toast').textContent)", timeout=5000)
+            check("…a new folder can be made there; a paper still to come that already waits for Lab keeps waiting for Lab (one folder waits per paper), and the message says so",
+                  fl_ is not None and "already waits for another folder" in page.inner_text("#toast"), page.inner_text("#toast"))
+            if fl_:
+                api("/api/folders", {"action": "delete", "id": fl_["id"]})              # (the checks that follow count the folders)
             open(marker + ".wrong", "w").write("1")                                                   # the next round of the queue: the app refuses a different work's PDF
             page.click("#qbtn")
             try:
@@ -1835,6 +1852,15 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('#lib-results .librow:has-text("Kappa evidence") [data-more]'); page.click('#lib-results .librow:has-text("Kappa evidence") [data-setkind]'); page.wait_for_selector("#kind-dlg[open]")
             check("…and the dialog opened again shows it as a thesis (the word is not lost when you only look)", page.is_checked('#kind-dlg input[name="kd"][value="other"]') and page.input_value("#kd-lab") == "Thesis" and page.is_visible("#kd-lab"))
             page.click("#kd-no"); page.fill("#lf-q", "")
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]')
+            page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.select_option("#lf-folder", "~none"); page.select_option("#lf-sort", "added"); page.keyboard.press("Escape")
+            page.wait_for_selector("#lr-selall", timeout=10000)
+            none_ = [r_ for r_ in api("/api/library") if not r_.get("folders") and r_.get("journal") != "Books"]
+            shown_ = page.locator("#lib-results .librow").count(); page.click("#lr-selall")
+            check("the Library can list the papers in no folder (newest first) and 'Select all' ticks them, ready for 'Add to folder'",
+                  shown_ == len(none_) and any(r_["title"].startswith("Kappa evidence") for r_ in none_) and page.is_visible("#lib-actionbar") and ("%d selected" % shown_) in page.inner_text("#lib-actionbar")
+                  and page.locator("#lib-results .rsel:checked").count() == shown_, (shown_, len(none_), page.inner_text("#lib-actionbar")[:80]))
+            page.click("#ab-clear")
             api("/api/library/delete", {"files": [kr_["file"]]})                # (the checks that follow count the library as it was)
             idx_ = os.path.join(TMP, "Papers", "_index.csv")
             with open(idx_, newline="", encoding="utf-8") as f_:

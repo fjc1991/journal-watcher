@@ -84,6 +84,9 @@ def _window(text, tok, n=70):
     return ("…" if a else "") + re.sub(r"\s+", " ", text[a:b]).strip() + ("…" if b < len(text) else "")
 
 
+NO_FOLDER = "~none"
+
+
 def search(rows, q="", status="", star=False, folder="", journal="", year="", tag="", notes=False, sort="", kind=""):
     toks = _tokens(q or "")
     out = []
@@ -95,7 +98,10 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
             continue
         if star and not st.get("star"):
             continue
-        if folder and folder not in (r.get("folders") or []):
+        if folder == NO_FOLDER:                                    # papers in no folder yet (to file them: select them all, Add to folder)
+            if r.get("folders"):
+                continue
+        elif folder and folder not in (r.get("folders") or []):
             continue
         if journal and r.get("abbr") != journal:
             continue
@@ -143,6 +149,8 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
         out.sort(key=lambda x: x["_r"].get("title", "").lower())
     elif sort == "journal":
         out.sort(key=lambda x: (x["_r"].get("journal", ""), x["_r"].get("year", "")))
+    elif sort == "added":                                       # the date the paper came into the library, newest first (a run's papers together)
+        out.sort(key=lambda x: (x["_r"].get("date_checked") or ""), reverse=True)
     elif sort == "opened":
         out.sort(key=lambda x: (x["_r"].get("state") or {}).get("opened", ""), reverse=True)
     elif sort == "notes":

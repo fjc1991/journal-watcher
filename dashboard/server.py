@@ -674,7 +674,9 @@ class Handler(BaseHTTPRequestHandler):
     def scope_rows(self, s):
         """Library rows picked by a scope: {folder?, journal?, year?, tag?, status?, star?} (all optional; none = the whole library)."""
         rows = pl.library()
-        if s.get("folder"):
+        if s.get("folder") == ls.NO_FOLDER:                     # ("Not in any folder" in the Library's filters)
+            rows = [r for r in rows if not r.get("folders")]
+        elif s.get("folder"):
             f = fo.get(str(s["folder"]))
             if not f:
                 return None
@@ -1843,6 +1845,19 @@ class Handler(BaseHTTPRequestHandler):
             if not ids:
                 return self.send_json({"error": "nothing selected"}, 400)
             return self.started(start_download(ids), JOBS.run)
+        if path == "/api/run/folder":           # {run_id, folder | new_name, ids?, pending}: papers of a run into a folder you choose (those in the library now; the rest when they arrive)
+            try:
+                ids = [str(x) for x in b["ids"]][:5000] if isinstance(b.get("ids"), list) else None
+
+                def put(run):
+                    fid = str(b.get("folder") or "") or fo.create(b.get("new_name"))["id"]      # (a new folder only once the run is found)
+                    return dict(pl.run_to_folder(run, fid, ids, bool(b.get("pending", True))), run=run.to_dict(full=False))
+                res = attach_to_run(b.get("run_id"), put)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if res is None:
+                return self.send_json({"error": "That run is not there any more: reload the page."}, 404)
+            return self.send_json({"ok": True, **res, "folders": fo.list_all()})
         if path == "/api/run/attach/keep":      # {run_id, id, token}: the PDF that did not look like the paper is the right one, you said
             try:
                 res = attach_to_run(b.get("run_id"), lambda run: pl.attach_keep(run, str(b.get("id") or ""), b.get("token")))

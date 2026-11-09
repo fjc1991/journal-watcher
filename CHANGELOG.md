@@ -2,6 +2,12 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.9
+
+- **Put a run's papers into a folder after the run.** Every run's page has **📁 Add to a folder…**: choose a folder (or make one) and the run's papers that are in your library go in at once; the ones still to download go in when they arrive (a download, a retry, or a PDF you add). A Discover run made in a folder also has a one-click **Add all to “<folder>”**. An older Discover run called "Picks · this folder" takes the folder you choose, and its name ("Picks · Labor Market Papers").
+- **The Library can find the papers that are in no folder.** Folder filter → **Not in any folder**, sort by **Recently added**, then **Select all** in the list's header and **📁 Add to folder**.
+- Fixed: the icons on the tool tiles (a folder's tools, the Library's tabs) floated between the name and its hint, and were drawn smaller than intended. The icon now sits beside the name, with the hint underneath.
+
 ## 1.2.8
 
 - **Add a PDF you downloaded yourself.** When the app could not download a paper, download it in your own browser and drop the PDF on the paper's card in the run, or press **Add the PDF I downloaded…** on the card (or in the paper's details). The PDF gets the same check as a download (is it this paper?) and is filed under the same name and in the same folder as a download would be. It is not summarised by itself: the Library's **Summarise N papers…** shows the cost first. A PDF that does not look like the paper is not added: the app says what the PDF seems to be and why, and **It is the right paper** adds it anyway (Check my PDFs then leaves it alone). A download running at the same time no longer undoes it.

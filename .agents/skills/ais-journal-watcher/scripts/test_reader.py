@@ -545,7 +545,65 @@ ths = [threading.Thread(target=at, args=(x["id"],)) for x in (S3, S4)]
 assert all(v[0] == 200 and v[1]["filed"] for v in res.values()), res
 back = pl.Run.load(runS.id).papers
 assert back[S3["id"]]["dl_status"] == "ok" and back[S4["id"]]["dl_status"] == "ok", "two at once: both are saved"
-assert not calls
+# --- after the run: its papers into a folder you choose ("Add to a folder…" on the run's page)
+fidR = fo.create("Labor Market Papers")["id"]
+A1 = paper(id="doi:10.1287/mnsc.2024.0020", doi="10.1287/mnsc.2024.0020")                                   # (filed below: in the library)
+A2 = paper(id="doi:10.1287/mnsc.2024.0021", doi="10.1287/mnsc.2024.0021", dl_status="failed")               # still to download
+A3 = paper(id="doi:10.1/skip", doi="10.1/skip", title="Skipped one", verdict="skip", dl_status=None)       # not for download: never waits for the folder
+A4 = paper(id="doi:10.1/au.9", doi="10.1/au.9", title="An author's work", folder=fidK, dl_status="failed")  # waits for its author's folder
+runT = mkrun([A1, A2, A3, A4], params={"label": "this folder"})
+assert pl.attach_pdf(runT, A1["id"], R["right"])["filed"]
+r = pl.run_to_folder(runT, fidR)
+assert (r["added"], r["already"], r["pending"], r["kept"], r["folder"]) == (1, 0, 1, 1, "Labor Market Papers"), r
+assert dl.index_key(A1) in fo.get(fidR)["papers"] and runT.papers[A2["id"]].get("folder") == fidR and not runT.papers[A3["id"]].get("folder") and runT.papers[A4["id"]]["folder"] == fidK
+assert runT.title() == "Picks · Labor Market Papers" and runT.params["folder"] == fidR, runT.title()
+assert pl.Run.load(runT.id).papers[A2["id"]].get("folder") == fidR and pl.Run.load(runT.id).title() == "Picks · Labor Market Papers", "saved"
+assert pl.attach_pdf(runT, A2["id"], R["right"])["folder"] == "Labor Market Papers" and dl.index_key(A2) in fo.get(fidR)["papers"], "a paper still to come goes in when it arrives"
+r = pl.run_to_folder(runT, fidR)
+assert (r["added"], r["already"], r["pending"]) == (0, 2, 0), r
+fo.remove(fidR, [dl.index_key(A1)])
+assert pl.run_to_folder(runT, fidR)["added"] == 1 and dl.index_key(A1) in fo.get(fidR)["papers"], "you chose it: a paper taken out goes back in"
+runU = mkrun([paper(id="doi:10.1/u1", doi="10.1/u1", title="Imported one", dl_status="failed")], params={"label": "Imported: refs"})
+pl.run_to_folder(runU, fidR, pending=False)
+assert runU.title() == "Picks · Imported: refs" and not runU.papers["doi:10.1/u1"].get("folder"), "a named run keeps its name; without pending nothing waits"
+try:
+    pl.run_to_folder(runU, "no-such-folder"); raise AssertionError("no error")
+except ValueError as e:
+    assert "not there any more" in str(e)
+srv = ThreadingHTTPServer(("127.0.0.1", 0), sv.Handler); threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = "http://127.0.0.1:%d" % srv.server_address[1]
+c, j = post("/api/run/folder", json.dumps({"run_id": runU.id, "new_name": "Picked later", "pending": True}).encode(), jh)
+assert c == 200 and j["folder"] == "Picked later" and any(f_["name"] == "Picked later" for f_ in j["folders"]) and pl.Run.load(runU.id).papers["doi:10.1/u1"].get("folder"), (c, j)
+c, j = post("/api/run/folder", json.dumps({"run_id": runU.id, "new_name": "Picked later"}).encode(), jh); assert c == 400 and "exists" in j["error"], (c, j)
+c, j = post("/api/run/folder", json.dumps({"run_id": "nope", "folder": fidR}).encode(), jh); assert c == 404, (c, j)
+# a paper that waits for the folder and comes another way (another run, the Library's Add) is filed when the run is next looked at
+V = paper(id="doi:10.1287/mnsc.2024.0022", doi="10.1287/mnsc.2024.0022"); runV = mkrun([V], params={"label": "this folder"})
+assert pl.run_to_folder(runV, fidR)["pending"] == 1
+hv = dl.out_path(dict(V)); open(hv, "wb").write(R["right"]); dl.save_index(dict(V), os.path.relpath(hv, dl.ROOT), "ok", "added by you")
+runV2 = pl.Run.load(runV.id); pl.mark_downloaded(runV2)
+assert runV2.papers[V["id"]]["dl_status"] == "ok" and dl.index_key(V) in fo.get(fidR)["papers"], fo.get(fidR)["papers"]
+# a paper the running download has just brought in (its file is there, the index was read a moment before) is filed now, not left waiting
+W9 = paper(id="doi:10.1/w9", doi="10.1/w9", title="Just arrived", dl_status="ok"); hw = os.path.join(dl.PAPERS, "2024-05", "x_w9.pdf"); open(hw, "wb").write(R["small"])
+W9["file"] = os.path.relpath(hw, dl.ROOT); runW9 = mkrun([W9], params={"label": "this folder"})
+r = pl.run_to_folder(runW9, fidR)
+assert r["added"] == 1 and r["pending"] == 0 and "10.1/w9" in fo.get(fidR)["papers"], r
+# without the papers still to come, a Discover run does not take the folder's name (its page would promise what will not happen)
+runG2 = mkrun([paper(id="doi:10.1/g2", doi="10.1/g2", title="Waiting one", dl_status="failed")], params={"label": "this folder"})
+pl.run_to_folder(runG2, fidR, pending=False)
+assert runG2.title() == "Picks · this folder" and not runG2.params.get("folder"), runG2.params
+# "Not in any folder" as the scope of the tools that take one (search in the PDFs, ask…)
+nf_ = sv.Handler.scope_rows(None, {"folder": "~none"})
+assert nf_ is not None and all(not r_.get("folders") for r_ in nf_), "no 'no such folder'"
+# a new folder is made only once its run is found
+n_f = len(fo.list_all())
+c, j = post("/api/run/folder", json.dumps({"run_id": "nope", "new_name": "Never made"}).encode(), jh)
+assert c == 404 and len(fo.list_all()) == n_f and not any(f_["name"] == "Never made" for f_ in fo.list_all()), (c, j)
+# the Library: papers in no folder, newest first
+import library_search as ls_
+rows3 = [{"file": "a.pdf", "title": "A", "folders": [], "date_checked": "2026-11-01"}, {"file": "b.pdf", "title": "B", "folders": ["x"], "date_checked": "2026-11-05"},
+         {"file": "c.pdf", "title": "C", "folders": [], "date_checked": "2026-11-07"}]
+assert [x["file"] for x in ls_.search(rows3, folder="~none", sort="added")] == ["c.pdf", "a.pdf"]
+assert [x["file"] for x in ls_.search(rows3, folder="x")] == ["b.pdf"]
 srv.shutdown()
 print("ALL OK")
 '''
