@@ -1567,12 +1567,40 @@ try:
     ai.remove_key("ollama"); out["key"]["ollama"] = "accepted"
 except ValueError:
     out["key"]["ollama"] = "refused"
+# undo: a deleted paper is kept for 30 days and can be put back with its notes, folders and reading status; after that it is gone
+import time as _t
+C2 = "Papers/2025-01/MISQ/Delta.pdf"; pd2 = put(C2, b"%%PDF-delta"); open(ns.notes_path(pd2), "w").write('{"version": 1, "rev": 3, "highlights": [{"id": "h"}]}')
+dl.save_index({"doi": "10.1/d", "title": "Delta", "journal": "MISQ", "abbr": "MISQ"}, C2, "ok")
+fo.add(fid, ["10.1/d"]); rs.update("10.1/d", {"status": "read"})
+rd = deletion.delete_item(C2)
+u = {"token": bool(rd.get("undo")), "gone": not os.path.exists(pd2) and not os.path.exists(ns.notes_path(pd2)), "listed": [x["title"] for x in deletion.recently_deleted() if x["token"] == rd["undo"]],
+     "not_in_library": C2 not in [r["file"] for r in pl.library()], "out_of_folder": "10.1/d" not in fo.get(fid)["papers"]}
+back = deletion.restore(rd["undo"])
+row = [r for r in pl.library() if r["file"] == C2]
+u.update(back=back["file"] == C2 and os.path.exists(pd2) and '"rev": 3' in open(ns.notes_path(pd2)).read(), row=bool(row), folder="10.1/d" in fo.get(fid)["papers"],
+         status=(row[0]["state"] or {}).get("status") if row else None, not_deleted="10.1/d" not in deletion.deleted_keys(), list_empty=not [x for x in deletion.recently_deleted() if x["token"] == rd["undo"]])
+try:
+    deletion.restore(rd["undo"]); u["twice"] = "accepted"
+except ValueError:
+    u["twice"] = "refused"
+for bad in ("../x", "deleted-20200101-000000-zzzzzz", ""):
+    try:
+        deletion.restore(bad); u["bad"] = "accepted"
+    except ValueError:
+        u.setdefault("bad", "refused")
+rd2 = deletion.delete_item(C2)
+mf = os.path.join(dl.PAPERS, "_removed", rd2["undo"], "_undo.json"); m_ = json.load(open(mf)); m_["when"] = _t.time() - 31 * 86400; json.dump(m_, open(mf, "w"))
+u["old_not_listed"] = not [x for x in deletion.recently_deleted() if x["token"] == rd2["undo"]]
+u["purged"] = deletion.purge_old() == 1 and not os.path.exists(os.path.join(dl.PAPERS, "_removed", rd2["undo"]))
+out["undo"] = u
 print("JSON" + json.dumps(out))
 """ % HERE
             env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "OPENAI_API_KEY")}
             r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=180)
             assert r.returncode == 0, r.stderr[-1500:]
             o = json.loads(r.stdout.split("JSON", 1)[1])
+            assert o["undo"] == {"token": True, "gone": True, "listed": ["Delta"], "not_in_library": True, "out_of_folder": True, "back": True, "row": True, "folder": True, "status": "read",
+                                 "not_deleted": True, "list_empty": True, "twice": "refused", "bad": "refused", "old_not_listed": True, "purged": True}, o["undo"]
             a, b = o["a"], o["b"]
             assert a["res"]["kind"] == "paper" and a["res"]["title"] == "Alpha" and len(a["res"]["deleted"]) == 4 and a["left"] == [], a
             assert a["index_left"] == [], "its passages in the search index are deleted too"

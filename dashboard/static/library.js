@@ -535,18 +535,33 @@ function wireRows() {
   document.addEventListener("click", e => { if (!e.target.closest(".fpop")) $$(".fpop").forEach(p => p.remove()); if (!e.target.closest(".menuwrap")) $$(".menuwrap .menu").forEach(m => m.classList.add("hide")); });
   // (PDFs dropped from your desktop are handled by dropimport.js: onto a folder, inside a folder, or anywhere in the Library with a chooser)
 }
+// a bar at the foot of the page for a few seconds: what was done, and Undo
+function undoBar(text, undo) {
+  $("#undo-bar") && $("#undo-bar").remove();
+  const b = document.createElement("div"); b.id = "undo-bar"; b.className = "card di-snack"; b.setAttribute("role", "status");
+  b.innerHTML = `<span>${esc(text)}</span><button class="btn small" id="undo-go">Undo</button>`;
+  document.body.append(b);
+  const t = setTimeout(() => b.remove(), 15000);
+  $("#undo-go", b).onclick = async () => { clearTimeout(t); $("#undo-go", b).disabled = true; try { await undo(); } catch (er) { notifyError(er); } b.remove(); };
+}
 async function deleteItems(files) {      // delete papers or books for good, after saying exactly what goes (deletion.py)
   const rows = files.map(f => lib()[byFile(f)]).filter(Boolean);
   if (!rows.length) return;
   const one = rows.length === 1, books = rows.filter(r => r.book).length;
   const what = one ? `the ${rows[0].book ? "book" : "paper"} “${rows[0].title || rows[0].file}”` : `${rows.length} ${books === rows.length ? "books" : books ? "papers and books" : "papers"}`;
   const files_ = one && rows[0].book ? "its PDF and EPUB" : one ? "its PDF" : "their files (PDF, EPUB)";
-  if (!confirm(`Delete ${what} for good?\n\n${files_[0].toUpperCase() + files_.slice(1)} and ${one ? "its" : "their"} notes, highlights, summary and card are deleted from this computer and from your data folder. This cannot be undone in Journal Watcher (Dropbox keeps deleted files for 30 days).\n\nA weekly check or archive search will not download ${one ? "it" : "them"} again; you can still add ${one ? "it" : "them"} yourself.`)) return;
+  if (!confirm(`Delete ${what} for good?\n\n${files_[0].toUpperCase() + files_.slice(1)} and ${one ? "its" : "their"} notes, highlights, summary and card are deleted from this computer and from your data folder. You can put ${one ? "it" : "them"} back for 30 days (Undo, or Settings → AI files & backup → Recently deleted); after that ${one ? "it is" : "they are"} gone for good.\n\nA weekly check or archive search will not download ${one ? "it" : "them"} again; you can still add ${one ? "it" : "them"} yourself.`)) return;
   try {
     const r = await api("/api/library/delete", {files: rows.map(x => x.file)});
     rows.forEach(x => SEL.delete(x.file));
     toast(r.errors.length ? `Deleted ${r.deleted.length}; ${r.errors.length} could not be deleted (${r.errors[0].error})` : one ? `Deleted “${rows[0].title || rows[0].file}”.` : `Deleted ${r.deleted.length} ${books === rows.length ? "books" : "items"}.`);
     window.dispatchEvent(new Event("jw-library-changed"));
+    const tokens = r.deleted.map(x => x.undo).filter(Boolean);
+    if (tokens.length) undoBar(`Deleted ${tokens.length === 1 ? "“" + (r.deleted[0].title || "1 item").slice(0, 60) + "”" : tokens.length + " items"}.`, async () => {
+      const u = await api("/api/library/restore", {tokens});
+      toast(u.errors.length ? `${u.restored.length} put back; ${u.errors.length} could not be (${u.errors[0].error})` : `Put back ${u.restored.length === 1 ? "“" + (u.restored[0].title || "it").slice(0, 60) + "”" : u.restored.length + " items"}, with ${u.restored.length === 1 ? "its" : "their"} notes and folders.`);
+      window.dispatchEvent(new Event("jw-library-changed"));
+    });
   } catch (er) { notifyError(er); }
 }
 function actionbar() {

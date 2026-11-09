@@ -1106,6 +1106,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/aifiles":      # Settings → AI files: what the AI wrote or cached, how big it is, what was cleared lately, how big a backup is
             return self.send_json({"kinds": aifiles.scan(), "trash": aifiles.trash_list(), "backup": aifiles.backup_size(), "export_dir": prefs.get_settings().get("export_dir") or "",
                                    "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
+        if path == "/api/library/deleted":   # what you deleted in the last 30 days and can put back
+            return self.send_json({"kept": deletion.recently_deleted(), "days": deletion.KEEP_DAYS})
         if path == "/api/snapshots":    # the daily snapshots of your own files on this computer
             return self.send_json({"snapshots": aifiles.snapshots(), "keep": aifiles.KEEP_SNAPSHOTS})
         if path == "/api/backup":       # ?pdfs=1: a zip of your own data (notes, cards, folders, tags, settings…), optionally with the PDFs
@@ -2010,6 +2012,16 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as e:
                     errors.append({"file": str(f)[:300], "error": str(e)[:200]})
             return self.send_json({"ok": not errors, "deleted": done, "errors": errors})
+        if path == "/api/library/restore":       # {tokens: [...]}: put back what you deleted (kept for 30 days: deletion.restore)
+            done, errors = [], []
+            for t in (b.get("tokens") or [])[:500]:
+                try:
+                    done.append(deletion.restore(str(t)))
+                except (ValueError, OSError) as e:
+                    errors.append({"token": str(t)[:60], "error": str(e)[:200]})
+            if done and indexer:
+                indexer.kick(2)
+            return self.send_json({"ok": not errors, "restored": done, "errors": errors, "kept": deletion.recently_deleted()})
         if path == "/api/runs/delete":           # {id}: delete the record of a past run (its papers stay in the library)
             rid = str(b.get("id") or "")
             if JOBS.busy() and JOBS.run is not None and JOBS.run.id == os.path.basename(rid):
@@ -2177,6 +2189,10 @@ def take_lock(port):
 
 
 def _daily_snapshot():
+    try:
+        deletion.purge_old()            # (what you deleted more than 30 days ago leaves the disk now)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         aifiles.snapshot()
     except Exception as e:  # noqa: BLE001      (a full disk, a locked file: the app starts all the same)
