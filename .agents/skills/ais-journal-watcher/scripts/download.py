@@ -348,8 +348,17 @@ def download_paper(p, env, dry=False, browser=None):
 
     def write(data, via):
         if not dry:
-            with open(path, "wb") as f:
-                f.write(data)
+            tmp = tmp_path(path)                         # (written whole, then put in place: a full disk or a quit never leaves half a PDF under the paper's name)
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
             save_index(p, os.path.relpath(path, ROOT), "ok", via)
         return True, path, via
 
@@ -594,11 +603,16 @@ class open_browser:
         except Exception as e:
             print("(browser route unavailable: %s)" % str(e)[:80])
             self.b = None
+            self.error = str(e)[:200] or e.__class__.__name__       # (the download says so on the page: see pipeline.download_and_summarize)
+            BROWSER_ERROR["why"] = self.error
             return None
 
     def __exit__(self, *exc):
         if self.b is not None:
             self.b.__exit__(*exc)
+
+
+BROWSER_ERROR = {"why": ""}       # why the sign-in browser did not start the last time it was asked for ("" when it did)
 
 
 if __name__ == "__main__":

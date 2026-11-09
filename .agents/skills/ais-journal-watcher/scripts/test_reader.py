@@ -475,6 +475,34 @@ identity._remove = lambda f: dl.INDEX_LOCK._is_owned()
 assert identity.remove("anything") is True
 identity._remove = keep_rm
 
+# (14j) the sign-in browser does not start: said once in plain words; one paper's error does not stop the others; a full disk stops the batch and says so
+class _NoBr:
+    def __init__(self, **k):
+        dl.BROWSER_ERROR["why"] = "Chromium is missing"
+    def __enter__(self):
+        return None
+    def __exit__(self, *a):
+        return False
+N1 = paper(id="doi:10.1/n1", doi="10.1/n1", title="Paper n one"); N2 = paper(id="doi:10.1/n2", doi="10.1/n2", title="Paper n two", publisher="wiley"); N3 = paper(id="doi:10.1/n3", doi="10.1/n3", title="Paper n three", publisher="acm")
+runN = mkrun([N1, N2, N3]); ev_log.clear(); tried = []
+def fake_dl8(p, env, browser=None, dry=False):
+    tried.append(p["id"])
+    if p["id"] == N1["id"]:
+        raise RuntimeError("the index could not be written")
+    return False, None, "no PDF"
+dl.download_paper, dl.open_browser = fake_dl8, _NoBr
+pl.download_and_summarize(runN, [N1["id"], N2["id"], N3["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+logs = [d.get("msg", "") for e, d in ev_log if e == "log"]
+assert sum("sign-in browser could not start (Chromium is missing)" in m for m in logs) == 1, logs
+assert sorted(tried) == sorted([N1["id"], N2["id"], N3["id"]]) and runN.papers[N1["id"]]["dl_status"] == "failed" and "could not be saved" in runN.papers[N1["id"]]["dl_note"], (tried, runN.papers[N1["id"]])
+runN2 = mkrun([dict(N1, dl_status=None), dict(N2, dl_status=None), dict(N3, dl_status=None)]); tried.clear(); ev_log.clear()
+def fake_dl9(p, env, browser=None, dry=False):
+    tried.append(p["id"]); raise OSError(28, "No space left on device")
+dl.download_paper, dl.open_browser = fake_dl9, _Br
+stop9 = threading.Event()
+pl.download_and_summarize(runN2, [N1["id"], N2["id"], N3["id"]], lambda e, d: ev_log.append((e, d)), stop9, sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+assert len(tried) == 1 and stop9.is_set() and any("disk is full" in d.get("msg", "") for e, d in ev_log if e == "log"), (tried, [d for e, d in ev_log if e == "log"])
+assert not any(v.get("dl_status") == "downloading" for v in runN2.papers.values()), "no paper is left 'downloading'"
 # (15) the index and a run's file, written by several threads at once: nothing lost, nothing half-written
 def many(tag):
     for i in range(150):

@@ -1696,11 +1696,16 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     import deletion
     gone = deletion.deleted_keys()
     try:
+        getattr(dl, "BROWSER_ERROR", {}).update(why="")
         with dl.open_browser(on_challenge=on_challenge, ask=ask) as br:
             try:
                 br.stop = stop                                  # Stop also ends a wait for the user's tick
             except AttributeError:
                 pass
+            if br is None:                                      # the browser the sign-ins live in did not start: say so once, in plain words (each paper would only say "blocked")
+                why = getattr(dl, "BROWSER_ERROR", {}).get("why") or "it did not start"
+                emit("log", {"msg": "The sign-in browser could not start (%s). Papers that are free to read are still downloaded; papers behind a publisher or library sign-in cannot be, "
+                                    "until this is fixed. Quit other copies of Journal Watcher, then try again; if it stays, restart the computer." % why, "level": "error"})
             while True:
                 while todo_q:
                     if stop.is_set():
@@ -1748,7 +1753,15 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     current.clear()
                     current["pub"] = pub
                     emit("download", {"id": p["id"], "dl_status": "downloading"})
-                    ok, path, note = dl.download_paper(dict(p), env, browser=br)
+                    try:
+                        ok, path, note = dl.download_paper(dict(p), env, browser=br)
+                    except Exception as e:  # noqa: BLE001      (one paper's error is that paper's: the batch goes on, except when the disk is full)
+                        full = isinstance(e, OSError) and getattr(e, "errno", None) == 28
+                        ok, path, note = False, None, ("the disk is full: nothing more can be saved" if full else "could not be saved: %s" % (str(e)[:120] or e.__class__.__name__))
+                        emit("log", {"msg": ("The disk is full: the download stops here. Free some space, then press Download again." if full
+                                             else "“%s” could not be saved (%s). The other papers go on." % ((p.get("title") or "")[:60], str(e)[:120])), "level": "error"})
+                        if full:
+                            stop.set()
                     chall = current.get("chall")
                     last_at[pub] = clock()
                     if ok:
