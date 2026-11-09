@@ -2353,6 +2353,42 @@ assert os.path.exists(os.path.join(paths.BASE, "ai (conflicted copy).json")), "a
 w = sy.set_aside(".env (Work Mac's conflicted copy 2026-11-03)")
 assert os.path.exists(os.path.join(paths.ROOT, w)) and w.startswith("Papers/_conflicts/") and not os.path.exists(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)")) and open(os.path.join(paths.ROOT, w)).read() == "X=1"
 i = sy.info(); assert i["separate"] and i["me"]["name"] == "Home laptop" and len(i["conflicts"]) == 1 and i["data_folder"] == paths.ROOT
+# -- your other files join too, with nothing of either copy lost: a paper's notes, reading status, a folder, tags, the AI spending record
+import json as _j
+def two(rel, mine, theirs, text=False):
+    full = os.path.join(paths.ROOT, rel); os.makedirs(os.path.dirname(full), exist_ok=True)
+    name, ext = os.path.splitext(full); cp_ = name + " (Work Mac's conflicted copy 2026-11-04)" + ext
+    for path_, obj in ((full, mine), (cp_, theirs)):
+        open(path_, "w", encoding="utf-8").write(obj if text else _j.dumps(obj))
+    return os.path.relpath(cp_, paths.ROOT), full
+cpn, fn_ = two("Papers/2024-05/Journal/kept.notes.json", {"version": 1, "rev": 4, "highlights": [{"id": "h1", "text": "mine"}, {"id": "h2", "text": "both, my wording"}], "cards": [], "bookmarks": [], "paper_note": "My note."},
+               {"version": 1, "rev": 3, "highlights": [{"id": "h2", "text": "both, their wording"}, {"id": "h3", "text": "theirs"}], "cards": [{"id": "c1", "text": "their card"}], "bookmarks": [], "paper_note": "Their note."})
+assert {x["path"]: x for x in sy.conflicts(fresh=True)}[cpn]["join"] == "notes"
+r = sy.merge(cpn); n_ = _j.load(open(fn_))
+assert r["kind"] == "notes" and r["added"] == 3 and [h["id"] for h in n_["highlights"]] == ["h1", "h2", "h3"] and n_["highlights"][1]["text"] == "both, my wording" and n_["cards"] == [{"id": "c1", "text": "their card"}], n_
+assert n_["rev"] == 5 and "My note." in n_["paper_note"] and "Their note." in n_["paper_note"] and not os.path.exists(os.path.join(paths.ROOT, cpn)) and os.path.exists(os.path.join(paths.ROOT, r["set_aside"]))
+cps, fs_ = two("Papers/_status.json", {"version": 1, "papers": {"10.1/a": {"status": "reading", "opened": "2026-11-01T10:00:00", "page": 3}, "10.1/b": {"star": True}}},
+               {"version": 1, "papers": {"10.1/a": {"status": "read", "opened": "2026-11-03T10:00:00", "page": 12, "takeaway": "Good."}, "10.1/c": {"status": "toread"}}})
+sy.merge(cps); st_ = _j.load(open(fs_))["papers"]
+assert st_["10.1/a"] == {"status": "read", "opened": "2026-11-03T10:00:00", "page": 12, "takeaway": "Good."} and st_["10.1/b"] == {"star": True} and st_["10.1/c"] == {"status": "toread"}, st_
+cpf, ff_ = two("Papers/_folders/lab.json", {"version": 1, "id": "lab", "name": "Lab", "papers": ["10.1/a", "10.1/b"]}, {"version": 1, "id": "lab", "name": "Lab (renamed there)", "papers": ["10.1/b", "10.1/c"]})
+sy.merge(cpf); f_ = _j.load(open(ff_)); assert f_["papers"] == ["10.1/a", "10.1/b", "10.1/c"] and f_["name"] == "Lab", f_
+cpt, ft_ = two("Papers/_tags.json", {"version": 1, "rev": 2, "tags": [{"id": "t1", "name": "a"}]}, {"version": 1, "rev": 5, "tags": [{"id": "t1", "name": "a2"}, {"id": "t2", "name": "b"}]})
+sy.merge(cpt); t_ = _j.load(open(ft_)); assert [x["id"] for x in t_["tags"]] == ["t1", "t2"] and t_["tags"][0]["name"] == "a" and t_["rev"] == 6, t_
+cpu, fu_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-03T10:00:00", "cost": 0.3}\n', '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-02T10:00:00", "cost": 0.2}\n', text=True)
+r = sy.merge(cpu); lines_ = open(fu_).read().splitlines()
+assert r["added"] == 1 and [_j.loads(x)["cost"] for x in lines_] == [0.1, 0.2, 0.3], lines_
+# a copy that cannot be read changes nothing; a file of another kind is not joined
+cpb, fb_ = two("Papers/2024-05/Journal/other.notes.json", {"version": 1, "rev": 1, "highlights": [{"id": "k"}]}, {"version": 1}); open(os.path.join(paths.ROOT, cpb), "w").write('{"version": 1, "high')
+before_ = open(fb_).read()
+try:
+    sy.merge(cpb); raise AssertionError("joined an unreadable copy")
+except ValueError as e:
+    assert "Nothing was changed" in str(e) and open(fb_).read() == before_ and os.path.exists(os.path.join(paths.ROOT, cpb))
+try:
+    sy.merge(".agents/skills/ais-journal-watcher/ai (conflicted copy).json"); raise AssertionError("joined settings")
+except ValueError:
+    pass
 print("OK")
 ''' % HERE
             env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}

@@ -1239,7 +1239,7 @@ class Handler(BaseHTTPRequestHandler):
                     syncinfo.rename(b.get("name"))
                     return self.send_json({"ok": True, **syncinfo.info()})
                 if act == "merge":
-                    res = syncinfo.merge_index(b.get("path"))
+                    res = syncinfo.merge(b.get("path"))
                 elif act == "set_aside":
                     res = {"set_aside": syncinfo.set_aside(b.get("path"))}
                 else:

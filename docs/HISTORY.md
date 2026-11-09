@@ -1021,6 +1021,16 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Not verified.** Real downloads through the author's library for these papers; PowerPoint and PDF files of the author's own (only generated ones); the AI path with a real provider (a fake in the tests, by the standing rule).
 
+### Item 45. Improvements, part A: data safety (2026-11-10, from the audit the author asked for)
+
+**Asked.** "Go over any other things that could be improved", then "Do all 40 now": an audit of five areas (each claim checked against the code by a second reviewer) gave 40 items; they are done in five PRs. This is the first: the seven reliability items.
+
+**Changed.** `notes_store`: `_state` tells a missing file from one that cannot be read; `load` marks it (`unreadable`), `save`/`save_tags` raise `Unreadable` and keep a copy beside it. `aifiles.snapshot/snapshots/restore_snapshot` (in `LOCAL/snapshots`, 14 kept; a restore first keeps what is there, writes only into the data folder, never a PDF) and the server's start-up thread. `deletion.delete_item` moves the files to `Papers/_removed/deleted-<time>/` with `_undo.json` (row, folders, status); `restore`, `recently_deleted`, `purge_old` (30 days). `download.write` through a temporary file; `download_and_summarize` catches one paper's error (a full disk stops the batch), says when the browser did not start (`dl.BROWSER_ERROR`), and marks the papers still waiting (`dl_queued`) so a quit leaves them in the run's file. `syncinfo.merge` joins notes (by item id), reading status (per paper, the one opened last), a folder, tags and the spending record; `conflicts()` says which copies can be joined.
+
+**Tests.** `t_notes_unreadable`, `t_snapshots`, the delete child (undo, restore twice, bad tokens, 31 days), the attach child (browser not started, one paper's error, a full disk, the queue marks), the sync child (each kind of file, an unreadable copy changes nothing).
+
+**Not verified.** A real half-synced Dropbox file; a real full disk; the restore and undo buttons by hand on a Mac (their server side is tested, their page side only by the UI suite's existing delete checks).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

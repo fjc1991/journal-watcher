@@ -2,6 +2,16 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.11
+
+Keeping your work safe:
+
+- **A daily snapshot of everything that is yours.** Once a day, when the app starts, your notes, highlights, folders, tags, reading status, library index and settings (not the PDFs) are copied to this computer, outside the synced folder; the last 14 are kept. **Settings → AI files & backup → Daily snapshots** lists them, and **Restore** puts them back as they were (what you have now is kept first, so a restore can be undone).
+- **Deleting can be undone for 30 days.** A deleted paper or book, with its notes and highlights, is kept for 30 days: press **Undo** right after deleting, or **Put back** under Settings → AI files & backup → Recently deleted. It returns to its folders with its reading status.
+- **Notes are never overwritten when they cannot be read.** If a paper's notes file was only half synced or was damaged, the reader used to open the paper as if it had no highlights, and your next highlight replaced the file. Now it tells you, saves nothing over it, and keeps a copy.
+- **Two computers: more than the library list can be joined.** When Dropbox keeps two copies of a paper's notes, your reading status, a folder, your tags or the AI spending record, **Join the two copies** (Settings → Computers & sync) keeps what is in either.
+- **Downloads fail more clearly and more safely.** A PDF is written whole or not at all. One paper that cannot be saved no longer stops the batch; a full disk stops it and says so. If the sign-in browser cannot start, the run says that once, instead of every paper ending as "blocked". If the app is quit during a download, the run offers **Go on with the download that was cut off**.
+
 ## 1.2.10
 
 - **Import the references of a document.** "Import references" (Library → Add a paper, or the command palette) now takes a document that cites papers, not only a .ris or .bib file: **Word**, **PowerPoint**, **PDF**, a text file or a list you paste (a syllabus, a reading list, a paper's bibliography). The references are found by how they are written, with no AI and nothing sent anywhere, then each is looked up on Crossref and checked against what your document prints: the title, and the author or the year. You see which ones you already have. A record that only resembles a reference is listed unticked ("not sure it is this one"), a whole book is not downloaded, and a reference Crossref does not know is listed for you to decide.
