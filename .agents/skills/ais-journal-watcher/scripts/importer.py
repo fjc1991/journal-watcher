@@ -64,16 +64,18 @@ def _meta_from_item(it, doi=""):
             "abstract": fx.cr_strip_jats(it.get("abstract")), "keywords": it.get("subject") or []}
 
 
-def crossref_search(title, rows=4):
-    """The records Crossref finds for a title (best first), as crossref_meta gives them; [] when nothing is found or it cannot be reached.
-    Only the title is sent."""
+def crossref_search(title, rows=4, strict=False):
+    """The records Crossref finds for a title (best first), as crossref_meta gives them; [] when nothing is found or it cannot be reached (strict: an answer that
+    did not come raises OSError instead, so "not found" and "not asked" can be told apart). Only the title is sent."""
     if os.environ.get("JW_OFFLINE") or len(str(title or "").strip()) < 8:
         return []
     try:
         raw, _ = dl.http_get("https://api.crossref.org/works?query.bibliographic=%s&rows=%d" % (urllib.parse.quote(str(title)[:250]), rows), timeout=30,
                              headers={"Accept": "application/json"})
         items = json.loads(raw.decode("utf-8", "replace")).get("message", {}).get("items") or []
-    except Exception:
+    except Exception as e:
+        if strict:
+            raise OSError("Crossref did not answer (%s)" % str(e)[:80])
         return []
     return [m for m in (_meta_from_item(it) for it in items) if m and m.get("doi")]
 

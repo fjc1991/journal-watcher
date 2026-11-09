@@ -1802,6 +1802,126 @@ print("JSON" + json.dumps(out))
             else:
                 open(idx_, "w", encoding="utf-8").write(saved_idx)
     check("paper kinds: a paper you add is a journal article, a preprint, a conference paper or other (from Crossref, or from the PDF's stamp or footer; an arXiv stamp beats a published version found by title), filed under its venue with a short abbreviation, kept next to the PDF (not in the index), listed with its type, changed without touching the index; the index writers keep unknown columns", t_kinds)
+    def t_refextract():
+        """References in a document you have (Word, PowerPoint, PDF, text): found by their shape (no AI, nothing sent), each looked up on Crossref and CHECKED against
+        what the document prints; a record that only resembles it is 'unsure', a book is not downloaded, a sentence that is not a reference is dropped, an answer
+        Crossref did not give is asked for again and then said plainly; the AI is a backup whose cost is known first and whose list is checked the same way."""
+        import io, zipfile, pymupdf, refextract as rx, ai as ai_
+        REC = {
+            "koning": {"title": "Experimentation and Start-up Performance: Evidence from A/B Testing", "authors": ["Rembrand Koning", "Sharique Hasan"], "container": "Management Science", "doi": "10.1287/mnsc.2021.4209", "pub_date": "2022-09", "type": "journal-article"},
+            "koning_wp": {"title": "Experimentation and Start-up Performance: Evidence from A/B Testing", "authors": ["Rembrand Koning"], "container": "", "doi": "10.2139/ssrn.3440291", "pub_date": "2019-08", "type": "posted-content"},
+            "wiki": {"title": "Wikipedia matters", "authors": ["Marit Hinnosaar"], "container": "Journal of Economics & Management Strategy", "doi": "10.1111/jems.12421", "pub_date": "2021-07", "type": "journal-article"},
+            "cui": {"title": "The Effects of Generative AI on High-Skilled Work: Evidence from Three Field Experiments with Software Developers", "authors": ["Kevin Zheyuan Cui"], "container": "Management Science", "doi": "10.1287/mnsc.2025.00535", "pub_date": "2026-01", "type": "journal-article"},
+            "lookalike": {"title": "Design and analysis of switchback experiments in ride sharing", "authors": ["Someone Else"], "container": "Other Journal", "doi": "10.9999/other", "pub_date": "2011-01", "type": "journal-article"},
+            "book": {"title": "Trustworthy Online Controlled Experiments", "authors": ["Ron Kohavi"], "container": "", "doi": "10.1017/9781108653985", "pub_date": "2020-03", "type": "book"},
+            "ieee": {"title": "Deep residual learning for image recognition", "authors": ["Kaiming He"], "container": "CVPR", "doi": "10.1109/cvpr.2016.90", "pub_date": "2016-06", "type": "proceedings-article"},
+            "doi": {"title": "A paper known by its DOI", "authors": ["Ann Lee"], "container": "ISR", "doi": "10.1287/isre.2024.0001", "pub_date": "2024-01", "type": "journal-article"},
+        }
+        asked, fail = [], {"n": 0}
+        def fake_search(q, rows=4, strict=False):
+            asked.append(q)
+            if fail["n"]:
+                fail["n"] -= 1
+                if strict:
+                    raise OSError("Crossref did not answer")
+                return []
+            ql = q.lower()
+            hits = [REC[k] for k in ("koning_wp", "koning") if "start-up performance" in ql] + [REC["wiki"]] * ("wikipedia matters" in ql) + [REC["cui"]] * ("high-skilled work" in ql) \
+                + [REC["lookalike"]] * ("switchback" in ql) + [REC["book"]] * ("trustworthy online" in ql) + [REC["ieee"]] * ("residual learning" in ql)
+            return [dict(h) for h in hits]
+        keep = (importer.crossref_search, importer.crossref_meta, rx.RETRY_WAIT, ai_.chat)
+        importer.crossref_search, importer.crossref_meta, rx.RETRY_WAIT = fake_search, (lambda d: dict(REC["doi"]) if d.lower() == REC["doi"]["doi"] else None), 0
+        try:
+            APA = "Koning, R., Hasan, S., and Chatterji, A. (2022). Experimentation and start-up performance: Evidence from A/B testing. Management Science, 68, 6434-6453. Start-ups that adopted A/B testing tools grew 30% to 100% more after a year. " + "It is short and motivating, and it is also observational. " * 4 + "Zzfarword ends the note."
+            paras_xml = "".join("<w:p><w:r><w:t>%s</w:t></w:r></w:p>" % t for t in [
+                "Week 1. Why experiment? Causality in 2026",
+                APA.replace("&", "&amp;"),
+                "Hinnosaar, M., Hinnosaar, T., Kummer, M., and Slivko, O. (2023). Wikipedia matters. Journal of Economics &amp; Management Strategy, 32(3), 657-669. Kummer&apos;s own field experiment.",
+                "Cui, K. Z., Demirer, M., Jaffe, S., Musolff, L., Peng, S., and Salz, T. The effects of generative AI on high-skilled work: Evidence from three field experiments with software developers. Management Science, forthcoming.",
+                "Bojinov, I., Simchi-Levi, D., and Zhao, J. (2023). Design and analysis of switchback experiments. Management Science, 69, 3759-3777.",
+                "Kohavi, R., Tang, D., and Xu, Y. (2020). Trustworthy online controlled experiments. Cambridge University Press.",
+                "Peeking gets a remedy, not only a warning. Fixed horizons, or always-valid sequential tests (Johari et al. 2022).",
+                "Frick, Belo and Telang showed in 2023 that incentives were misaligned.",
+                "Nobody, A., and Unknown, B. (2021). A working paper nobody has indexed anywhere. Unpublished manuscript.",
+            ]) + '<w:p><w:hyperlink r:id="rId9"><w:r><w:t>Lee (2024), the linked paper</w:t></w:r></w:hyperlink></w:p>'
+            zb = io.BytesIO()
+            with zipfile.ZipFile(zb, "w") as z:
+                z.writestr("word/document.xml", '<w:document xmlns:w="w" xmlns:r="r"><w:body>%s</w:body></w:document>' % paras_xml)
+                z.writestr("word/_rels/document.xml.rels", '<Relationships><Relationship Id="rId9" Type="hyperlink" Target="https://doi.org/10.1287/isre.2024.0001" TargetMode="External"/></Relationships>')
+                z.writestr("word/footnotes.xml", '<w:footnotes xmlns:w="w"><w:p><w:r><w:t>A footnote, no reference.</w:t></w:r></w:p></w:footnotes>')
+            docx = zb.getvalue()
+            ps = rx.paragraphs(docx, "syllabus.docx")
+            assert len(ps) == 11 and "Kummer's own" in ps[2] and ps[9].endswith("https://doi.org/10.1287/isre.2024.0001") and ps[10].startswith("A footnote"), ps
+            cs = rx.candidates(ps)
+            assert not any(c.startswith(("Week 1", "Peeking", "A footnote")) for c in cs) and any(c.startswith("Cui, K. Z.") for c in cs) and any("Lee (2024)" in c for c in cs), cs
+            pr = rx.parse_ref(APA)
+            assert pr["year"] == "2022" and pr["title"] == "Experimentation and start-up performance: Evidence from A/B testing" and pr["venue"] == "Management Science" and pr["cut"] <= len(APA), pr
+            assert rx.parse_ref(cs[2])["title"].startswith("The effects of generative AI on high-skilled work") and rx.parse_ref(cs[2])["year"] == "", rx.parse_ref(cs[2])
+            msgs = list(rx.extract_stream(docx, "syllabus.docx"))
+            done = msgs[-1]
+            assert done["type"] == "done" and [m for m in msgs if m["type"] == "status" and m.get("total") == len(cs) and m.get("step") == 2], msgs[:3]
+            E = {e["doi"] or e["title"]: e for e in done["entries"]}
+            k = E["10.1287/mnsc.2021.4209"]
+            assert k["status"] == "found" and k["journal"] == "Management Science" and "10.2139/ssrn.3440291" not in E, "the published article, not the working paper of the same title"
+            assert E["10.1111/jems.12421"]["status"] == "found", "a two-word title, online 2021 and printed 2023: the author and the year (two either way) make it found"
+            assert E["10.1287/mnsc.2025.00535"]["status"] == "found", "a forthcoming paper with no year is found by its title and author"
+            assert E["10.9999/other"]["status"] == "unsure", "a record whose title only resembles it (other authors, another year) is not taken as found"
+            assert E["10.1017/9781108653985"]["status"] == "book"
+            assert E["10.1287/isre.2024.0001"]["status"] == "found" and "DOI" in E["10.1287/isre.2024.0001"]["why"], "a link to doi.org in the document is asked for directly"
+            nb = E["A working paper nobody has indexed anywhere"]
+            assert nb["status"] == "none" and nb["year"] == "2021" and not nb["doi"], nb
+            assert not any("Frick" in (e["ref"] or "") for e in done["entries"]), "a sentence that only begins like a reference is dropped"
+            assert all(len(q) <= 400 for q in asked) and not any("zzfarword" in q.lower() for q in asked), "the reference's own words go to Crossref, not the notes after it"
+            assert done["ai"]["cost"] is not None and done["ai"]["model"] and done["candidates"] == len(cs), done["ai"]
+            # the check itself
+            assert rx.check(REC["wiki"], "Smith, J. (2022). Wikipedia matters. Journal X.")[0] != "found", "a two-word title with another author is not found, though the year fits"
+            assert rx.check(REC["wiki"], "Hinnosaar, M. (2021). Wikipedia matters. JEMS.")[0] == "found", "a two-word title needs both the author and the year"
+            assert rx.check(REC["wiki"], "Completely different words about platforms (1999).")[0] == ""
+            assert rx.check(REC["koning"], "Koning, R. (2022). Experimentation and start-up performance. Management Science.")[0] == "found", "the subtitle left out"
+            assert rx.check(REC["koning"], "Experimentation and start-up performance: Evidence from A/B testing")[0] == "unsure", "the title alone, no author and no year: not sure"
+            # Crossref gives no answer once: asked again; twice: said plainly, not "not on Crossref"
+            fail["n"] = 1
+            assert rx.resolve(APA)["status"] == "found"
+            fail["n"] = 2
+            e = rx.resolve(APA)
+            assert e["status"] == "none" and e.get("unasked") and "did not answer" in e["why"], e
+            # other kinds of file
+            IEEE = '[1] K. He, X. Zhang, S. Ren, and J. Sun, "Deep residual learning for image recognition," in Proc. CVPR, 2016, pp. 770-778.'
+            ents = rx.paragraphs(("References\n\n" + IEEE + "\n[2] A. Nobody, \"Nothing anybody indexed at all,\" 2001.\n\nKoning, R., Hasan, S., and Chatterji, A. (2022). Experimentation and\nstart-up performance: Evidence from A/B testing. Management\nScience, 68, 6434-6453.\n").encode(), "list.txt")
+            assert len(ents) == 4 and ents[1] == IEEE and ents[3].endswith("Science, 68, 6434-6453."), ents
+            assert rx.resolve(IEEE)["doi"] == "10.1109/cvpr.2016.90" and rx.parse_ref(IEEE)["title"] == "Deep residual learning for image recognition"
+            d_ = pymupdf.open(); pg = d_.new_page(); pg.insert_textbox(pymupdf.Rect(60, 60, 400, 400), "References\n" + APA[:118] + "\nHinnosaar, M., Hinnosaar, T., Kummer, M., and Slivko, O. (2023). Wikipedia matters. Journal of Economics and Management Strategy, 32(3).", fontsize=9)
+            pdf_refs = rx.candidates(rx.paragraphs(d_.tobytes(), "refs.pdf")); d_.close()
+            assert len(pdf_refs) == 2 and pdf_refs[0].startswith("Koning, R.") and "Evidence from A/B testing" in pdf_refs[0] and pdf_refs[1].startswith("Hinnosaar"), pdf_refs
+            zp = io.BytesIO()
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("ppt/slides/slide1.xml", '<p:sld xmlns:a="a"><a:p><a:r><a:t>Readings</a:t></a:r></a:p><a:p><a:r><a:t>%s</a:t></a:r></a:p></p:sld>' % APA[:118].replace("&", "&amp;"))
+            assert rx.candidates(rx.paragraphs(zp.getvalue(), "deck.pptx")) == [APA[:118].strip()]
+            for bad, name, words in ((b"\xd0\xcf\x11\xe0old word file", "old.doc", "save it as .docx"), (b"PK\x03\x04broken", "x.docx", "not a document"), (b"", "e.txt", "empty")):
+                try:
+                    rx.paragraphs(bad, name); raise AssertionError("no error for " + name)
+                except ValueError as e:
+                    assert words in str(e), (name, str(e))
+            assert list(rx.extract_stream(b"\xd0\xcf\x11\xe0old", "old.doc"))[-1]["type"] == "error"
+            # the AI as a backup: its list is checked on Crossref like the rest; a reference it made up is not "found"; an AI error is said, nothing else happens
+            class R:
+                text = json.dumps({"references": [{"authors": "Koning, R., Hasan, S.", "year": "2022", "title": "Experimentation and start-up performance: Evidence from A/B testing", "venue": "Management Science", "doi": ""},
+                                                  {"authors": "Ghost, A.", "year": "2020", "title": "A paper the model invented from thin air", "venue": "Nature", "doi": "10.1/invented"},
+                                                  {"authors": "", "year": "", "title": "", "venue": "", "doi": ""}]})
+                cost, provider, model = 0.012, "fake", "m1"
+            sent = []
+            ai_.chat = lambda feature, messages, **kw: sent.append((feature, messages, kw)) or R()
+            am = list(rx.ai_stream(docx, "syllabus.docx"))
+            ae = am[-1]["entries"]
+            assert am[-1]["type"] == "done" and am[-1]["cost"] == 0.012 and len(sent) == 1 and sent[0][0] == "refs" and sent[0][2].get("schema") and "Wikipedia matters" in sent[0][1][0]["content"], am[-1]
+            assert [x["status"] for x in ae] == ["found", "none"] and ae[0]["doi"] == "10.1287/mnsc.2021.4209" and not ae[1]["doi"], ae
+            def boom(*a, **k):
+                raise ai_.AIError("This month's AI budget is used up.")
+            ai_.chat = boom
+            assert list(rx.ai_stream(docx, "syllabus.docx"))[-1] == {"type": "error", "error": "This month's AI budget is used up."}
+        finally:
+            importer.crossref_search, importer.crossref_meta, rx.RETRY_WAIT, ai_.chat = keep
+    check("references in a document (Word, PowerPoint, PDF, text): found by their shape, each checked on Crossref against what the document prints (a look-alike is 'unsure', a book is not downloaded, prose is dropped, an unanswered question is asked again); the AI is a backup whose list is checked the same way", t_refextract)
     def t_import_review_rules():
         """The rules behind the review dialog that a reviewer found missing: a token is claimed atomically and expires, a name clash never overwrites, dates are real dates, a paper
         is recognised with or without a DOI, the confirmed journal is kept, and 'confirmed' needs more than a title."""

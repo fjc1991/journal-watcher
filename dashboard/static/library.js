@@ -673,7 +673,7 @@ function addDialog() {
   d.innerHTML = `<h2>Add a paper</h2><p class="pmeta">It is filed like every other paper: <code>Papers/YYYY-MM/&lt;Journal&gt;/</code>, with an entry in the index.</p>
     <label class="lbl">From a DOI (needs a free copy: open access, arXiv, SSRN…)</label><div class="row"><input type="text" id="ad-doi" placeholder="10.1287/isre.2024.0984  or  https://doi.org/…"><button class="btn primary" id="ad-doibtn">Add</button></div>
     <label class="lbl">Or a PDF from your computer (you check its details before it is added)</label><div class="dropzone" id="ad-drop">Drop a PDF here or <a href="#" id="ad-pick">choose a file</a><input type="file" id="ad-file" accept="application/pdf" multiple class="hide"></div>
-    <div class="pmeta" style="margin-top:8px">Have a reference list from EndNote, Mendeley or Zotero? <a href="#" id="ad-bib">Import a bibliography (.ris / .bib)…</a></div>
+    <div class="pmeta" style="margin-top:8px">Have a document that cites papers (a syllabus, a reading list, a Word or PDF file) or a reference list from EndNote, Mendeley or Zotero? <a href="#" id="ad-bib">Import references…</a></div>
     <label class="chk"><input type="checkbox" id="ad-sum"> Write a summary after adding a DOI (uses Claude, about 1–2 cents)</label>
     <div class="pmeta" id="ad-msg" style="min-height:20px;margin-top:8px"></div><div class="row" style="justify-content:flex-end"><button class="btn" id="ad-close">Close</button></div>`;
   document.body.append(d); d.showModal();

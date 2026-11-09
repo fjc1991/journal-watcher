@@ -38,6 +38,7 @@ import activity  # noqa: E402
 import aifiles  # noqa: E402
 import authorcache as ac  # noqa: E402
 import bibimport  # noqa: E402
+import refextract  # noqa: E402
 import books  # noqa: E402
 import exports  # noqa: E402
 import folders as fo  # noqa: E402
@@ -1147,6 +1148,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if not self.local_only():
             return self.send_json({"error": "forbidden"}, 403)
+        if path == "/api/refs/extract":  # a document with references (Word, PowerPoint, PDF, text; the raw file is the body, X-Filename its name): its references, each
+            # looked up on Crossref, streamed with progress. X-Mode "ai": the AI lists the references first (the page showed its cost); otherwise no AI call.
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= refextract.MAX_BYTES:
+                return self.send_json({"error": "The file is empty or larger than 150 MB."}, 400)
+            data = self.rfile.read(n)
+            name = urllib.parse.unquote(self.headers.get("X-Filename") or "pasted text")[:200]
+            use_ai = self.headers.get("X-Mode") == "ai"
+
+            def gen():
+                for m in (refextract.ai_stream if use_ai else refextract.extract_stream)(data, name):
+                    if m.get("type") == "done":                    # (each reference marked with the paper in your library, if you have it)
+                        m = dict(m, entries=bibimport.match(m["entries"], pl.library()))
+                    yield m
+            return self.stream_ndjson(gen(), job=self.job_of("refs", "References · " + name[:60]) if use_ai else None)
         if path == "/api/run/attach":   # a PDF you downloaded yourself, for one paper of a run: the raw PDF is the body; X-Run, X-Paper (URL-encoded)
             n = int(self.headers.get("Content-Length") or 0)
             if not 0 < n <= 150 * 1024 * 1024:

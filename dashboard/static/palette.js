@@ -39,7 +39,7 @@ function build() {
   add("act", "Switch between light and dark", "moon", "settings", () => $("#themebtn").click(), {hint: "action", hay: "theme dark light mode night"});
   add("act", "Look: Subtle or Bold…", "sparkle", "settings", async () => { await closeReader(); window.Settings && window.Settings.open("look"); }, {hint: "action", hay: "appearance colours subtle bold tint"});
   add("act", "Add a paper (PDF or DOI)", "add", "library", () => window.LibraryUI && window.LibraryUI.addDialog(), {hint: "action", hay: "import upload drop pdf doi new paper"});
-  add("act", "Import a bibliography (.ris / .bib)", "add", "library", () => window.BibImport && window.BibImport.open(), {hint: "action", hay: "endnote mendeley zotero reference list references import bibtex ris overleaf"});
+  add("act", "Import references (Word, PDF, .ris / .bib…)", "add", "library", () => window.BibImport && window.BibImport.open(), {hint: "action", hay: "endnote mendeley zotero reference list references import bibtex ris overleaf bibliography word docx pdf powerpoint pptx syllabus reading list citations document"});
   add("act", "New folder", "plus", "folders", async () => { await nav({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = $('[data-fp="new"]'); b && b.click(); }, 250); }, {hint: "action", hay: "create folder project"});
   return out;
 }

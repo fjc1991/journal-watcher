@@ -431,7 +431,7 @@ def fake_screen(system, batch, usage, override=None):                           
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen
 import importer as imp
-def fake_imp_search(title, rows=4):                                               # Crossref's answer to a title search (and what was asked): two records for the "Alpha" PDF, none for anything else
+def fake_imp_search(title, rows=4, **k):                                               # Crossref's answer to a title search (and what was asked): two records for the "Alpha" PDF, none for anything else
     open(IMPLOG, 'a').write(title + '\n')
     if 'delta' in title.lower():
         return [{'title': 'Delta study of marketplace reputation systems and seller behaviour', 'authors': ['Dee Quill', 'Ed Fenwick'], 'container': 'Marketplace Letters', 'issn': [], 'doi': '10.9999/delta.2019.3', 'pub_date': '2019-09-01', 'url': 'https://doi.org/10.9999/delta.2019.3'}]
@@ -1334,6 +1334,37 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('[data-bd="go"]'); page.wait_for_function("document.querySelector('#toast') && /Fetching 2 papers/.test(document.querySelector('#toast').textContent)", timeout=8000)
             check("Fetch sends the ticked references (title, authors, DOI, journal) to the download routes", len(sent) == 1 and [i["doi"] for i in sent[0]["items"]] == ["10.9999/not-here", ""] and sent[0]["items"][0]["venue"] == "ISR" and sent[0]["items"][0]["authors"] == ["H. Lee"] and sent[0]["label"].startswith("Imported: my-refs"), json.dumps(sent)[:300])
             page.unroute("**/api/related/download")
+            print("import references from a document (Word, PDF, text)")
+            n_seen_r = len(SEEN); n_fold_r = len(api("/api/folders"))
+            doc_ = ("Reading list for week 3\n\n"
+                    "Alpha, A., and Beta, B. (2021). Alpha study of onboarding complementors in digital platform ecosystems and their governance. Journal of Test Platforms, 3(1), 1-20. A note about why it is on the list.\n\n"
+                    "Ghost, G., and Nobody, N. (2019). A report that no database knows anything about. Unpublished manuscript.\n\n"
+                    "Someone, S. (2026). %s. MIS Quarterly.\n\n"
+                    "The seminar meets on Tuesdays in 2026.\n" % rows[0][0])
+            page.evaluate("window.LibraryUI.addDialog()"); page.wait_for_selector("#ad-bib"); page.click("#ad-bib"); page.wait_for_selector("#bibdlg #bd-file", state="attached")
+            page.click('#bibdlg [data-bd="clear"]') if page.locator('#bibdlg [data-bd="clear"]').count() else None
+            page.set_input_files("#bd-file", files=[{"name": "week3 readings.txt", "mimeType": "text/plain", "buffer": doc_.encode()}]); page.wait_for_selector(".bd-sum", timeout=20000)
+            sum_ = page.inner_text(".bd-sum")
+            check("a document's references are found by their shape and looked up (no AI): three references, one on Crossref, one not, one you already have; prose is not listed",
+                  "3 references found" in sum_ and "1 on Crossref" in sum_ and "1 already in your library" in sum_ and "Tuesdays" not in page.inner_text("#bd-body") and len(SEEN) == n_seen_r, sum_)
+            check("…the one found on Crossref is ticked (with its DOI), the one Crossref does not know is listed unticked for you to decide",
+                  page.locator(".bd-r input:checked").count() == 1 and "10.9999/alpha.2021.1" in page.inner_text(".bd-r >> nth=0") and "not on Crossref" in page.inner_text(".bd-r.weak") and page.locator(".bd-r.weak input:checked").count() == 0, page.inner_text(".bd-list")[:300])
+            check("…the AI is offered as a backup with its cost on the button, and is not asked by itself", "Ask the AI" in page.inner_text('[data-bd="ai"]') and "sent to" in page.inner_text("#bd-airow") and len(SEEN) == n_seen_r, page.inner_text("#bd-airow")[:200])
+            check("…you choose where they go: the library only, each of your folders, or a new folder", page.locator("#bd-to option").count() == n_fold_r + 2 and page.input_value("#bd-to") == "lib")
+            page.select_option("#bd-to", "new"); page.wait_for_selector("#bd-toname:not(.hide)")
+            check("…a new folder is named after the document, and the button says the paper you have goes there too", page.input_value("#bd-toname") == "week3 readings" and "put the 1 you have in the folder" in page.inner_text('[data-bd="go"]'), page.inner_text('[data-bd="go"]'))
+            sent_r = []
+            page.route("**/api/related/download", lambda route: (sent_r.append(json.loads(route.request.post_data)), route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True, "n": 1, "have": [], "run": {"id": "x", "kind": "picks", "papers": []}}))))
+            page.click('[data-bd="go"]'); page.wait_for_function("document.querySelector('#toast') && /Fetching 1 paper into “week3 readings”/.test(document.querySelector('#toast').textContent)", timeout=8000)
+            page.unroute("**/api/related/download")
+            nf_ = next((f_ for f_ in api("/api/folders") if f_["name"] == "week3 readings"), None)
+            check("Fetch makes the folder, puts the paper you already have in it, and sends the found reference to the download routes with that folder",
+                  nf_ is not None and nf_["count"] == 1 and len(sent_r) == 1 and sent_r[0]["folder"] == nf_["id"] and [i_["doi"] for i_ in sent_r[0]["items"]] == ["10.9999/alpha.2021.1"], (nf_, json.dumps(sent_r)[:300]))
+            if nf_:
+                api("/api/folders", {"action": "delete", "id": nf_["id"]})                  # (the checks that follow count the folders)
+            page.goto("about:blank"); page.goto(base + "/#/library"); page.wait_for_selector("#libitem")
+            r_old = urllib.request.Request(base + "/api/refs/extract", b"\xd0\xcf\x11\xe0old word", {"X-Filename": "old.doc"})
+            check("an old .doc file is refused in plain words (save it as .docx)", "save it as .docx" in urllib.request.urlopen(r_old).read().decode())
             keys_ = urllib.request.urlopen(base + "/api/export/cites?folder=lab").read().decode().strip()
             check("the LaTeX export gives one \\citep{…} with the keys of the .bib file", keys_.startswith("\\citep{") and keys_.endswith("}") and keys_.count(",") == 2, keys_)
             exp_dir = os.path.join(TMP, "exported"); api("/api/settings", {"prefs": {"export_dir": exp_dir}})
