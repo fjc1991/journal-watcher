@@ -1884,7 +1884,7 @@ print("JSON" + json.dumps(out))
             assert rx.check({"title": "Trust in Online Markets", "authors": ["Zed Quill"], "pub_date": "2019"}, KIM)[0] == "unsure"
             assert rx.check({"title": "Management Information Systems", "authors": ["Zed Quill"], "pub_date": "2021"}, KIM)[0] == "", "the journal's name is not the title"
             assert rx.check({"title": "Trust in online markets for used goods: Reply", "authors": ["Other One"], "pub_date": "2021"}, KIM)[0] != "found"
-            assert rx.check({"title": "Trust in online markets for used goods", "authors": ["Li He"], "pub_date": "2012"}, "Kim, S. (2020). Trust in online markets for used goods when he sells. JMIS.")[0] != "found", "'He' is not among the authors"
+            assert rx.check({"title": "Trust in online markets when he sells", "authors": ["Li He"], "pub_date": "2012"}, "Kim, S. (2020). Trust in online markets when he sells. JMIS.")[0] == "unsure", "'He' is a word of the title, not one of the authors"
             assert rx.check({"title": "What’s trending in difference-in-differences? A synthesis of the recent econometrics literature", "authors": ["Jonathan Roth"], "pub_date": "2023-08"},
                             "Roth, J., and Poe, J. (2023). What's trending in difference-in-differences? A synthesis of the recent econometrics literature. Journal of Econometrics, 235.")[0] == "found", "a title with a question mark"
             assert rx.check({"title": "Long-term effects of socio-economic status on health", "authors": ["Ann Kim"], "pub_date": "2020"}, "Kim, A. (2020). Longterm effects of socio-economic status on health. J.")[0] == "found", "a word joined at a line's end"
