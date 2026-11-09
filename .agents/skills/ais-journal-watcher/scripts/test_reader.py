@@ -576,6 +576,28 @@ c, j = post("/api/run/folder", json.dumps({"run_id": runU.id, "new_name": "Picke
 assert c == 200 and j["folder"] == "Picked later" and any(f_["name"] == "Picked later" for f_ in j["folders"]) and pl.Run.load(runU.id).papers["doi:10.1/u1"].get("folder"), (c, j)
 c, j = post("/api/run/folder", json.dumps({"run_id": runU.id, "new_name": "Picked later"}).encode(), jh); assert c == 400 and "exists" in j["error"], (c, j)
 c, j = post("/api/run/folder", json.dumps({"run_id": "nope", "folder": fidR}).encode(), jh); assert c == 404, (c, j)
+# a paper that waits for the folder and comes another way (another run, the Library's Add) is filed when the run is next looked at
+V = paper(id="doi:10.1287/mnsc.2024.0022", doi="10.1287/mnsc.2024.0022"); runV = mkrun([V], params={"label": "this folder"})
+assert pl.run_to_folder(runV, fidR)["pending"] == 1
+hv = dl.out_path(dict(V)); open(hv, "wb").write(R["right"]); dl.save_index(dict(V), os.path.relpath(hv, dl.ROOT), "ok", "added by you")
+runV2 = pl.Run.load(runV.id); pl.mark_downloaded(runV2)
+assert runV2.papers[V["id"]]["dl_status"] == "ok" and dl.index_key(V) in fo.get(fidR)["papers"], fo.get(fidR)["papers"]
+# a paper the running download has just brought in (its file is there, the index was read a moment before) is filed now, not left waiting
+W9 = paper(id="doi:10.1/w9", doi="10.1/w9", title="Just arrived", dl_status="ok"); hw = os.path.join(dl.PAPERS, "2024-05", "x_w9.pdf"); open(hw, "wb").write(R["small"])
+W9["file"] = os.path.relpath(hw, dl.ROOT); runW9 = mkrun([W9], params={"label": "this folder"})
+r = pl.run_to_folder(runW9, fidR)
+assert r["added"] == 1 and r["pending"] == 0 and "10.1/w9" in fo.get(fidR)["papers"], r
+# without the papers still to come, a Discover run does not take the folder's name (its page would promise what will not happen)
+runG2 = mkrun([paper(id="doi:10.1/g2", doi="10.1/g2", title="Waiting one", dl_status="failed")], params={"label": "this folder"})
+pl.run_to_folder(runG2, fidR, pending=False)
+assert runG2.title() == "Picks · this folder" and not runG2.params.get("folder"), runG2.params
+# "Not in any folder" as the scope of the tools that take one (search in the PDFs, ask…)
+nf_ = sv.Handler.scope_rows(None, {"folder": "~none"})
+assert nf_ is not None and all(not r_.get("folders") for r_ in nf_), "no 'no such folder'"
+# a new folder is made only once its run is found
+n_f = len(fo.list_all())
+c, j = post("/api/run/folder", json.dumps({"run_id": "nope", "new_name": "Never made"}).encode(), jh)
+assert c == 404 and len(fo.list_all()) == n_f and not any(f_["name"] == "Never made" for f_ in fo.list_all()), (c, j)
 # the Library: papers in no folder, newest first
 import library_search as ls_
 rows3 = [{"file": "a.pdf", "title": "A", "folders": [], "date_checked": "2026-11-01"}, {"file": "b.pdf", "title": "B", "folders": ["x"], "date_checked": "2026-11-05"},

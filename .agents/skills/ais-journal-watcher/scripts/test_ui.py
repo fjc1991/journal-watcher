@@ -1390,7 +1390,7 @@ fx.fetch_journal = lambda j: []                                                 
             page.click("#fldbtn"); page.wait_for_selector("#rf-dlg[open]")
             check("…'Add to a folder…' asks which folder (the run's own first) and offers the papers still to download, which go in when they arrive",
                   page.input_value("#rf-to") == "lab" and page.locator("#rf-later").count() == 1 and "still to download" in page.inner_text("#rf-dlg"), page.inner_text("#rf-dlg")[:300])
-            page.select_option("#rf-to", "new"); page.fill("#rf-name", "Picked later"); page.click("#rf-go"); page.wait_for_selector("#rf-dlg", state="detached", timeout=10000)
+            page.select_option("#rf-to", "~new"); page.fill("#rf-name", "Picked later"); page.click("#rf-go"); page.wait_for_selector("#rf-dlg", state="detached", timeout=10000)
             fl_ = next((f_ for f_ in api("/api/folders") if f_["name"] == "Picked later"), None)
             page.wait_for_function("document.querySelector('#toast') && /already wait/.test(document.querySelector('#toast').textContent)", timeout=5000)
             check("…a new folder can be made there; a paper still to come that already waits for Lab keeps waiting for Lab (one folder waits per paper), and the message says so",

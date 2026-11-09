@@ -501,9 +501,12 @@ def mark_downloaded(run):
         k = paper_key(p)
         f = have.get(k)
         if f:
+            came = p.get("dl_status") != "ok" or p.get("file") != f
             p["file"], p["dl_status"] = f, "ok"
             md = f[:-4] + ".md"
             p["summary"] = md if os.path.exists(os.path.join(ROOT, md)) else None
+            if came and p.get("folder"):                    # (it waited for a folder and came another way: another run, the Library's Add, a PDF dropped elsewhere)
+                _into_folder(p, k)
         elif k in gone:
             p["file"], p["summary"], p["dl_status"], p["dl_note"] = None, None, "deleted", DELETED_NOTE
         elif p.get("dl_status") == "deleted":               # (no longer deleted: the row was replaced when you added the paper again elsewhere)
@@ -1393,6 +1396,8 @@ def run_to_folder(run, fid, ids=None, pending=True):
         if not p:
             continue
         k = next((x for x in (p.get("lib_key"), paper_key(p)) if x and x in have), None)
+        if not k and p.get("dl_status") == "ok" and has_file(p):
+            k = p.get("lib_key") or paper_key(p)           # (it came while this was being read: the download has its row by now)
         if k:
             keys.append(k)
             continue
@@ -1408,7 +1413,7 @@ def run_to_folder(run, fid, ids=None, pending=True):
     before = set(f.get("papers") or [])
     if keys:
         fo.add(fid, keys)
-    if run.kind == "picks" and (not run.params.get("folder") or not fo.get(run.params["folder"])) and (run.params.get("label") or "related papers") in GENERIC_PICKS:
+    if pending and run.kind == "picks" and (not run.params.get("folder") or not fo.get(run.params["folder"])) and (run.params.get("label") or "related papers") in GENERIC_PICKS:
         run.params.update(folder=fid, folder_name=f["name"], label=f["name"])        # ("Picks · this folder" becomes "Picks · Labor Market Papers")
     run.save(force=True)
     return {"added": sum(1 for k in keys if k not in before), "already": sum(1 for k in keys if k in before), "pending": later, "kept": kept, "folder": f["name"]}
