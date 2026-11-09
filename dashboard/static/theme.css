@@ -194,10 +194,12 @@ body.sb-open .sb-scrim { display: block; }
 /* ---- tool tabs: a row on a hairline, the tool's icon in its colour, the page you are on underlined */
 /* the tool tabs (the Library's and a folder's): large tiles, each with its tool's colour, its name and a one-line hint; the open one filled with its colour */
 .tooltabs { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 8px; padding: 0; margin: 0 0 18px; background: none; border: 0; border-radius: 0; box-shadow: none; max-width: 100%; }
-.tooltabs button { display: grid; grid-template-columns: auto 1fr; column-gap: 9px; align-items: center; text-align: left; min-height: 58px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+/* a tile: the icon beside the name on the first line, the hint under both (the icon used to float between the two lines) */
+.tooltabs button { display: grid; grid-template-columns: 18px 1fr; grid-template-rows: auto auto; column-gap: 8px; row-gap: 4px; align-items: center; align-content: start; text-align: left; min-height: 58px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--panel); color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.25; cursor: pointer; position: relative; box-shadow: none; }
-.tooltabs button .ico { grid-row: 1 / span 2; color: var(--t, var(--ink-2)); width: 22px; height: 22px; }
-.tooltabs button .th { grid-column: 2; display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--ink-2); line-height: 1.3; }
+.tooltabs button .ico { grid-row: 1; grid-column: 1; color: var(--t, var(--ink-2)); width: 18px; height: 18px; }
+.tooltabs button .tn { grid-row: 1; grid-column: 2; min-width: 0; }
+.tooltabs button .th { grid-row: 2; grid-column: 1 / -1; display: block; font-size: 12px; font-weight: 400; color: var(--ink-2); line-height: 1.3; }
 .tooltabs button:hover { background: var(--t-soft, var(--hover)); border-color: var(--t-line, var(--line)); }
 .tooltabs button.on { background: color-mix(in srgb, var(--t, var(--accent)) 20%, var(--panel)); border: 2px solid var(--t, var(--accent)); padding: 9px 11px; }
 .tooltabs button.on .th { color: var(--ink); }
@@ -476,8 +478,6 @@ details.logbox.card { background: none; border: 0; box-shadow: none; }
 details.logbox summary { padding: 6px 2px; font-size: 12px; color: var(--ink-3); }
 details.logbox[open] { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card); }
 details.logbox[open] summary { padding: 10px 14px; }
-.tooltabs button { padding: 9px 9px 10px; font-size: 13.5px; gap: 6px; }
-.tooltabs button .ico { width: 15px; height: 15px; }
 .lt-top { gap: 6px; } .lt-top #lf-sort { max-width: 170px; }
 .tooltabs { margin-bottom: 20px; }
 .runhead .meta { font-size: 13.5px; }
