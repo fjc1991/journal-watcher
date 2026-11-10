@@ -876,7 +876,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def finish_import(self, res, summarize):
         """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does."""
-        row = next((r for r in pl.library() if r["file"] == res["file"]), {})
+        row = pl.library_row(res["file"]) or {}
         if indexer and not res["existing"]:
             indexer.kick(2)
         if summarize and not res["existing"] and not row.get("summary"):
@@ -892,7 +892,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def doc_info(self, rel):
         """Library row of a paper (by its Papers/… path) and the small identity record stored in its notes."""
-        row = next((r for r in pl.library() if r["file"] == rel), None) or {}
+        row = pl.library_row(rel) or {}
         key = (row.get("doi") or row.get("title") or "").lower()
         return row, {"id": key, "title": row.get("title", ""), "doi": row.get("doi", "")}
 
@@ -1301,7 +1301,7 @@ class Handler(BaseHTTPRequestHandler):
             except ImportError:
                 return self.send_json({"error": "The AI backend isn’t installed on this server yet."}, 501)
         if path == "/api/ai/chapter":       # {file, chapter, fresh?, override?}: write (or return the saved) summary of one chapter; streams status | text | final | done | error
-            row_ = next((r for r in pl.library() if r["file"] == b.get("file")), {})
+            row_ = pl.library_row(b.get("file")) or {}
             ov = b.get("override") if isinstance(b.get("override"), dict) else None
             return self.stream_ndjson(books.summary_stream(str(b.get("file") or ""), b.get("chapter"), row_.get("title") or "", bool(b.get("fresh")), ov),
                                       job=self.job_of("summary", "Chapter summary · " + (row_.get("title") or "a book")[:50], file=b.get("file"), tab="sum"))
@@ -1376,7 +1376,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(e.args[0] if e.args else e)}, 400)
             return self.send_json({"ok": True, "folders": fo.list_all()})
         if path == "/api/paper/state":  # {file, status?, star?, takeaway?, page?, total?, opened?}
-            row = next((r for r in pl.library() if r["file"] == b.get("file")), None)
+            row = pl.library_row(b.get("file"))
             if not row:
                 return self.send_json({"error": "no such paper"}, 404)
             try:

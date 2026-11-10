@@ -2443,6 +2443,296 @@ print("JSON" + json.dumps(out))
             else:
                 open(idx_, "w", encoding="utf-8").write(saved_idx)
     check("paper kinds: a paper you add is a journal article, a preprint, a conference paper or other (from Crossref, or from the PDF's stamp or footer; an arXiv stamp beats a published version found by title), filed under its venue with a short abbreviation, kept next to the PDF (not in the index), listed with its type, changed without touching the index; the index writers keep unknown columns", t_kinds)
+
+    def _lib_fixture():
+        """A library of six papers (one a book) in three folders of a scratch data folder; returns (root, restore, rows by name, helpers)."""
+        import builtins, csv, time
+        import pipeline as pl_, readstate as rs_, kinds as kd_, authorcache as ac_
+        root = os.path.realpath(tempfile.mkdtemp(prefix="jw-libcache-"))
+        saved = (pl_.PAPERS, pl_.ROOT, dl.PAPERS, dl.ROOT, fo.DIR, rs_.PATH, ac_.CACHE)
+        pl_.ROOT = dl.ROOT = root; pl_.PAPERS = dl.PAPERS = os.path.join(root, "Papers")
+        fo.DIR, rs_.PATH, ac_.CACHE = os.path.join(pl_.PAPERS, "_folders"), os.path.join(pl_.PAPERS, "_status.json"), os.path.join(root, "authors_cache.json")
+        ac_._mem.clear()
+        def restore():
+            pl_.PAPERS, pl_.ROOT, dl.PAPERS, dl.ROOT, fo.DIR, rs_.PATH, ac_.CACHE = saved
+            ac_._mem.clear(); shutil.rmtree(root, ignore_errors=True)
+        P = {}
+        for i, (ym, jn, ab) in enumerate([("2024-01", "MIS Quarterly", "MISQ"), ("2024-01", "MIS Quarterly", "MISQ"), ("2024-01", "MIS Quarterly", "MISQ"),
+                                          ("2025-03", "Management Science", "MS"), ("2025-03", "Management Science", "MS"), ("2023-05", "Books", "BOOK")]):
+            p = {"title": "Cache paper %d" % i, "doi": "10.77/c%d" % i, "journal": jn, "abbr": ab, "authors": ["Ann Lee"], "pub_date": ym}
+            path = dl.out_path(p); open(path, "wb").write(b"%PDF-1.4 " + str(i).encode())
+            dl.save_index(p, os.path.relpath(path, root), "ok")
+            P[i] = {"pdf": path, "file": os.path.relpath(path, root), "key": p["doi"]}
+        open(P[0]["pdf"][:-4] + ".md", "w").write("# Summary")
+        n0 = ns.load(P[0]["pdf"]); n0["highlights"] = [{"id": "h1", "text": "x"}, {"id": "h2", "text": "y"}]; ns.save(P[0]["pdf"], n0, 0)
+        kd_.write_sidecar(P[1]["pdf"], "conference", "ICIS 2023", "", P[1]["key"])
+        json.dump({"isbn": "9780000000001", "pages": 200, "chapters": [{"title": "One", "from": 1, "to": 20}]}, open(P[5]["pdf"][:-4] + ".book.json", "w"))
+        rs_.update(P[2]["key"], {"status": "read", "star": True})
+        fid = fo.create("Cache folder")["id"]; fo.add(fid, [P[3]["key"]])
+
+        def settle():
+            """Every file and folder an hour old, and read once: from here the cache trusts what it holds (a file written a moment ago is read again on purpose)."""
+            t = time.time() - 3600
+            for b, ds, fs in os.walk(root):
+                for x in ds + fs:
+                    os.utime(os.path.join(b, x), (t, t))
+            os.utime(pl_.PAPERS, (t, t))
+            return pl_.library()
+
+        class Spy:
+            """What a call reads: the files opened and the folders listed under the data folder, and the number of stat calls."""
+            def __enter__(self):
+                self.opened, self.listed, self.stats = [], [], 0
+                self.keep = (builtins.open, os.listdir, os.stat)
+                def op(f, *a, **k):
+                    if isinstance(f, str) and f.startswith(root):
+                        self.opened.append(os.path.relpath(f, root))
+                    return self.keep[0](f, *a, **k)
+                def ld(d=".", *a):
+                    if isinstance(d, str) and d.startswith(root):
+                        self.listed.append(os.path.relpath(d, root))
+                    return self.keep[1](d, *a)
+                def st(*a, **k):
+                    self.stats += 1
+                    return self.keep[2](*a, **k)
+                builtins.open, os.listdir, os.stat = op, ld, st
+                return self
+            def __exit__(self, *a):
+                builtins.open, os.listdir, os.stat = self.keep
+        by = lambda rows: {r["file"]: r for r in rows}   # noqa: E731
+        return root, restore, P, fid, settle, Spy, by
+
+
+    def t_library_cache():
+        import csv
+        import pipeline as pl_, readstate as rs_, kinds as kd_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        try:
+            r1 = settle()
+            assert [r["file"] for r in r1] == [P[i]["file"] for i in (5, 4, 3, 2, 1, 0)], "newest first, as before"
+            b1 = by(r1)
+            assert b1[P[0]["file"]]["summary"] == P[0]["file"][:-4] + ".md" and b1[P[0]["file"]]["notes"] == {"highlights": 2, "cards": 0} and b1[P[1]["file"]]["kind"] == "conference"
+            assert b1[P[2]["file"]]["state"] == {"status": "read", "star": True} and b1[P[3]["file"]]["folders"] == [fid] and b1[P[5]["file"]]["book"]["pages"] == 200 and b1[P[5]["file"]]["kind"] == "book"
+            # nothing changed: nothing is read again (no file is opened), and the answer is the same
+            with Spy() as s:
+                r2 = pl_.library()
+            assert r2 == r1 and s.opened == [], s.opened
+            assert s.stats < 6 * 5, "fewer stat calls than five per paper: %d" % s.stats
+            # the rows are the caller's: changing them changes nothing for the next caller
+            snap = json.loads(json.dumps(r1))            # (what the library said, in objects of its own: r1 itself would change with r2 if the two shared anything)
+            assert snap == r1
+            r2[0]["title"] = "changed"; r2[0]["state"]["star"] = "x"; r2[0]["folders"].append("zz"); r2[-1]["notes"]["highlights"] = 99; r2.pop()
+            r2[0]["book"]["pages"] = 1; r2[0]["book"]["chapters"][0]["title"] = "changed"; r2[0]["book"]["chapters"].append({})
+            r2[3]["state"]["star"] = False; r2[3]["state"]["mine"] = 1; r2[2]["folders"].clear(); r2[2]["state"]["x"] = 1
+            assert pl_.library() == snap, "a caller's change to a row came back"
+
+            def changed(label, change, expect, reads=None):
+                """After `change` (made when the cache trusts everything it holds) the library says `expect`; `reads`: the only files that may be opened for it."""
+                settle(); change()
+                with Spy() as s:
+                    rows = pl_.library()
+                assert expect(by(rows), rows), "stale after: " + label
+                if reads is not None:
+                    assert sorted(s.opened) == sorted(os.path.relpath(p, root) for p in reads), (label, s.opened)
+            f0, f1, f2, f3, f4, f5 = (P[i]["file"] for i in range(6))
+            idx = os.path.join(pl_.PAPERS, "_index.csv")
+            # this app's own saves
+            changed("reading status (readstate.update)", lambda: rs_.update(P[0]["key"], {"status": "toread"}), lambda b, _: b[f0]["state"] == {"status": "toread"})
+            changed("a folder gets a paper (folders.add)", lambda: fo.add(fid, [P[0]["key"]]), lambda b, _: b[f0]["folders"] == [fid])
+            changed("a new folder", lambda: fo.add(fo.create("Second")["id"], [P[0]["key"]]), lambda b, _: b[f0]["folders"] == [fid, "second"])
+            changed("a folder deleted", lambda: fo.delete("second"), lambda b, _: b[f0]["folders"] == [fid])
+            def hl():
+                n = ns.load(P[3]["pdf"]); n["highlights"] = [{"id": "h", "text": "t"}]; ns.save(P[3]["pdf"], n, n["rev"])
+            changed("a first highlight (notes_store.save): only that file is read", hl, lambda b, _: b[f3]["notes"] == {"highlights": 1, "cards": 0}, reads=[ns.notes_path(P[3]["pdf"])])
+            changed("Change type (kinds.write_sidecar)", lambda: kd_.write_sidecar(P[4]["pdf"], "other", "X", "Report", P[4]["key"]), lambda b, _: (b[f4]["kind"], b[f4]["kind_label"]) == ("other", "Report"),
+                    reads=[P[4]["pdf"][:-4] + ".paper.json"])
+            changed("a summary, a card and a skim written", lambda: [open(P[3]["pdf"][:-4] + e, "w").write("{}") for e in (".md", ".card.json", ".skim.json")],
+                    lambda b, _: b[f3]["summary"] and b[f3]["card"] is True and b[f3]["skim"] is True, reads=[])
+            changed("a paper added (download.save_index)", lambda: (open(os.path.join(root, "Papers", "2024-01", "MIS Quarterly", "new.pdf"), "wb").write(b"%PDF"),
+                                                                  dl.save_index({"title": "New", "doi": "10.77/new", "journal": "MIS Quarterly", "abbr": "MISQ"}, "Papers/2024-01/MIS Quarterly/new.pdf", "ok")),
+                    lambda b, rows: rows[0]["key"] == "10.77/new" and len(rows) == 7)
+            # another computer, through Dropbox: files rewritten in place (the folder's own date does not change), replaced, added and removed without this process doing anything
+            def inplace(path, fn):
+                d = json.load(open(path)); fn(d); json.dump(d, open(path, "w"))
+            changed("another computer: reading status", lambda: inplace(rs_.PATH, lambda d: d["papers"].update({P[1]["key"]: {"star": True}})), lambda b, _: b[f1]["state"] == {"star": True})
+            changed("another computer: a folder's list", lambda: inplace(os.path.join(fo.DIR, fid + ".json"), lambda d: d.update(papers=[P[4]["key"]])), lambda b, _: b[f4]["folders"] == [fid] and b[f0]["folders"] == [])
+            changed("another computer: more highlights", lambda: inplace(ns.notes_path(P[0]["pdf"]), lambda d: d["highlights"].append({"id": "h3"})), lambda b, _: b[f0]["notes"]["highlights"] == 3)
+            changed("another computer: the type of a paper", lambda: inplace(P[1]["pdf"][:-4] + ".paper.json", lambda d: d.update(kind="preprint")), lambda b, _: b[f1]["kind"] == "preprint")
+            changed("another computer: a book's details", lambda: inplace(P[5]["pdf"][:-4] + ".book.json", lambda d: d.update(pages=321)), lambda b, _: b[f5]["book"]["pages"] == 321)
+            changed("another computer: notes deleted", lambda: os.remove(ns.notes_path(P[0]["pdf"])), lambda b, _: b[f0]["notes"] is None)
+            changed("another computer: a summary deleted", lambda: os.remove(P[0]["pdf"][:-4] + ".md"), lambda b, _: b[f0]["summary"] is None)
+            changed("another computer: a type file deleted", lambda: os.remove(P[1]["pdf"][:-4] + ".paper.json"), lambda b, _: b[f1]["kind"] == "journal")
+            def drop():
+                rr = list(csv.DictReader(open(idx, newline="")))
+                with open(idx + ".x", "w", newline="") as f:
+                    w = csv.DictWriter(f, dl.INDEX_COLS); w.writeheader(); w.writerows([r for r in rr if r["doi"] != "10.77/new"])
+                os.replace(idx + ".x", idx)
+            changed("another computer: the index without a paper", drop, lambda b, rows: len(rows) == 6 and "Papers/2024-01/MIS Quarterly/new.pdf" not in b)
+            # a second write a moment after the first, with the same size and the same date (a clock that counts in seconds, or two saves within one tick): still seen
+            side = P[2]["pdf"][:-4] + ".paper.json"
+            settle(); json.dump({"kind": "preprint", "for": P[2]["key"]}, open(side, "w")); st = os.stat(side)
+            assert by(pl_.library())[f2]["kind"] == "preprint"
+            txt = json.dumps({"kind": "other", "for": P[2]["key"]}); open(side, "w").write(txt + " " * (st.st_size - len(txt))); os.utime(side, ns=(st.st_atime_ns, st.st_mtime_ns))
+            assert (os.stat(side).st_size, os.stat(side).st_mtime_ns, os.stat(side).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino)
+            assert by(pl_.library())[f2]["kind"] == "other", "a file written a moment ago was trusted"
+            fp = os.path.join(fo.DIR, fid + ".json")       # (the same for a folder's list: P[4] is in it; then P[5] in its place, same length, same date)
+            settle(); d = json.load(open(fp)); assert d["papers"] == [P[4]["key"]], d
+            json.dump(d, open(fp, "w")); st = os.stat(fp); assert by(pl_.library())[f4]["folders"] == [fid]
+            d["papers"] = [P[5]["key"]]; json.dump(d, open(fp, "w")); os.utime(fp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            assert (os.stat(fp).st_size, os.stat(fp).st_mtime_ns, os.stat(fp).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino)
+            rows = by(pl_.library()); assert rows[f5]["folders"] == [fid] and rows[f4]["folders"] == [], "a folder file written a moment ago was trusted"
+            # a PDF whose name on disk is not exactly the index's (another case on a Mac): its summary is still found
+            settle(); os.rename(P[4]["pdf"], P[4]["pdf"][:-4] + ".PDF"); open(P[4]["pdf"][:-4] + ".md", "w").write("# s")
+            assert by(pl_.library())[f4]["summary"] == f4[:-4] + ".md"
+            # a disk that lists its names in another form than the index has them (accents on a Mac): every file is asked for by name, as before
+            want = settle(); real_ld = os.listdir
+            assert by(want)[f3]["summary"] and by(want)[f3]["card"] is True and by(want)[f3]["skim"] is True and by(want)[f3]["notes"] == {"highlights": 1, "cards": 0} and by(want)[f1]["kind"] == "journal"
+            try:
+                os.listdir = lambda d=".": [x if os.path.basename(str(d)) == "_folders" else x.upper() for x in real_ld(d)]
+                got = pl_.library()
+            finally:
+                os.listdir = real_ld
+            assert got == want, "a paper's files were not found when the folder lists them under another form of their names"
+            # another data folder (the tests, a moved home): never the other one's rows
+            other = tempfile.mkdtemp(prefix="jw-libcache2-"); keep = (pl_.PAPERS, pl_.ROOT)
+            try:
+                pl_.PAPERS, pl_.ROOT = os.path.join(other, "Papers"), other
+                assert pl_.library() == []
+            finally:
+                pl_.PAPERS, pl_.ROOT = keep; shutil.rmtree(other, ignore_errors=True)
+            assert len(pl_.library()) == 6
+            # two threads at once, while a third keeps saving: every answer is a whole library
+            import threading
+            errs, stop = [], threading.Event()
+            def reader():
+                try:
+                    for _ in range(40):
+                        rows = pl_.library(); assert len(rows) == 6 and all(r["key"] for r in rows)
+                except Exception as e:  # noqa: BLE001
+                    errs.append(repr(e))
+            def writer():
+                n = 0
+                while not stop.is_set():
+                    n += 1; rs_.update(P[0]["key"], {"page": n}); fo.add(fid, [P[n % 6]["key"]])
+            ths = [threading.Thread(target=reader) for _ in range(4)]; w = threading.Thread(target=writer); w.start()
+            [t.start() for t in ths]; [t.join() for t in ths]; stop.set(); w.join()
+            assert not errs, errs[:2]
+        finally:
+            restore()
+    check("the library list is kept in memory and checked against the disk on every call: nothing is read again when nothing changed, a caller cannot change it, and every kind of change "
+          "(a save here; a file rewritten, added or removed by another computer; two writes in the same second) is seen at once", t_library_cache)
+
+
+    def t_library_row():
+        import pipeline as pl_, readstate as rs_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        try:
+            rows = settle()
+            for r in rows:
+                assert pl_.library_row(r["file"]) == r, r["file"]
+            rows = json.loads(json.dumps(rows))          # (in objects of their own: nothing below can change them by changing a row it was given)
+            assert pl_.library_row("Papers/2024-01/MIS Quarterly/nope.pdf") is None and pl_.library_row("") is None and pl_.library_row(None) is None and pl_.library_row(["x"]) is None and pl_.library_row({"a": 1}) is None
+            with Spy() as s:                                   # one paper: its own folder and files, not the library's
+                row = pl_.library_row(P[0]["file"])
+            assert row["notes"] == {"highlights": 2, "cards": 0} and s.opened == [] and s.stats <= 12 and set(s.listed) <= {os.path.join("Papers", "_folders"), os.path.dirname(P[0]["file"])}, (s.opened, s.listed, s.stats)
+            row["state"]["x"] = 1; row["title"] = "mine"; row["notes"]["cards"] = 7; row["folders"].append("zz")
+            assert pl_.library_row(P[0]["file"]) == by(rows)[P[0]["file"]]
+            bk = pl_.library_row(P[5]["file"]); bk["book"]["chapters"][0]["title"] = "mine"; bk["book"]["pages"] = 1          # (a book's details too)
+            assert pl_.library_row(P[5]["file"]) == by(rows)[P[5]["file"]] and by(pl_.library())[P[5]["file"]] == by(rows)[P[5]["file"]]
+            settle(); rs_.update(P[0]["key"], {"page": 4}); assert pl_.library_row(P[0]["file"])["state"]["page"] == 4            # (what the reader posts every few seconds)
+            settle(); os.remove(ns.notes_path(P[0]["pdf"])); assert pl_.library_row(P[0]["file"])["notes"] is None
+            # two rows for one file (an index joined from two computers): the one the library lists first
+            settle(); dl.save_index({"title": "Same file again", "doi": "10.77/again", "journal": "MIS Quarterly", "abbr": "MISQ"}, P[1]["file"], "ok")
+            assert pl_.library_row(P[1]["file"])["key"] == "10.77/again" == next(r for r in pl_.library() if r["file"] == P[1]["file"])["key"]
+            both = [r for r in pl_.library() if r["file"] == P[1]["file"]]           # (the type file beside the PDF was written for the first of the two: the second is not given it)
+            assert [(r["key"], r["kind"]) for r in both] == [("10.77/again", "journal"), ("10.77/c1", "conference")] and pl_.library_row(P[1]["file"])["kind"] == "journal", both
+            # a line of the index with more fields than columns (csv keeps the rest as a list): that list is the caller's too
+            import csv
+            with open(os.path.join(pl_.PAPERS, "_index.csv"), "a", newline="") as f:
+                csv.writer(f).writerow(["2026-01-01", "MIS Quarterly", "MISQ", "A long line", "Ann Lee", "10.77/long", "", "", "", P[2]["file"], "ok", "", "one more"])
+            settle(); row = pl_.library_row(P[2]["file"]); assert row["key"] == "10.77/long" and row[None] == ["one more"], row
+            row[None].append("mine"); assert pl_.library_row(P[2]["file"])[None] == ["one more"] and pl_.library()[0][None] == ["one more"]
+        finally:
+            restore()
+    check("one paper's row is found by its file without building the library (reading progress, notes autosave, opening a paper): the same row, None for anything else, and its changes are seen", t_library_row)
+
+    def t_library_row_server():
+        """The requests about one paper (opening it, its reading progress, the notes autosave, a chapter summary, the answer to an import) find its row by
+        its file: the whole library is not built for them. A real server on a scratch data folder; no AI is called."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        child = r'''
+import importlib.util, json, os, sys, threading, urllib.request, urllib.error, urllib.parse
+from http.server import ThreadingHTTPServer
+sys.path.insert(0, %r)
+import paths; paths.seed_home()
+import download as dl, notes_store as ns, pipeline as pl, readstate as rs
+spec = importlib.util.spec_from_file_location("jw_server", os.path.join(paths.DASHBOARD, "server.py")); sv = importlib.util.module_from_spec(spec); spec.loader.exec_module(sv)
+P = []
+for i in range(3):
+    p = {"title": "Row paper %%d" %% i, "doi": "10.88/r%%d" %% i, "journal": "MIS Quarterly", "abbr": "MISQ", "authors": ["Ann Lee"], "pub_date": "2024-02"}
+    path = dl.out_path(p); open(path, "wb").write(b"%%PDF-1.4 " + str(i).encode()); rel = os.path.relpath(path, paths.ROOT)
+    dl.save_index(p, rel, "ok"); P.append(rel)
+whole = {r["file"]: r for r in pl.library()}
+assert sorted(whole) == sorted(P)
+calls, real = [], pl.library
+def counted():
+    calls.append(1); return real()
+pl.library = counted
+srv = ThreadingHTTPServer(("127.0.0.1", 0), sv.Handler); threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = "http://127.0.0.1:%%d" %% srv.server_address[1]
+def call(path, body=None):
+    req = urllib.request.Request(base + path, None if body is None else json.dumps(body).encode(), {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+J = lambda r: (r[0], json.loads(r[1] or b"{}"))
+# opening a paper: its row, the same as the library's
+c, d = J(call("/api/doc?file=" + urllib.parse.quote(P[1])))
+assert c == 200 and d["meta"] == whole[P[1]] and d["meta"]["title"] == "Row paper 1", d
+# reading progress (posted every few seconds while you read), a star, and opening
+c, d = J(call("/api/paper/state", {"file": P[1], "page": 3, "total": 12}))
+assert c == 200 and rs.load()["10.88/r1"]["page"] == 3 and rs.load()["10.88/r1"]["progress"] == 0.25, (c, d, rs.load())
+c, d = J(call("/api/paper/state", {"file": P[2], "star": True}))
+assert c == 200 and rs.load()["10.88/r2"] == {"star": True}, (c, d)
+c, d = J(call("/api/paper/state", {"file": P[0], "opened": True, "page": 2, "total": 4}))
+assert c == 200 and rs.load()["10.88/r0"]["status"] == "reading", (c, d)
+for bad in ("Papers/2024-02/MIS Quarterly/nope.pdf", "", None, ["x"], {"a": 1}, 7):
+    c, d = J(call("/api/paper/state", {"file": bad, "star": True}))
+    assert c == 404 and d == {"error": "no such paper"}, (bad, c, d)
+# the notes autosave: saved with the paper's identity from its row
+c, d = J(call("/api/doc/notes", {"file": P[1], "rev": 0, "notes": {"highlights": [{"id": "h1", "text": "x"}], "cards": [], "bookmarks": []}}))
+assert c == 200, (c, d)
+saved = json.load(open(ns.notes_path(os.path.join(paths.ROOT, P[1]))))
+assert saved["doc"]["doi"] == "10.88/r1" and saved["doc"]["title"] == "Row paper 1" and len(saved["highlights"]) == 1, saved
+# a chapter summary of a file that is not a book: an error line, no AI call
+c, raw = call("/api/ai/chapter", {"file": P[1], "chapter": 0})
+assert c == 200 and b'"error"' in raw, (c, raw[:300])
+c, raw = call("/api/ai/chapter", {"file": ["x"], "chapter": 0})
+assert c == 200 and b'"error"' in raw, (c, raw[:300])
+# the answer to an import carries the paper's row
+class H:
+    def send_json(self, d, code=200):
+        return d
+out = sv.Handler.finish_import(H(), {"file": P[2], "existing": True, "title": "Row paper 2"}, False)
+assert out["row"]["key"] == "10.88/r2" and out["row"]["state"] == {"star": True} and out["row"]["file"] == P[2], out
+assert sv.Handler.finish_import(H(), {"file": "Papers/x/nope.pdf", "existing": True, "title": "x"}, False)["row"] == {}
+assert calls == [], "the whole library was built %%d times for requests about one paper" %% len(calls)
+# the library list still is the library (and sees what those requests saved)
+c, d = J(call("/api/library"))
+assert c == 200 and len(calls) == 1 and {r["file"]: r for r in d}[P[1]]["notes"] == {"highlights": 1, "cards": 0} and {r["file"]: r for r in d}[P[1]]["state"]["page"] == 3, d
+srv.shutdown()
+print("OK")
+''' % HERE
+        try:
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=180)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("one paper's requests do not build the library: opening a paper, its reading progress, the notes autosave, a chapter summary and the answer to an import find the row by its file", t_library_row_server)
     def t_refextract():
         """References in a document you have (Word, PowerPoint, PDF, text): found by their shape (no AI, nothing sent), each looked up on Crossref and CHECKED against
         what the document prints; a record that only resembles it is 'unsure', a book is not downloaded, a sentence that is not a reference is dropped, an answer

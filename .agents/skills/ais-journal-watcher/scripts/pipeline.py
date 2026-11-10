@@ -8,6 +8,7 @@ Run kinds:
             never touches seen.json
 """
 import base64
+import copy
 import csv
 import hashlib
 import unicodedata
@@ -210,31 +211,154 @@ def paper_key(p):
     return dl.index_key({"doi": p.get("doi"), "title": p.get("title")})
 
 
-def library():
+# ---------------------------------------------------------------- the library list
+# Nothing here is trusted without asking the disk: every call stats the files it depends on, and only what changed is read again. Another process, or another computer
+# through Dropbox, changes these files without telling this one.
+
+_LIB_LOCK = threading.RLock()      # one thread at a time checks the disk and builds rows (no other lock is taken while it is held)
+_LIB_FILES = {}                    # (path, tag) -> (signature, settled, value): what a file said when it had this mtime, size and inode
+LIB_RACY_NS = 2_000_000_000        # a file changed less than this long before it was read is read again next time: a second write within the timestamp's resolution
+                                   # (1 s on HFS+, 2 s on exFAT, a few ms on ext4) with the same size would otherwise look unchanged
+LIB_STATS = {"reads": 0}           # how often a file was parsed (the tests look at it)
+
+
+def _lib_sig(path):
+    """(mtime in ns, size, inode) of a file or folder, None when it is not there."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _lib_file(path, load, default=None, tag=None):
+    """load(path), read again only when the file's signature changed (or it was too new to trust: LIB_RACY_NS); `default` when the file is not there.
+    What load raises is raised (and nothing is kept), as before."""
+    k = (path, tag)
+    sig = _lib_sig(path)
+    if sig is None:
+        _LIB_FILES.pop(k, None)
+        return default
+    hit = _LIB_FILES.get(k)
+    if hit and hit[0] == sig and hit[1]:
+        return hit[2]
+    now = time.time_ns()
+    LIB_STATS["reads"] += 1
+    val = load(path)
+    _LIB_FILES[k] = (sig, sig[0] < now - LIB_RACY_NS, val)
+    return val
+
+
+def _lib_names(d):
+    """The names in a folder (nothing is kept: a folder's own date is not trusted to say that a file was added or removed in it)."""
+    try:
+        return frozenset(os.listdir(d))
+    except OSError:
+        return frozenset()
+
+
+def _lib_read_index(idx):
+    """The library's rows of Papers/_index.csv as (rows, by_file): each row is (the row as read, with the plain journal and title; its key; its year; the folder
+    the PDF is in; the PDF's name; the PDF's full path). by_file: Papers/… path -> the last such row (the one library() lists first)."""
+    out, by_file = [], {}
+    with open(idx, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["status"] != "ok" or not r["file"]:
+                continue
+            key = dl.index_key(r)                # (from the title as stored: folders, reading status and runs know a paper without a DOI by it)
+            r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (shown with "&" for "&amp;"; the key above is unchanged)
+            m = re.match(r"Papers/(\d{4})-\d{2}/", r["file"])          # Papers/YYYY-MM/<Journal>/... -> publication year for grouping
+            pdf = os.path.join(ROOT, r["file"])
+            b = (r, key, m.group(1) if m else "", os.path.dirname(pdf), os.path.basename(pdf), pdf)
+            out.append(b)
+            by_file[r["file"]] = b
+    return out, by_file
+
+
+def _lib_member():
+    """folders.membership(), read again only when a folder file was added, removed or changed."""
+    try:
+        sig = tuple(sorted((fn,) + (_lib_sig(os.path.join(fo.DIR, fn)) or ()) for fn in os.listdir(fo.DIR) if fn.endswith(".json") and "." not in fn[:-5]))
+    except OSError:
+        sig = ()
+    hit = _LIB_FILES.get((fo.DIR, "member"))
+    if hit and hit[0] == sig and hit[1]:
+        return hit[2]
+    now = time.time_ns()
+    LIB_STATS["reads"] += 1
+    val = fo.membership()
+    _LIB_FILES[(fo.DIR, "member")] = (sig, all(len(s) == 4 and s[1] < now - LIB_RACY_NS for s in sig), val)
+    return val
+
+
+def _lib_notes(path):
+    return ns.counts(path[:-len(".notes.json")] + ".pdf")
+
+
+def _lib_own(v):
+    """A copy the caller may change: what is kept is never handed out."""
+    return dict(v) if type(v) is dict and not any(type(x) in (dict, list) for x in v.values()) else copy.deepcopy(v)
+
+
+def _lib_row(b, state, member, dirs):
+    """One library row, new every time: the caller may change it, and whatever is in it (reading status, folders, notes counts, a book's details), without changing
+    what the next caller gets. dirs: the folders already listed for this call ({} to start with)."""
+    base, key, year, d, name, pdf = b
+    names, stem = dirs.get(d), pdf[:-4]
+    if names is None:
+        names = dirs[d] = _lib_names(d)
+    if name in names:                   # the folder's list answers "is there a summary, notes, a card…" for every paper in it at once
+        has = lambda ext: name[:-4] + ext in names    # noqa: E731
+    else:                                        # the PDF is not there under exactly this name (another case or accent form on a Mac, or gone): ask the disk, as before
+        has = lambda ext: os.path.exists(stem + ext)    # noqa: E731
+    r = dict(base)
+    if None in r:                                # (a line of the index with more fields than columns: csv keeps the rest as a list)
+        r[None] = list(r[None])
+    md = r["file"][:-4] + ".md"
+    r["summary"] = md if has(".md") else None
+    n = _lib_file(stem + ".notes.json", _lib_notes) if has(".notes.json") else None     # reader highlights/cards, None if none
+    r["notes"] = dict(n) if n else None
+    r["card"] = has(".card.json")                # paper card (papercard.py)
+    r["skim"] = has(".skim.json")                # skim layer (skim.py)
+    st = state.get(key)
+    r["key"], r["state"], r["folders"] = key, _lib_own(st) if st else {}, list(member.get(key, []))
+    if r.get("journal") == "Books":              # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
+        r["book"] = copy.deepcopy(_lib_file(stem + ".book.json", lambda p: dl.load_json(p, {}), {})) if has(".book.json") else {}
+    side = _lib_file(stem + ".paper.json", lambda p: kinds.read_sidecar(pdf, key), {}, key) if has(".paper.json") else {}
+    r["kind"], r["kind_label"] = kinds.of_row(r, side)     # journal article, preprint, conference paper, other (kinds.py)
+    r["year"] = year
+    return r
+
+
+def _lib_parts():
     idx = os.path.join(PAPERS, "_index.csv")
-    rows = []
-    state, member = rs.load(), fo.membership()   # reading status (Papers/_status.json) and virtual folders (Papers/_folders/)
-    if os.path.exists(idx):
-        with open(idx, newline="") as f:
-            for r in csv.DictReader(f):
-                if r["status"] != "ok" or not r["file"]:
-                    continue
-                key = dl.index_key(r)                # (from the title as stored: folders, reading status and runs know a paper without a DOI by it)
-                r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (shown with "&" for "&amp;"; the key above is unchanged)
-                md = r["file"][:-4] + ".md"
-                r["summary"] = md if os.path.exists(os.path.join(ROOT, md)) else None
-                r["notes"] = ns.counts(os.path.join(ROOT, r["file"]))  # reader highlights/cards, None if none
-                r["card"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".card.json"))   # paper card (papercard.py)
-                r["skim"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".skim.json"))   # skim layer (skim.py)
-                r["key"], r["state"], r["folders"] = key, state.get(key) or {}, member.get(key, [])
-                if r.get("journal") == "Books":      # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
-                    r["book"] = dl.load_json(os.path.join(ROOT, r["file"][:-4] + ".book.json"), {})
-                r["kind"], r["kind_label"] = kinds.of_row(r, kinds.read_sidecar(os.path.join(ROOT, r["file"]), key))     # journal article, preprint, conference paper, other (kinds.py)
-                # Papers/YYYY-MM/<Journal>/... -> publication year for grouping
-                m = re.match(r"Papers/(\d{4})-\d{2}/", r["file"])
-                r["year"] = m.group(1) if m else ""
-                rows.append(r)
-    return ac.apply(rows)[::-1]        # authors the index lacks come from the Crossref cache (authorcache.py)
+    rows, by_file = _lib_file(idx, _lib_read_index, ([], {}), ROOT)
+    if len(_LIB_FILES) > 4 * len(rows) + 2000:       # (papers deleted or moved leave entries behind: start again rather than grow)
+        _LIB_FILES.clear()
+        rows, by_file = _lib_file(idx, _lib_read_index, ([], {}), ROOT)
+    return rows, by_file, _lib_file(rs.PATH, lambda p: rs.load(), {}), _lib_member()   # reading status (Papers/_status.json) and virtual folders (Papers/_folders/)
+
+
+def library():
+    with _LIB_LOCK:
+        rows, _, state, member = _lib_parts()
+        dirs = {}
+        out = [_lib_row(b, state, member, dirs) for b in rows]
+    return ac.apply(out)[::-1]         # authors the index lacks come from the Crossref cache (authorcache.py)
+
+
+def library_row(file):
+    """The library row of one paper by its Papers/… path, None when it is not in the library: what next(r for r in library() if r["file"] == file) gives,
+    without building the other rows."""
+    if not isinstance(file, str):
+        return None
+    with _LIB_LOCK:
+        _, by_file, state, member = _lib_parts()
+        b = by_file.get(file)
+        if b is None:
+            return None
+        row = _lib_row(b, state, member, {})
+    return ac.apply([row])[0]
 
 
 # ---------------------------------------------------------------- runs
