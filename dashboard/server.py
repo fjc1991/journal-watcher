@@ -976,6 +976,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/doc/chat":     # the Ask tab's saved conversation
             pdf = ns.pdf_path(one("file"))
             return self.send_json(ns.load_chat(pdf) if pdf else {"error": "no such paper"}, 200 if pdf else 404)
+        if path in ("/api/doc/ask/estimate", "/api/doc/summary/estimate"):     # what the next question (?file=&from=&to=&hist=) or "Generate" in the Summary tab (?file=&template=) costs; nothing is sent
+            pdf = ns.pdf_path(one("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            if not ask:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if path == "/api/doc/summary/estimate":
+                if books.is_book(one("file")):                 # (as POST /api/ai/summary: a book is summarised chapter by chapter)
+                    return self.send_json({"error": books.BOOK_NO_TEMPLATE}, 400)
+                return self.send_json(ask.summary_estimate(pdf, self.doc_info(one("file"))[0], one("template") or None))
+            pg = None
+            try:
+                if one("from") or one("to"):                   # one chapter of a book, as {from, to} in POST /api/ai/ask
+                    pg = (int(one("from")), int(one("to")))
+                hist = int(one("hist", "0") or 0)              # the length of the conversation that would go along
+            except ValueError:
+                return self.send_json({"error": "bad chapter range"}, 400)
+            if pg and (pg[0] < 1 or pg[1] < pg[0]):
+                return self.send_json({"error": "bad chapter range"}, 400)
+            return self.send_json(ask.estimate(pdf, pg, hist))
         if path == "/api/doc/blocks":    # the paper as paragraphs in reading order, for the text view
             pdf = ns.pdf_path(one("file"))
             if not pdf:

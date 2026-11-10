@@ -674,10 +674,11 @@ function renderToc() {
 
 // -- summary tab: the markdown the pipeline wrote next to the PDF, and "generate with another template" (shown, not saved, until you say so)
 function buildSum() {
-  panels.sum.innerHTML = `<div class="rd-sub"><select id="sum-t" title="Summary template (edit them in Settings)"></select><button class="rd-btn" id="sum-go" title="Write this kind of summary with the model chosen in Settings; the saved summary is not touched">Generate</button>
+  panels.sum.innerHTML = `<div class="rd-sub"><select id="sum-t" title="Summary template (edit them in Settings)"></select><button class="rd-btn" id="sum-go" title="Write this kind of summary with the model chosen in Settings; the saved summary is not touched">Generate</button><span class="pmeta" id="sum-est" role="status"></span>
     <button class="rd-btn hide" id="sum-saved">Show saved</button><span class="pmeta hide" id="sum-bk">A book is summarised chapter by chapter in Library → Books → Chapters, not with a paper template.</span></div><div class="rd-scroll" id="sum-body"></div><div class="ex-act hide" id="sum-act"></div>`;
   wireOut($("#sum-body", panels.sum));
   $("#sum-go", panels.sum).onclick = () => genSummary(false);
+  $("#sum-t", panels.sum).onchange = () => sumEst();
   $("#sum-saved", panels.sum).onclick = () => { delete $("#sum-body", root).dataset.file; $("#sum-act", root).classList.add("hide"); $("#sum-saved", root).classList.add("hide"); loadSum(); };
   panels.sum.addEventListener("click", e => { const x = e.target.closest("[data-sx]")?.dataset.sx; if (!x) return; const text = $("#sum-body", root)._gen;
     if (x === "again") genSummary(true);
@@ -698,6 +699,15 @@ function fillTemplates() {
   const sel = $("#sum-t", root); if (!sel) return;
   sel.innerHTML = (S.summaries || []).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
   if (S.prefs && S.prefs.summary_template) sel.value = S.prefs.summary_template;
+  if (S.open && S.tab === "sum") sumEst();
+}
+// what Generate costs with the chosen template, said beside the button before it is pressed (GET /api/doc/summary/estimate; nothing is sent for it)
+async function sumEst() {
+  const el = $("#sum-est", root), file = S.file, tpl = $("#sum-t", root).value, book = !!(S.meta && S.meta.journal === "Books"); if (!el) return;
+  el.textContent = ""; el.classList.toggle("hide", book); if (!file || book) return;
+  let e; try { e = await (await fetch("/api/doc/summary/estimate?file=" + encodeURIComponent(file) + "&template=" + encodeURIComponent(tpl))).json(); } catch (er) { return; }
+  if (S.file !== file || $("#sum-t", root).value !== tpl || !e || e.error || !e.model) return;      // (another paper or template since; no model chosen: Generate says so)
+  el.textContent = e.saved ? "free: you have this answer saved" + (e.cost != null ? ` (⟳ asks again, ${usd(e.cost)})` : "") : usd(e.cost, "cost not known (this model has no price in Settings → AI)");
 }
 async function genSummary(fresh) {
   const el = $("#sum-body", root), act = $("#sum-act", root), tpl = $("#sum-t", root).value, tplName = $("#sum-t", root).selectedOptions[0].textContent; let text = "", done = null;
@@ -718,7 +728,7 @@ async function genSummary(fresh) {
     act.innerHTML = `<button class="rd-btn" data-sx="notes">→ Save to notes</button>${cut ? "" : `<button class="rd-btn" data-sx="replace">${S.meta.summary ? "Replace the saved summary" : "Save as this paper’s summary"}</button>`}<button class="rd-btn" data-sx="copy">Copy</button><button class="rd-btn" data-sx="again" title="Generate again, ignoring the stored answer">⟳</button>`;
     act.classList.remove("hide"); $("#sum-saved", root).classList.toggle("hide", !S.meta.summary);
   } catch (e) { if (S.file === forFile) el.innerHTML = errBox(e, {retry: 'data-sx="again"'}); }
-  finally { $("#sum-go", root).disabled = false; }            // (also when another paper was opened meanwhile: its Generate button works)
+  finally { $("#sum-go", root).disabled = false; if (S.tab === "sum") sumEst(); }            // (also when another paper was opened meanwhile: its Generate button works; the answer is saved now, so the line beside the button says so)
 }
 async function replaceSummary(text) {
   if (S.meta.summary && !confirm("Replace the saved summary of this paper with this one?\nThe old one is kept in state/summary_backups/.")) return;
@@ -732,7 +742,7 @@ let SUM_FOR = "";
 async function loadSum() {
   const el = $("#sum-body", root), path = S.meta.summary, book = !!(S.meta && S.meta.journal === "Books");
   if (SUM_FOR !== S.file) { SUM_FOR = S.file; delete el.dataset.file; el._gen = ""; el._title = ""; $("#sum-act", root).classList.add("hide"); $("#sum-go", root).disabled = false; }      // (a summary of the last paper may still be coming: it stops at its next line)      // (another paper: nothing of the last one stays)
-  $("#sum-t", root).classList.toggle("hide", book); $("#sum-go", root).classList.toggle("hide", book); $("#sum-bk", root).classList.toggle("hide", !book);
+  $("#sum-t", root).classList.toggle("hide", book); $("#sum-go", root).classList.toggle("hide", book); $("#sum-bk", root).classList.toggle("hide", !book); sumEst();
   if (book) { $("#sum-saved", root).classList.add("hide"); $("#sum-act", root).classList.add("hide"); if (await loadBookSum(el)) return; }
   if (!path) { delete el.dataset.file; el.innerHTML = book ? el.innerHTML : `<div class="rd-empty">No summary has been written for this paper yet.<br>Pick a template above and press Generate.</div>`; return; }
   if (el.dataset.file === path) return; el.dataset.file = path; el.textContent = "Loading…";

@@ -1028,6 +1028,103 @@ def main():
         assert sent.count("[") >= len(bs) and full[-1]["type"] == "done"        # every passage is sent in whole-paper mode
     check("ask pipeline: passages numbered, cited, streamed", t_ask)
 
+    def t_ask_estimate():
+        """What the next question costs is known before it is asked, in both modes; it follows the chapter and the conversation, and sends nothing."""
+        old_rows = ai._rows; ai._rows = lambda: iter(())            # (the usage record as it is on a new computer)
+        try:
+            n0 = len(SEEN)
+            e = ask.estimate(pdf)
+            kept = [b for b in bs if b.get("kind", "body") != "ref"]; body = [b for b in kept if b.get("kind", "body") == "body"]
+            assert e["provider"] == "fake" and e["model"] == "m1" and e["out_tokens"] == ask.EST_OUT_TOKENS == 700 and e["out_basis"] == "default", e
+            assert e["rag"]["passages"] == min(12, len(body)) and e["full"]["passages"] == len(kept) and "fallback" not in e["full"] and "next" not in e["full"] and "next" not in e["rag"], e
+            assert e["full"]["chars"] > e["rag"]["chars"] and e["full"]["cost"] > e["rag"]["cost"] > 0, e
+            assert e["rag"]["cost"] == ai.estimate("ask", e["rag"]["chars"], 700) and e["full"]["cost"] == ai.estimate("ask", e["full"]["chars"], 700)
+            # one chapter is less than the whole; the conversation adds its length, up to what the server lets through
+            c = ask.estimate(pdf, pages=(2, 3))
+            assert c["full"]["passages"] == len([b for b in kept if 1 <= b["page"] <= 2]) < e["full"]["passages"] and c["full"]["cost"] < e["full"]["cost"], c
+            h = ask.estimate(pdf, history_chars=9000)
+            assert h["rag"]["chars"] == e["rag"]["chars"] + 9000 and h["full"]["chars"] == e["full"]["chars"] + 9000 and h["rag"]["cost"] > e["rag"]["cost"], h
+            assert ask.estimate(pdf, history_chars=10 ** 9)["rag"]["chars"] == e["rag"]["chars"] + ask.HISTORY_MAX == e["rag"]["chars"] + 36000
+            assert ask.estimate(pdf, history_chars=-5)["rag"]["chars"] == e["rag"]["chars"]
+            # a paper too long to read whole: the estimate is for the 40 closest passages, and says so
+            lim = ask.FULL_LIMIT; ask.FULL_LIMIT = 100
+            try:
+                f = ask.estimate(pdf)["full"]; assert f.get("fallback") is True and f["passages"] == min(40, len(body)) and f["cost"] > 0, f
+            finally:
+                ask.FULL_LIMIT = lim
+            # pages with nothing on them: nothing to read, so no figure (never "free")
+            z = ask.estimate(pdf, pages=(40, 41)); assert z["full"]["passages"] == 0 and z["full"]["cost"] is None and z["rag"]["cost"] is None, z
+            assert len(SEEN) == n0, "an estimate asks no provider anything (no chat, no embedding)"
+            # the whole-paper figure is what is really sent, within the allowance for the question
+            list(ask.stream(pdf, "Summarise.", "full", fresh=True)); sent = sum(len(x["content"]) for x in SEEN[-1][1]["messages"])
+            assert sent <= e["full"]["chars"] <= sent + ask.EST_QUESTION + 2 * len(kept), (sent, e["full"]["chars"])
+            # the length of an answer: 700 tokens until five answers are on record, then their mean (saved answers shown again, cancelled ones and other features left out)
+            row = lambda out, **kw: {"feature": "ask", "provider": "fake", "model": "m1", "in": 1000, "out": out, "cost": 0.01, **kw}  # noqa: E731
+            four = [row(100), row(200), row(300), row(400), row(5000, cached=True), row(5000, cancelled=True), row(5000, feature="explain"), row(0)]
+            ai._rows = lambda: iter(four)
+            assert ask.estimate(pdf)["out_basis"] == "default" and ask.estimate(pdf)["rag"]["cost"] == e["rag"]["cost"]
+            ai._rows = lambda: iter(four + [row(1000)])
+            m = ask.estimate(pdf)
+            assert m["out_tokens"] == 400 and m["out_basis"] == "history" and m["rag"]["cost"] == ai.estimate("ask", e["rag"]["chars"], 400) < e["rag"]["cost"], m
+            ai._rows = lambda: iter(())
+            # a model without a price: no figure, never 0
+            write_cfg({**CFG, "prices": {}})
+            assert ask.estimate(pdf)["rag"]["cost"] is None and ask.estimate(pdf)["full"]["cost"] is None
+            # "keep the paper ready" with Claude: the first whole-paper question pays for keeping the paper, a further one for reading it back
+            claude = {**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["mA"]}}, "features": {"ask": {"provider": "anth", "model": "mA"}},
+                      "prices": {"mA": {"in": 3.0, "out": 15.0, "cache_write": 3.75, "cache_read": 0.3}}}
+            write_cfg({**claude, "ask": {"keep_paper": False}})
+            off = ask.estimate(pdf, history_chars=660)
+            assert "next" not in off["full"] and "next" not in off["rag"], off
+            write_cfg({**claude, "ask": {"keep_paper": True}})
+            on = ask.estimate(pdf, history_chars=660)
+            paper, rest = on["full"]["chars"] - 300 - 660, 300 + 660
+            assert abs(on["full"]["cost"] - (int(paper / 3.3) * 3.75 + int(rest / 3.3) * 3.0 + 700 * 15.0) / 1e6) < 1e-12, on
+            assert abs(on["full"]["next"] - (int(paper / 3.3) * 0.3 + int(rest / 3.3) * 3.0 + 700 * 15.0) / 1e6) < 1e-12, on
+            assert on["full"]["cost"] > off["full"]["cost"] > on["full"]["next"] > 0 and "next" not in on["rag"] and on["rag"]["cost"] == off["rag"]["cost"], (on, off)
+            ask.FULL_LIMIT = 100
+            try:
+                assert "next" not in ask.estimate(pdf)["full"], "a paper too long to read whole is not kept ready"
+            finally:
+                ask.FULL_LIMIT = lim
+            write_cfg({**claude, "ask": {"keep_paper": True}, "prices": {"mA": {"in": 3.0, "out": 15.0}}})      # a price you typed without the two columns: a quarter more, and a tenth
+            g = ask.estimate(pdf, history_chars=660)["full"]
+            assert abs(g["cost"] - on["full"]["cost"]) < 1e-12 and abs(g["next"] - on["full"]["next"]) < 1e-12, g
+            write_cfg({**CFG, "ask": {"keep_paper": True}})
+            assert "next" not in ask.estimate(pdf)["full"], "only Claude is asked to keep the paper"
+        finally:
+            ai._rows = old_rows; write_cfg(CFG)
+    check("ask estimate: both modes priced before asking, chapter and conversation counted, answer length from the usage record, kept-ready paper as two figures, nothing sent", t_ask_estimate)
+
+    def t_summary_estimate():
+        """The reader's Generate button has its price first: the paper as the provider will read it, and free when the answer is already saved."""
+        import prefs as prefs_
+        tids = [t["id"] for t in prefs_.get_prompts()["summaries"]][:2]; meta = {"title": "T", "journal": "J", "doi": ""}
+        try:
+            n0 = len(SEEN)
+            e = ask.summary_estimate(pdf, meta, tids[0])
+            prompt = ask._summary_messages(pdf, meta, tids[0])[0]["content"][1]["text"]
+            assert len(SEEN) == n0 and e["provider"] == "fake" and e["model"] == "m1" and e["saved"] is False, e
+            assert e["chars"] == len(ai._pdf_text(pdf)) + len(prompt) and len(prompt) > 100 and e["cost"] == ai.estimate("summarize", e["chars"], 1500) > 0, e
+            # once it has been generated, the same paper, template and model is a saved answer: Generate is free, and the estimate knows (another template is not)
+            assert list(ask.summary_stream(pdf, meta, tids[0]))[-1]["type"] == "done"
+            n1 = len(SEEN)
+            assert ask.summary_estimate(pdf, meta, tids[0])["saved"] is True and ask.summary_estimate(pdf, meta, tids[1])["saved"] is False and len(SEEN) == n1
+            assert ask.summary_estimate(pdf, {**meta, "title": "Another"}, tids[0])["saved"] is False
+            # Claude is sent the PDF itself: the text of every page and each page as an image (this paper's own pages, from the index)
+            write_cfg({**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["mA"]}}, "features": {"ask": {"provider": "anth", "model": "mA"}},
+                       "prices": {"mA": {"in": 3.0, "out": 15.0}}})
+            a = ask.summary_estimate(pdf, meta, tids[0])
+            pages = max(b["page"] for b in bs) + 1
+            assert a["provider"] == "anth" and a["chars"] == sum(len(b["text"]) for b in bs) + pages * ai.PDF_PAGE_IMAGE + len(prompt) > e["chars"] and a["saved"] is False, (a, pages)
+            assert a["cost"] == ai.estimate("summarize", a["chars"], 1500) > 0
+            # no price for the model: no figure, never 0; no model at all: the same, and no error
+            write_cfg({**CFG, "prices": {}}); u = ask.summary_estimate(pdf, meta, tids[0]); assert u["cost"] is None and u["saved"] is True, u
+            write_cfg({**CFG, "features": {}}); u = ask.summary_estimate(pdf, meta, tids[0]); assert u["cost"] is None and u["model"] is None and u["saved"] is False, u
+        finally:
+            write_cfg(CFG)
+    check("summary estimate in the reader: the paper as the provider reads it (text, or the PDF's pages for Claude), a saved answer is known, nothing sent", t_summary_estimate)
+
     def t_ask_err():
         write_cfg({**CFG, "features": {"ask": {"provider": "nokey", "model": "m"}}})
         msgs = list(ask.stream(pdf, "q", "rag"))

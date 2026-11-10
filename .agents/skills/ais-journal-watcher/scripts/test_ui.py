@@ -948,7 +948,34 @@ fx.fetch_journal = lambda j: []                                                 
             check("…cancelled, offline, budget, set-up, local-only, busy, unreachable and plain messages are told apart", kinds_ == ["cancelled", "offline", "budget", "setup", "setup", "setup", "busy", "net", "error", "error", "boom", "That didn’t work"], str(kinds_))
 
             print("reader: Ask, summary, settings")
-            page.click('.rd-tabs button[data-tab="ask"]'); page.fill("#ask-q", "How many firms are on the platform?"); page.click('#reader [data-k="send"]')
+            beside_ = lambda: sorted(os.listdir(os.path.dirname(sidecar(2, ".pdf"))))  # noqa: E731
+            n_sent0 = len(SEEN); beside0 = beside_()
+            page.click('.rd-tabs button[data-tab="ask"]')
+            page.wait_for_function("/Next question/.test(document.querySelector('#ask-est').innerText)", timeout=20000)
+            page.select_option("#ask-mode", "rag"); est_rag = page.inner_text("#ask-est"); page.select_option("#ask-mode", "full"); est_full = page.inner_text("#ask-est"); page.select_option("#ask-mode", "rag")
+            e_ = api("/api/doc/ask/estimate?file=" + urllib.request.quote(rows[2][3]))
+            check("under the Ask box a line says what the next question costs and what the model reads, before anything is asked; choosing 'Whole paper' changes it",
+                  est_rag == "Next question: under 1 cent · reads the %d closest passages" % e_["rag"]["passages"] and est_full == "Next question: under 1 cent · reads the whole paper (%d passages)" % e_["full"]["passages"]
+                  and page.eval_on_selector("#ask-est", "e => e.previousElementSibling.className") == "ask-box", est_rag + " | " + est_full)
+            check("…the figures are the server's, for both modes (the whole paper is never less than the closest passages), and a model's price is never shown as nothing",
+                  e_["model"] == "m1" and 0 < e_["rag"]["cost"] <= e_["full"]["cost"] and e_["full"]["chars"] >= e_["rag"]["chars"] and e_["out_basis"] in ("default", "history") and "next" not in e_["full"], str(e_))
+            check("…working it out asked no provider anything and wrote nothing next to the paper", len(SEEN) == n_sent0 and beside_() == beside0, "%d requests; %s" % (len(SEEN) - n_sent0, beside_()))
+            fake_est = lambda **full: json.dumps({"provider": "claude", "model": "mA", "out_tokens": 700, "out_basis": "default", "rag": {"passages": 12, "chars": 9000, "cost": 0.031}, "full": {"passages": 40, "chars": 90000, **full}})  # noqa: E731
+            said_ = []
+            for full_ in ({"cost": 0.12, "next": 0.021}, {"cost": 0.12}, {"cost": None}, {"cost": 0.12, "fallback": True}):
+                page.unroute("**/api/doc/ask/estimate*"); page.route("**/api/doc/ask/estimate*", (lambda b_: lambda route: route.fulfill(status=200, content_type="application/json", body=b_))(fake_est(**full_)))
+                page.select_option("#ask-mode", "rag"); page.evaluate("document.querySelector('#ask-est').textContent = ''; window.dispatchEvent(new Event('jw-settings-changed'))")
+                page.wait_for_function("/about \\$0\\.03/.test(document.querySelector('#ask-est').innerText)", timeout=10000)
+                said_.append(page.inner_text("#ask-est")); page.select_option("#ask-mode", "full"); said_.append(page.inner_text("#ask-est"))
+            check("…with 'keep the paper ready' and Claude, a whole-paper question shows two figures in plain words: the first question, and further ones within 5 minutes",
+                  said_[1] == "First question about $0.12; further questions within 5 minutes about $0.02 · reads the whole paper (40 passages)" and said_[0] == "Next question: about $0.03 · reads the 12 closest passages"
+                  and said_[3] == "Next question: about $0.12 · reads the whole paper (40 passages)", str(said_[:4]))
+            check("…a model without a price is said to have none (never shown as free), and a paper too long to read whole says the closest passages are read",
+                  said_[5] == "Next question: cost not known (this model has no price in Settings → AI) · reads the whole paper (40 passages)"
+                  and said_[7] == "Next question: about $0.12 · this paper is too long to read whole, so the 40 closest passages are read", str(said_[4:]))
+            page.unroute("**/api/doc/ask/estimate*"); page.select_option("#ask-mode", "rag"); page.evaluate("document.querySelector('#ask-est').textContent = ''; window.dispatchEvent(new Event('jw-settings-changed'))")
+            page.wait_for_function("/under 1 cent/.test(document.querySelector('#ask-est').innerText)", timeout=10000)
+            page.fill("#ask-q", "How many firms are on the platform?"); page.click('#reader [data-k="send"]')
             page.wait_for_selector(".ask-turn [data-t='regen']", timeout=30000)
             check("Ask answers with a clickable citation", page.locator(".ask-turn .cite").count() >= 1 and "120 firms" in page.inner_text(".ask-turn"))
             check("the answer is split into titled sections: Short answer, Evidence, Not in the passages (marked as a caveat), Sources",
@@ -959,7 +986,11 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.ask-turn .of-sec[data-sec="evidence-0"] .of-sh h4'); page.wait_for_timeout(150)
             check("a section collapses and expands by clicking its title", page.locator('.ask-turn .of-sec[data-sec="evidence-0"].col').count() == 1)
             page.click('.ask-turn .of-sec[data-sec="evidence-0"] .of-sh h4')
-            page.fill("#ask-q", "And why is that?"); page.click('#reader [data-k="send"]'); page.wait_for_function("document.querySelectorAll('.ask-turn').length === 2 && document.querySelectorAll(\".ask-turn [data-t='regen']\").length === 2", timeout=30000)
+            with page.expect_request(lambda r_: "/api/doc/ask/estimate" in r_.url, timeout=40000) as est_req:
+                page.fill("#ask-q", "And why is that?"); page.click('#reader [data-k="send"]'); page.wait_for_function("document.querySelectorAll('.ask-turn').length === 2 && document.querySelectorAll(\".ask-turn [data-t='regen']\").length === 2", timeout=30000)
+            hist_n = int(re.search(r"hist=(\d+)", est_req.value.url).group(1)); turns_txt = page.evaluate("[...document.querySelectorAll('.ask-turn .ask-q')].map(e => e.innerText.length)")
+            check("after an answer the line is worked out again with the conversation that now goes along (both turns: the questions and the answers)",
+                  hist_n > sum(turns_txt) + 2 * 40 and api("/api/doc/ask/estimate?file=" + urllib.request.quote(rows[2][3]) + "&hist=%d" % hist_n)["rag"]["chars"] == e_["rag"]["chars"] + hist_n, "hist=%d, questions %s" % (hist_n, turns_txt))
             hist = [x for x in SEEN if "chat" in x[0] and "Question:" in json.dumps(x[1])][-1][1]["messages"]
             check("a follow-up sends the earlier turn as history", any(m["role"] == "user" and str(m["content"]).startswith("How many firms") for m in hist) and any(m["role"] == "assistant" and "120 firms" in str(m["content"]) for m in hist))
             page.locator(".ask-turn").last.locator("[data-t='compare']").click(); page.wait_for_selector(".ask-alt [data-t='usealt']", timeout=30000)
@@ -989,7 +1020,20 @@ fx.fetch_journal = lambda j: []                                                 
             page.wait_for_timeout(1200)
             chat_ = json.load(open(sidecar(2, ".chat.json")))["turns"]
             check("the saved conversation remembers which answer was cut off", [t_.get("cut_off") for t_ in chat_] == [None, None, True], str([t_.get("cut_off") for t_ in chat_]))
-            page.click('.rd-tabs button[data-tab="sum"]'); page.select_option("#sum-t", "tldr"); page.click("#sum-go"); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
+            n_sent1 = len(SEEN); beside1 = beside_()
+            page.click('.rd-tabs button[data-tab="sum"]'); page.select_option("#sum-t", "tldr")
+            se_ = api("/api/doc/summary/estimate?file=" + urllib.request.quote(rows[2][3]) + "&template=tldr")
+            page.wait_for_function("document.querySelector('#sum-est').innerText.trim() !== ''", timeout=20000)
+            check("beside Generate in the Summary tab the cost is said before it is pressed (for the chosen template), and nothing is sent or written for it",
+                  se_["saved"] is False and se_["model"] == "m1" and 0 < se_["cost"] < 0.005 and page.inner_text("#sum-est") == "under 1 cent" and page.eval_on_selector("#sum-est", "e => e.previousElementSibling.id") == "sum-go"
+                  and len(SEEN) == n_sent1 and beside_() == beside1, page.inner_text("#sum-est") + " " + str(se_))
+            page.click("#sum-go"); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
+            page.wait_for_function("/free/.test(document.querySelector('#sum-est').innerText)", timeout=20000)
+            n_sent2 = len(SEEN); page.select_option("#sum-t", [o_ for o_ in page.eval_on_selector_all("#sum-t option", "os => os.map(o => o.value)") if o_ != "tldr"][0])
+            page.wait_for_function("document.querySelector('#sum-est').innerText.trim() === 'under 1 cent'", timeout=20000); page.select_option("#sum-t", "tldr")
+            page.wait_for_function("/free/.test(document.querySelector('#sum-est').innerText)", timeout=20000)
+            check("…once it is written, the line says the answer is saved and free (and what asking again costs); another template has its own price",
+                  page.inner_text("#sum-est") == "free: you have this answer saved (⟳ asks again, under 1 cent)" and api("/api/doc/summary/estimate?file=" + urllib.request.quote(rows[2][3]) + "&template=tldr")["saved"] is True and len(SEEN) == n_sent2, page.inner_text("#sum-est"))
             check("a summary can be generated with another template (not saved until you say so)", "FAKE SUMMARY" in page.inner_text("#sum-body") and not os.path.exists(sidecar(2, ".md")))
             check("…in titled sections, the TL;DR first and highlighted as the lead", [t.strip().lower() for t in page.locator("#sum-body .of-sec h4").all_inner_texts()] == ["tl;dr", "method", "key findings"] and page.locator("#sum-body .of-sec.lead").count() == 1 and "not saved yet" in page.inner_text("#sum-body"),
                   str(page.locator("#sum-body .of-sec h4").all_inner_texts()))
@@ -2371,7 +2415,13 @@ fx.fetch_journal = lambda j: []                                                 
             # ask about one chapter: the reader's Ask tab opens limited to it
             page.click('#bk-list [data-chap-ask="1"]'); page.wait_for_selector(".rd-band .textLayer span", timeout=60000); page.wait_for_selector("#ask-chapsel", timeout=10000)
             check("'Ask about it' opens the book in the reader on the Ask tab with that chapter chosen", page.eval_on_selector("#ask-chapsel", "e => e.value") == "1" and page.locator('.rd-tabs button[data-tab="ask"].on').count() == 1 and "Chapter 2" in page.inner_text("#ask-chapsel"), page.inner_text("#ask-chapsel"))
-            page.select_option("#ask-mode", "full"); page.fill("#ask-q", "What does this chapter say about rules?"); page.click('.ask-box [data-k="send"]')
+            page.select_option("#ask-mode", "full")
+            page.wait_for_function("/whole chapter/.test(document.querySelector('#ask-est').innerText)", timeout=30000); est_ch = page.inner_text("#ask-est")
+            page.select_option("#ask-chapsel", "-1"); page.wait_for_function("/whole book/.test(document.querySelector('#ask-est').innerText)", timeout=30000); est_bk = page.inner_text("#ask-est")
+            page.select_option("#ask-chapsel", "1"); page.wait_for_function("/whole chapter/.test(document.querySelector('#ask-est').innerText)", timeout=30000)
+            n_of = lambda t_: int(re.search(r"\((\d+) passages\)", t_).group(1))  # noqa: E731
+            check("…the line under the Ask box counts the chosen chapter only (fewer passages than the whole book), and follows the choice", est_ch.startswith("Next question: ") and 0 < n_of(est_ch) < n_of(est_bk), est_ch + " | " + est_bk)
+            page.fill("#ask-q", "What does this chapter say about rules?"); page.click('.ask-box [data-k="send"]')
             page.wait_for_function("document.querySelector('.ask-turn') && document.querySelector('.ask-turn').innerText.includes('Sources')", timeout=60000)
             ask_req = [b_ for pth_, b_ in SEEN if pth_.endswith("/chat/completions") and "Passages from the paper" in str(b_["messages"][-1]["content"])][-1]
             sent_pages = sorted({int(x_) for x_ in re.findall(r"\(p\. (\d+)\)", ask_req["messages"][-1]["content"])})
@@ -2441,6 +2491,14 @@ fx.fetch_journal = lambda j: []                                                 
             check("…the reader's Summary tab shows the same overview, marked out of date, with no paper template or Generate button for a book",
                   "FAKE BOOK OVERVIEW" in page.inner_text("#sum-body") and "has changed since" in page.inner_text("#sum-body") and not page.is_visible("#sum-go") and not page.is_visible("#sum-t")
                   and "chapter by chapter" in page.inner_text("#sum-bk"), page.inner_text("#reader .rd-sub")[:300])
+            def get_code_(path):
+                try:
+                    urllib.request.urlopen(base + path); return 200
+                except urllib.error.HTTPError as e_:
+                    return e_.code
+            check("…and no cost of a paper-template summary is shown beside it for a book, nor worked out by the server",
+                  page.locator("#sum-est").count() == 1 and not page.is_visible("#sum-est") and get_code_("/api/doc/summary/estimate?file=" + urllib.request.quote(ep_row["file"]) + "&template=tldr") == 400
+                  and get_code_("/api/doc/ask/estimate?file=" + urllib.request.quote(ep_row["file"]) + "&from=3&to=1") == 400 and get_code_("/api/doc/ask/estimate?file=Papers/none.pdf") == 404)
             open(bj_path_, "w", encoding="utf-8").write(bj_keep_)
             def post_code_(path, body):
                 try:

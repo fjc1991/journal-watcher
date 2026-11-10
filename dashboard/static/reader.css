@@ -171,6 +171,7 @@ body.reading { overflow: hidden; }
 .ask-src li { margin: 3px 0; }
 .ask-box { border-top: 1px solid var(--line); padding: 8px 12px; display: flex; gap: 8px; align-items: flex-end; background: var(--panel); }
 .ask-box textarea { flex: 1; resize: none; min-height: 38px; max-height: 140px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
+.ask-est { padding: 0 12px 7px; font-size: 12px; color: var(--ink-3); background: var(--panel); } .ask-est:empty { display: none; }
 .ask-warn { margin: 10px 12px; padding: 9px 11px; border-radius: 9px; background: var(--bl-soft); border: 1px solid var(--bl); line-height: 1.5; }
 .ask-status { color: var(--ink-3); font-style: italic; }
 
