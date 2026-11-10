@@ -1077,6 +1077,41 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Not verified.** No real provider was called at any point: that each provider reports "length" or "max_tokens" as documented, that Anthropic accepts the request with the breakpoint on the paper block and reads it back on the second question, and that real charges match the estimates, are all untested. Answer quality with the paper before the conversation in whole-paper follow-ups is assumed equal, not measured.
 
+### Item 48. Improvements, part D: speed (2026-11-10)
+
+**Asked.** The fourth of the five PRs for the 40 audit items: the five speed items and the three lower-rated ones the author asked for anyway. Also: the author will release 1.3.0 after the fifth PR and not the versions in between, so `CHANGELOG.md` now has one `## 1.3.0` section for everything since 1.2.9 (the release notes are read from the section of the tag).
+
+**How it was built.** As part C: a map per item by a reader of the code, this time with a prototype and a measurement script (`synthetic library, N papers`), then one implementer per item who had to run the measurement before and after, then one review in four areas aimed at what caches get wrong (a stale answer, another paper's answer, a caller changing what it was handed, a race), each finding checked by a skeptic.
+
+**Measured** (a shared 4-CPU Linux machine, synthetic libraries, by the implementers; not measured on a Mac or in a Dropbox folder):
+
+| What | Before | After |
+|---|---|---|
+| `pipeline.library()`, 3,000 papers | 131 ms (15,107 stats, 2,029 opens) | 38 ms (2,018 stats, 1,347 folder listings, 0 opens) |
+| One paper's row (notes autosave, reading progress) | 127 ms | 0.04 ms |
+| Library "List all", 1,000 rows, click to painted | 560 ms, 43,733 elements | 68 ms, 2,011 elements |
+| Library search, 12 warm queries, 3,000 papers | 4,839 ms | 1,532 ms |
+| Up next, 3,000 papers, nothing changed / after one edited takeaway | 249 / 912 ms | 74 / 78 ms |
+| Up next's file, 3,000 papers | 9.7 MB, rewritten whole | 4.7 MB, appended to |
+| Loading the server | 1.05 s | 0.10 s |
+| Listing past runs again (104 weekly runs, 8 searches of 1,000 papers) | 119 ms | 3 ms |
+| A pass that needs every PDF's hash, 300 PDFs of 1.5 MB | 0.43 to 0.52 s, 450 MB read | 0.001 to 0.002 s, nothing read |
+| Weekly check, 14 journals, fake feeds of 0.8 s, nothing new | 11.3 s | 5.9 s |
+
+**What did not get faster, plainly.** The first library list, the first search and the first listing of runs after a start (every file must be read once). The first Claude call of a session now pays the SDK's load (about 0.8 s). The weekly check with feeds that answer at once is slightly slower, by the pause between two feeds of one publisher.
+
+**Changed.** `notes_store.sha1_of`: every PDF's hash is remembered under (size, modification time, inode, change time), kept in `pdf_sha1.json` on this computer; a file younger than two seconds, or changed while it was read, is not remembered. `pipeline.library` / `library_row`: per-file parse caches under the same kind of signature, one listing per paper folder, the index parsed once and looked up by file; every call still stats what it depends on. `pipeline.list_runs`: each run's header kept in memory under its file's signature. The Anthropic SDK is imported where it is first used (`ai.py`, the direct summary path, `agent.py`); a computer without it starts and says what to install. `pipeline._FeedsAhead`: at most three feeds in flight, one host never twice at once, the journal whose turn it is first; the journal loop, Stop and the checkpoint are as before. `library_search`: the lowered and stripped texts are kept beside the cached original. `personal.py`: numpy for the math, one file of fixed-size records that is appended to, the embedding model written in the file. `library.js`: 100 rows at a time, a row's menu built when opened.
+
+**Found on the way (not in the audit).** The one-slot hash memo could hand a thread another paper's hash (8 wrong in 160,000 calls under a forced switch interval). Up next failed outright after a change of the embedding model, until a file was deleted by hand. A search still in flight when the box was cleared drew its rows onto the Library's home page.
+
+**Review.** 18 findings confirmed, 2 refuted; 15 fixed, 3 accepted. The two that mattered were both new with this change: the library cache remembered what a file said while it could not be read (a notes file locked by the sync client showed as "no highlights" until restart), and the weekly check had gained a 1-second pause between feeds of one publisher that made a quiet week slower than before (now 0.3 s; there was none before, only the work in between). Also fixed: the change time joined the signatures (a rewrite in place with the same length and the old modification time, as a sync client can deliver, was not seen); a damaged hash map is always an empty one; the hash map written by one process no longer puts back entries another process replaced; the journal whose turn it is no longer waits behind feeds read ahead; one journal with an unusable feed address no longer stops the whole check; a check started right after Stop cannot ask a host that an abandoned read is still asking; the look for the SDK at start cannot crash the start; four faults in the Up next store when two processes write it.
+
+**Accepted, not fixed.** The search's kept texts are never dropped while the app runs (about 70 MB at 3,000 papers with non-Latin text; 12 MB per 1,000 for plain English). The suggested folder in Up next is worked out as one matrix product and is not bit-for-bit what the per-paper sums gave, so a paper exactly at a threshold could fall on the other side (the ranking on the pinned fixture and on the benchmark is identical). The browser's own find (Cmd-F) and a screen reader see only the rows that are drawn.
+
+**Not done.** The other long lists (Show all journals, a journal's page, a folder's Papers tab, Books) are still drawn whole. A bulk export of thousands of selected papers still builds an address too long for the server. `Journal Watcher.command` still loads every package at each launch from a checkout (about 2 s; a presence check would take 0.02 s). A folder-listing cache keyed on a folder's own modification time was measured faster (22 ms instead of 28 ms) and left out: whether Dropbox and external drives update that time is not known. A cross-process lock for the Up next file.
+
+**Not verified.** Nothing was measured on macOS, on a cold disk or in a Dropbox folder with online-only files, which is where the audit expected the largest gain from the hash cache. Real feed latency. Whether Dropbox delivers a changed file by replacing it or in place (the signatures handle both; which one happens was not observed).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
