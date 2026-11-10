@@ -772,6 +772,8 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
     key = _cache_key(name, f, messages, system, schema, max_tokens, web_search) if cache else None
     if key and not fresh:
         hit = dl.load_json(os.path.join(CACHE, key + ".json"), None) if os.path.exists(os.path.join(CACHE, key + ".json")) else None
+        if hit and "stop" not in hit and type((hit.get("usage") or {}).get("out")) is int and hit["usage"]["out"] >= max_tokens:
+            hit = None                                     # saved before cut-off answers were kept out (no stop reason on it) and as long as the limit it was asked with: taken as cut off, so it is asked again
         if hit:
             r = Result(hit["text"], hit.get("usage"), name, f["model"], cost=0.0, sources=hit.get("sources"), cached=True)
             yield "text", r.text
@@ -794,7 +796,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
                     os.makedirs(CACHE, exist_ok=True)
                     tmp = dl.tmp_path(os.path.join(CACHE, key + ".json"))
                     with open(tmp, "w", encoding="utf-8") as fh:
-                        json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
+                        json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "stop": v.stop, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
                     os.replace(tmp, os.path.join(CACHE, key + ".json"))
             yield kind, v
     except Declined as e:

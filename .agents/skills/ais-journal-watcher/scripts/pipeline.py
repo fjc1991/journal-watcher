@@ -56,10 +56,11 @@ SCREEN_HISTORY_CALLS = 200     # only the most recent screening calls count: a p
 def screen_history(provider, model):
     """What your earlier screening with this provider and model cost, from the usage ledger: (papers sent, mean cost per paper). Only the calls that say how many
     papers they carried (so not a Settings Test, nor a call made before the ledger recorded it) and that have a price; an answer that could not be used was paid for
-    too, so it counts."""
+    too, so it counts. A request that repeats papers already sent (the one resend, the halves of a batch that was split) carries 0: its cost counts, its papers are
+    not counted a second time, so the mean is what was paid per different paper."""
     import ai
     rows = [r for r in ai._rows() if r.get("feature") == "screen" and r.get("provider") == provider and r.get("model") == model
-            and type(r.get("papers")) is int and r["papers"] > 0 and not r.get("cached") and not r.get("cancelled")
+            and type(r.get("papers")) is int and r["papers"] >= 0 and not r.get("cached") and not r.get("cancelled")
             and isinstance(r.get("cost"), (int, float))][-SCREEN_HISTORY_CALLS:]
     n = sum(r["papers"] for r in rows)
     return n, (sum(r["cost"] for r in rows) / n if n else None)
@@ -1010,7 +1011,8 @@ SPLIT_DEPTH = 2                # a batch whose answer was cut off is halved at m
 def _screen_batch(system, batch, usage, override=None, stop=None):
     """One batch of papers judged by the model of the "screen" feature (Settings → AI), through the AI layer: the monthly budget stops it, local-only mode applies, and
     every call is in the usage ledger. Returns {n: result}. Raises ai.Blocked when nothing more may be asked, or the ai.AIError of an answer that asking again cannot change
-    (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either. Raises BatchFailed (with the reason) when this batch could not be judged.
+    (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either (its `partial`, when a split batch was stopped that way between
+    its halves, holds the verdicts of the halves that did answer). Raises BatchFailed (with the reason) when this batch could not be judged.
     An answer that is not the JSON asked for is not simply sent again: if `stop` (the researcher's Stop) is set, nothing more is sent and None is returned (the papers
     stay unscreened); an answer cut off at the length limit is asked again as two halves (SPLIT_DEPTH; BatchFailed.partial then holds the verdicts of the halves that
     did answer); anything else is asked once more, and no further."""
@@ -1022,13 +1024,14 @@ def _screen_batch(system, batch, usage, override=None, stop=None):
     return _ask_verdicts(system, items, usage, override, stop, SPLIT_DEPTH)
 
 
-def _ask_verdicts(system, items, usage, override, stop, depth):
-    """The verdicts {n: result} for these papers of one batch (each carries its number n in the batch, so the halves of a split batch merge back); see _screen_batch."""
+def _ask_verdicts(system, items, usage, override, stop, depth, again=False):
+    """The verdicts {n: result} for these papers of one batch (each carries its number n in the batch, so the halves of a split batch merge back); see _screen_batch.
+    again: these papers were already sent in a request of this batch (a half of a split batch)."""
     why, resent = "no answer", False
     for attempt in range(3):
         try:
             res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000,
-                          override=override, log={"papers": len(items)})       # (the ledger row says how many papers it carried: the estimate rests on it, see screen_history)
+                          override=override, log={"papers": 0 if again or resent else len(items)})       # (the ledger row says how many papers it carried, 0 when it repeats papers a request of this batch already carried: the estimate rests on it, see screen_history)
         except ai.Declined as e:
             if e.result is not None:
                 usage.add_result(e.result)                     # a refusal is billed too
@@ -1055,12 +1058,18 @@ def _ask_verdicts(system, items, usage, override, stop, depth):
                 mid = (len(items) + 1) // 2
                 got, whys = {}, []
                 for half in (items[:mid], items[mid:]):
+                    if stop is not None and stop.is_set():     # Stop was pressed while the other half was answered: this one is not sent
+                        return None
                     try:
-                        part = _ask_verdicts(system, half, usage, override, stop, depth - 1)
+                        part = _ask_verdicts(system, half, usage, override, stop, depth - 1, again=True)
                     except BatchFailed as e:
                         got.update(e.partial)
                         whys.append(e.reason)
                         continue
+                    except ai.AIError as e:                    # the budget, or a refused request: the screening stops, but the halves that did answer were paid for and keep their verdicts
+                        got.update(getattr(e, "partial", None) or {})
+                        e.partial = got
+                        raise
                     if part is None:                           # stopped: nothing of this batch is kept (the caller leaves its papers unscreened)
                         return None
                     got.update(part)
@@ -1072,7 +1081,11 @@ def _ask_verdicts(system, items, usage, override, stop, depth):
                 break
             resent = True
             continue
-        return {r["n"]: r for r in out if isinstance(r, dict) and isinstance(r.get("n"), int)}
+        sent = {it["n"] for it in items}
+        got = {r["n"]: r for r in out if isinstance(r, dict) and type(r.get("n")) is int and r["n"] in sent}      # only the numbers this request carried: a half of a split batch that numbers its answer from 1 again must not overwrite the other half's verdicts
+        if not got:                                            # an answer for none of its own papers cannot be used (and asking again would pay for the same)
+            raise BatchFailed("the model's answer had no verdict for any of the papers it was sent")
+        return got
     raise BatchFailed(why)
 
 
@@ -1221,7 +1234,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                 batch = futs[fut]
                 if fut.cancelled():                            # cancelled below once nothing more may be asked: never started, not paid for
                     continue
-                why = ""
+                why, cut_short = "", False
                 try:
                     res = fut.result()
                 except ai.AIError as e:                        # Blocked (budget, local-only, no key) or a request the provider refuses for every batch alike (model, key, credit):
@@ -1229,7 +1242,9 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                         f.cancel()
                     if blocked is None:
                         blocked = e
-                    continue
+                    res, cut_short = getattr(e, "partial", None), True      # (partial: a split batch stopped between its halves; the halves that answered keep their verdicts)
+                    if not res:
+                        continue
                 except BatchFailed as e:
                     res, why = e.partial, e.reason             # (partial: the halves of a split batch that did answer keep their verdicts)
                     emit("log", {"msg": "Screening failed for %d papers: %s" % (len([n for n in range(1, len(batch) + 1) if not res.get(n)]), why[:300]), "level": "warn"})
@@ -1239,6 +1254,8 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                     answered += 1                              # (a batch that failed gave no verdict: it does not count as screened by this model)
                 for n, p in enumerate(batch, 1):
                     r = res.get(n)
+                    if not r and cut_short:                    # never judged, because the screening was stopped: left unscreened
+                        continue
                     if not r:
                         reason = "screening failed: " + (why or ("the model's answer had no verdict for this paper" if res else "no answer"))
                         p["verdict"], p["relevance"], p["reason"], p["topics"] = "error", 0, reason[:400], []
@@ -1254,7 +1271,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                         p.pop("model_verdict", None)
                         terms_rule(run, p)
                     emit("verdict", {k: p.get(k) for k in ("id", "verdict", "relevance", "topics", "method", "reason", "model_verdict")})
-                prog["done"] += len(batch)
+                prog["done"] += sum(1 for n in range(1, len(batch) + 1) if res.get(n)) if cut_short else len(batch)
                 emit("progress", {"stage": "screening", "label": "Screening", "done": prog["done"], "total": total})
                 emit("cost", {"cost": round(run.usage.cost(), 4), "usage": run.usage.d, "detail": run.usage.detail()})
                 remember_verdicts(fp, [p for p in batch if p.get("verdict") != "error"])

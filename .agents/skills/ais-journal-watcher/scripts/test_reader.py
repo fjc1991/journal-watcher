@@ -1351,6 +1351,8 @@ def main():
                 Fake.ending = None
             assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and "cut off at the model’s length limit" in st["stopped"] and st["made"] == 0, st
             assert all("cut off" in f["error"] for f in st["failed"]) and len(st["failed"]) == 3 and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            paid = sum(x["cost"] for x in ai.usage_log(3))                                                                 # (nothing was saved, but the three answers were paid for: the job says so)
+            assert paid > 0 and abs(st["cost"] - paid) < 1e-12, ("a cut-off part is missing from what the job says it cost", st["cost"], paid)
             # --- the overview stopped at the length limit: the parts are kept, no overview is saved, and pressing again asks for it again (it was not cached)
             reset(t=[[1, "A1", 1], [1, "B2", 2]], sums={}); answers(overview=lambda b: ["Half an over"]); n1 = len(mine())
             Fake.ending = lambda body: "length" if sysof(body).startswith("You write an OVERVIEW") else None
@@ -1358,10 +1360,13 @@ def main():
                 assert bj.start(brel) is True; st = wait()
                 assert st["made"] == 2 and not st["failed"] and st["overview"] is False and "The overview could not be written" in st["stopped"] and "cut off at the model’s length limit" in st["stopped"], st
                 assert "overview" not in bk.info_at(bpdf) and len(bk.info_at(bpdf)["summaries"]) == 2 and len(mine()) - n1 == 3 and mine()[-1]["max_tokens"] == 4000, (len(mine()) - n1, mine()[-1]["max_tokens"])
+                paid = sum(x["cost"] for x in ai.usage_log(3)); parts_ = sum(v["cost"] for v in bk.info_at(bpdf)["summaries"].values())
+                assert paid > parts_ > 0 and abs(st["cost"] - paid) < 1e-12, ("the cut-off overview is missing from what the job says it cost", st["cost"], paid, parts_)
                 try:
                     bk.write_overview(brel); raise AssertionError("a cut-off overview was saved")
                 except ai.AIError as ex:
                     assert "cut off" in str(ex) and "not saved" in str(ex), str(ex)
+                    assert isinstance(ex, ai.CutOff) and ex.result.cost > 0 and ex.text == "Half an over", (type(ex).__name__, getattr(ex, "text", None))
                 assert len(mine()) - n1 == 4 and "overview" not in bk.info_at(bpdf)
             finally:
                 Fake.ending = None
@@ -3712,6 +3717,67 @@ print("OK")
         Fake.pieces = ["The sample has ", "120 firms (2)."]
     check("an answer that stopped at the length limit is marked cut off (OpenAI-style 'length'), is given back but never cached, the pages are told, and it is not written as a paper's summary", t_cut_off)
 
+    def t_cut_off_old_cache():
+        """An answer saved before cut-off answers were kept out of the cache has no stop reason on it. One whose output reached the limit it was asked with is taken as
+        cut off: asked again (and replaced by the new answer); a shorter one, and any answer saved since, is served as before."""
+        chats = lambda: sum(1 for x in SEEN if x[0].endswith("/chat/completions"))  # noqa: E731
+        def entry_of(msg, limit):          # the cache file of this request (asked once, complete, so it is saved)
+            before = set(os.listdir(ai.CACHE)) if os.path.isdir(ai.CACHE) else set()
+            assert not ai.chat("explain", msg, system="s", cache=True, max_tokens=limit).cached
+            new = set(os.listdir(ai.CACHE)) - before; assert len(new) == 1, new
+            return os.path.join(ai.CACHE, new.pop())
+        def rewrite(f, **k):               # as it was saved before the change: no "stop", and the tokens it came out at
+            d = json.load(open(f)); d.pop("stop", None); d.update(k); json.dump(d, open(f, "w"))
+        Fake.pieces = ["The passage argues that the half ans"]
+        try:
+            m1 = [{"role": "user", "content": "explain OLD CUT"}]
+            f1 = entry_of(m1, 1800); rewrite(f1, usage={"in": 900, "out": 1800})
+            n0 = chats(); Fake.pieces = ["The passage argues that the half answer is now whole."]
+            r = ai.chat("explain", m1, system="s", cache=True, max_tokens=1800)
+            assert chats() == n0 + 1 and not r.cached and r.text.endswith("now whole."), ("an old answer as long as its limit was served as complete", r.cached, r.text)
+            r = ai.chat("explain", m1, system="s", cache=True, max_tokens=1800)
+            assert chats() == n0 + 1 and r.cached and r.text.endswith("now whole.") and not r.cut_off, "the new answer took its place"
+            assert "stop" in json.load(open(f1)), "an answer saved now says how it ended"
+            # an old answer shorter than its limit is complete: served, not asked again; so is one with more tokens than the limit that was saved since (it says how it ended)
+            m2 = [{"role": "user", "content": "explain OLD WHOLE"}]
+            f2 = entry_of(m2, 1800); rewrite(f2, usage={"in": 900, "out": 1799}); n0 = chats()
+            assert ai.chat("explain", m2, system="s", cache=True, max_tokens=1800).cached and chats() == n0
+            rewrite_new = json.load(open(f2)); rewrite_new.update(stop=None, usage={"in": 900, "out": 5000}); json.dump(rewrite_new, open(f2, "w"))
+            assert ai.chat("explain", m2, system="s", cache=True, max_tokens=1800).cached and chats() == n0
+            rewrite(f2, usage={}); assert ai.chat("explain", m2, system="s", cache=True, max_tokens=1800).cached and chats() == n0      # (no token count on it: nothing to go by, served)
+        finally:
+            Fake.pieces = ["The sample has ", "120 firms (2)."]
+    check("an answer saved before cut-off answers were kept out of the cache, with as many output tokens as the limit it was asked with, is asked again; a shorter one and any saved since are served", t_cut_off_old_cache)
+
+    def t_agent_summary():
+        """The agent's summarize tool goes through the AI layer: the summary is written and returned, and a cut-off answer comes back as the tool's error text."""
+        had = os.environ.get("ANTHROPIC_API_KEY"); env0 = dict(os.environ)
+        os.environ["ANTHROPIC_API_KEY"] = had or "not-a-key"       # (agent.py will not load without one; nothing is sent to Claude here)
+        try:
+            import agent as ag_
+        finally:
+            os.environ.clear(); os.environ.update(env0)
+        import pipeline as pl
+        keep = (ag_.find_paper, ag_.pdf_for, ag_.log, dict(ag_.USAGE), prefs.summary_prompt, pl.client)
+        prefs.summary_prompt = lambda *a, **k: "Summarise this paper for the agent."      # (a summary template is set, as it is by default: the AI-layer path)
+        def no_direct(): raise AssertionError("the summary did not go through the AI layer")
+        pl.client = no_direct
+        t1, t2 = os.path.join(TMP, "agent1.pdf"), os.path.join(TMP, "agent2.pdf")
+        shutil.copy(pdf, t1); shutil.copy(pdf, t2)
+        ag_.find_paper = lambda k: {"id": k, "title": "Platforms %s" % k, "abbr": "MISQ"}; ag_.pdf_for = lambda p: t1 if p["id"] == "a1" else t2; ag_.log = lambda m: None
+        try:
+            Fake.pieces = ["# Summary\n\nWritten for the agent."]; rows0 = len(ai.usage_log(100000))
+            out = ag_.summarize_pdf.func("a1")
+            assert out.startswith("# Summary") and open(t1[:-4] + ".md").read().startswith("# Summary"), out
+            assert len(ai.usage_log(100000)) == rows0 + 1 and ai.usage_log(1)[0]["feature"] == "summarize" and ag_.USAGE == keep[3], "in the usage record, not in the agent's own Claude tokens"
+            Fake.pieces = ["Half a summ"]; Fake.ending = "length"
+            out = ag_.summarize_pdf.func("a2")
+            assert "cut off at the model’s length limit" in out and "not saved" in out and not os.path.exists(t2[:-4] + ".md"), out
+        finally:
+            Fake.ending = None; Fake.pieces = ["The sample has ", "120 firms (2)."]
+            ag_.find_paper, ag_.pdf_for, ag_.log = keep[:3]; prefs.summary_prompt, pl.client = keep[4:]
+    check("the agent's summarize tool goes through the AI layer: the summary is written and returned, and a cut-off answer is the tool's error text, not a crash", t_agent_summary)
+
     def t_cut_off_claude():
         import types as _t
         class _M:
@@ -4368,6 +4434,9 @@ print("OK")
             assert m1[-1]["type"] == "done" and m1[-1]["cut_off"] is True and m2[-1]["cut_off"] is True and not m2[-1]["cached"] and len(SEEN) == n0 + 2, (m1[-1], m2[-1], len(SEEN) - n0)
             d1 = next(m for m in m1 if m["type"] == "draft")["doc"]
             assert d1["cut_off"] is True and rw.load("cutdraft")["cut_off"] is True and rw.load("cutdraft")["raw"].endswith("adds that"), "kept, and marked as unfinished"
+            same = rw.update("cutdraft", raw=d1["raw"])                                                                    # Edit, then Save without typing: the end is still missing, so the note stays
+            assert same["cut_off"] is True and rw.load("cutdraft")["cut_off"] is True and same["raw"] == d1["raw"], "a save that changes nothing keeps the cut-off note"
+            assert rw.update("cutdraft", raw=d1["raw"].replace("\n", "\r\n") + "\n")["cut_off"] is True and rw.update("cutdraft", style="numbered")["cut_off"] is True
             ed = rw.update("cutdraft", raw=d1["raw"] + " entry rises [P2-1].")
             assert ed["cut_off"] is False and rw.load("cutdraft")["cut_off"] is False, "once you have edited it, it is yours"
             Fake.ending = None
@@ -7457,6 +7526,7 @@ print("OK")
             n0, rows0 = len(chat_calls()), len(ai.usage_log(100000))
             r4 = new_run("prose", n=2); pl_.screen(r4, emit, stop, batch_size=2, workers=1)
             assert len(chat_calls()) - n0 == 2 and len(ai.usage_log(100000)) - rows0 == 2, (len(chat_calls()) - n0, len(ai.usage_log(100000)) - rows0)
+            assert [x.get("papers") for x in ai.usage_log(2)][::-1] == [2, 0], [x.get("papers") for x in ai.usage_log(2)][::-1]      # (the second request repeats the same papers: 0 on its row)
             assert {r4.papers[i]["verdict"] for i in r4.order} == {"error"} and all("not the JSON" in r4.papers[i]["reason"] and "This paper studies" in r4.papers[i]["reason"] for i in r4.order), r4.papers[r4.order[0]]["reason"]
             # 4b. an answer cut off at the length limit is not sent again as it was: the batch is asked again as two halves (the papers keep their numbers), every paper
             #     gets its verdict, and the cut-off answer is paid for and counted like the others
@@ -7469,6 +7539,7 @@ print("OK")
             assert sent == [[1, 2, 3, 4], [1, 2], [3, 4]], sent
             assert all(r4b.papers[i]["verdict"] == "download" for i in r4b.order) and len(ai.usage_log(100000)) - rows0 == 3, [r4b.papers[i].get("verdict") for i in r4b.order]
             assert abs(r4b.usage.cost() - sum(x["cost"] for x in ai.usage_log(3))) < 1e-9 and not any(e == "log" and "Screening failed" in d["msg"] for e, d in events)
+            assert [x.get("papers") for x in ai.usage_log(3)][::-1] == [4, 0, 0], [x.get("papers") for x in ai.usage_log(3)][::-1]      # the halves repeat papers already counted: 0 on their rows
             # 4c. every answer is cut off, however small the batch: halved twice and no further (1 + 2 + 4 requests for 8 papers, never one per paper), and the reason says so
             Fake.responder = lambda body: ['{"results": [{"n": 1, "verd']; Fake.ending = "length"
             n0 = len(chat_calls()); r4c = new_run("cutall", n=8); pl_.screen(r4c, emit, stop, batch_size=8, workers=1)
@@ -7495,6 +7566,55 @@ print("OK")
             Fake.responder = lambda body: (st3.set(), ["{"])[1]; Fake.ending = "length"
             n0 = len(chat_calls()); r4f = new_run("stoppedcut", n=4); pl_.screen(r4f, emit, st3, batch_size=4, workers=1)
             assert len(chat_calls()) - n0 == 1 and not any(r4f.papers[i].get("verdict") for i in r4f.order), (len(chat_calls()) - n0, [r4f.papers[i].get("verdict") for i in r4f.order])
+            Fake.ending = None
+            # 4g. Stop pressed while the first half of a split batch was answered (an answer that can be used): the second half is not sent
+            st4 = threading.Event()
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else (st4.set(), verdicts(body))[1]
+            n0 = len(chat_calls()); r4g = new_run("stoppedhalf", n=4); pl_.screen(r4g, emit, st4, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2]], ("a request was sent after Stop", [asked(b) for b in chat_calls()[n0:]])
+            assert not any(r4g.papers[i].get("verdict") for i in r4g.order), [r4g.papers[i].get("verdict") for i in r4g.order]
+            # 4h. the second half numbers its answer from 1 again: its verdicts are not put on the first half's papers; the first half keeps its own, the second fails and says why
+            def renumbered(body):
+                if len(asked(body)) > 2:
+                    return ["{"]
+                if asked(body)[0] == 1:
+                    return verdicts(body)
+                return [json.dumps({"results": [{"n": k, "verdict": "skip", "relevance": 3, "topics": [], "method": "Survey", "reason": "another paper's"} for k in (1, 2)]})]
+            Fake.responder = renumbered
+            n0, events[:] = len(chat_calls()), []
+            r4h = new_run("renumbered", n=4); pl_.screen(r4h, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2], [3, 4]], [asked(b) for b in chat_calls()[n0:]]
+            assert [(r4h.papers[i]["verdict"], r4h.papers[i]["reason"]) for i in r4h.order[:2]] == [("download", "fits")] * 2, ("a paper got another paper's verdict", [(r4h.papers[i]["verdict"], r4h.papers[i]["reason"]) for i in r4h.order])
+            assert all(r4h.papers[i]["verdict"] == "error" and "no verdict for any of the papers it was sent" in r4h.papers[i]["reason"] for i in r4h.order[2:]), [r4h.papers[i]["reason"] for i in r4h.order[2:]]
+            fp4h = pl_.screen_fingerprint(pl_.screening_system(r4h.params.get("topics"), r4h.params.get("query"), r4h.params.get("methods")))
+            assert {k: v["v"] for k, v in json.load(open(pl_.VERDICTS))[fp4h].items() if k.startswith("renumbered-")} == {"renumbered-0": "download", "renumbered-1": "download"}
+            mixed = lambda body: [json.dumps({"results": [{"n": k, "verdict": "skip", "relevance": 3, "topics": [], "method": "Survey", "reason": "r%s" % k} for k in (2, 7, True, "1")]})]
+            Fake.ending = None; Fake.responder = mixed                                                                     # (and in a whole batch: a number it was not sent, True or "1" is no verdict)
+            r4h2 = new_run("strays", n=2); pl_.screen(r4h2, emit, stop, batch_size=2, workers=1)
+            assert [r4h2.papers[i]["verdict"] for i in r4h2.order] == ["error", "skip"] and r4h2.papers["strays-1"]["reason"] == "r2", [r4h2.papers[i].get("reason") for i in r4h2.order]
+            # 4i. the screening is stopped between the halves (a refused key, then the budget): the half that answered was paid for and keeps its verdicts (saved, too);
+            #     the other papers stay unscreened, the reason is on the run, and Retry screening asks only for them
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else verdicts(body)
+            Fake.http_error = lambda body: (401, "User not found.") if body.get("response_format") and asked(body) == [3, 4] else None
+            n0, events[:] = len(chat_calls()), []
+            r4i = new_run("refusedhalf", n=4); pl_.screen(r4i, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2], [3, 4]], [asked(b) for b in chat_calls()[n0:]]
+            assert [r4i.papers[i].get("verdict") for i in r4i.order] == ["download", "download", None, None], ("the verdicts already paid for were dropped", [r4i.papers[i].get("verdict") for i in r4i.order])
+            assert "HTTP 401" in r4i.screen_error and [d for e, d in events if e == "progress"][-1]["done"] == 2, (r4i.screen_error, [d for e, d in events if e == "progress"][-1])
+            Fake.http_error = None; n0 = len(chat_calls()); pl_.screen(r4i, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2]] and all(r4i.papers[i]["verdict"] == "download" for i in r4i.order) and r4i.screen_error == "", [asked(b) for b in chat_calls()[n0:]]
+            r4i2 = new_run("refusedhalf", n=4); n0 = len(chat_calls()); pl_.screen(r4i2, emit, stop, batch_size=4, workers=1)      # (the same search again: all four are known, nothing is asked)
+            assert len(chat_calls()) == n0 and r4i2.reused == 4, (len(chat_calls()) - n0, r4i2.reused)
+            gate, gates = ai._budget_gate, []
+            ai._budget_gate = lambda *a, **k: (_ for _ in ()).throw(ai.Blocked("This month’s AI budget ($1.00) is used up.")) if (gates.append(1), len(gates))[1] >= 4 else gate(*a, **k)
+            try:                                                                                                           # 8 papers, every answer for more than 2 cut off: 8, 4, 2 are asked, then the budget stops it
+                n0 = len(chat_calls()); r4j = new_run("budgethalf", n=8); pl_.screen(r4j, emit, stop, batch_size=8, workers=1)
+            finally:
+                ai._budget_gate = gate
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4], [1, 2]], [asked(b) for b in chat_calls()[n0:]]
+            assert [r4j.papers[i].get("verdict") for i in r4j.order] == ["download", "download"] + [None] * 6 and "budget" in r4j.screen_error, ([r4j.papers[i].get("verdict") for i in r4j.order], r4j.screen_error)
             Fake.ending = None
             # 5. an answer that leaves a paper out: only that paper fails, and says so
             Fake.responder = lambda body: [json.dumps({"results": [{"n": 1, "verdict": "skip", "relevance": 5, "topics": [], "method": "Survey", "reason": "no"}]})]
@@ -7739,8 +7859,13 @@ print("OK")
             assert pl_.screen_estimate() == (by_price, "prices") and pl_.est_screen_cost_per_paper() == by_price, pl_.screen_estimate()
             row(cost=0.005, papers=1)                                                                                      # the 50th paper: from here on, what they cost
             row(cost=9.0, papers=25, provider="other"); row(cost=9.0, papers=25, model="m2"); row(cost=9.0, papers=25, feature="ask"); row(cost=0.0, papers=25, cached=True)
-            row(cost=None, papers=25); row(cost=9.0, papers=25, cancelled=True); row(cost=9.0, papers=0); row(cost=9.0, papers="25")
+            row(cost=None, papers=25); row(cost=9.0, papers=25, cancelled=True); row(cost=9.0, papers=-1); row(cost=9.0, papers="25"); row(cost=9.0, papers=True)
             n, mean = pl_.screen_history("fake", "m1"); assert n == 50 and abs(mean - 0.0025) < 1e-12, (n, mean)
+            # a request that repeats papers already sent (a resend, the halves of a split batch) carries 0 papers: what it cost counts, its papers are not counted twice
+            kept = open(ai.LEDGER).read()
+            row(cost=0.05, papers=0); row(cost=0.025, papers=0)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 50 and abs(mean - 0.004) < 1e-12, (n, mean)
+            open(ai.LEDGER, "w").write(kept)
             per, basis = pl_.screen_estimate(); assert basis == "history" and abs(per - 0.0025) < 1e-12 and pl_.est_screen_cost_per_paper() == per, (per, basis)
             assert pl_.screen_estimate("fake", "m9") == (None, None) and pl_.est_screen_cost_per_paper("fake", "m9") is None      # a model with no price and nothing on record: not known
             write_cfg({**CFG, "prices": {}, "features": feats})
@@ -7763,9 +7888,27 @@ print("OK")
             assert sorted(x.get("papers") or 0 for x in rows) == [2, 3] and all(x["feature"] == "screen" for x in rows), rows
             n, mean = pl_.screen_history("fake", "m1"); assert n == 5 and mean > 0 and abs(mean - sum(x["cost"] for x in rows) / 5) < 1e-12, (n, mean)
             assert pl_.screen_test("fake", "m1")["ok"] and "papers" not in ai.usage_log(1)[0] and pl_.screen_history("fake", "m1")[0] == 5, ai.usage_log(1)[0]
+            # a batch of 4 whose answer is cut off, asked again as two halves: three requests paid for, four different papers; an answer in prose asked twice: two papers
+            os.remove(ai.LEDGER)
+            whole = Fake.responder; asked = lambda body: [it["n"] for it in json.loads(body["messages"][-1]["content"])]
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else whole(body); Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            r2 = pl_.Run("weekly", {"topics": [], "query": "the estimate, split"})
+            for k in range(4):
+                r2.add_paper({"id": "split-%d" % k, "title": "Paper %d" % k, "abbr": pl_.journals()[0]["abbr"], "pub_date": "2026-09-01", "abstract": "About something.", "keywords": None})
+            pl_.screen(r2, lambda *a, **k: None, threading.Event(), batch_size=4, workers=1)
+            rows = ai.usage_log(10); assert len(rows) == 3 and all(r2.papers[i]["verdict"] == "skip" for i in r2.order), rows
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 4 and abs(mean - sum(x["cost"] for x in rows) / 4) < 1e-12, ("the same papers were counted more than once", n, mean)
+            Fake.ending = None; Fake.responder = lambda body: ["Prose, not verdicts."]
+            r3 = pl_.Run("weekly", {"topics": [], "query": "the estimate, prose"})
+            for k in range(2):
+                r3.add_paper({"id": "prose-%d" % k, "title": "Paper %d" % k, "abbr": pl_.journals()[0]["abbr"], "pub_date": "2026-09-01", "abstract": "About something.", "keywords": None})
+            pl_.screen(r3, lambda *a, **k: None, threading.Event(), batch_size=2, workers=1)
+            rows = ai.usage_log(10); n, mean = pl_.screen_history("fake", "m1")
+            assert len(rows) == 5 and n == 6 and abs(mean - sum(x["cost"] for x in rows) / 6) < 1e-12, (len(rows), n, mean)
+            Fake.responder = whole
             ai.chat("ask", [{"role": "user", "content": "hello"}]); assert "papers" not in ai.usage_log(1)[0]             # (and no other call carries it)
         finally:
-            Fake.responder = None; ai.LEDGER = saved[0]
+            Fake.responder = None; Fake.ending = None; ai.LEDGER = saved[0]
             if saved[1] is None:
                 os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
             else:

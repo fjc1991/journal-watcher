@@ -660,7 +660,7 @@ def write_overview(rel, title="", override=None):
     if res is None or not (res.text or "").strip():
         raise ai.AIError("The model gave an empty overview, so nothing was saved.")
     if res.cut_off:
-        raise ai.AIError("The overview was cut off at the model’s length limit, so it was not saved. You can try again.")
+        raise ai.CutOff("The overview was cut off at the model’s length limit, so it was not saved. You can try again.", res, res.text)      # (it carries what it cost: see bookjob)
     rec = {"text": res.text.strip(), "provider": res.provider, "model": res.model, "cost": res.cost, "parts": len(ps), "fingerprint": _fingerprint(info, ps), "cut": cut,
            "at": datetime.now().isoformat(timespec="seconds")}
     with _BOOKLOCK:

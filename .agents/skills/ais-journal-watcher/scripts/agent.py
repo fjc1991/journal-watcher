@@ -284,12 +284,16 @@ def summarize_pdf(paper_id: str) -> str:
         log("summarizing [%s] %s" % (p.get("abbr"), (p.get("title") or "")[:60]))
     try:
         return pl.summarize(p, path, _UsageAdapter())
-    except RuntimeError as e:
-        return str(e)
+    except (RuntimeError, pl.ai.AIError) as e:      # (AIError: the AI layer's own, e.g. a summary cut off at the length limit, the budget, a missing key)
+        return str(e) or "the summary could not be written"
 
 
 class _UsageAdapter:
     add = staticmethod(add_usage)
+
+    @staticmethod
+    def add_result(res):
+        """A call made through the AI layer: it is already in the usage record and under the monthly budget, and not part of this run's own Claude tokens."""
 
 
 @beta_tool
