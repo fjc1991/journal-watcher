@@ -969,7 +969,7 @@ def main():
                 def get_final_message(self): return _M()
             ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _S())))
             real_to = ai._to_anthropic
-            ai._to_anthropic = lambda m: (ai._clients.clear(), real_to(m))[1]                                                           # the cache is cleared while the request is being prepared
+            ai._to_anthropic = lambda m, *a: (ai._clients.clear(), real_to(m, *a))[1]                                                           # the cache is cleared while the request is being prepared
             c2 = json.loads(json.dumps(c)); c2["providers"]["anth"] = {"type": "anthropic", "key_env": "OR_TEST_KEY", "models": ["m1"]}; write_cfg(c2)
             try:
                 assert ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "anth", "model": "m1"}).text == "ok"
