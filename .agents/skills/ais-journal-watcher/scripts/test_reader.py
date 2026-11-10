@@ -3280,7 +3280,7 @@ moved = paths.migrate_local(); again = paths.migrate_local()
 import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard, notes_store
 out = {"local": paths.LOCAL, "state": paths.STATE, "moved": moved, "again": again,
        "where": {"models": ai.MODELS, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
-                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED, "hashes": notes_store.SHA_CACHE},
+                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "personal_old": personal.OLD, "fetched": pipeline.FETCHED, "hashes": notes_store.SHA_CACHE},
        "shared": {"ai_cache": ai.CACHE, "index": blocks.INDEX, "ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
        "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL)),
        "index_files": sorted(os.listdir(os.path.join(st, "index"))), "cache_files": sorted(os.listdir(os.path.join(st, "ai_cache")))}
@@ -5507,7 +5507,7 @@ print("OK")
     check("saved searches: names and filters are cleaned, repeats refused, an empty list leaves no file", t_smart)
 
     def t_personal():
-        pe.CACHE = os.path.join(TMP, "personal_vecs.json"); pe._mem.clear()
+        pe.CACHE, pe.OLD = os.path.join(TMP, "personal_vecs.bin"), os.path.join(TMP, "personal_vecs.json"); pe._mem.clear()
         A = ["Platform governance and transparency rules for complementors", "Transparency of platform rules and complementor entry", "Governance of digital platforms: rules and complementors", "Complementors respond to platform governance rules"]
         B = ["Protein folding with deep neural networks", "Neural networks for protein structure prediction"]
         mk = lambda i, t, st=None, **kw: {"file": "Papers/x%d.pdf" % i, "title": t, "matched_topics": "", "state": st or {}, "folders": [], "notes": None, "score": 5, "date_checked": "2020-01-01", **kw}   # noqa: E731
@@ -5525,6 +5525,245 @@ print("OK")
         assert set(f) == {"n1", "n2"} and f["n1"]["score"] > f["n2"]["score"] and f["n1"]["band"] == "high", f
         assert pe.fits([{"id": "n1", "title": "Anything"}], few) == {}                                                                                                     # not enough to learn from: no fits, no guesses
     check("reading queue: your list first, read/skipped/opened papers left out, fit learned from what you read, nothing guessed from too little", t_personal)
+
+    def up_next_fixture():
+        """A fresh vector store, and a library of 24 papers about three subjects (platforms, proteins, auctions); two folders with three papers each."""
+        pe.CACHE, pe.OLD = os.path.join(TMP, "upnext", "personal_vecs.bin"), os.path.join(TMP, "upnext", "personal_vecs.json"); pe._mem.clear()
+        shutil.rmtree(os.path.join(TMP, "upnext"), ignore_errors=True)
+        words = {"plat": "platform governance rules complementors transparency entry ecosystems developers", "prot": "protein folding neural networks structure prediction residues sequences",
+                 "auct": "auction bidding reserve prices sellers revenue mechanisms bidders"}
+        mk = lambda i, subj, st=None, fl=(), **kw: {"file": "Papers/u%02d.pdf" % i, "title": " ".join((words[subj].split() * 2)[i % 5:i % 5 + 5]) + " study%d" % i, "matched_topics": "", "state": st or {}, "folders": list(fl), "notes": None, "score": 5,   # noqa: E731
+                                                    "date_checked": "2020-01-01", **kw}
+        rows = []
+        for i in range(24):
+            subj = ("plat", "prot", "auct")[i % 3]
+            st = {"status": "read"} if i in (0, 3, 6) else {"star": True} if i == 9 else {"skip": True} if i in (1, 4) else {"status": "toread"} if i == 20 else {}
+            rows.append(mk(i, subj, st, ("pin-platforms",) if i in (0, 3, 12) else ("pin-auctions",) if i in (2, 5, 8) else ()))
+        return rows
+
+    def spy_embed():
+        """Counts the texts handed to the embedding model: with spy_embed() as texts: …; len(texts)."""
+        class Spy:
+            def __enter__(self):
+                self.orig, self.texts = ai.embed, []
+                ai.embed = lambda t, **kw: (self.texts.extend(t), self.orig(t, **kw))[1]
+                return self.texts
+
+            def __exit__(self, *a):
+                ai.embed = self.orig
+        return Spy()
+
+    def with_folders(fn):
+        made = [fo.create(n)["id"] for n in ("Pin platforms", "Pin auctions")]
+        try:
+            assert made == ["pin-platforms", "pin-auctions"], made
+            fn()
+        finally:
+            for f in made:
+                fo.delete(f)
+            write_cfg(CFG)
+
+    PIN = [("u20", "medium", "", 0), ("u09", "high", "", 0), ("u02", "high", "", 0), ("u11", "high", "pin-auctions", 1.9), ("u12", "high", "", 0), ("u15", "high", "", 0), ("u18", "high", "pin-platforms", 1.9),
+           ("u21", "high", "pin-platforms", 1.9), ("u05", "medium", "", 0), ("u08", "medium", "", 0), ("u14", "medium", "", 0), ("u17", "medium", "pin-auctions", 2.1), ("u23", "medium", "pin-auctions", 1.9),
+           ("u07", "lower", "", 0), ("u10", "lower", "", 0), ("u13", "lower", "", 0), ("u16", "lower", "", 0), ("u19", "lower", "", 0), ("u22", "lower", "", 0)]
+    shape = lambda q: [(i["file"][7:10], i["fit"], (i["folder"] or {}).get("id", ""), (i["folder"] or {}).get("z", 0)) for i in q["items"]]   # noqa: E731
+    REC = 22 + 4 * 512                                                      # one record of the vector file with the fake model's 512 numbers: key, day, vector
+
+    def t_upnext_pinned():
+        rows = up_next_fixture()
+        q = pe.queue(rows, 30)
+        assert shape(q) == PIN, shape(q)                                    # order, fit and suggested folder of every candidate, as the version before the matrix store gave them (this check passes on that version too)
+        assert q["total"] == 19 and q["profile"] == {"pos": 4, "neg": 2, "ready": True}, q
+        pe._mem.clear()                                                      # the same from the file alone (a restart)
+        assert shape(pe.queue(rows, 30)) == PIN
+        assert pe.queue([]) == {"items": [], "profile": {"pos": 0, "neg": 0, "ready": False}} and pe.vectors([]).shape == (0, 1)
+
+    def t_upnext_no_repeat():
+        rows = up_next_fixture()
+        with spy_embed() as texts:
+            pe.queue(rows, 30)
+            first = len(texts)
+            assert first == len({pe.row_text(r) for r in rows}) == 24, first                     # every text once
+            ino, size = os.stat(pe.CACHE).st_ino, os.path.getsize(pe.CACHE)
+            assert size == 256 + 24 * REC, size
+            calls, orig = [], pe.vectors
+            pe.vectors = lambda t: (calls.append(len(t)), orig(t))[1]
+            try:
+                pe.queue(rows, 30); pe._mem.clear(); pe.queue(rows, 30)
+            finally:
+                pe.vectors = orig
+            assert len(texts) == first, "nothing changed, yet %d texts were embedded again" % (len(texts) - first)
+            assert len(calls) <= 8 and max(calls) == 24, calls                                        # the library is looked up as a whole, not once per candidate (two calls of queue: at most 4 look-ups each)
+            assert (os.stat(pe.CACHE).st_ino, os.path.getsize(pe.CACHE)) == (ino, size), "an unchanged library wrote the file again"
+            rows[10]["state"]["takeaway"] = "Reserve prices change what sellers earn"
+            a = pe.queue(rows, 30)
+            assert texts[first:] == [pe.row_text(rows[10])], texts[first:]                             # one changed text: one text embedded…
+            assert os.stat(pe.CACHE).st_ino == ino and os.path.getsize(pe.CACHE) - size == REC, (os.path.getsize(pe.CACHE) - size)   # …and one record appended: the file is not written again as a whole
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == a and len(texts) == first + 1                                 # and it is there after a restart
+            v = pe.vectors([pe.row_text(rows[0])]); v[:] = 9
+            assert float(abs(pe.vectors([pe.row_text(rows[0])])).max()) <= 1.0, "a caller could change the kept vectors"
+
+    def t_upnext_model_change():
+        import numpy as np
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        with spy_embed() as texts:
+            write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-2"}})
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)                           # another embedding model in Settings: no vector of the old one is used, all are made again
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)               # (the file starts again: the other model's vectors are not kept beside the new ones)
+            del texts[:]
+            pe.queue(rows, 30); pe._mem.clear(); pe.queue(rows, 30)
+            assert not texts, len(texts)                                                                # once
+            orig = ai.embed
+            ai.embed = lambda t, **kw: (lambda a: a / np.maximum(np.linalg.norm(a, axis=1, keepdims=True), 1e-9))(orig(t, **kw)[:, :256] + 1e-3)
+            try:
+                write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-short"}})          # a model with vectors of another length: no crash, no mixing
+                q = pe.queue(rows, 30)
+                assert q["total"] == 19 and pe.vectors([pe.row_text(rows[0])]).shape == (1, 256), q["total"]
+                pe._mem.clear(); texts.clear()
+                assert pe.queue(rows, 30) == q and not texts
+                write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-short-2"}})        # the same model name with another length (the store in memory and the file say 512): what is kept is dropped, all made again
+                pe.vectors(["one text of the short model"])
+                ai.embed = orig
+                del texts[:]
+                assert pe.queue(rows, 30)["total"] == 19 and len(texts) == 24 and pe.vectors(["one text of the short model"]).shape == (1, 512), len(texts)
+            finally:
+                ai.embed = orig
+
+    def t_upnext_other_writer():
+        import subprocess
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        probe = ("import os, sys; sys.path.insert(0, %r)\nimport numpy as np, ai, personal as pe\n"
+                 "ai.CONFIG, pe.CACHE, pe.OLD = %r, %r, %r\n"
+                 "def emb(t, **kw):\n    a = np.zeros((len(t), 512), dtype='float32'); a[:, 7] = 1.0; return a\n"
+                 "ai.embed = emb\npe.vectors(['written by another process'])\n") % (HERE, ai.CONFIG, pe.CACHE, pe.OLD)
+        r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, env={**os.environ, "JW_NO_KEYCHAIN": "1"})
+        assert r.returncode == 0, r.stderr[-600:]
+        with spy_embed() as texts:
+            v = pe.vectors(["written by another process"])
+            assert not texts and v[0, 7] == 1.0, (texts, v[0, :9])                                      # what another process added is found, not made again…
+            assert pe.queue(rows, 30) == ref and not texts                                              # …and it did not cost this process's vectors
+            pe.vectors(["one more text here"]); pe._mem.clear(); del texts[:]
+            assert pe.vectors(["written by another process"])[0, 7] == 1.0 and pe.queue(rows, 30) == ref and not texts, texts      # nor did this process's next write lose the other's
+            os.remove(pe.CACHE)                                                                         # the file deleted while the app runs: nothing is embedded again, and the next new text writes all of it back
+            assert pe.queue(rows, 30) == ref and not texts
+            pe.vectors(["a text after the file went"]); pe._mem.clear(); del texts[:]
+            assert pe.queue(rows, 30) == ref and not texts, len(texts)
+
+    def t_upnext_torn_file():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        good = os.path.getsize(pe.CACHE)
+        with spy_embed() as texts:
+            with open(pe.CACHE, "ab") as f:
+                f.write(b"\x01" * 700)                                                                  # a record cut short (the app was killed while appending)
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == ref and not texts, len(texts)
+            pe.vectors(["a text added after the crash"])
+            assert os.path.getsize(pe.CACHE) == good + REC, os.path.getsize(pe.CACHE)
+            pe._mem.clear(); del texts[:]
+            pe.vectors(["a text added after the crash"])
+            assert pe.queue(rows, 30) == ref and not texts
+            with open(pe.CACHE, "wb") as f:
+                f.write(b"not a vector file")                                                           # unreadable: made again, no error
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)
+
+    def t_upnext_old_file():
+        import hashlib
+        import numpy as np
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        key = lambda t: hashlib.sha1(t.encode()).hexdigest()[:20]     # noqa: E731
+        old = {key(t): [round(float(x), 4) for x in v] for t, v in ((pe.row_text(r), ai.embed([pe.row_text(r)])[0]) for r in rows)}   # what earlier versions kept: {key: [numbers rounded to 4 places]}
+        old["0" * 20] = [0.5] * 384                                                                     # (one of another length, from another model: not carried over)
+
+        def start_with(d):
+            if os.path.exists(pe.CACHE):
+                os.remove(pe.CACHE)
+            with open(pe.OLD, "w") as f:
+                f.write(d if isinstance(d, str) else json.dumps(d))
+            pe._mem.clear()
+            return open(pe.OLD, "rb").read()
+        with spy_embed() as texts:
+            raw = start_with(old)
+            assert pe.queue(rows, 30) == ref and texts == [pe.row_text(rows[0])], texts                 # carried over: one text is embedded to see that the file is by the model in Settings, no other
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)
+            assert open(pe.OLD, "rb").read() == raw                                                     # the old file is left as it was
+            pe._mem.clear(); del texts[:]
+            assert pe.queue(rows, 30) == ref and not texts                                              # after a restart the new file answers; the old one is not looked at again
+            orig = ai.embed
+            ai.embed = lambda t, **kw: np.roll(orig(t, **kw), 1, axis=1)                                # a model that gives other vectors of the same length
+            try:
+                write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-rolled"}})
+                start_with(old); del texts[:]                                                           # (the new file is gone, the old one is still there)
+                assert pe.queue(rows, 30)["total"] == 19 and len(texts) == 25, len(texts)               # the old file's vectors are not this model's: none is used, all are made again (1 to see it + 24)
+                v, was = pe.vectors([pe.row_text(rows[5])])[0], np.array(old[key(pe.row_text(rows[5]))], dtype="float32")
+                assert np.allclose(v, np.roll(was, 1), atol=1e-3) and not np.allclose(v, was, atol=1e-3)
+            finally:
+                ai.embed = orig
+                write_cfg(CFG)
+            start_with({"f" * 20: old[key(pe.row_text(rows[0]))]}); del texts[:]
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)                           # none of its texts is asked for, so it cannot be checked: not carried over
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)
+            start_with("not json at all {"); del texts[:]
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)                           # an old file that cannot be read does no harm
+
+    def t_upnext_prune():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        lib = os.path.getsize(pe.CACHE)
+        cands = [{"id": "c%d" % i, "title": "Candidate number%d about auctions" % i} for i in range(60)]
+        f1 = pe.fits(cands, rows)
+        assert os.path.getsize(pe.CACHE) == lib + 60 * REC
+        pe._mem.clear()
+        assert pe.queue(rows, 30) == ref and os.path.getsize(pe.CACHE) == lib + 60 * REC               # young vectors stay, used or not (the Watch page will ask for them again), also when they are not in the library
+        real = pe._today
+        pe._today = lambda: real() + pe.KEEP_DAYS
+        try:
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == ref and os.path.getsize(pe.CACHE) == lib + 60 * REC           # exactly KEEP_DAYS old: still kept
+            pe._today = lambda: real() + pe.KEEP_DAYS + 1
+            with spy_embed() as texts:
+                pe.fits(cands[:5], rows)                                                                # five of them are asked for in this session
+                assert pe.queue(rows, 30) == ref and not texts                                          # the library's own vectors are in use: kept however old
+                assert os.path.getsize(pe.CACHE) == lib + 5 * REC, (os.path.getsize(pe.CACHE), lib)     # the 55 that nothing asked for since the start, older than KEEP_DAYS, are gone from the file
+                pe._mem.clear()
+                assert pe.queue(rows, 30) == ref and not texts
+                assert pe.fits(cands, rows) == f1 and len(texts) == 55, len(texts)                      # asked for again, they are made again (the five that were kept are not)
+        finally:
+            pe._today = real
+
+    def t_upnext_threads():
+        import numpy as np
+        rows = up_next_fixture()
+        texts = ["thread text number%d platform" % i for i in range(40)]
+        errs, out = [], {}
+        with spy_embed() as seen:
+            def work(k):
+                try:
+                    out[k] = pe.vectors(texts[k % 3::2] + [pe.row_text(r) for r in rows[k:k + 6]])
+                except Exception as e:  # noqa: BLE001
+                    errs.append(e)
+            ts = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+            [t.start() for t in ts]; [t.join() for t in ts]
+            assert not errs, errs
+            assert len(seen) == len(set(seen)), "a text was embedded twice"
+        pe._mem.clear()
+        for k in range(8):
+            assert np.array_equal(out[k], pe.vectors(texts[k % 3::2] + [pe.row_text(r) for r in rows[k:k + 6]]))
+
+    check("Up next is the same as before the matrix store: order, fit and suggested folder of every candidate", lambda: with_folders(t_upnext_pinned))
+    check("Up next embeds a text once, looks the library up as a whole, and one changed text appends one record instead of writing the file again", lambda: with_folders(t_upnext_no_repeat))
+    check("another embedding model in Settings: every vector is made again, none of the old model is used, another vector length does not break Up next", lambda: with_folders(t_upnext_model_change))
+    check("vectors written by another process are found and not lost; a deleted vector file is written back", lambda: with_folders(t_upnext_other_writer))
+    check("a vector record cut short and an unreadable vector file do no harm", lambda: with_folders(t_upnext_torn_file))
+    check("the vector file of earlier versions is carried over once when it is by the model in Settings, and left as it was; one by another model is not used", lambda: with_folders(t_upnext_old_file))
+    check("vectors nothing asks for any more are forgotten after KEEP_DAYS; the library's own and the young ones never are", lambda: with_folders(t_upnext_prune))
+    check("eight threads at once ask for vectors: no text embedded twice, the same vectors after a restart", lambda: with_folders(t_upnext_threads))
 
     def t_mcp_protocol():
         r = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
