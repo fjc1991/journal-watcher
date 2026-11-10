@@ -15,8 +15,9 @@ Options: web_search=True (the provider searches the web; sources come back in Re
 requests are answered from state/ai_cache/ and cost nothing; fresh=True skips the cache), override={"provider","model"}.
 
 Two adapters: `anthropic` (the SDK, same call style as pipeline.py) and `openai_compat` (plain HTTPS with urllib, so no
-extra dependency). Every call is appended to state/ai_usage.jsonl. Keys come from .env (never from ai.json). Settings that
-guard spending and privacy: ai.json -> budget.monthly_usd, privacy.local_only.
+extra dependency). Every call is appended to state/ai_usage.jsonl (a paid embedding call too, as feature "embed"). Keys come from .env (never from ai.json).
+Settings that guard spending and privacy: ai.json -> budget.monthly_usd (a new paid call is refused once the month's spend reaches it; an answer already saved
+and a free model on this computer are not; budget_check() compares a large job's estimate with what is left), privacy.local_only.
 """
 import base64
 import hashlib
@@ -441,10 +442,7 @@ def _log(feature, r, sent=None, extra=None):
         row["chars"], row["preview"] = sent
     if extra:
         row.update({k: v for k, v in extra.items() if k not in row})      # the caller's own facts about the call (screening: how many papers it carried); never over a field of the ledger
-    with _lock:
-        os.makedirs(STATE, exist_ok=True)
-        with open(LEDGER, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    _append(row)
 
 
 def _log_cancelled(feature, provider, f, sent, text):
@@ -457,12 +455,24 @@ def _log_cancelled(feature, provider, f, sent, text):
         if sent:
             row["chars"], row["preview"] = sent
         act.add_cost(r.cost)
-        with _lock:
-            os.makedirs(STATE, exist_ok=True)
-            with open(LEDGER, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _append(row)
     except Exception:  # noqa: BLE001      (never let bookkeeping hide the cancel)
         pass
+
+
+def _append(row):
+    """One row at the end of the ledger. The month's total kept in memory follows it without reading the file again, but only when nobody else wrote in between."""
+    line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    with _lock:
+        os.makedirs(STATE, exist_ok=True)
+        before = _ledger_stat()
+        with open(LEDGER, "ab") as f:
+            f.write(line)
+        after = _ledger_stat()
+        if _month["key"] == (LEDGER, row["ts"][:7], before) and after and after[0] == (before[0] if before else 0) + len(line):
+            _month_add(row)
+            _month["key"] = (LEDGER, row["ts"][:7], after)
+        # (otherwise the key no longer matches the file, and the next _month_state() reads it again)
 
 
 def _rows():
@@ -476,16 +486,51 @@ def _rows():
                 continue
 
 
-def month_spend():
+_month = {"key": None, "cost": 0.0, "calls": 0, "unpriced": 0}      # this month's rows of the ledger, added up once (see _month_state)
+
+
+def _ledger_stat():
+    try:
+        st = os.stat(LEDGER)
+        return (st.st_size, st.st_mtime_ns, st.st_ino)
+    except OSError:
+        return None
+
+
+def _month_add(r):
+    c = r.get("cost")
+    _month["calls"] += 1
+    if isinstance(c, (int, float)):
+        _month["cost"] += c
+    else:
+        _month["unpriced"] += 1          # (a call whose model had no price: not in the total, but counted, so that the budget can say the total is too low)
+
+
+def _month_state():
+    """{cost, calls, unpriced} of this (UTC) month. Kept in memory: the ledger is read again only when its size, time or identity changed (another process or
+    another computer appended to it, a sync client replaced it, the two-computer merge rewrote it), when the month turned, or when LEDGER points elsewhere."""
     ym = datetime.now(timezone.utc).strftime("%Y-%m")
-    return sum(r.get("cost") or 0 for r in _rows() if r.get("ts", "").startswith(ym))
+    with _lock:
+        key = (LEDGER, ym, _ledger_stat())           # (taken BEFORE reading: a line appended while we read makes the next call read again)
+        if _month["key"] != key:
+            _month.update(key=None, cost=0.0, calls=0, unpriced=0)
+            for r in _rows():
+                if str(r.get("ts", "")).startswith(ym):
+                    _month_add(r)
+            _month["key"] = key
+        return {"cost": _month["cost"], "calls": _month["calls"], "unpriced": _month["unpriced"]}
+
+
+def month_spend():
+    """USD of this month's calls with a known price (kept in memory, see _month_state)."""
+    return _month_state()["cost"]
 
 
 def usage_summary():
-    """{calls, cost, unpriced, cached, month:{cost,calls}, budget, warn, by_feature, by_provider, by_day} from the ledger
-    (cost = known prices only)."""
+    """{calls, cost, unpriced, cached, month:{cost,calls,unpriced}, budget, left, warn, by_feature, by_provider, by_day} from the ledger
+    (cost = known prices only; month.unpriced = this month's calls without a known price, which the budget cannot count; left = what remains of the budget, None without one)."""
     ym = datetime.now(timezone.utc).strftime("%Y-%m")
-    out = {"calls": 0, "cost": 0.0, "unpriced": 0, "cached": 0, "month": {"cost": 0.0, "calls": 0}, "by_feature": {}, "by_provider": {}, "by_day": {}}
+    out = {"calls": 0, "cost": 0.0, "unpriced": 0, "cached": 0, "month": {"cost": 0.0, "calls": 0, "unpriced": 0}, "by_feature": {}, "by_provider": {}, "by_day": {}}
     for r in _rows():
         b = out["by_feature"].setdefault(r.get("feature", "?"), {"calls": 0, "cost": 0.0, "in": 0, "out": 0})
         pv = out["by_provider"].setdefault(r.get("provider", "?"), {"calls": 0, "cost": 0.0})
@@ -500,10 +545,11 @@ def usage_summary():
             day = out["by_day"].setdefault(r.get("ts", "")[:10], 0.0)
             out["by_day"][r.get("ts", "")[:10]] = day + c
         if r.get("ts", "").startswith(ym):
-            out["month"]["calls"] += 1; out["month"]["cost"] += c or 0
+            out["month"]["calls"] += 1; out["month"]["cost"] += c or 0; out["month"]["unpriced"] += 1 if c is None else 0
     bud = config_data()["budget"].get("monthly_usd")
     out["budget"] = bud
     out["warn"] = bool(bud) and out["month"]["cost"] >= 0.8 * bud
+    out["left"] = max(0.0, bud - out["month"]["cost"]) if bud else None
     out["by_day"] = dict(sorted(out["by_day"].items())[-30:])
     return out
 
@@ -529,12 +575,42 @@ def _route(feature, override=None, web=False):
     if p.get("key_env") and not _key(p["key_env"]):
         raise Blocked("%s isn’t set up: add %s=… to the .env file in the project folder (no restart needed), "
                       "or pick another provider in Settings → AI." % (f["provider"], p["key_env"]))
-    bud = c["budget"].get("monthly_usd")
-    if bud and month_spend() >= bud:
-        raise Blocked("This month’s AI budget ($%.2f) is used up. Raise it in Settings → Usage, or wait until next month." % bud)
     if web and not can_search_web(p):
         raise AIError("%s can’t search the web. Pick Claude, OpenRouter or OpenAI for this feature in Settings → AI." % f["provider"])
     return f["provider"], p, f
+
+
+def is_free(provider, model, cfg=None):
+    """A model on this computer that needs no key (prices.lookup says "free": Ollama, LM Studio). It cannot add to the month's spend, so the budget never stops it."""
+    return ((pricing.lookup(provider, model, cfg) or {}).get("source")) == "free"
+
+
+def unpriced_note(n):
+    """The words for this month's calls without a known price ("" when there are none): the budget cannot count them, and says so."""
+    return "%d call%s this month had no known price, so the real total is higher" % (n, "" if n == 1 else "s") if n else ""
+
+
+def _budget_gate(provider, model, cfg=None):
+    """Raise Blocked when this month's budget is used up. Called only when a new call is about to be sent (after the saved answers were looked at), and never for a
+    free model on this computer."""
+    cfg = cfg or config_data()
+    bud = cfg["budget"].get("monthly_usd")
+    if not bud or is_free(provider, model, cfg):
+        return
+    if month_spend() >= bud:
+        note = unpriced_note(_month_state()["unpriced"])
+        raise Blocked("This month’s AI budget ($%.2f) is used up%s. Raise it in Settings → AI, or wait until next month. Answers already saved and free models on this computer still work."
+                      % (bud, " (%s)" % note if note else ""))
+
+
+def budget_check(cost=None):
+    """Before a job that makes many calls: its estimate (USD, None when not known) against what is left of this month's budget.
+    {budget, spent, left (None without a budget), unpriced (this month's calls without a known price), note (the same in words), cost, over (the estimate is more than what is left)}"""
+    bud = config_data()["budget"].get("monthly_usd")
+    m = _month_state()
+    left = max(0.0, bud - m["cost"]) if bud else None
+    return {"budget": bud or None, "spent": m["cost"], "left": left, "unpriced": m["unpriced"], "note": unpriced_note(m["unpriced"]), "cost": cost,
+            "over": bool(bud) and cost is not None and cost > left + 1e-9}
 
 
 # ---------------------------------------------------------------- message parts (text / image / pdf)
@@ -644,6 +720,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
             _log(feature, r, sent, log)
             yield "done", r
             return
+    _budget_gate(name, f.get("model"))                     # (after the saved answers: one already paid for is given even when the budget is used up)
     run = _anthropic if p.get("type") == "anthropic" else _compat
     got = []
     try:
@@ -899,19 +976,30 @@ def embed(texts, kind="passage", progress=None):
             raise AIError("Local-only mode is on: choose the local embedding model in Settings → AI.")
         if p.get("key_env") and not _key(p["key_env"]):
             raise AIError("%s isn’t set up: add %s=… to .env." % (c["provider"], p["key_env"]))
-        rows = []
-        for i in range(0, len(texts), 64):
-            req = urllib.request.Request(p["base_url"].rstrip("/") + "/embeddings",
-                                         json.dumps({"model": c["model"], "input": texts[i:i + 64]}).encode(), _headers(p))
-            try:
-                with urllib.request.urlopen(req, timeout=120) as r:
-                    rows += [d["embedding"] for d in sorted(json.load(r)["data"], key=lambda d: d["index"])]
-            except urllib.error.HTTPError as e:
-                raise _http_error(c["provider"], e)
-            except urllib.error.URLError as e:
-                raise AIError("Can’t reach %s (%s)." % (c["provider"], e.reason))
-            if progress:
-                progress(min(i + 64, len(texts)), len(texts))
+        _budget_gate(c["provider"], c["model"], cfg)          # (a paid embedding call counts under the monthly budget like any other call)
+        rows, tokens, chars, exact = [], 0, 0, True
+        try:
+            for i in range(0, len(texts), 64):
+                part = texts[i:i + 64]
+                req = urllib.request.Request(p["base_url"].rstrip("/") + "/embeddings",
+                                             json.dumps({"model": c["model"], "input": part}).encode(), _headers(p))
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as r:
+                        body = json.load(r)
+                except urllib.error.HTTPError as e:
+                    raise _http_error(c["provider"], e)
+                except urllib.error.URLError as e:
+                    raise AIError("Can’t reach %s (%s)." % (c["provider"], e.reason))
+                rows += [d["embedding"] for d in sorted(body["data"], key=lambda d: d["index"])]
+                n = sum(len(t) for t in part)
+                u = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+                said = u.get("prompt_tokens") or u.get("total_tokens")
+                chars += n; tokens += int(said or n / 3.3); exact = exact and bool(said)      # (the provider did not say: about 3.3 characters per token, marked as an estimate)
+                if progress:
+                    progress(min(i + 64, len(texts)), len(texts))
+        finally:
+            if chars:                                         # what was sent is billed even when a later piece fails or the job is cancelled; the passages themselves are not stored
+                _log("embed", Result("", {"in": tokens}, c["provider"], c["model"]), (chars, ""), None if exact else {"estimated": True})
         arr = np.array(rows, dtype="float32")
     arr /= np.maximum(np.linalg.norm(arr, axis=1, keepdims=True), 1e-9)
     return arr

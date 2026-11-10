@@ -1166,9 +1166,15 @@ class Handler(BaseHTTPRequestHandler):
             if one("pending", "") and indexer:
                 out["indexing"]["pending"] = len(indexer.pending())
             return self.send_json(out)
-        if path in ("/api/ai/config", "/api/ai/usage", "/api/ai/log"):
+        if path in ("/api/ai/config", "/api/ai/usage", "/api/ai/log", "/api/ai/budget"):
             if not ai:
                 return self.send_json({"error": "AI features aren't installed"}, 501)
+            if path == "/api/ai/budget":        # ?cost=: a large job's estimate against what is left of the monthly budget, asked by the page before the job starts (no cost: the estimate is not known)
+                try:
+                    cost = float(one("cost")) if one("cost") else None
+                except ValueError:
+                    return self.send_json({"error": "cost must be a number"}, 400)
+                return self.send_json(ai.budget_check(cost))
             return self.send_json({"/api/ai/config": ai.config, "/api/ai/usage": ai.usage_summary,
                                    "/api/ai/log": lambda: ai.usage_log(int(one("limit", "40")))}[path]())
         self.send_json({"error": "not found"}, 404)

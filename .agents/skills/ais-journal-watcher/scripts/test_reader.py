@@ -106,7 +106,7 @@ class Fake(BaseHTTPRequestHandler):
                     if len(w) > 3:
                         v[zlib.crc32(w.encode()) % 512] += 1
                 rows.append({"index": i, "embedding": v})
-            data = json.dumps({"data": rows}).encode()
+            data = json.dumps({"data": rows, **({"usage": {"prompt_tokens": Fake.embed_tokens, "total_tokens": Fake.embed_tokens}} if getattr(Fake, "embed_tokens", None) else {})}).encode()     # (most providers say how many tokens an embedding call read; a test sets Fake.embed_tokens for that)
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         fail = getattr(Fake, "http_error", None)
         hit = fail(body) if fail else None           # (status, message): the provider refuses the request, as OpenRouter does for a model without the parameters asked for
@@ -3189,6 +3189,147 @@ print("OK")
         assert ai.usage_summary()["warn"] is True
         ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
     check("local-only mode blocks remote providers; the monthly budget stops calls", t_privacy_budget)
+
+    def t_embed_ledger():
+        """A paid (remote) embedding call is in the ledger with its cost, and the budget stops it."""
+        write_cfg({**CFG, "prices": {**CFG["prices"], "emb": {"in": 0.5, "out": 0, "cache_write": 0, "cache_read": 0}}})
+        try:
+            n0, spent0, emb0 = len(ai.usage_log(100000)), ai.month_spend(), ai.usage_summary()["by_feature"].get("embed", {"calls": 0})["calls"]
+            v = ai.embed(["alpha beta gamma delta " * 40, "epsilon zeta"]); assert v.shape[0] == 2
+            rows = ai.usage_log(100000)[:len(ai.usage_log(100000)) - n0]
+            assert len(rows) == 1 and rows[0]["feature"] == "embed" and (rows[0]["provider"], rows[0]["model"]) == ("fake", "emb"), rows
+            assert rows[0]["in"] == int(932 / 3.3) and rows[0].get("estimated") is True and rows[0]["chars"] == 932 and not rows[0].get("preview"), rows     # (the fake said no usage: an estimate from the characters; the passages are not stored)
+            assert abs(rows[0]["cost"] - 282 * 0.5 / 1e6) < 1e-12 and abs(ai.month_spend() - spent0 - rows[0]["cost"]) < 1e-12 and ai.usage_summary()["by_feature"]["embed"]["calls"] == emb0 + 1, rows
+            Fake.embed_tokens = 123
+            try:
+                ai.embed(["a b c"] * 70)                                           # two requests (64 passages at a time), one row
+            finally:
+                Fake.embed_tokens = None
+            row = ai.usage_log(1)[0]
+            assert len(ai.usage_log(100000)) == n0 + 2 and row["feature"] == "embed" and row["in"] == 246 and "estimated" not in row and row["chars"] == 350, row     # (what the provider counted, not an estimate)
+            ai.save_config({"budget": {"monthly_usd": 0.0000001}}); n1, rows1 = len(SEEN), len(ai.usage_log(100000))
+            try:
+                ai.embed(["x"]); raise AssertionError("the budget must stop a paid embedding call")
+            except ai.Blocked as e:
+                assert "budget" in str(e) and "Settings → AI," in str(e), str(e)
+            assert len(SEEN) == n1 and len(ai.usage_log(100000)) == rows1, "nothing was sent and nothing was written"
+        finally:
+            ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("a paid embedding call is in the usage ledger with its cost (the provider's token count, else an estimate), and the monthly budget stops it", t_embed_ledger)
+
+    def t_unknown_spend():
+        """Calls without a known price are said, not counted as $0 silently."""
+        from datetime import datetime, timezone
+        saved, now = ai.LEDGER, datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ai.LEDGER = os.path.join(TMP, "ledger_unknown.jsonl")
+        try:
+            with open(ai.LEDGER, "w") as f:
+                for c, ts in ((0.5, now), (None, now), (None, now), (None, "2001-01-05T10:00:00+00:00")):
+                    f.write(json.dumps({"ts": ts, "feature": "ask", "provider": "fake", "model": "m1" if c else "nopr", "in": 10, "out": 1, "cost": c}) + "\n")
+            ai.save_config({"budget": {"monthly_usd": 10}})
+            u = ai.usage_summary()
+            assert u["month"]["unpriced"] == 2 and u["unpriced"] == 3 and not u["warn"] and abs(u["left"] - 9.5) < 1e-9, u
+            b = ai.budget_check(1.0); assert b["unpriced"] == 2 and not b["over"] and abs(b["spent"] - 0.5) < 1e-9 and b["note"] == "2 calls this month had no known price, so the real total is higher", b
+            ai.save_config({"budget": {"monthly_usd": 0.5}})
+            try:
+                ai.chat("ask", [{"role": "user", "content": "x"}]); raise AssertionError("the budget must stop the call")
+            except ai.Blocked as e:
+                assert "budget ($0.50) is used up (2 calls this month had no known price, so the real total is higher). Raise it in Settings → AI," in str(e), str(e)
+            with open(ai.LEDGER, "w") as f:
+                f.write(json.dumps({"ts": now, "feature": "ask", "provider": "fake", "model": "m1", "cost": 0.5}) + "\n" + json.dumps({"ts": now, "feature": "ask", "provider": "fake", "model": "nopr", "cost": None}) + "\n")
+            try:
+                ai.chat("ask", [{"role": "user", "content": "x"}]); raise AssertionError("the budget must stop the call")
+            except ai.Blocked as e:
+                assert "used up (1 call this month had no known price, so the real total is higher). Raise" in str(e), str(e)
+            with open(ai.LEDGER, "w") as f:
+                f.write(json.dumps({"ts": now, "feature": "ask", "provider": "fake", "model": "m1", "cost": 0.75}) + "\n")
+            try:
+                ai.chat("ask", [{"role": "user", "content": "x"}]); raise AssertionError("the budget must stop the call")
+            except ai.Blocked as e:
+                assert "budget ($0.50) is used up. Raise it in Settings → AI," in str(e), str(e)                   # (every call had a price: nothing to add)
+            ai.save_config({"budget": {"monthly_usd": None}}); u = ai.usage_summary(); assert u["left"] is None and u["month"]["unpriced"] == 0 and ai.budget_check(1.0)["note"] == "", u
+        finally:
+            ai.LEDGER = saved; ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("calls without a known price are counted and said in the budget figures and in the refusal, which points to Settings → AI", t_unknown_spend)
+
+    def t_cache_and_free_before_budget():
+        """An answer already paid for, and a model on this computer that needs no key, still work when the budget is used up."""
+        ai.cache_clear(); msgs = [{"role": "user", "content": "paid for once"}]
+        r1 = ai.chat("ask", msgs, system="s", cache=True); assert not r1.cached
+        c = json.loads(json.dumps(ai.config_data())); c["providers"]["ollama"] = {"type": "openai_compat", "base_url": URL, "key_env": ""}; c["budget"] = {"monthly_usd": 0.0000001}; write_cfg(c)
+        try:
+            n0 = len(SEEN)
+            r2 = ai.chat("ask", msgs, system="s", cache=True)
+            assert r2.cached and r2.text == r1.text and r2.cost == 0.0 and len(SEEN) == n0, "the saved answer is given although the budget is used up"
+            for kw, m in (({"fresh": True}, msgs), ({}, [{"role": "user", "content": "never asked before"}]), ({"override": {"provider": "fake", "model": "no-price"}}, msgs)):
+                try:
+                    ai.chat("ask", m, system="s", cache=True, **kw); raise AssertionError("a new paid call must be stopped")
+                except ai.Blocked as e:
+                    assert "budget" in str(e)
+            assert len(SEEN) == n0
+            assert ai.is_free("ollama", "llama3") and not ai.is_free("fake", "m1") and not ai.is_free("fake", "no-price")      # (127.0.0.1 with a key may be a proxy to a paid service; no price is not a price of nothing)
+            r3 = ai.chat("ask", [{"role": "user", "content": "free"}], override={"provider": "ollama", "model": "llama3"})
+            assert r3.text and r3.cost == 0.0 and len(SEEN) == n0 + 1, "a free model on this computer is not stopped by the budget"
+            c["embeddings"] = {"provider": "ollama", "model": "nomic"}; write_cfg(c)
+            assert ai.embed(["x y"]).shape[0] == 1 and len(SEEN) == n0 + 2 and ai.usage_log(1)[0]["feature"] == "embed" and ai.usage_log(1)[0]["cost"] == 0.0
+        finally:
+            write_cfg(CFG); ai.cache_clear()
+    check("with the budget used up, saved answers and free models on this computer still work; new paid calls are refused", t_cache_and_free_before_budget)
+
+    def t_month_total_in_memory():
+        """The month's total is not read from the ledger on every call, and still follows what another process or computer appends."""
+        from datetime import datetime, timezone
+        saved, real_rows, reads = ai.LEDGER, ai._rows, []
+        ai.LEDGER = os.path.join(TMP, "ledger_month.jsonl")
+        ai._rows = lambda: (reads.append(1), real_rows())[1]
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        row = lambda c, ts=now: json.dumps({"ts": ts, "feature": "ask", "provider": "fake", "model": "m1", "cost": c}) + "\n"   # noqa: E731
+        try:
+            with open(ai.LEDGER, "w") as f:
+                f.write(row(0.25) + row(7.0, "2001-01-05T10:00:00+00:00"))
+            assert abs(ai.month_spend() - 0.25) < 1e-9; n = len(reads)
+            for _ in range(50):
+                ai.month_spend()
+            assert len(reads) == n, "an unchanged ledger is not read again"
+            r = ai.chat("ask", [{"role": "user", "content": "x"}]); spent = ai.month_spend()
+            assert r.cost > 0 and abs(spent - 0.25 - r.cost) < 1e-12 and len(reads) == n, "this process's own calls are added in memory"
+            ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "fake", "model": "no-price"})
+            assert ai.budget_check()["unpriced"] == 1 and ai.month_spend() == spent and len(reads) == n, "a call without a price is counted, not added"
+            with open(ai.LEDGER, "a") as f:
+                f.write(row(1.0))                                              # another process, or another computer through the shared folder
+            assert abs(ai.month_spend() - (spent + 1.0)) < 1e-9 and len(reads) == n + 1, "what somebody else appended is seen"
+            r = ai.chat("ask", [{"role": "user", "content": "x"}]); assert abs(ai.month_spend() - (spent + 1.0 + r.cost)) < 1e-9 and len(reads) == n + 1
+            with open(ai.LEDGER, "a") as f:
+                f.write(row(2.0))                                              # somebody else's line, then our own before the total was asked for: both count
+            r2 = ai.chat("ask", [{"role": "user", "content": "x"}]); assert abs(ai.month_spend() - (spent + 3.0 + r.cost + r2.cost)) < 1e-9 and len(reads) == n + 2
+            with open(ai.LEDGER, "w") as f:
+                f.write(row(0.1))                                              # the file was replaced (a sync client, the two-computer merge)
+            assert abs(ai.month_spend() - 0.1) < 1e-9
+            other = os.path.join(TMP, "ledger_month2.jsonl")
+            with open(other, "w") as f:
+                f.write(row(0.4))
+            ai.LEDGER = other; assert abs(ai.month_spend() - 0.4) < 1e-9; ai.LEDGER = os.path.join(TMP, "ledger_month.jsonl")
+            os.remove(ai.LEDGER); assert ai.month_spend() == 0
+        finally:
+            ai._rows, ai.LEDGER = real_rows, saved
+    check("the month's spend is kept in memory and read again only when the ledger file changed", t_month_total_in_memory)
+
+    def t_budget_check():
+        """A job's estimate against what is left of the budget."""
+        from datetime import datetime, timezone
+        saved = ai.LEDGER; ai.LEDGER = os.path.join(TMP, "ledger_check.jsonl")
+        try:
+            with open(ai.LEDGER, "w") as f:
+                f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "feature": "ask", "provider": "fake", "model": "m1", "cost": 3.0}) + "\n")
+            assert ai.budget_check(99.0) == {"budget": None, "spent": 3.0, "left": None, "unpriced": 0, "note": "", "cost": 99.0, "over": False}, ai.budget_check(99.0)
+            ai.save_config({"budget": {"monthly_usd": 5}})
+            b = ai.budget_check(1.0); assert not b["over"] and b["budget"] == 5 and abs(b["left"] - 2.0) < 1e-9, b
+            assert not ai.budget_check(2.0)["over"] and ai.budget_check(2.01)["over"] and not ai.budget_check(None)["over"] and not ai.budget_check()["over"]      # (exactly what is left still fits; an estimate that is not known is not asked about)
+            ai.save_config({"budget": {"monthly_usd": 3}}); b = ai.budget_check(0.01); assert b["over"] and b["left"] == 0, b
+            ai.save_config({"budget": {"monthly_usd": 2}}); b = ai.budget_check(0.0); assert not b["over"] and b["left"] == 0, b                                        # (nothing to pay: nothing to ask, even over the budget)
+        finally:
+            ai.LEDGER = saved; ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("a large job's estimate is compared with what is left of the monthly budget", t_budget_check)
 
     def t_prompts():
         out = prefs.save_prompts({"prompts": [{"name": "Explain it", "prompt": "Explain {{text}} from {{title}}", "pinned": True}, {"id": "explain-it", "name": "Again", "prompt": "x", "scope": "area"}],

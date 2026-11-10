@@ -4,7 +4,7 @@
 //   Ideas Lab: your brief -> current events from a web search (you untick or add) -> ideas generated from the evidence, scored by a tough
 //             "editor" and checked against OpenAlex -> a board you star, shortlist, annotate, develop into an outline and export.
 // Server streams are newline-delimited JSON ({type: status|progress|events|ideas|text|paper|done|error}).
-import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost, exactCost} from "./state.js";
+import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost, exactCost, budgetOk} from "./state.js";
 import {frame, kv, callout, mdParts, sectionsHtml, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -64,6 +64,7 @@ export async function evidence(el, fid) {
   el.onclick = e => { const o = e.target.closest("[data-open]"); if (o) openAt(o.dataset.open, +o.dataset.page, o.dataset.q); };
   $("#ev-exp", el)?.addEventListener("click", () => dl("/api/export/cards?folder=" + encodeURIComponent(fid)));
   $("#ev-make", el)?.addEventListener("click", async () => {
+    if (!(await budgetOk(r.estimate.cards))) return;
     const prog = $("#ev-prog", el), btn = $("#ev-make", el); btn.disabled = true; prog.classList.remove("hide"); prog.innerHTML = "Starting…"; let total = 0, ok = 0; const errs = [];
     try {
       await ndjson("/api/ai/cards", {folder: fid}, m => {

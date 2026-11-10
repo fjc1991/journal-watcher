@@ -552,7 +552,21 @@ fx.fetch_journal = lambda j: []                                                 
             page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
             dialogs = []
             answers = []        # canned answers for the next prompt() dialogs (otherwise the default value, or "fake/m2" for the compare picker)
-            page.on("dialog", lambda d: (dialogs.append(d.message), d.accept(answers.pop(0) if answers else (d.default_value or "fake/m2"))))
+            refuse = []         # put one item in it and the next dialog is answered with Cancel
+            page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss() if refuse and refuse.pop() else d.accept(answers.pop(0) if answers else (d.default_value or "fake/m2"))))
+
+            def budget_asks(sel, what):
+                """With next to nothing as the monthly budget, pressing `sel` (a job with an estimate) must ask first; the answer here is Cancel, which must start nothing."""
+                was_ = api("/api/ai/config")["budget"]["monthly_usd"]; api("/api/ai/config", {"budget": {"monthly_usd": 0.0000001}})
+                n_dlg_, n_chat_ = len(dialogs), len([1 for _p, b_ in SEEN if b_.get("messages")]); refuse.append(1)
+                try:
+                    page.click(sel); page.wait_for_timeout(800)
+                finally:
+                    del refuse[:]; api("/api/ai/config", {"budget": {"monthly_usd": was_}})
+                said_ = dialogs[n_dlg_:]
+                check("%s: when the estimate is more than what is left of the monthly budget, the page asks first (the estimate, what is left, where to raise it), and Cancel starts nothing" % what,
+                      len(said_) == 1 and said_[0].startswith("This is estimated at ") and "$0.00 is left of this month’s budget" in said_[0] and "Settings → AI" in said_[0] and said_[0].endswith("Start anyway?")
+                      and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_chat_, str(said_)[:300])
             page.goto(base + "/"); page.wait_for_selector("#libitem")
 
             print("markdown from an AI answer or a synced file")
@@ -1051,6 +1065,10 @@ fx.fetch_journal = lambda j: []                                                 
             check("…(refused: 0 to 3650 days)", api("/api/ai/config")["screening"]["reuse_days"] == 30 and "3650" in page.inner_text("#st-msg"), page.inner_text("#st-msg"))
             page.fill("#st-reuse", "90"); page.click("#st-save"); page.wait_for_timeout(600)
             page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat")
+            use_ = api("/api/ai/usage"); body_ = page.inner_text("#st-body")
+            check("usage: calls of this month without a known price are said (the total is 'at least', and a note says the real total is higher and the budget cannot count them), with what is left of the budget",
+                  use_["month"]["unpriced"] > 0 and page.locator("#st-unpriced").count() == 1 and ("%d call" % use_["month"]["unpriced"]) in page.inner_text("#st-unpriced") and "had no known price, so the real total is higher than" in body_
+                  and "the budget cannot count" in body_ and "at least $" in page.inner_text(".st-stat >> nth=0") and "· budget $5.00 · $" in page.inner_text(".st-stat >> nth=0") and " left" in page.inner_text(".st-stat >> nth=0"), body_[:400])
             check("usage panel shows spend, cached answers and what was sent", "cache" in page.inner_text("#st-body").lower() and page.locator(".st-table.log tr").count() > 3)
             check("the usage chart always shows the last 30 days, not just the days with spend", page.locator(".st-chart > div").count() == 30)
             shot(page, "6-usage"); page.click('.st-tabs button[data-t="reader"]'); page.fill('.legend input[data-c="yellow"]', "Claim"); page.click("#st-save"); page.wait_for_timeout(600)
@@ -1115,6 +1133,8 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs")
             page.click('.fvtabs [data-ft="evidence"]'); page.wait_for_selector("#ev-make")
             check("Evidence: 1 of 3 papers has a card, with a button for the rest", "1 of 3" in page.inner_text("#fv-body") and "Make 2 cards" in page.inner_text("#ev-make"))
+            budget_asks("#ev-make", "cards for a folder")
+            check("…and nothing was made", "1 of 3" in page.inner_text("#fv-body"))
             page.click("#ev-make"); page.wait_for_selector("#fv-body:has-text('3 of 3')", timeout=60000); page.wait_for_selector(".ev-cl", timeout=20000)
             check("three cards exist after the batch; the shared limitation is one group of 3 papers", all(os.path.exists(sidecar(i, ".card.json")) for i in range(3)) and "3 papers" in page.inner_text(".ev-cl >> nth=0"))
             check("the folder header counts the new cards without a reload", "3 with a card" in page.inner_text(".pagehead .meta"), page.inner_text(".pagehead .meta"))
@@ -1250,6 +1270,7 @@ fx.fetch_journal = lambda j: []                                                 
             page.wait_for_selector('table.mx thead th:has-text("Moderators")')
             check("a new column of your own appears (marked as yours) and the fill button says how many cells it needs", page.locator('th:has-text("Moderators") .cd-tag').count() == 1 and "Fill 3 empty cells" in page.inner_text('[data-k="fill"]'))
             check("matrix headers are tinted by where the column comes from (the paper cards or you), with a legend", page.locator("table.mx th.mx-b").count() >= 5 and page.locator("table.mx th.mx-y").count() == 1 and page.locator(".mx-legend").count() == 1)
+            budget_asks('[data-k="fill"]', "filling the comparison matrix")
             page.click('[data-k="fill"]'); page.wait_for_function("[...document.querySelectorAll('table.mx td')].filter(td => td.innerText.includes('Tenure moderates the effect.')).length === 3", timeout=90000)
             check("filling answers every paper with a page link", page.locator("table.mx td:has-text('Tenure moderates the effect.')").count() == 3, [json.dumps(json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))["cells"])[:500], page.evaluate("[...document.querySelectorAll('.toast, #toast, [class*=toast]')].map(e => e.innerText).join('|')")])
             mx = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))
@@ -1294,6 +1315,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("sentences about your own study are not ticked; the one that names a paper in your library says so", page.locator(".cl-s input:checked").count() == 5 and "about your study" in page.locator(".cl-s.off").inner_text() and "names" in page.locator(".cl-s >> nth=2").inner_text())
             page.wait_for_function("document.querySelector('#cl-gob') && /Check 5 claims/.test(document.querySelector('#cl-gob').textContent)", timeout=10000)
             check("the button says how many claims it will check, and the cost", "·" in page.inner_text("#cl-gob") and "Check 5 claims" in page.inner_text("#cl-gob"), page.inner_text("#cl-gob"))
+            budget_asks('[data-cl="go"]', "checking claims")
             page.click('[data-cl="go"]'); page.wait_for_selector('.of[data-tool="claims"]', timeout=60000)
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You check claims")][-1]
             user = req["messages"][-1]["content"]
@@ -1340,7 +1362,16 @@ fx.fetch_journal = lambda j: []                                                 
             page.goto("about:blank"); page.goto(base + "/#/folder/lab/synthesis"); page.wait_for_selector('[data-sy="go"]', timeout=15000)
             check("the folder has a Synthesis tab that lists its papers (all with cards ticked)", page.locator('.fvtabs [data-ft="synthesis"]').count() == 1 and page.locator("input[data-pf]:checked").count() == 3)
             page.fill("#sy-focus", "how disclosure rules change trust and entry"); page.wait_for_function("document.querySelector('#sy-est').textContent.includes('·')", timeout=10000)
+            bud_ = api("/api/ai/budget?cost=1"); bud_over_ = api("/api/ai/budget?cost=%s" % (bud_["left"] + 0.01)); bud_none_ = api("/api/ai/budget")
+            check("GET /api/ai/budget compares an estimate with what is left of the monthly budget", bud_["budget"] == 5 and bud_["over"] is False and bud_["cost"] == 1 and 0 < bud_["left"] <= 5 and abs(bud_["left"] + bud_["spent"] - 5) < 1e-9
+                  and bud_over_["over"] is True and bud_none_["over"] is False and bud_none_["cost"] is None, str((bud_, bud_over_, bud_none_)))
+            budget_asks('[data-sy="go"]', "a synthesis")
+            check("…and no synthesis was started", page.locator('.of[data-tool="synthesis"]').count() == 0 and not page.locator('[data-sy="go"]').is_disabled())
+            said_ = [m_ for m_ in dialogs if m_.startswith("This is estimated at ")][-1]
+            check("…the question also says how many of this month's calls had no known price (the embeddings here), so the real total is higher", bud_["unpriced"] > 0 and (" %d call" % bud_["unpriced"]) in said_ and "this month had no known price, so the real total is higher." in said_, said_)
+            n_dlg_ = len(dialogs)
             page.click('[data-sy="go"]'); page.wait_for_selector('.of[data-tool="synthesis"]', timeout=60000)
+            check("an estimate that fits in what is left of the budget is not asked about", not any("budget" in m_ for m_ in dialogs[n_dlg_:]), str(dialogs[n_dlg_:]))
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You synthesise a set")][-1]
             user = req["messages"][-1]["content"]
             check("the model got every card as numbered notes, and what you asked it to organise the themes around", "NOTES ON THE 3 PAPERS" in user and "P1-1 [question]" in user and "P3-" in user and "disclosure rules" in user, user[:300])
@@ -2353,7 +2384,9 @@ fx.fetch_journal = lambda j: []                                                 
                   and len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0, we_)
             page.click("[data-whole-no]"); page.wait_for_function("document.querySelector('#bk-list [data-whole]').classList.contains('hide')")
             check("…Cancel sends nothing", len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0)
-            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("[data-whole-go]"); page.click("[data-whole-go]")
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("[data-whole-go]")
+            budget_asks("[data-whole-go]", "summarising a whole book")
+            page.click("[data-whole-go]")
             ok_ = False
             for _ in range(160):
                 st_ = api("/api/book/whole?file=%s&status=1" % urllib.parse.quote(ep_row["file"]))["status"]
@@ -2870,6 +2903,8 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('#journalchips .chip[data-abbr="%s"]' % first_two[0]); page.click("#topicchips .chip >> nth=0")
             check("before the first search the form does not claim to have run it", "already ran" not in page.inner_text("#est"))
             n0 = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
+            budget_asks("#searchbtn", "a Discover search")
+            check("…and no search was started", len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"]) == n0)
             page.click("#searchbtn"); run_a = wait_idle(3)
             check("the search finds 3 papers and screens them once (one question to the model)", run_a["n_papers"] == 3 and run_a["n_download"] == 2 and len(batches()) == 1 and batches() == ["3"], str((run_a["n_papers"], batches())))
             # the skipped paper is listed under "Skipped" like any other card. A skipped card once shared its class (skip) with the hidden "Skip to the page" link, whose
@@ -3251,6 +3286,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("…the failed papers are counted ('Screening failed'), and the page says why the last screening stopped", re.search(r"2\s*SCREENING FAILED", stats_t.upper()) is not None and "No endpoints found" in page.inner_text("#screenerr") and page.locator("#screenerr:not(.hide)").count() == 1, stats_t)
             page.evaluate("go({j: '*'})"); page.wait_for_selector("#papers .paper")
             check("…and each failed card shows the provider's own words, not only 'screening failed'", "No endpoints found that can handle the requested parameters" in page.inner_text("#papers"), page.inner_text("#papers")[:300])
+            budget_asks("#screenbtn", "screening a run's papers again")
             page.click("#screenbtn")
             ok_ = False
             for _ in range(80):
@@ -3312,7 +3348,10 @@ fx.fetch_journal = lambda j: []                                                 
                   and not os.path.exists(os.path.join(sumdir, "sumtest.md")), box_t)
             page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
             check("…Cancel closes it and writes nothing", not os.path.exists(os.path.join(sumdir, "sumtest.md")))
-            page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo"); page.click("#lf-sumgo")
+            page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo")
+            budget_asks("#lf-sumgo", "summarising the papers without a summary")
+            check("…and no summary was written", not os.path.exists(os.path.join(sumdir, "sumtest.md")) and not api("/api/summaries")["status"].get("running"))
+            page.click("#lf-sumgo")
             done_ = False
             for _ in range(160):
                 if not api("/api/summaries")["status"]["running"] and os.path.exists(os.path.join(sumdir, "sumtest.md")):

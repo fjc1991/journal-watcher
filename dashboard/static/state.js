@@ -152,6 +152,15 @@ export function bookEmpty(R) {          // what to say when a book has no overvi
 export const aboutCost = (c, none = "") => c == null ? none : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
 export const exactCost = (c, none = "") => c == null ? none : c > 0 && c < 0.00005 ? "under $0.0001" : c > 0 && c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "") : "$" + c.toFixed(2);
 export const usd = aboutCost;
+// Before a job that makes many AI calls starts: when its estimate is more than what is left of this month's budget, ask first (GET /api/ai/budget). Resolves to
+// true to go on. Nothing is asked without a budget, without an estimate, or when the estimate fits. The job is never refused here: each call still stops at the budget.
+export async function budgetOk(cost) {
+  if (cost == null || !(cost > 0)) return true;
+  let b; try { b = await api("/api/ai/budget?cost=" + encodeURIComponent(cost)); } catch (e) { return true; }      // (the dashboard is gone or has no AI: the job itself says so)
+  if (!b.over) return true;
+  return confirm(`This is estimated at ${aboutCost(cost)}; ${exactCost(b.left)} is left of this month’s budget (${exactCost(b.budget)}).${b.note ? " " + b.note[0].toUpperCase() + b.note.slice(1) + "." : ""} It would stop part-way when the budget is reached; you can raise the budget in Settings → AI.\n\nStart anyway?`);
+}
+window.budgetOk = budgetOk;          // (the Watch page's own script asks through it too)
 
 export function debounce(fn, ms) {
   let t = null;

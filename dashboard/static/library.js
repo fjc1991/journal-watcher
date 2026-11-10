@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, exactCost} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, exactCost, budgetOk} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -176,7 +176,7 @@ function sumBox() {
   } else { box.classList.add("hide"); box.innerHTML = ""; return; }
   box.innerHTML = html; box.classList.remove("hide");
   const go = $("#lf-sumgo", box), no = $("#lf-sumno", box), ok = $("#lf-sumok", box);
-  if (go) go.onclick = async () => { go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
+  if (go) go.onclick = async () => { if (!(await budgetOk(e.cost))) return; go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
   if (no) no.onclick = () => { SUM_OPEN = false; sumBox(); };
   if (ok) ok.onclick = () => { SUM_SEEN = st.ended; sumBox(); };
   if (st.ended && SUM_WATCHED && SUM_DONE !== st.ended) { SUM_DONE = st.ended; ctx.reload().then(() => { if (ctx.rerender) ctx.rerender(); else results(TOP && TOP.opts); }).catch(() => {}); }      // the new summaries: green "Ready to read" bars
@@ -299,6 +299,7 @@ async function wholeBook(card, box, b) {                        // the estimate 
     <div class="row" style="gap:8px"><button class="btn primary small" data-whole-go>Summarise</button><button class="btn small" data-whole-no>Cancel</button></div></div>`;
   $("[data-whole-no]", out).onclick = () => { out.innerHTML = ""; out.classList.add("hide"); };
   $("[data-whole-go]", out).onclick = async () => {
+    if (!(await budgetOk(e.cost))) return;
     try { const r = await api("/api/book/whole", {file, title}); follow(card, box, out, file, r.status); } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }     // (409 while another book's job runs: its words say so)
   };
 }

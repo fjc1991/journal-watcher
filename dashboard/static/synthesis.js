@@ -2,7 +2,7 @@
 // speak to with each paper's position (the map: themes down, papers across, a cell per paper that has something to say) and what is still open (gaps). Every cell and gap points at
 // the notes it rests on (click: the paper opens at that page); the server drops anything that points at a note it was not given, and marks a gap with no note behind it as "not grounded".
 // Saved as Papers/_folders/<id>.synthesis.json. Server: GET /api/folder/synthesis, POST /api/ai/synthesis[/estimate] (stream: status | progress | synthesis | done | error).
-import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress, aboutCost, exactCost} from "./state.js";
+import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress, aboutCost, exactCost, budgetOk} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -36,8 +36,8 @@ function draw() {
 const settings = () => ({files: [...Y.sel], focus: ($("#sy-focus", Y.el) || {}).value ?? Y.focus});
 let seq = 0;
 const estimate = debounce(async () => {
-  const my = ++seq, e = $("#sy-est", Y.el); if (!e || Y.sel.size < 2) { if (e) e.textContent = ""; return; }
-  try { const r = await api("/api/ai/synthesis/estimate", {id: Y.fid, settings: settings()}); if (my === seq && $("#sy-est", Y.el)) $("#sy-est", Y.el).textContent = r.cost != null ? " · " + money(r.cost) : ""; } catch (er) { /* a courtesy */ }
+  const my = ++seq, e = $("#sy-est", Y.el); Y.cost = null; if (!e || Y.sel.size < 2) { if (e) e.textContent = ""; return; }
+  try { const r = await api("/api/ai/synthesis/estimate", {id: Y.fid, settings: settings()}); if (my === seq && $("#sy-est", Y.el)) { Y.cost = r.cost; $("#sy-est", Y.el).textContent = r.cost != null ? " · " + money(r.cost) : ""; } } catch (er) { /* a courtesy */ }
 }, 350);
 
 const noteTip = (doc, id) => { const n = doc.notes[id]; return n ? `${n.kind}: ${n.text}${n.page ? " (p. " + n.page + ")" : ""}` : id; };
@@ -90,6 +90,7 @@ function openNote(id) {
 }
 async function run(again) {
   if (Y.busy) return; const s = settings(); if (s.files.length < 2) return toast("Choose at least two papers that have a card.");
+  if (!(await budgetOk(Y.cost))) return;
   Y.focus = s.focus; Y.busy = true; const btn = $('[data-sy="go"]', Y.el); if (btn) btn.disabled = true; const st = () => $("#sy-st", Y.el);
   try {
     const r = await fetch("/api/ai/synthesis", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: Y.fid, settings: s, fresh: again})});

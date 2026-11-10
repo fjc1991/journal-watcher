@@ -2,7 +2,7 @@
 // Built-in columns come from the paper cards (edit them in the reader's Card tab). Your own columns ("Sample size?", "Which industry?") are filled
 // by the model from each paper's closest passages, one call per paper; "Not reported" is a valid answer; click a cell to write your own.
 // The matrix is saved in Papers/_folders/<id>.matrix.json. Export: CSV, Word, LaTeX (with \citet keys), Markdown.
-import {notifyError, $, $$, esc, ico, api, toast, aboutCost, exactCost} from "./state.js";
+import {notifyError, $, $$, esc, ico, api, toast, aboutCost, exactCost, budgetOk} from "./state.js";
 
 let ctx = null;
 const M = {fid: null, t: null, busy: false};
@@ -126,7 +126,7 @@ function editCell(td) {
   ta.onblur = () => commit(false); ta.onkeydown = e => { if (e.key === "Escape") commit(true); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); ta.blur(); } };
 }
 async function fill() {
-  if (M.busy) return; M.busy = true; draw(); const st = () => $("#mx-st", M.el); let total = 0, errs = 0;
+  if (M.busy || !(await budgetOk((M.t.fill || {}).cost))) return; M.busy = true; draw(); const st = () => $("#mx-st", M.el); let total = 0, errs = 0;
   try {
     const r = await fetch("/api/ai/matrix/fill", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: M.fid})});
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
