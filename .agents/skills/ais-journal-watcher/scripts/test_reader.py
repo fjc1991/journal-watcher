@@ -1077,7 +1077,14 @@ def main():
             off = ask.estimate(pdf, history_chars=660)
             assert "next" not in off["full"] and "next" not in off["rag"], off
             write_cfg({**claude, "ask": {"keep_paper": True}})
+            short = ask.estimate(pdf, history_chars=660)
+            assert ask.KEEP_MIN_TOKENS == 4096 and int((short["full"]["chars"] - 960) / 3.3) < 4096, short
+            assert "next" not in short["full"] and short["full"]["cost"] == off["full"]["cost"], "a text too short to be kept ready has one figure: every question pays it at the input price"
+            keep_min = ask.KEEP_MIN_TOKENS; ask.KEEP_MIN_TOKENS = int((short["full"]["chars"] - 960) / 3.3)      # (exactly long enough)
             on = ask.estimate(pdf, history_chars=660)
+            ask.KEEP_MIN_TOKENS += 1
+            assert "next" not in ask.estimate(pdf, history_chars=660)["full"], "one token short of the limit"
+            ask.KEEP_MIN_TOKENS -= 1
             paper, rest = on["full"]["chars"] - 300 - 660, 300 + 660
             assert abs(on["full"]["cost"] - (int(paper / 3.3) * 3.75 + int(rest / 3.3) * 3.0 + 700 * 15.0) / 1e6) < 1e-12, on
             assert abs(on["full"]["next"] - (int(paper / 3.3) * 0.3 + int(rest / 3.3) * 3.0 + 700 * 15.0) / 1e6) < 1e-12, on
@@ -1093,7 +1100,7 @@ def main():
             write_cfg({**CFG, "ask": {"keep_paper": True}})
             assert "next" not in ask.estimate(pdf)["full"], "only Claude is asked to keep the paper"
         finally:
-            ai._rows = old_rows; write_cfg(CFG)
+            ai._rows = old_rows; write_cfg(CFG); ask.KEEP_MIN_TOKENS = 4096
     check("ask estimate: both modes priced before asking, chapter and conversation counted, answer length from the usage record, kept-ready paper as two figures, nothing sent", t_ask_estimate)
 
     def t_summary_estimate():
@@ -2688,6 +2695,25 @@ assert r["added"] == 1 and [_j.loads(x)["cost"] for x in lines_] == [0.1, 0.2, 0
 cpu2, fu2_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-03T10:00:00", "co', '{"ts": "2026-11-02T10:00:00", "cost": 0.2}\n', text=True)
 r = sy.merge(cpu2); lines_ = open(fu2_).read().splitlines()                    # (a line cut off mid-way, as a quit leaves it: the join still works and keeps it)
 assert r["added"] == 1 and '{"ts": "2026-11-03T10:00:00", "co' in lines_ and any('"cost": 0.2' in x for x in lines_) and len(lines_) == 3, lines_
+# a call that ends while the two copies are being joined: its row waits for the join (the AI layer's lock) and lands in the joined file, and the month's spend has it
+import ai, threading
+assert os.path.realpath(ai.LEDGER) == os.path.realpath(fu_), ai.LEDGER
+ym_ = iso(now)[:7]
+cpu3, fu3_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "' + ym_ + '-01T10:00:00", "cost": 1.0}\n', '{"ts": "' + ym_ + '-02T10:00:00", "cost": 2.0}\n', text=True)
+assert abs(ai.month_spend() - 1.0) < 1e-9
+real_replace_, late_ = os.replace, []
+def replace_(a_, b_):
+    if os.path.basename(b_) == "ai_usage.jsonl" and not late_:                                 # the moment between reading the record and replacing it
+        t_ = threading.Thread(target=ai._append, args=({"ts": iso(now), "feature": "ask", "provider": "p", "model": "m", "cost": 5.0},)); late_.append(t_); t_.start(); t_.join(0.5)
+    return real_replace_(a_, b_)
+os.replace = replace_
+try:
+    r = sy.merge(cpu3)
+finally:
+    os.replace = real_replace_
+late_[0].join(10); costs_ = sorted(_j.loads(x)["cost"] for x in open(fu3_).read().splitlines())
+assert r["added"] == 1 and len(late_) == 1 and costs_ == [1.0, 2.0, 5.0], "a row written during the join was lost: " + str(costs_)
+assert abs(ai.month_spend() - 8.0) < 1e-9, ai.month_spend()
 # a copy that cannot be read changes nothing; a file of another kind is not joined
 cpb, fb_ = two("Papers/2024-05/Journal/other.notes.json", {"version": 1, "rev": 1, "highlights": [{"id": "k"}]}, {"version": 1}); open(os.path.join(paths.ROOT, cpb), "w").write('{"version": 1, "high')
 before_ = open(fb_).read()
@@ -3432,6 +3458,161 @@ print("OK")
         finally:
             ai.LEDGER = saved; ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
     check("a large job's estimate is compared with what is left of the monthly budget", t_budget_check)
+
+    def t_budget_zero():
+        """0 means "no limit", and is stored as that: the Settings field then shows "no limit", not a 0 that reads as "no paid calls"."""
+        try:
+            for v in (0, "0", 0.0, "", None, -3, "-0.5"):
+                ai.save_config({"budget": {"monthly_usd": 7}}); ai.save_config({"budget": {"monthly_usd": v}})
+                assert ai.config_data()["budget"]["monthly_usd"] is None and ai.config()["budget"]["monthly_usd"] is None, (v, ai.config_data()["budget"])
+            for v, want in ((5, 5.0), ("2.5", 2.5), (0.01, 0.01)):
+                ai.save_config({"budget": {"monthly_usd": v}}); assert ai.config_data()["budget"]["monthly_usd"] == want, (v, ai.config_data()["budget"])
+        finally:
+            ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("a monthly budget of 0 (or nothing, or less) is stored as no limit, never as a 0 that could read as 'no paid calls'", t_budget_zero)
+
+    def t_question_lookup_before_budget():
+        """With a paid embedding model and the budget used up, the question's own lookup still goes (it is what reaches a saved answer), passages are not embedded,
+        and the Evidence grouping says why instead of quietly grouping by identical wording."""
+        write_cfg({**CFG, "prices": {**CFG["prices"], "emb": {"in": 0.5, "out": 0, "cache_write": 0, "cache_read": 0}}})
+        ai.cache_clear(); q = "How many firms does the platform have, exactly?"
+        try:
+            first = list(ask.stream(pdf, q, "rag")); assert first[-1]["type"] == "done" and not first[-1].get("cached"), first[-1]
+            ai.embed(["some paid passage " * 30])                                # (so that this month has a spend)
+            assert ai.month_spend() > 0
+            ai.save_config({"budget": {"monthly_usd": 0.0000001}}); n0, rows0 = len(SEEN), len(ai.usage_log(100000))
+            again = list(ask.stream(pdf, q, "rag"))
+            assert again[-1]["type"] == "done" and again[-1].get("cached") is True, "the saved answer is found although the budget is used up: %s" % again[-1]
+            sent = SEEN[n0:]; assert len(sent) == 1 and sent[0][0].endswith("/embeddings") and sent[0][1]["input"] == [q], [x[0] for x in sent]
+            row = ai.usage_log(1)[0]
+            assert len(ai.usage_log(100000)) >= rows0 + 1 and any(r["feature"] == "embed" and r.get("cost") for r in ai.usage_log(3)), "the question's lookup is still written to the usage record: %s" % row
+            n1 = len(SEEN)
+            try:
+                ai.embed(["a new passage"]); raise AssertionError("embedding passages is a new paid call: the budget stops it")
+            except ai.Blocked as e:
+                assert "budget" in str(e)
+            try:
+                evd.cluster(["platform governance", "platform governance", "something else"], 0.8); raise AssertionError("the grouping fell back to identical wording without a word")
+            except ai.Blocked as e:
+                assert "budget" in str(e) and "Settings → AI" in str(e), str(e)
+            assert len(SEEN) == n1, "nothing was sent for either"
+            ai.save_config({"budget": {"monthly_usd": None}})
+            assert len(evd.cluster(["platform governance", "platform governance", "something else"], 0.8)) == 2
+            real = ai.embed; ai.embed = lambda *a, **k: (_ for _ in ()).throw(ai.AIError("no model yet"))
+            try:
+                assert evd.cluster(["A b", "a  b", "c"], 0.8) == [[0, 1], [2]], "any other problem still falls back to identical wording"
+            finally:
+                ai.embed = real
+        finally:
+            ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG); ai.cache_clear()
+    check("with the budget used up and a paid embedding model, a question's own lookup still goes (a saved answer is found), passages are not embedded, and the Evidence grouping says why", t_question_lookup_before_budget)
+
+    def t_cache_price_fallback():
+        """A price typed with only input and output: kept and re-read text costs what the estimate says (a quarter more than input, a tenth of it), not nothing."""
+        claude = {**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["mA"]}, "ollama": {"type": "openai_compat", "base_url": URL, "key_env": ""}},
+                  "features": {"ask": {"provider": "anth", "model": "mA"}}, "ask": {"keep_paper": True}}
+        old_rows, keep_min = ai._rows, ask.KEEP_MIN_TOKENS; ai._rows = lambda: iter(()); ask.KEEP_MIN_TOKENS = 0
+        try:
+            for typed in ({"in": 3.0, "out": 15.0}, {"in": 3.0, "out": 15.0, "cache_write": 0.0, "cache_read": 0.0}):      # (the second: what Settings stores for the two fields left empty)
+                write_cfg({**claude, "prices": {"mA": typed}})
+                assert abs(ai.cost_of("mA", {"in": 30, "out": 0, "cache_write": 40000, "cache_read": 0}, provider="anth") - (30 * 3.0 + 40000 * 3.75) / 1e6) < 1e-12, ai.cost_of("mA", {"in": 30, "out": 0, "cache_write": 40000}, provider="anth")
+                assert abs(ai.cost_of("mA", {"in": 30, "out": 10, "cache_write": 0, "cache_read": 40000}, provider="anth") - (30 * 3.0 + 10 * 15.0 + 40000 * 0.3) / 1e6) < 1e-12
+                # the figure under the Ask box and the row in the usage record are the same sum
+                e = ask.estimate(pdf, history_chars=660)["full"]; paper, rest = int((e["chars"] - 960) / 3.3), int(960 / 3.3)
+                assert abs(e["cost"] - ai.cost_of("mA", {"in": rest, "out": 700, "cache_write": paper}, provider="anth")) < 1e-12 and abs(e["next"] - ai.cost_of("mA", {"in": rest, "out": 700, "cache_read": paper}, provider="anth")) < 1e-12, e
+            write_cfg({**claude, "prices": {"mA": {"in": 3.0, "out": 15.0, "cache_write": 5.0, "cache_read": 1.0}}})        # figures you did type are the ones used
+            assert abs(ai.cost_of("mA", {"in": 0, "out": 0, "cache_write": 1000, "cache_read": 1000}, provider="anth") - 0.006) < 1e-12
+            e = ask.estimate(pdf)["full"]; paper = int((e["chars"] - 300) / 3.3)
+            assert abs(e["cost"] - e["next"] - paper * 4.0 / 1e6) < 1e-12, e
+            assert ai.cost_of("llama3", {"in": 500, "out": 500, "cache_write": 40000, "cache_read": 40000}, provider="ollama") == 0.0, "a free model on this computer stays free"
+            assert ai.pricing.rates({"in": 2.0, "out": 8.0}) == {"in": 2.0, "out": 8.0, "cache_write": 2.5, "cache_read": 0.2}
+        finally:
+            ai._rows = old_rows; ask.KEEP_MIN_TOKENS = keep_min; write_cfg(CFG)
+    check("a price typed with only input and output: text kept ready and read back is charged a quarter more than input and a tenth of it, in the usage record as in the estimate", t_cache_price_fallback)
+
+    def t_sha_memo_threads():
+        """The remembered hash of the PDF hashed last: a second thread hashing another file at the worst moment never makes one file get the other's hash."""
+        import hashlib
+        fa, fb = os.path.join(TMP, "sha_a.pdf"), os.path.join(TMP, "sha_b.pdf")
+        for p, data in ((fa, b"paper A" * 100), (fb, b"paper B" * 100)):
+            with open(p, "wb") as f:
+                f.write(data)
+        ha, hb = hashlib.sha1(b"paper A" * 100).hexdigest(), hashlib.sha1(b"paper B" * 100).hexdigest()
+
+        class Racy(dict):
+            """The memo, with "another thread" (hashing B) running right after the n-th store of this thread."""
+            def __init__(self, at):
+                super().__init__(); self.at, self.n, self.busy = at, 0, False
+
+            def __setitem__(self, k, v):
+                super().__setitem__(k, v)
+                if not self.busy:
+                    self.n += 1
+                    if self.n == self.at:
+                        self.busy = True
+                        try:
+                            assert ns.sha1_of(fb) == hb
+                        finally:
+                            self.busy = False
+        real = ns._sha
+        try:
+            for at in (1, 2):
+                ns._sha = Racy(at)
+                got = ns.sha1_of(fa)
+                assert got == ha, "store %d: paper A was given %s" % (at, "paper B's hash" if got == hb else got)
+                assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "store %d: the memo holds one file's name with the other's hash" % at
+                assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) is None and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None
+            ns._sha = {}
+            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == ha and ns.sha1_known(fa) == ha
+            with open(fa, "ab") as f:
+                f.write(b"more")
+            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
+        finally:
+            ns._sha = real
+    check("the remembered PDF hash is safe with several threads: another file hashed at the same moment never gives a paper the other's hash", t_sha_memo_threads)
+
+    def t_scan_parsed_once():
+        """A scan has no text: that is found out once and kept, not by parsing the whole PDF again each time (the cost line asks every time it is shown)."""
+        import pymupdf
+        scan = os.path.join(TMP, "scan.pdf")
+        doc = pymupdf.open(); doc.new_page(); doc.new_page(); doc.save(scan); doc.close()
+        real, opens = pymupdf.open, []
+        pymupdf.open = lambda *a, **k: (opens.append(a[:1]), real(*a, **k))[1]
+        try:
+            assert bl.extract(scan) == [] and len(opens) == 1
+            assert bl.extract(scan) == [] and bl.extract(scan) == [] and len(opens) == 1, "the scan was parsed %d times" % len(opens)
+            e = ask.estimate(scan); assert e["rag"]["cost"] is None and e["full"]["passages"] == 0 and len(opens) == 1, e
+            assert bl.extract(scan, force=True) == [] and len(opens) == 2                    # (asked to read it again: it does)
+            assert bl.extract(pdf) == bs and len(opens) == 2
+        finally:
+            pymupdf.open = real
+    check("a scan (no text) is parsed once and that is remembered, not parsed again for every estimate", t_scan_parsed_once)
+
+    def t_ask_estimate_blocked():
+        """When a question cannot be asked at all, the estimate says why (in Ask's own words) so that the page shows that and no price."""
+        try:
+            assert "blocked" not in ask.estimate(pdf)
+            for feats in ({}, {"ask": {"provider": "fake"}}, {"ask": {"provider": "fake", "model": ""}}):
+                write_cfg({**CFG, "features": feats}); e = ask.estimate(pdf)
+                assert e["blocked"] == "No model chosen — click ⚙" and e["rag"]["cost"] is None and e["rag"]["passages"] > 0, (feats, e)
+            write_cfg({**CFG, "features": {"ask": {"provider": "nokey", "model": "m1"}}}); e = ask.estimate(pdf)
+            assert e["blocked"].startswith("nokey isn’t set up: add NO_SUCH_KEY_XYZ=") and e["blocked"] == _blocked(lambda: ai._route("ask")), e
+            write_cfg({**CFG, "features": {"ask": {"provider": "gone", "model": "m1"}}}); e = ask.estimate(pdf)
+            assert e["blocked"] == "No provider is set for “ask”. Choose one in Settings → AI.", e
+            far = {**CFG, "providers": {**CFG["providers"], "far": {"type": "openai_compat", "base_url": "https://far.invalid/v1", "key_env": "FAKE_KEY"}}, "features": {"ask": {"provider": "far", "model": "m1"}}}
+            write_cfg(far); assert "blocked" not in ask.estimate(pdf)
+            write_cfg({**far, "privacy": {"local_only": True}}); e = ask.estimate(pdf)
+            assert e["blocked"].startswith("Local-only mode is on, so “ask” can’t use far."), e
+        finally:
+            write_cfg(CFG)
+
+    def _blocked(fn):
+        try:
+            fn()
+        except ai.Blocked as e:
+            return str(e)
+        return None
+    check("the Ask estimate says when a question cannot be asked at all (no model chosen, no provider, no key, local-only mode), in the words Ask itself uses", t_ask_estimate_blocked)
 
     def t_prompts():
         out = prefs.save_prompts({"prompts": [{"name": "Explain it", "prompt": "Explain {{text}} from {{title}}", "pinned": True}, {"id": "explain-it", "name": "Again", "prompt": "x", "scope": "area"}],

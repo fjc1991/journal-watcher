@@ -1079,7 +1079,11 @@ class Handler(BaseHTTPRequestHandler):
             for r in miss[:60]:
                 pdf = ns.pdf_path(r["file"]); e = papercard.estimate(pdf, quick=True) if pdf else None
                 cost = None if cost is None or not e or e["cost"] is None else cost + e["cost"]
-            return self.send_json({"evidence": evidence.build(rows), "cards": cards, "estimate": {"cards": cost}})
+            try:
+                ev = evidence.build(rows)
+            except ai.Blocked as e:                            # (grouping by meaning needs a paid embedding call and the month's budget is used up: the tab says so)
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"evidence": ev, "cards": cards, "estimate": {"cards": cost}})
         if path == "/api/library/search":     # books=only: just the books (the Books tab); books=all: both; otherwise papers only (a book has its own tab)
             bk_ = one("books")
             rows_ = [r for r in pl.library() if bk_ == "all" or (r.get("journal") == "Books") == (bk_ == "only")]
@@ -1833,7 +1837,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not f:
                     return self.send_json({"error": "no such folder"}, 404)
                 if path.endswith("/estimate"):
-                    ev = evidence.build(rows)
+                    try:
+                        ev = evidence.build(rows)
+                    except ai.Blocked as e:                    # (as GET /api/folder/evidence)
+                        return self.send_json({"error": str(e)}, 400)
                     board = ideas.load(f["id"])
                     return self.send_json({"events": ideas.estimate_events(), "generate": ideas.estimate_generate(ev, [e for e in board["events"]["items"] if e.get("keep", True)], ideas._brief(b.get("brief"))), "papers": len(ev["papers"])})
                 if path.endswith("/events"):

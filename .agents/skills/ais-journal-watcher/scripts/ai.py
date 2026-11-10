@@ -380,7 +380,7 @@ def save_config(patch):
         c["privacy"] = {"local_only": bool((patch["privacy"] or {}).get("local_only"))}
     if "budget" in patch:
         v = (patch["budget"] or {}).get("monthly_usd")
-        c["budget"] = {"monthly_usd": None if v in (None, "") else max(0.0, float(v))}
+        c["budget"] = {"monthly_usd": float(v) if v not in (None, "") and float(v) > 0 else None}      # (0, nothing or less than 0 all mean "no limit", and are stored as that: the Settings field then shows "no limit", never a 0 that reads as "no paid calls")
     if "ask" in patch:
         c["ask"] = {"keep_paper": bool((patch["ask"] or {}).get("keep_paper"))}
     if "screening" in patch:
@@ -430,7 +430,8 @@ def cost_of(model, usage, searches=0, provider=None):
     if not p:
         return None
     per_search = p["web_search"] if p.get("web_search") is not None else (config_data().get("prices", {}).get("_web_search") or {}).get("per_search", 0.01)
-    return sum(usage.get(k, 0) * p.get(k, 0) for k in ("in", "out", "cache_write", "cache_read")) / 1e6 + searches * per_search
+    rate = pricing.rates(p)              # (a price typed without the two cache figures: kept and re-read text is not counted as free)
+    return sum(usage.get(k, 0) * rate[k] for k in rate) / 1e6 + searches * per_search
 
 
 def pdf_chars(path, native, saved=False):
@@ -1036,7 +1037,8 @@ def embed(texts, kind="passage", progress=None):
             raise AIError("Local-only mode is on: choose the local embedding model in Settings → AI.")
         if p.get("key_env") and not _key(p["key_env"]):
             raise AIError("%s isn’t set up: add %s=… to .env." % (c["provider"], p["key_env"]))
-        _budget_gate(c["provider"], c["model"], cfg)          # (a paid embedding call counts under the monthly budget like any other call)
+        if kind != "query":                                   # a paid embedding of passages counts under the monthly budget like any other call. A question's own
+            _budget_gate(c["provider"], c["model"], cfg)      # vector does not stop there: it is a few words, it is what finds an answer already saved or the passages for a free model on this computer, and it is still written to the usage record below
         rows, tokens, chars, exact = [], 0, 0, True
         try:
             for i in range(0, len(texts), 64):

@@ -43,6 +43,8 @@ def cluster(texts, thresh):
     try:
         import numpy as np
         vecs = ai.embed(texts)
+    except ai.Blocked:                   # the monthly budget is used up: said, not hidden behind the grouping by identical wording below (the page would quietly group differently)
+        raise
     except Exception:  # noqa: BLE001  (no model yet, offline…): fall back to identical wording
         groups = {}
         for i, t in enumerate(texts):

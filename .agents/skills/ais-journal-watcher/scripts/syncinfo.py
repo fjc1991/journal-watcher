@@ -413,23 +413,33 @@ def merge(rel):
         raise ValueError("The file this is a copy of is not there: set the copy aside, or rename it by hand.")
     try:
         if kind == "usage":
-            with open(orig, encoding="utf-8") as f:
-                mine = f.read().splitlines()
-            with open(full, encoding="utf-8") as f:
-                theirs = f.read().splitlines()
-            have = set(mine)
-            new = [x for x in theirs if x.strip() and x not in have]
-            if new:
-                def when(x):                                # (a line cut off mid-way sorts first; it is kept as it is)
-                    try:
-                        return str(json.loads(x).get("ts") or "")
-                    except (ValueError, AttributeError):
-                        return ""
-                text = "\n".join(sorted([x for x in mine if x.strip()] + new, key=when)) + "\n"
-                tmp = orig + ".join.tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(text)
-                os.replace(tmp, orig)
+            try:
+                import ai                                   # (only here: the AI layer's lock on the usage record)
+                ledger_lock = ai._lock
+            except ImportError:                             # (the AI part is not installed: nothing writes the usage record)
+                ledger_lock = threading.Lock()
+            # Nothing may be written to the usage record between reading it and replacing it: a call that ends meanwhile would lose its row, and the month's
+            # spend with it. So the whole read-and-replace holds the lock ai._append writes under. Lock order: this is the only lock taken here (this module
+            # has none of its own) and nothing inside calls back into ai, so it cannot wait on itself or on another lock. It covers this app only: another
+            # program writing the file (the sync client) is not held back by it, as before.
+            with ledger_lock:
+                with open(orig, encoding="utf-8") as f:
+                    mine = f.read().splitlines()
+                with open(full, encoding="utf-8") as f:
+                    theirs = f.read().splitlines()
+                have = set(mine)
+                new = [x for x in theirs if x.strip() and x not in have]
+                if new:
+                    def when(x):                                # (a line cut off mid-way sorts first; it is kept as it is)
+                        try:
+                            return str(json.loads(x).get("ts") or "")
+                        except (ValueError, AttributeError):
+                            return ""
+                    text = "\n".join(sorted([x for x in mine if x.strip()] + new, key=when)) + "\n"
+                    tmp = orig + ".join.tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    os.replace(tmp, orig)
             added, said = len(new), "Joined: %d AI spending records from the other copy." % len(new)
         else:
             a, b = _json(orig), _json(full)

@@ -41,7 +41,8 @@ export function mount(el) {
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(140, input.scrollHeight) + "px"; });
   wireCites(el, b => { const t = turns[+b.closest(".ask-turn")?.dataset.i]; return t && (b.closest(".ask-alt") && t.alt ? t.alt.passages : t.passages); });
   on("paper:opened", async () => { EST = null; estFor = ""; estSeq++; drawEst(); loadBook(); turns = []; ctxText = ""; draw(); status(); try { turns = (await api("/api/doc/chat?file=" + encodeURIComponent(S.file))).turns || []; draw(); } catch (e) { /* no saved chat */ } if (estFor && turns.length) loadEst(); });      // (a saved conversation goes along with the next question)
-  on("tab:show", k => { if (k === "ask" && estFor !== S.file) loadEst(); });      // only once this tab is shown: opening a paper to read it works nothing out
+  on("tab:show", k => { if (k === "ask" && estFor !== S.file && !S.tabRestored) loadEst(); });      // only once the reader chooses this tab: opening a paper works nothing out, also not when the tab is put back as it was last time
+  for (const ev of ["pointerdown", "focusin"]) el.addEventListener(ev, () => { if (S.file && estFor !== S.file) loadEst(); });      // (the tab was only put back: the cursor in the box, or anything else done here, asks for the figure)
   on("reader:closed", () => { turns = []; EST = null; estFor = ""; estSeq++; });
   window.addEventListener("jw-settings-changed", () => { status(); if (estFor) loadEst(); });      // (another model, another price, "keep the paper ready")
   draw();
@@ -166,6 +167,7 @@ async function loadEst() {
 function drawEst() {
   const el = panel && $("#ask-est", panel); if (!el) return;
   const mode = $("#ask-mode", panel).value, e = EST && EST[mode];
+  if (EST && EST.blocked) { el.textContent = EST.blocked; return; }      // no model chosen, no key, local-only mode: a question cannot be asked, so that is said and no price
   if (!e || !e.passages) { el.textContent = ""; return; }
   const what = chap >= 0 ? "chapter" : chapters.length ? "book" : "paper";
   const reads = e.fallback ? `this ${what} is too long to read whole, so the ${e.passages} closest passages are read` : mode === "full" ? `reads the whole ${what} (${e.passages} passages)` : `reads the ${e.passages} closest passages`;

@@ -178,7 +178,7 @@ function sumBox() {
   } else { box.classList.add("hide"); box.innerHTML = ""; return; }
   box.innerHTML = html; box.classList.remove("hide");
   const go = $("#lf-sumgo", box), no = $("#lf-sumno", box), ok = $("#lf-sumok", box);
-  if (go) go.onclick = async () => { if (!(await budgetOk(e.cost))) return; go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
+  if (go) go.onclick = async () => { if (!(await budgetOk(e.cost, e.basis === "prices" ? e.cost_high : null, e.cost_low))) return; go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
   if (no) no.onclick = () => { SUM_OPEN = false; sumBox(); };
   if (ok) ok.onclick = () => { SUM_SEEN = st.ended; sumBox(); };
   if (st.ended && SUM_WATCHED && SUM_DONE !== st.ended) { SUM_DONE = st.ended; ctx.reload().then(() => { if (ctx.rerender) ctx.rerender(); else results(TOP && TOP.opts); }).catch(() => {}); }      // the new summaries: green "Ready to read" bars

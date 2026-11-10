@@ -30,6 +30,10 @@ FULL_LIMIT = 450_000     # characters (~110k tokens): above this "whole paper" f
 EST_OUT_TOKENS = 700     # the length of an answer the estimate assumes until OUT_HISTORY_MIN answers are on record (a short answer and a few evidence points; the limit is 2,500)
 OUT_HISTORY_MIN = 5      # from this many answers in the usage record on, the estimate uses their mean length
 HISTORY_MAX = 4 * (3000 + 6000)       # the most of the conversation that is sent with a question (the server lets four turns through, 3,000 + 6,000 characters each)
+KEEP_MIN_TOKENS = 4096   # the shortest text (in tokens: about 13,500 characters at 3.3 characters a token) the estimate counts as kept ready between questions. A provider
+                         # silently does not keep a shorter one (no error; every question then pays the whole text at the input price), and how short is too short
+                         # differs by model (1,024 to 4,096 tokens): this is the largest, so that a further question is never shown cheaper than it is
+NO_MODEL = "No model chosen — click ⚙"      # (the words the Ask tab's header uses)
 EST_QUESTION = 300       # characters the estimate allows for the question and the words around the passages
 SUMMARY_MAX_TOKENS = 16000
 SUMMARY_OUT_TOKENS = 1500             # as summaries.OUT_TOKENS: a summary in the default template is about 1,000 to 1,700 tokens
@@ -94,9 +98,11 @@ def estimate(pdf_path, pages=None, history_chars=0):
     """What the next question costs in each mode, before it is asked: {"provider", "model", "out_tokens", "out_basis", "rag": {...}, "full": {...}}, each
     mode {"passages", "chars", "cost"}; cost is None when the model has no price or there is nothing to read, never a silent 0. "full" also has "fallback": True
     when the paper is too long to read whole (the 40 closest passages are read), and "next" when the paper is kept ready between questions ("keep the paper
-    ready" is on, the provider is Claude and the whole paper is read): cost is then the first question (the paper's text at the price of keeping it) and next a
+    ready" is on, the provider is Claude, the whole paper is read and it is at least KEEP_MIN_TOKENS long): cost is then the first question (the paper's text at the price of keeping it) and next a
     further question within five minutes (the paper's text at the price of reading it back). pages: as in readable(). history_chars: the length of the
-    conversation that goes along. Nothing is sent and nothing is embedded: the passages are counted, not looked up (which ones are closest depends on the question)."""
+    conversation that goes along. "blocked" is there when a question cannot be asked at all, and says why in the words Ask itself would use (no model chosen, no
+    provider, no key, local-only mode): the page shows that and no figure. Nothing is sent and nothing is embedded: the passages are counted, not looked up
+    (which ones are closest depends on the question)."""
     blocks = readable(pdf_path, pages)
     body = [b for b in blocks if b.get("kind", "body") == "body"]
     mean = sum(len(b["text"]) for b in body) / len(body) if body else 0
@@ -111,6 +117,14 @@ def estimate(pdf_path, pages=None, history_chars=0):
     provider, model = ai.feature_model("ask")
     out_tokens, basis = _out_tokens()
     out = {"provider": provider, "model": model, "out_tokens": out_tokens, "out_basis": basis}
+    try:
+        if not model:
+            raise KeyError("model")
+        ai._route("ask")
+    except ai.Blocked as e:              # no provider, no key, local-only mode: what Ask would answer
+        out["blocked"] = str(e)
+    except (KeyError, TypeError):        # nothing chosen for Ask (a damaged or hand-written ai.json)
+        out["blocked"] = NO_MODEL
     for mode in ("rag", "full"):
         fits = whole(blocks, mode)
         n, chars = (len(blocks), sum(len(b["text"]) for b in blocks)) if fits else closest(12 if mode == "rag" else 40)
@@ -118,11 +132,11 @@ def estimate(pdf_path, pages=None, history_chars=0):
         out[mode] = {"passages": n, "chars": paper + rest, "cost": ai.estimate("ask", paper + rest, out_tokens) if n else None}
         if mode == "full" and not fits:
             out[mode]["fallback"] = True
-        price = ai.pricing.lookup(provider, model) if n and fits and ai.keep_paper() and _claude(provider) else None
+        price = ai.pricing.lookup(provider, model) if n and fits and ai.keep_paper() and _claude(provider) and int(paper / 3.3) >= KEEP_MIN_TOKENS else None
         if price:
             # kept ready: the paper is paid once at the price of keeping it and then at the price of reading it back (a price list without those two: a quarter
-            # more than the input price, and a tenth of it); the question, the conversation and the answer cost what they always do
-            keep, back = price.get("cache_write") or 1.25 * price["in"], price.get("cache_read") or 0.1 * price["in"]
+            # more than the input price, and a tenth of it, in prices.rates, which the usage record uses too); the question, the conversation and the answer cost what they always do
+            rate = ai.pricing.rates(price); keep, back = rate["cache_write"], rate["cache_read"]
             other = int(rest / 3.3) * price["in"] + out_tokens * price["out"]
             out[mode]["cost"], out[mode]["next"] = (int(paper / 3.3) * keep + other) / 1e6, (int(paper / 3.3) * back + other) / 1e6
     return out

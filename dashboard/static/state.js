@@ -159,13 +159,16 @@ export const usd = aboutCost;
 // Before a job that makes many AI calls starts: when its estimate is more than what is left of this month's budget, ask first (GET /api/ai/budget). Resolves to
 // true to go on. Nothing is asked without a budget, without an estimate, or when the estimate fits. The job is never refused here: each call still stops at the budget.
 let budgetAsking = false;
-export async function budgetOk(cost) {
+// high (and low): the ends of an estimate that is a range. It is then the HIGH figure that is compared with what is left (the job may well cost that much),
+// and the question says so.
+export async function budgetOk(cost, high, low) {
+  const range = cost != null && high != null && high > cost; if (range) { low = low != null ? low : cost; cost = high; }
   if (cost == null || !(cost > 0)) return true;
   if (budgetAsking) return false;      // (the button was pressed twice: the first press is still asking, and one job is enough)
   budgetAsking = true;
   let b; try { b = await api("/api/ai/budget?cost=" + encodeURIComponent(cost)); } catch (e) { return true; } finally { budgetAsking = false; }      // (the dashboard is gone or has no AI: the job itself says so)
   if (!b.over) return true;
-  return confirm(`This is estimated at ${aboutCost(cost)}; ${exactCost(b.left)} is left of this month’s budget (${exactCost(b.budget)}).${b.note ? " " + b.note[0].toUpperCase() + b.note.slice(1) + "." : ""} It would stop part-way when the budget is reached; you can raise the budget in Settings → AI.\n\nStart anyway?`);
+  return confirm(`This is estimated at ${range ? aboutRange(low, cost) + " (the higher figure is the one compared with your budget)" : aboutCost(cost)}; ${exactCost(b.left)} is left of this month’s budget (${exactCost(b.budget)}).${b.note ? " " + b.note[0].toUpperCase() + b.note.slice(1) + "." : ""} It would stop part-way when the budget is reached; you can raise the budget in Settings → AI.\n\nStart anyway?`);
 }
 window.budgetOk = budgetOk;          // (the Watch page's own script asks through it too)
 
