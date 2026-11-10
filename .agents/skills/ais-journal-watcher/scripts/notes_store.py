@@ -11,11 +11,13 @@ Tag definitions are shared by every paper in Papers/_tags.json. Both files are
 written atomically and carry a `rev`: a stale browser tab gets a Conflict (the
 server answers 409 with the current copy) instead of overwriting newer notes.
 """
+import atexit
 import hashlib
 import json
 import os
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
@@ -27,7 +29,15 @@ LISTS = ("highlights", "cards", "bookmarks")  # the per-paper collections
 BOARD = ("frames", "links")                   # the notes canvas: labelled frames around cards, arrows between cards (saved when present)
 
 _lock = threading.RLock()
+# the content hash of every PDF this process has hashed or remembers from an earlier run: path -> (size, mtime_ns, inode, sha1). An entry is used only while the file's
+# size, modification time and inode are exactly these; anything else is hashed again. The map is kept on THIS computer (SHA_CACHE, in paths.LOCAL), never in the shared folder.
 _sha = {}
+_sha_lock = threading.Lock()         # guards _sha and _sha_state; never held while a PDF is read or the map is written (it may be taken while _lock is held, never the other way round)
+_sha_io = threading.Lock()           # one writer of SHA_CACHE at a time in this process
+_sha_state = {"loaded": False, "dirty": False, "timer": None, "last": None}       # last: (path, signature, sha1) of the PDF hashed last, for sha1_known only
+SHA_CACHE = os.path.join(dl.LOCAL, "pdf_sha1.json")
+SHA_SAVE_S = 5.0                     # the map is written this long after a new hash (one write for a whole pass over the library)
+SHA_YOUNG_NS = 2_000_000_000         # a file changed less than 2 s ago is hashed but not remembered: a second change inside the file system's time step could not be told apart
 
 
 class Conflict(Exception):
@@ -75,30 +85,112 @@ def sidecars(pdf):
     return [p for p in (pdf[:-4] + ".md", notes_path(pdf), chat_path(pdf), card_path(pdf), skim_path(pdf), pdf[:-4] + ".book.json", pdf[:-4] + ".epub", pdf[:-4] + ".paper.json") if os.path.exists(p)]       # (the last two: a book's own details and the EPUB it was made from: see books.py)
 
 
-def sha1_of(pdf):
-    st = os.stat(pdf)
-    key = (pdf, st.st_mtime_ns, st.st_size)
-    memo = _sha.get("kv")                # (key, hash) as ONE object, read once: several threads hash different PDFs at the same time, and none may be handed another's hash
-    if memo and memo[0] == key:
-        return memo[1]
+def _sha_sig(st):
+    return (st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+def _sha_file(pdf):
     h = hashlib.sha1()
     with open(pdf, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
-    v = h.hexdigest()
-    _sha["kv"] = (key, v)                # (one store; what is returned is this thread's own value, never read back from the shared memo)
-    return v
+    return h.hexdigest()
+
+
+def _sha_read():
+    """What SHA_CACHE holds, as {path: (size, mtime_ns, inode, sha1)}; {} when it is missing, damaged or from another version."""
+    try:
+        with open(SHA_CACHE, encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("v") != 1:
+            return {}
+        return {p: (int(e[0]), int(e[1]), int(e[2]), e[3]) for p, e in d["files"].items()
+                if isinstance(e, list) and len(e) == 4 and isinstance(e[3], str) and len(e[3]) == 40}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+def _sha_hit(pdf, sig):
+    """The remembered hash of this file when its signature is still `sig`, else None. The saved map is read the first time (a small file; no PDF is opened)."""
+    with _sha_lock:
+        if not _sha_state["loaded"]:
+            _sha_state["loaded"] = True
+            for p, e in _sha_read().items():
+                _sha.setdefault(p, e)
+        hit = _sha.get(pdf)
+        return hit[3] if hit and hit[:3] == sig else None
+
+
+def sha_flush():
+    """Write the map to SHA_CACHE now (it is written by itself SHA_SAVE_S after a new hash, and not at all when nothing new was hashed). What another process wrote meanwhile
+    is kept; files that are gone are dropped."""
+    with _sha_lock:
+        t, _sha_state["timer"] = _sha_state["timer"], None
+        if t:
+            t.cancel()                   # (written now: the write that was waiting is not needed)
+        if not _sha_state["dirty"]:
+            return
+        _sha_state["dirty"] = False
+        mine = dict(_sha)
+    with _sha_io:
+        files = {p: list(e) for p, e in {**_sha_read(), **mine}.items() if os.path.exists(p)}
+        if not files and not os.path.exists(SHA_CACHE):
+            return                       # (nothing to keep and nothing to correct: no folder is made for an empty map)
+        try:
+            os.makedirs(os.path.dirname(SHA_CACHE), exist_ok=True)
+            tmp = dl.tmp_path(SHA_CACHE)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"v": 1, "files": files}, f, ensure_ascii=False)
+            os.replace(tmp, SHA_CACHE)
+        except OSError:                  # (a read-only or full disk: the hashes are simply worked out again next time)
+            pass
+
+
+def sha_forget():
+    """Forget what is in memory, as after a restart (the saved map is read again at the next sha1_of). For tests."""
+    with _sha_lock:
+        _sha.clear()
+        _sha_state["loaded"], _sha_state["last"] = False, None
+
+
+def sha1_of(pdf):
+    """The SHA-1 of the file's content. Read from the file only when its size, modification time or inode differ from the last time it was hashed (here, or in an earlier run)."""
+    st = os.stat(pdf)
+    sig = _sha_sig(st)
+    hit = _sha_hit(pdf, sig)
+    if hit:
+        return hit
+    sha = _sha_file(pdf)
+    _sha_state["last"] = (pdf, sig, sha)                # (one store of one object; read only by sha1_known, never to answer sha1_of)
+    try:
+        same = _sha_sig(os.stat(pdf)) == sig            # (changed while it was read: the hash is of a mixture, so it is not remembered)
+    except OSError:
+        same = False
+    if not same or time.time_ns() - st.st_mtime_ns < SHA_YOUNG_NS:
+        return sha
+    with _sha_lock:
+        _sha[pdf] = sig + (sha,)
+        _sha_state["dirty"] = True
+        if _sha_state["timer"] is None:
+            t = threading.Timer(SHA_SAVE_S, sha_flush)
+            t.daemon = True
+            _sha_state["timer"] = t
+            t.start()
+    return sha
+
+
+atexit.register(sha_flush)           # (a script that ends normally keeps what it hashed; the Mac app leaves with os._exit, hence the timer)
 
 
 def sha1_known(pdf):
-    """The hash of this PDF when it is the one hashed last and has not changed since, else None. The file is never opened (ai.pdf_chars: measuring a call that has
-    just been cancelled must not read the PDF again)."""
+    """The hash of this PDF when it is remembered (or is the one hashed last, however new the file) and the file has not changed since, else None. The file is never
+    opened (ai.pdf_chars: measuring a call that has just been cancelled must not read the PDF again)."""
     try:
-        st = os.stat(pdf)
+        sig = _sha_sig(os.stat(pdf))
     except (OSError, TypeError):
         return None
-    memo = _sha.get("kv")                # (the pair, read once: see sha1_of)
-    return memo[1] if memo and memo[0] == (pdf, st.st_mtime_ns, st.st_size) else None
+    last = _sha_state["last"]            # (the triple, read once)
+    return _sha_hit(pdf, sig) or (last[2] if last and last[:2] == (pdf, sig) else None)
 
 
 # ---------------------------------------------------------------- file io

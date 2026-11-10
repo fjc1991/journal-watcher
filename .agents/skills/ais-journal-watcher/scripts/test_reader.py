@@ -884,6 +884,215 @@ def main():
         assert os.path.exists(os.path.join(bl.INDEX, ns.sha1_of(pdf) + ".blocks.json")) and bl.extract(pdf) == bs
     check("reading order, headers dropped, cached", t_blocks)
 
+    print("pdf hash cache")
+    import builtins, hashlib, time  # noqa: E402
+    HD = os.path.join(PAPERS, "2026-06", "HASH"); os.makedirs(HD, exist_ok=True)
+    true_sha = lambda p: hashlib.sha1(builtins.open(p, "rb").read()).hexdigest()  # noqa: E731
+
+    def settled(p, age=3600):
+        """Give the file a modification time in the past: a file changed in the last two seconds is hashed but (on purpose) not remembered."""
+        t = time.time() - age; os.utime(p, (t, t)); return p
+
+    class pdf_reads:
+        """with pdf_reads() as r: ... ; r.n = how many times notes_store opened a PDF to read it (the hashing lives in notes_store)."""
+        def __enter__(self):
+            self.n = 0; self.paths = []
+
+            def spy(path, mode="r", *a, **k):
+                if "b" in mode and str(path).lower().endswith(".pdf"):
+                    self.n += 1; self.paths.append(path)
+                return builtins.open(path, mode, *a, **k)
+            ns.open = spy; return self
+
+        def __exit__(self, *a):
+            del ns.open
+
+    def hash_pdfs(n, tag):
+        out = []
+        for i in range(n):
+            p = os.path.join(HD, "%s%d.pdf" % (tag, i)); builtins.open(p, "wb").write(b"%PDF-1.7 " + (tag + str(i)).encode() * 50); out.append(settled(p))
+        return out
+
+    def t_sha_many():
+        ps = hash_pdfs(5, "many")
+        with pdf_reads() as r:
+            first = [ns.sha1_of(p) for p in ps]
+            assert first == [true_sha(p) for p in ps] and r.n == 5, r.n
+            for _ in range(3):                                         # the passes a library-wide search makes: paper after paper, again and again
+                assert [ns.sha1_of(p) for p in ps] == first
+            assert r.n == 5, "an unchanged PDF was read again: %d reads for 5 files" % r.n
+            assert [ns.sha1_known(p) for p in ps] == first and r.n == 5, "every remembered paper is known without opening it, not only the one hashed last"
+    check("pdf hash: every PDF's hash is remembered, not only the last one (a pass over the library reads no PDF a second time)", t_sha_many)
+
+    def t_sha_changes():
+        a, b = hash_pdfs(2, "chg")
+        ns.sha1_of(a); ns.sha1_of(b); ns.sha1_of(a)
+        # 1. new content, another size
+        builtins.open(a, "wb").write(b"%PDF-1.7 longer " + b"x" * 500); settled(a, 1800)
+        assert ns.sha1_known(a) is None and ns.sha1_of(a) == true_sha(a), "another size"
+        # 2. new content, same size, another modification time
+        n = os.path.getsize(a); builtins.open(a, "wb").write(b"y" * n); settled(a, 900)
+        assert ns.sha1_known(a) is None and ns.sha1_of(a) == true_sha(a), "same size, newer"
+        # 3. replaced by another file of the same size AND the same modification time (a copy that keeps the time, a sync client putting a version back): only the inode tells
+        st = os.stat(a); ns.sha1_of(a)
+        tmp = a + ".new"; builtins.open(tmp, "wb").write(b"z" * n); os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns)); os.replace(tmp, a)
+        assert (os.stat(a).st_size, os.stat(a).st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+        assert ns.sha1_known(a) is None, "replaced by a file with the same size and time: still called known"
+        assert ns.sha1_of(a) == true_sha(a), "replaced by a file with the same size and time"
+        # 4. written again in place within the same instant (same size, same time, same inode: nothing to tell by) just after it was hashed: a file this fresh is not remembered
+        builtins.open(a, "wb").write(b"p" * n); st = os.stat(a)
+        with pdf_reads() as r:
+            assert ns.sha1_of(a) == ns.sha1_of(a) == true_sha(a) and r.n == 2, "a file written a moment ago was not read each time: %d" % r.n
+            assert ns.sha1_known(a) == true_sha(a) and r.n == 2          # (the one hashed last is still known to the cost line, which only measures; nothing is opened for it)
+        with builtins.open(a, "r+b") as f:
+            f.write(b"q" * n)
+        os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert (os.stat(a).st_ino, os.stat(a).st_size, os.stat(a).st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+        assert ns.sha1_of(a) == true_sha(a), "rewritten in place inside the file system's time step"
+        # 5. the other paper was not disturbed by any of it, and is still not read again
+        with pdf_reads() as r:
+            assert ns.sha1_of(b) == true_sha(b) and r.n == 0, r.n
+        # 6. a file that changes while it is being read (a sync client writing it) and is then put back exactly as it was: what was read is returned (as before), but it is not remembered
+        c = hash_pdfs(1, "mid")[0]; was = builtins.open(c, "rb").read(); st = os.stat(c)
+
+        def spy(path, mode="r", *a_, **k):
+            if path == c and "b" in mode:
+                builtins.open(c, "ab").write(b"tail")
+            return builtins.open(path, mode, *a_, **k)
+        ns.open = spy
+        try:
+            assert ns.sha1_of(c) == hashlib.sha1(was + b"tail").hexdigest()
+        finally:
+            del ns.open
+        with builtins.open(c, "r+b") as f:
+            f.write(was); f.truncate()
+        os.utime(c, ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert (os.stat(c).st_ino, os.stat(c).st_size, os.stat(c).st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+        with pdf_reads() as r:
+            assert ns.sha1_of(c) == true_sha(c) and r.n == 1, "a hash taken while the file was changing was kept (%d reads)" % r.n
+            assert ns.sha1_of(c) == true_sha(c) and r.n == 1, r.n          # (read in peace this time, so now it is remembered)
+        # 7. gone: an error as before, never an old answer
+        os.remove(b)
+        try:
+            ns.sha1_of(b); raise AssertionError("a hash for a file that is not there")
+        except OSError:
+            pass
+        assert ns.sha1_known(b) is None
+    check("pdf hash: never an old answer: another size, another time, a replacement with the same size and time, a rewrite in the same instant, a file changed while it was read, a deleted file", t_sha_changes)
+
+    def t_sha_restart():
+        assert os.path.realpath(ns.SHA_CACHE).startswith(os.path.realpath(paths.LOCAL) + os.sep), ns.SHA_CACHE          # on this computer…
+        for shared in (PAPERS, bl.INDEX, os.path.join(paths.STATE, "index"), os.path.join(paths.STATE, "ai_cache")):     # …and not where the papers or the shared caches are
+            assert not os.path.realpath(ns.SHA_CACHE).startswith(os.path.realpath(shared) + os.sep)
+        assert os.path.basename(ns.SHA_CACHE) in paths.LOCAL_ITEMS, "the map would travel with the data folder when it is moved"
+        keep = ns.SHA_CACHE, ns.SHA_SAVE_S
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1.json"); ns.sha_forget()
+        try:
+            ps = hash_pdfs(4, "rst"); want = [true_sha(p) for p in ps]
+            assert [ns.sha1_of(p) for p in ps] == want
+            ns.sha_flush(); assert os.path.exists(ns.SHA_CACHE)
+            os.remove(ns.SHA_CACHE)                                    # written rarely: passes that find every hash remembered write nothing
+            assert [ns.sha1_of(p) for p in ps] == want
+            ns.sha_flush(); assert not os.path.exists(ns.SHA_CACHE), "the map was written again although nothing new was hashed"
+            young = os.path.join(HD, "young.pdf"); builtins.open(young, "wb").write(b"%PDF just written"); ns.sha1_of(young)
+            ns.sha_flush(); assert not os.path.exists(ns.SHA_CACHE), "a file written a moment ago went into the saved map"
+            ns.sha_forget(); assert [ns.sha1_of(p) for p in ps] == want; ns.sha_flush()
+            assert sorted(json.load(builtins.open(ns.SHA_CACHE))["files"]) == sorted(ps)
+            ns.sha_forget()                                            # "the app was closed and opened again"
+            with pdf_reads() as r:
+                assert [ns.sha1_known(p) for p in ps] == want and [ns.sha1_of(p) for p in ps] == want and r.n == 0, "after a restart %d PDFs were read again" % r.n
+            # while the app was closed: one paper replaced (same size, other time), one replaced keeping size and time, one deleted and one untouched
+            n = os.path.getsize(ps[0]); builtins.open(ps[0], "wb").write(b"A" * n); settled(ps[0], 600)
+            st = os.stat(ps[1]); builtins.open(ps[1] + ".new", "wb").write(b"B" * st.st_size); os.utime(ps[1] + ".new", ns=(st.st_atime_ns, st.st_mtime_ns)); os.replace(ps[1] + ".new", ps[1])
+            os.remove(ps[2])
+            ns.sha_forget()
+            with pdf_reads() as r:
+                assert ns.sha1_of(ps[0]) == true_sha(ps[0]) and ns.sha1_of(ps[1]) == true_sha(ps[1]) and ns.sha1_of(ps[3]) == want[3]
+                assert sorted(r.paths) == sorted(ps[:2]), r.paths      # exactly the two that changed were read
+            ns.sha_flush()
+            # the saved map forgets files that are gone, keeps what another process wrote meanwhile, and is written by itself soon after a new hash
+            other = os.path.join(HD, "other-process.pdf"); builtins.open(other, "wb").write(b"%PDF other"); settled(other)
+            d = json.load(builtins.open(ns.SHA_CACHE)); so = os.stat(other)
+            assert ps[2] not in d["files"], "a deleted file stayed in the saved map"
+            d["files"][other] = [so.st_size, so.st_mtime_ns, so.st_ino, true_sha(other)]; d["files"][ps[2]] = [1, 2, 3, "0" * 40]; json.dump(d, builtins.open(ns.SHA_CACHE, "w"))
+            ns.SHA_SAVE_S = 0.05
+            extra = hash_pdfs(1, "late")[0]; ns.sha1_of(extra)
+            t0 = time.time()
+            while time.time() - t0 < 5 and extra not in json.load(builtins.open(ns.SHA_CACHE))["files"]:
+                time.sleep(0.05)
+            files = json.load(builtins.open(ns.SHA_CACHE))["files"]
+            assert extra in files and other in files and ps[2] not in files and ps[0] in files, sorted(files)
+            assert files[extra] == [os.stat(extra).st_size, os.stat(extra).st_mtime_ns, os.stat(extra).st_ino, true_sha(extra)], files[extra]
+            assert not [f for f in os.listdir(os.path.dirname(ns.SHA_CACHE)) if f.endswith(".tmp")]
+            # a damaged map, or one that lies about a file, costs a read and never a wrong answer
+            builtins.open(ns.SHA_CACHE, "w").write('{"v": 1, "files": {"' + ps[3].replace("\\", "\\\\")); ns.sha_forget()
+            assert ns.sha1_known(ps[3]) is None and ns.sha1_of(ps[3]) == want[3]
+            st = os.stat(ps[3])
+            json.dump({"v": 1, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino + 1, "0" * 40], ps[0]: [1, 2, 3, "not a hash"], ps[1]: "nonsense"}}, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+            assert ns.sha1_of(ps[3]) == want[3] and ns.sha1_of(ps[0]) == true_sha(ps[0]) and ns.sha1_of(ps[1]) == true_sha(ps[1])
+            for bad in ({"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, "0" * 40]}},                 # another version of the file
+                        {"v": 1, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, "0" * 39]}},                 # not a hash
+                        {"v": 1, "files": {ps[3]: [st.st_size + 1, st.st_mtime_ns, st.st_ino, "0" * 40]}},             # another size
+                        {"v": 1, "files": {ps[3]: [st.st_size, st.st_mtime_ns - 1, st.st_ino, "0" * 40]}},             # another time
+                        {"v": 1, "files": [ps[3]]}, [1, 2], "x"):
+                json.dump(bad, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+                assert ns.sha1_known(ps[3]) is None and ns.sha1_of(ps[3]) == want[3], bad
+        finally:
+            ns.SHA_CACHE, ns.SHA_SAVE_S = keep; ns.sha_forget()
+    check("pdf hash: the map is kept on this computer and survives a restart; it is written only after a new hash; a file that changed while the app was closed is read again, a damaged or lying map is never believed", t_sha_restart)
+
+    def t_sha_threads():
+        ps = hash_pdfs(6, "thr"); want = {p: true_sha(p) for p in ps}; bad = []
+        old = sys.getswitchinterval(); sys.setswitchinterval(1e-6)
+
+        def work(k):
+            for i in range(400):
+                p = ps[(i * (k + 1) + k) % len(ps)]
+                got = ns.sha1_of(p)
+                if got != want[p]:
+                    bad.append((os.path.basename(p), got)); return
+        try:
+            ts = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+            [t.start() for t in ts]; [t.join() for t in ts]
+        finally:
+            sys.setswitchinterval(old)
+        assert not bad, "a request thread was given another paper's hash: %s" % bad[:3]
+        with pdf_reads() as r:
+            [ns.sha1_of(p) for p in ps]; assert r.n == 0, r.n
+        # while one thread reads a large PDF nobody else waits: a second thread gets a remembered hash, and hashes a new file, in the middle of the first one's read
+        big, new = hash_pdfs(2, "slow"); done = []
+
+        def spy(path, mode="r", *a, **k):
+            if path == big and "b" in mode:
+                t = threading.Thread(target=lambda: done.append((ns.sha1_of(ps[0]), ns.sha1_of(new), ns.sha1_known(ps[1]))), daemon=True)
+                t.start(); t.join(5)
+                assert done, "a second thread had to wait for the first one's PDF to be read"
+            return builtins.open(path, mode, *a, **k)
+        ns.open = spy
+        try:
+            assert ns.sha1_of(big) == true_sha(big)
+        finally:
+            del ns.open
+        assert done == [(want[ps[0]], true_sha(new), want[ps[1]])], done
+    check("pdf hash: request threads and the indexer asking at once each get their own paper's hash, and none waits while another reads a PDF", t_sha_threads)
+
+    def t_sha_library_pass():
+        rows = []; keep = bl.INDEX; bl.INDEX = os.path.join(TMP, "index-hash")
+        try:
+            for i in range(4):
+                rel = "Papers/2026-06/HASH/lib%d.pdf" % i; make_pdf(os.path.join(TMP, rel)); settled(os.path.join(TMP, rel))
+                rows.append({"file": rel, "title": "Lib %d" % i, "authors": "Doe, Jane", "year": "2026"})
+            first = list(ft.stream(rows, "governance"))                    # reads each paper into the index once
+            assert first[-1]["type"] == "results" and first[-1]["searched"] == 4, first[-1]
+            with pdf_reads() as r:
+                again = list(ft.stream(rows, "governance"))
+                assert again[-1]["type"] == "results" and again[-1]["n"] == first[-1]["n"] and not any(m["type"] == "status" for m in again)
+                assert r.n == 0, "a search in the PDFs read %d PDFs in full only to name their cache files" % r.n
+                assert all(embed.is_indexed(ns.pdf_path(x["file"])) in (True, False) for x in rows) and r.n == 0, "asking what is still to be indexed read %d PDFs" % r.n
+        finally:
+            bl.INDEX = keep; shutil.rmtree(os.path.join(TMP, "index-hash"), ignore_errors=True); shutil.rmtree(HD, ignore_errors=True)
+    check("pdf hash: a second search in the PDFs (and every other pass over the library) opens no PDF", t_sha_library_pass)
+
     print("ai layer")
     write_cfg(CFG)
 
@@ -2557,10 +2766,10 @@ for n, body in (("browser-profile/Default/x", "p"), ("index/a.json", "{}"), ("ai
 for n, body in (("index/b.json", "{}"), ("ai_cache/d.json", "2"), ("ai_cache/c.json", "1")):          # (an earlier development version kept the index and the saved answers here: they belong in state/, shared)
     os.makedirs(os.path.dirname(os.path.join(paths.LOCAL, n)), exist_ok=True); open(os.path.join(paths.LOCAL, n), "w").write(body)
 moved = paths.migrate_local(); again = paths.migrate_local()
-import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard
+import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard, notes_store
 out = {"local": paths.LOCAL, "state": paths.STATE, "moved": moved, "again": again,
        "where": {"models": ai.MODELS, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
-                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED},
+                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED, "hashes": notes_store.SHA_CACHE},
        "shared": {"ai_cache": ai.CACHE, "index": blocks.INDEX, "ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
        "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL)),
        "index_files": sorted(os.listdir(os.path.join(st, "index"))), "cache_files": sorted(os.listdir(os.path.join(st, "ai_cache")))}
@@ -3539,36 +3748,30 @@ print("OK")
                 f.write(data)
         ha, hb = hashlib.sha1(b"paper A" * 100).hexdigest(), hashlib.sha1(b"paper B" * 100).hexdigest()
 
-        class Racy(dict):
-            """The memo, with "another thread" (hashing B) running right after the n-th store of this thread."""
-            def __init__(self, at):
-                super().__init__(); self.at, self.n, self.busy = at, 0, False
+        t = time.time() - 3600
+        os.utime(fa, (t, t)); os.utime(fb, (t, t))             # (an hour old, like a paper in the library: a file written in the last two seconds is hashed every time and not remembered)
+        import builtins
+        seen = []
 
-            def __setitem__(self, k, v):
-                super().__setitem__(k, v)
-                if not self.busy:
-                    self.n += 1
-                    if self.n == self.at:
-                        self.busy = True
-                        try:
-                            assert ns.sha1_of(fb) == hb
-                        finally:
-                            self.busy = False
-        real = ns._sha
+        def spy(path, mode="r", *a, **k):                      # "another thread" hashes B at the worst moment: after this thread has looked A up and before it has read and stored it
+            f = builtins.open(path, mode, *a, **k)
+            if path == fa and "b" in mode and not seen:
+                seen.append(1)
+                th = threading.Thread(target=lambda: seen.append(ns.sha1_of(fb)), daemon=True); th.start(); th.join(5)
+            return f
+        ns.sha_forget(); ns.open = spy
         try:
-            for at in (1, 2):
-                ns._sha = Racy(at)
-                got = ns.sha1_of(fa)
-                assert got == ha, "store %d: paper A was given %s" % (at, "paper B's hash" if got == hb else got)
-                assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "store %d: the memo holds one file's name with the other's hash" % at
-                assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) is None and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None
-            ns._sha = {}
-            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == ha and ns.sha1_known(fa) == ha
-            with open(fa, "ab") as f:
-                f.write(b"more")
-            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
+            got = ns.sha1_of(fa)
         finally:
-            ns._sha = real
+            del ns.open
+        assert seen == [1, hb], seen
+        assert got == ha, "paper A was given %s" % ("paper B's hash" if got == hb else got)
+        assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "one file's name is remembered with the other's hash"
+        assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) == ha and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None and ns.sha1_known(None) is None
+        with open(fa, "ab") as f:
+            f.write(b"more")
+        assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
+        assert ns.sha1_known(fa) == ns.sha1_of(fa) and ns.sha1_known(fb) == hb                                           # (the one hashed last is known even when it was written a moment ago)
     check("the remembered PDF hash is safe with several threads: another file hashed at the same moment never gives a paper the other's hash", t_sha_memo_threads)
 
     def t_scan_parsed_once():
@@ -7895,7 +8098,7 @@ print("OK")
                     assert want > 2 * t3[1] or forget, (want, t3)
                     bl_.extract(long_pdf)
                     if forget:
-                        ns_._sha.clear()
+                        os.utime(long_pdf, (1.6e9, 1.6e9))       # (the file is not the one that was hashed: nothing remembered fits it)
                     job = act_.start("summary", "cancel test")
                     try:
                         try:
@@ -7904,7 +8107,7 @@ print("OK")
                             pass
                         row = ai.usage_log(1)[0]
                         assert row.get("cancelled") and row["provider"] == "anth" and row["chars"] == want + len("Summarise.") and row["in"] == int(row["chars"] / 3.3), (forget, want, row)
-                        assert not forget or not ns_._sha, "the PDF was read again to be measured"
+                        assert not forget or ns_.sha1_known(long_pdf) is None, "the PDF was read again to be measured"
                     finally:
                         job.finish("cancelled")
             finally:
