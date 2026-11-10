@@ -553,7 +553,7 @@ function syncNav() {                // sidebar: which page you are on, the count
   renderSideFolders();
   const deep = typeof NAV.j === "string" && NAV.j[0] === "@" && window.LibraryUI ? LibraryUI.folderName(NAV.j.slice(1)) : "";
   $("#tbtitle").innerHTML = layer ? `<b>${NAVNAME[layer]}</b>` : deep ? `<a id="tbroot">Folders</a><span>›</span><b>${esc(deep)}</b>` : `<b>${NAVNAME[a]}</b>`;
-  const tr = $("#tbroot"); if (tr) tr.onclick = () => { leaveSettings(); go({view: "lib", j: null, tab: "folders"}); };
+  const tr = $("#tbroot"); if (tr) tr.onclick = () => { if (!leaveSettings()) return; go({view: "lib", j: null, tab: "folders"}); };
   const r = routeOf(NAV); if (BOOTED && location.hash !== r && !/^#read=/.test(location.hash) && !document.body.classList.contains("reading")) history.replaceState(history.state, "", r);
 }
 new MutationObserver(syncNav).observe(document.body, {attributes: true, attributeFilter: ["class"]});
@@ -580,15 +580,15 @@ function readPaper(m, opts) {
 function goBack() { if (history.state && history.length > 1) history.back(); else go({j: null}); }
 $("#backbtn").onclick = goBack;
 document.addEventListener("keydown", e => {
-  if (e.key !== "Escape" || document.body.classList.contains("reading")) return;   // the reader handles its own Esc
+  if (e.key !== "Escape" || document.body.classList.contains("reading") || document.querySelector("dialog[open]")) return;   // the reader handles its own Esc, and so does an open dialog
   if ($("#drawer").classList.contains("on")) closeDrawer(); else if (NAV.j !== null) goBack();
 });
-const leaveSettings = () => { if (window.Settings) Settings.close(); if (window.About) About.close(); };      // Settings and About are layers over the page; going anywhere else closes them
-$("#brand").onclick = $("#watchitem").onclick = () => { leaveSettings(); go({view: "run", j: null}); };
-$("#folditem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "folders"}); };
-$("#reviewitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "review"}); };
-$("#sbfolders").onclick = e => { const b = e.target.closest("[data-fid]"); if (b) { leaveSettings(); closeSidebarIfNarrow(); go({view: "lib", j: "@" + b.dataset.fid, tab: "folders", ftab: "papers"}); } };
-$("#sbnewfolder").onclick = async () => { leaveSettings(); await go({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = document.querySelector('[data-fp="new"]'); b && b.click(); }, 250); };
+const leaveSettings = () => { if (window.Settings && Settings.close() === false) return false; if (window.About) About.close(); return true; };      // Settings and About are layers over the page; going anywhere else closes them
+$("#brand").onclick = $("#watchitem").onclick = () => { if (!leaveSettings()) return; go({view: "run", j: null}); };
+$("#folditem").onclick = () => { if (!leaveSettings()) return; loadLibrary(); go({view: "lib", j: null, tab: "folders"}); };
+$("#reviewitem").onclick = () => { if (!leaveSettings()) return; loadLibrary(); go({view: "lib", j: null, tab: "review"}); };
+$("#sbfolders").onclick = e => { const b = e.target.closest("[data-fid]"); if (b) { if (!leaveSettings()) return; closeSidebarIfNarrow(); go({view: "lib", j: "@" + b.dataset.fid, tab: "folders", ftab: "papers"}); } };
+$("#sbnewfolder").onclick = async () => { if (!leaveSettings()) return; await go({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = document.querySelector('[data-fp="new"]'); b && b.click(); }, 250); };
 // the sidebar: always there on a wide window; a drawer on a narrow one; you can fold it away
 const narrow = () => matchMedia("(max-width: 900px)").matches || document.body.classList.contains("reading");   // a drawer instead of a fixed column
 function closeSidebarIfNarrow() { if (narrow()) document.body.classList.remove("sb-open"); }
@@ -647,6 +647,27 @@ function chip(label, on, cb) {
   c.onclick = () => { if (c.classList.contains("off")) return; c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on") ? "true" : "false"); cb && cb(); };
   c.onkeydown = e => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); c.click(); } }; return c;
 }
+// Your topics and methods as chips, and in the list's topic filter (drawn at the start, and again when you changed them in Settings).
+function drawInterests() {
+  $("#topicchips").innerHTML = ""; $("#methodchips").innerHTML = "";
+  CFG.topics.forEach(t => $("#topicchips").append(chip(t, false, updateEst)));
+  (CFG.methods || []).forEach(m => { const c = chip(m.label, false, updateEst); c.title = m.description || ""; $("#methodchips").append(c); });
+  const cur = $("#tfilter").value;
+  $("#tfilter").innerHTML = `<option value="">All topics</option>` + CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
+  if (CFG.topics.includes(cur)) $("#tfilter").value = cur;
+}
+// Journals or topics were changed in Settings: the form is drawn again from them. A journal you had ticked stays ticked; the run you are looking at, the papers
+// you ticked and what you typed stay as they are.
+window.addEventListener("jw-watch-changed", async () => {
+  try { CFG = await api("/api/config"); } catch (e) { return; }
+  const kept = box => new Set([...document.querySelectorAll(box + " .chip.on")].map(c => c.dataset.abbr || c.textContent));
+  const again = (box, on) => document.querySelectorAll(box + " .chip").forEach(c => { if (on.has(c.dataset.abbr || c.textContent) && !c.classList.contains("off")) { c.classList.add("on"); c.setAttribute("aria-checked", "true"); } });
+  const t = kept("#topicchips"), m = kept("#methodchips"), j = kept("#journalchips"), tj = kept("#tjournalchips");
+  drawInterests(); again("#topicchips", t); again("#methodchips", m);
+  journalChips("#journalchips", updateEst, x => (x.per_year || 0) < 1000, x => x.needs_query ? ` — searched by words: needs a focus phrase; only the ${x.limit || 200} best matches are looked at` : ""); again("#journalchips", j);
+  journalChips("#tjournalchips", updateTermsEst, () => true, x => x.needs_query ? ` — searched by words: only the ${x.limit || 200} best matches of your terms are looked at` : ""); again("#tjournalchips", tj);
+  updateEst(); updateTermsEst(); updateWeekEst(); if (RUN) render();
+});
 // The journals to tick for a search, under the name of the list they belong to (AIS basket, UTD 24, other), each list with its own all / none.
 // A journal that is in two lists is shown once, under the first. `small` says which start ticked; a journal that is off in Settings never starts ticked.
 function journalGroups() {
@@ -734,13 +755,11 @@ async function init() {
     $(id).onchange = updateEst;
   }
   $("#y0").value = $("#y1").value = String(CFG.years[0] - 1);
-  CFG.topics.forEach(t => $("#topicchips").append(chip(t, false)));
-  (CFG.methods || []).forEach(m => { const c = chip(m.label, false); c.title = m.description || ""; $("#methodchips").append(c); });
+  drawInterests();
   journalChips("#journalchips", updateEst, j => (j.per_year || 0) < 1000, j => j.needs_query ? ` — searched by words: needs a focus phrase; only the ${j.limit || 200} best matches are looked at` : "");
   $("#focus").oninput = updateEst;                      // (the note about SSRN needing words, and the "already ran" note, follow what you type)
   $("#jall").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip:not(.off):not([data-optin])").forEach(c => c.classList.add("on")); updateEst(); };
   $("#jnone").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip").forEach(c => c.classList.remove("on")); updateEst(); };
-  $("#tfilter").innerHTML += CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
   updateEst(); updateWeekEst();
   for (const id of ["#ty0", "#ty1"]) { $(id).innerHTML = CFG.years.map(y => `<option>${y}</option>`).join(""); $(id).onchange = updateTermsEst; }
   $("#ty0").value = String(CFG.years[0] - 1); $("#ty1").value = String(CFG.years[0]);
@@ -899,7 +918,7 @@ $("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.p
   if (window.budgetOk && !(await window.budgetOk(CFG.est_cost_per_paper == null ? null : n * CFG.est_cost_per_paper))) return;
   try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { fail(e); } };
 window.addEventListener("jw-settings-changed", async () => {      // a model changed in Settings: the page's estimates and the backup note follow it
-  try { CFG = await api("/api/config"); if (RUN) render(); } catch (e) {}
+  try { CFG = await api("/api/config"); if (RUN) render(); updateEst(); updateWeekEst(); } catch (e) {}      // (the weekly estimate names the model and uses its price)
 });
 $("#makebackup").onclick = async e => {          // the backup that screened this run becomes the screening model (Settings → AI → Screening new papers)
   const b = e.currentTarget;
@@ -1453,7 +1472,7 @@ async function loadLibrary() {
 }
 async function reloadLib() { LIB = await api("/api/library"); $("#libcount").textContent = LIB.length; }
 $("#skipnav").onclick = () => { const m = $("#main-content"); m.focus(); m.scrollIntoView(); };
-$("#libitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: LibraryUI.state.tab === "folders" ? "papers" : LibraryUI.state.tab}); };
+$("#libitem").onclick = () => { if (!leaveSettings()) return; loadLibrary(); go({view: "lib", j: null, tab: LibraryUI.state.tab === "folders" ? "papers" : LibraryUI.state.tab}); };
 function libRow(r, i) { return window.LibraryUI ? LibraryUI.row(r, i) : ""; }
 function renderLibrary() {
   const box = $("#libview");

@@ -5786,11 +5786,18 @@ print("OK")
             except ValueError as e:
                 assert "journals.json" in str(e)
             # topics: checked first, your file's other fields kept, a topic keeps its inner name
-            json.dump({"_comment": "c", "min_score": 3, "negative_terms": ["erratum"], "extra": {"a": 1}, "topics": [{"name": "genai", "label": "GenAI", "terms": ["LLM"]}], "methods": []}, open(wl.INTERESTS, "w"))
+            json.dump({"_comment": "c", "min_score": 3, "negative_terms": ["erratum"], "extra": {"a": 1}, "topics": [{"name": "genai", "label": "GenAI", "terms": ["LLM"], "weight": 2, "_note": "mine"}, {"name": "Old-Name", "label": "Kept name", "terms": ["x"]}], "methods": []}, open(wl.INTERESTS, "w"))
             r = wl.save_interests({"topics": [{"name": "genai", "label": "Generative AI", "terms": "LLM, large language model\nLLM;  ChatGPT "}, {"label": "Platform markets", "terms": ["two-sided market"]}],
                                    "methods": [{"label": "Field experiments", "description": "A randomised experiment in the field.", "terms": ["field experiment"]}], "min_score": "4"})
+            # a topic of your file keeps its inner name as you wrote it, and what else you keep on it (a note, a weight)
+
             d = json.load(open(wl.INTERESTS))
-            assert d["topics"] == [{"name": "genai", "label": "Generative AI", "terms": ["LLM", "large language model", "ChatGPT"]}, {"name": "platform_markets", "label": "Platform markets", "terms": ["two-sided market"]}], d["topics"]
+            assert d["topics"] == [{"name": "genai", "label": "Generative AI", "terms": ["LLM", "large language model", "ChatGPT"], "weight": 2, "_note": "mine"}, {"name": "platform_markets", "label": "Platform markets", "terms": ["two-sided market"]}], d["topics"]
+            json.dump(dict(d, topics=d["topics"] + [{"name": "Old-Name", "label": "Kept name", "terms": ["x"], "weight": 5}]), open(wl.INTERESTS, "w"))
+            wl.save_interests({"topics": [{"name": "Old-Name", "label": "Kept name, renamed", "terms": ["x", "y"]}, {"name": "genai", "label": "Generative AI", "terms": ["LLM"]}, {"name": "Old-Name", "label": "A second one claiming the same name", "terms": ["z"]}]})
+            d2 = json.load(open(wl.INTERESTS))["topics"]
+            assert d2[0] == {"name": "Old-Name", "label": "Kept name, renamed", "terms": ["x", "y"], "weight": 5} and d2[1]["weight"] == 2 and d2[2]["name"] == "a_second_one_claiming_the_same_name" and "weight" not in d2[2], d2
+            wl.save_interests({"topics": d["topics"]}); d = json.load(open(wl.INTERESTS))
             assert d["min_score"] == 4 and d["negative_terms"] == ["erratum"] and d["extra"] == {"a": 1} and d["_comment"] == "c" and d["methods"][0]["name"] == "field_experiments" and r["topics"][0]["label"] == "Generative AI"
             good = open(wl.INTERESTS).read()
             for bad, why in (({"topics": []}, "at least one topic"), ({"topics": [{"label": "", "terms": ["x"]}]}, "no name"), ({"topics": [{"label": "A", "terms": " , "}]}, "at least one word"),
@@ -5803,8 +5810,32 @@ print("OK")
                 assert open(wl.INTERESTS).read() == good, "a refused save changed the file"
         finally:
             wl.JOURNALS, wl.INTERESTS = keep; shutil.rmtree(tmp, ignore_errors=True)
+        # an older HBR entry ("weekly checks only") can be searched by year all the same, and Settings says so
+        tmp2 = tempfile.mkdtemp(prefix="jw-wl2-"); keep2 = wl.JOURNALS; wl.JOURNALS = os.path.join(tmp2, "journals.json")
+        try:
+            json.dump({"journals": [{"name": "Harvard Business Review", "abbr": "HBR", "publisher": "hbr", "source": "rss", "feed": "x", "archive": False}, {"name": "No year search", "abbr": "NYS", "publisher": "x", "source": "rss", "feed": "y", "archive": False}]}, open(wl.JOURNALS, "w"))
+            jj = {j["abbr"]: j for j in wl.journals()["journals"]}
+            assert jj["HBR"]["can_search"] and jj["HBR"]["search"] and not jj["NYS"]["can_search"] and wl.switch(["HBR", "NYS"], search=False) == 1, jj
+        finally:
+            wl.JOURNALS = keep2; shutil.rmtree(tmp2, ignore_errors=True)
+        # the command-line weekly run (agent.py) reads only the journals that are on, like the app's own check
+        import fetch_new as fx_w
+        tmp3 = tempfile.mkdtemp(prefix="jw-wl3-"); keep3 = (fx_w.BASE, fx_w.STATE_DIR, fx_w.fetch_journal, fx_w.enrich, sys.argv, sys.stdout); asked = []
+        try:
+            shutil.copy(os.path.join(paths.DEFAULTS, "journals.json"), tmp3)
+            fx_w.BASE, fx_w.STATE_DIR, fx_w.fetch_journal, fx_w.enrich, sys.argv, sys.stdout = tmp3, os.path.join(tmp3, "state"), (lambda j: (asked.append(j["abbr"]), [])[1]), (lambda p_: None), ["fetch_new.py"], io.StringIO()
+            fx_w.main()
+        finally:
+            fx_w.BASE, fx_w.STATE_DIR, fx_w.fetch_journal, fx_w.enrich, sys.argv, sys.stdout = keep3; shutil.rmtree(tmp3, ignore_errors=True)
+        assert asked == [j["abbr"] for j in first14], asked
         # the weekly check reads only the journals that are on: the shipped list still reads the fourteen it read before (SSRN never)
         import pipeline as pl_w
+        keep_tl = pl_w.topic_labels; wr = pl_w.weekly_run()
+        try:
+            pl_w.topic_labels = lambda: ["A topic saved in Settings since"]
+            assert pl_w.weekly_run(wr) is wr and wr.params["topics"] == ["A topic saved in Settings since"], wr.params          # (this week's run uses your topics as they are now)
+        finally:
+            pl_w.topic_labels = keep_tl
         assert [j["abbr"] for j in pl_w.journals() if j.get("weekly", True)] == [j["abbr"] for j in first14], [j["abbr"] for j in pl_w.journals() if j.get("weekly", True)]
     check("your journals and interests: the shipped list is the AIS basket and the UTD 24 with the new journals switched off; adding them never changes an entry of yours or adds one twice; a switch changes only itself; topics are checked before they are written and a refused save changes nothing", t_watchlist)
 

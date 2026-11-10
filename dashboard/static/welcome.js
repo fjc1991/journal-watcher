@@ -143,7 +143,7 @@ export async function open(at = 0) {
   draw(); if (!dlg.open) dlg.showModal();
 }
 
-window.addEventListener("jw-signins", e => { SIN = e.detail; if (dlg && dlg.open && (step === 2 || step === 4)) { const msg = $("#wl-simsg", dlg) && $("#wl-simsg", dlg).innerHTML; draw(); if (msg && $("#wl-simsg", dlg)) $("#wl-simsg", dlg).innerHTML = msg; } });
+window.addEventListener("jw-signins", e => { SIN = e.detail; if (dlg && dlg.open && (step === 2 || step === 5)) { const msg = $("#wl-simsg", dlg) && $("#wl-simsg", dlg).innerHTML; draw(); if (msg && $("#wl-simsg", dlg)) $("#wl-simsg", dlg).innerHTML = msg; } });
 window.Welcome = {open};
 // the first start: after the page has settled, unless it has been seen (or finished) before
 window.addEventListener("load", () => { if (!seen()) setTimeout(() => { if (!document.querySelector("dialog[open]")) open(0); }, 900); });

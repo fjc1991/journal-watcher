@@ -580,10 +580,9 @@ def weekly_run(current=None):
     """This week's run: the existing one (in memory or on disk) or a new one."""
     wid = week_of()
     rid = wid + "_weekly"
-    if current is not None and current.id == rid:
-        return current
-    r = Run.load(rid) or Run("weekly", {"topics": topic_labels(), "query": ""}, rid)
+    r = current if current is not None and current.id == rid else (Run.load(rid) or Run("weekly", {"topics": topic_labels(), "query": ""}, rid))
     r.week = wid
+    r.params["topics"] = topic_labels()          # (your topics as they are now: a check later in the week uses what you saved in Settings since the first one)
     return r
 
 

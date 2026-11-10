@@ -27,19 +27,22 @@ function build() {
   $("#st-back", root).onclick = close;
   $$(".st-tabs button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
   $$(".st-sub button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t; render(); });
-  document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select")) close(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select") && !document.querySelector("dialog[open]")) close(); });      // (an open dialog, such as the list of shortcuts, takes its own Esc)
   const touched = e => { if ($("#st-save", root) && !e.target.closest("[data-now]") && e.target.closest("#st-body")) dirty = true; };      // (a page with a Save button: what you type is not kept until you press it)
   root.addEventListener("input", touched); root.addEventListener("change", touched);
   addEventListener("beforeunload", e => { if (dirty && root && !root.classList.contains("hide")) { e.preventDefault(); e.returnValue = ""; } });
 }
-export function close() {
-  if (!root || root.classList.contains("hide")) return;
-  if (!leaveOk()) return;
+export function close() {      // false: you chose to stay (something typed was not saved), and whoever asked should not go on
+  if (!root || root.classList.contains("hide")) return true;
+  if (!leaveOk()) return false;
   dirty = false; root.classList.add("hide"); document.body.classList.remove("settings-open");
-  if (watchChanged) { watchChanged = false; location.reload(); }      // (the Watch page's journals and topics are drawn once, at its start)
+  if (watchChanged) { watchChanged = false; window.dispatchEvent(new Event("jw-watch-changed")); }      // (the Watch page draws its journals and topics again; nothing else on it is touched)
+  return true;
 }
 export async function open(t) {
-  build(); if (t) tab = t;
+  build();
+  if (!root.classList.contains("hide") && t && t !== tab && !leaveOk()) return;      // already open, with something typed and not saved: ask before another page is drawn
+  if (t) tab = t;
   if (window.About) About.close();
   root.classList.remove("hide"); document.body.classList.add("settings-open");
   try { D = await api("/api/settings"); } catch (e) { toast(e.message); return; }
@@ -84,6 +87,11 @@ async function renderWatch(body) {
   let W, I;
   try { [W, I] = await Promise.all([api("/api/journals"), api("/api/interests")]); } catch (e) { body.innerHTML = `<div class="card st-card">${errInline(e)}</div>`; return; }
   if (tab !== "watch") return;
+  const journalCard = () => `<h2>Your journals <small>${W.journals.filter(j => j.weekly).length} are read by the weekly check</small></h2>
+      <p class="pmeta">“Weekly check” decides whether <b>Check for new papers</b> reads a journal. “Ticked for a search” decides whether it starts ticked when you search by year (you can still tick any journal there). A switch is saved as you flip it. More journals in the weekly check means more papers to screen each week.</p>
+      ${W.missing.length ? `<div id="wl-missing"><b>${W.missing.length} journal${W.missing.length === 1 ? "" : "s"} of the AIS basket and the UTD 24 ${W.missing.length === 1 ? "is" : "are"} not in your list</b> <small>(${esc(W.missing.slice(0, 6).map(j => j.abbr).join(", "))}${W.missing.length > 6 ? ", …" : ""})</small>.
+        <button class="btn small primary" id="wl-add">Add ${W.missing.length === 1 ? "it" : "them"}, switched off</button> <small>None of your own entries is changed; you switch on the ones you want below.</small></div>` : ""}
+      <table class="st-table" id="wl-journals">${journalRows(W)}</table><span class="st-msg" id="wl-jmsg"></span>`;
   const draw = () => {
     body.innerHTML = `<div class="card st-card"><h2>Your topics <small>what every new paper is compared with</small></h2>
       <p class="pmeta">A paper is kept when its title, keywords or abstract contain enough of a topic's words (a word in the title counts 3, in the keywords 2, in the abstract 1), and the AI then judges it against the same topics. The three topics the app starts with are only examples: replace them with your own.</p>
@@ -94,15 +102,11 @@ async function renderWatch(body) {
       <div id="wl-methods">${I.methods.map(t => topicRow(t, "method")).join("")}</div>
       <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="wl-addm">＋ Add a method</button></div>
       <div class="st-actions"><button class="btn primary" id="st-save">Save topics and methods</button> <span id="st-msg" class="st-msg"></span></div></div>
-    <div class="card st-card"><h2>Your journals <small>${W.journals.filter(j => j.weekly).length} are read by the weekly check</small></h2>
-      <p class="pmeta">“Weekly check” decides whether <b>Check for new papers</b> reads a journal. “Ticked for a search” decides whether it starts ticked when you search by year (you can still tick any journal there). A switch is saved as you flip it. More journals in the weekly check means more papers to screen each week.</p>
-      ${W.missing.length ? `<div id="wl-missing"><b>${W.missing.length} journal${W.missing.length === 1 ? "" : "s"} of the AIS basket and the UTD 24 ${W.missing.length === 1 ? "is" : "are"} not in your list</b> <small>(${esc(W.missing.slice(0, 6).map(j => j.abbr).join(", "))}${W.missing.length > 6 ? ", …" : ""})</small>.
-        <button class="btn small primary" id="wl-add">Add ${W.missing.length === 1 ? "it" : "them"}, switched off</button> <small>None of your own entries is changed; you switch on the ones you want below.</small></div>` : ""}
-      <table class="st-table" id="wl-journals">${journalRows(W)}</table><span class="st-msg" id="wl-jmsg"></span></div>`;
+    <div class="card st-card" id="wl-jcard">${journalCard()}</div>`;
   };
   draw();
   const collect = (box, kind) => $$(`#${box} .wl-topic`, body).map(d => ({name: d.dataset.name, label: $(".wl-label", d).value, terms: $(".wl-terms", d).value, ...(kind === "method" ? {description: $(".wl-desc", d).value} : {})}));
-  const done = r => { W = {journals: r.journals, missing: r.missing, sets: r.sets}; watchChanged = true; const y = $("#st-body", root).scrollTop; draw(); $("#st-body", root).scrollTop = y; };
+  const done = r => { W = {journals: r.journals, missing: r.missing, sets: r.sets}; watchChanged = true; $("#wl-jcard", body).innerHTML = journalCard(); };      // (only the journals are drawn again: what you typed in a topic and have not saved stays)
   body.onclick = async e => {
     if (e.target.closest("#wl-addt")) { $("#wl-topics", body).insertAdjacentHTML("beforeend", topicRow({}, "topic")); dirty = true; $("#wl-topics .wl-topic:last-child .wl-label", body).focus(); return; }
     if (e.target.closest("#wl-addm")) { $("#wl-methods", body).insertAdjacentHTML("beforeend", topicRow({}, "method")); dirty = true; $("#wl-methods .wl-topic:last-child .wl-label", body).focus(); return; }
@@ -148,8 +152,8 @@ function renderAI(body) {
       <td class="c-test"><button class="btn small" data-test="${esc(n)}">Test</button><div class="tres"></div></td></tr>`).join("")}</table></div></div>
   <div class="card st-card"><h2>Which model does what</h2>
     <div class="st-main" id="st-main"><b>Use one for everything</b>
-      <select id="mn-p" aria-label="Provider for all features">${pnames.map(n => `<option${mainP === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
-      <input type="text" id="mn-m" list="dl-main" aria-label="Model for all features" value="${esc(mainM || "")}"><datalist id="dl-main">${((A.providers[mainP] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist>
+      <select id="mn-p" data-now aria-label="Provider for all features">${pnames.map(n => `<option${mainP === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
+      <input type="text" id="mn-m" data-now list="dl-main" aria-label="Model for all features" value="${esc(mainM || "")}"><datalist id="dl-main">${((A.providers[mainP] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist>
       <button class="btn small" id="mn-test">Test</button><span class="tres"></span>
       <button class="btn" id="mn-apply">Apply to all features</button>
       <small id="mn-note" class="st-msg">${mixed}</small></div>
@@ -200,12 +204,12 @@ function renderAI(body) {
   $$("[data-keyremove]", body).forEach(b => b.onclick = async () => {
     const n = b.dataset.keyremove;
     if (!confirm(`Remove the ${n} API key from this computer?\n\nIt is deleted from this Mac's Keychain and from the .env file of your data folder. Features that use ${n} stop working until you paste a key again.`)) return;
-    try { D.ai = await api("/api/ai/key", {provider: n, remove: true}); window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast(D.ai.key_note || "Key removed."); }
+    try { D.ai = await api("/api/ai/key", {provider: n, remove: true}); window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); dirty = false; toast(D.ai.key_note || "Key removed."); }
     catch (e) { notifyError(e); }
   });
   $$("[data-keychange]", body).forEach(b => b.onclick = () => { const f = $(".keyform", b.closest("td")); f.classList.remove("hide"); $("input", f).focus(); b.classList.add("hide"); const ok = $(".keyok", b.closest("td")); if (ok) ok.classList.add("hide"); const rm = $("[data-keyremove]", b.closest("td")); if (rm) rm.classList.add("hide"); });
   $$("[data-savekey]", body).forEach(b => b.onclick = async () => { const td = b.closest("td"), inp = $("input", td), out = $(".keymsg", td); if (!inp.value.trim()) return;
-    try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast(D.ai.key_note ? "Key saved. " + D.ai.key_note : "Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
+    try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); dirty = false; toast(D.ai.key_note ? "Key saved. " + D.ai.key_note : "Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
   $$("[data-test]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"), first = $(".pm", tr).value.split(",")[0].trim(); const m = first || prompt("Model name to test on " + b.dataset.test + ":"); if (m) test(b, b.dataset.test, m); });
   $$("[data-testf]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"); test(b, $(".fp", tr).value, $(".fm", tr).value.trim(), tr.dataset.f === "screen" ? "screen" : null); });
   $("#st-save", body).onclick = async () => {

@@ -54,12 +54,17 @@ def _load_journals():
     return d
 
 
+def _can_search(j):
+    """Whether a journal can be searched by year. HBR can, whatever an entry copied before its year search existed says (pipeline.journals puts that right too)."""
+    return bool(j.get("archive", True)) or (j.get("publisher") == "hbr" and not j.get("archive_source"))
+
+
 def journals():
     """What the page shows: every journal of your file with its switches and lists, and the shipped journals your file does not have."""
     d, defaults = _load_journals(), _defaults()
     mine = [j for j in d["journals"] if isinstance(j, dict) and j.get("abbr")]
     rows = [{"abbr": j["abbr"], "name": j.get("name") or j["abbr"], "publisher": j.get("publisher") or "", "issn": j.get("issn") or "", "per_year": j.get("per_year"),
-             "weekly": bool(j.get("weekly", True)), "search": bool(j.get("archive", True)) and not j.get("default_off"), "can_search": bool(j.get("archive", True)),
+             "weekly": bool(j.get("weekly", True)), "search": _can_search(j) and not j.get("default_off"), "can_search": _can_search(j),
              "sets": sets_of(j, defaults)} for j in mine]
     missing = [{"abbr": x["abbr"], "name": x.get("name") or x["abbr"], "sets": sets_of(x, defaults)} for x in defaults if not any(_same(x, j) for j in mine)]
     return {"journals": rows, "missing": missing, "sets": SETS}
@@ -97,7 +102,7 @@ def switch(abbrs, weekly=None, search=None):
                 j.pop("weekly", None)
             else:
                 j["weekly"] = False
-        if search is not None and j.get("archive", True):
+        if search is not None and _can_search(j):
             if search:
                 j.pop("default_off", None)
             else:
@@ -129,8 +134,11 @@ def interests():
             "negative_terms": list(d.get("negative_terms") or [])}
 
 
-def _group(items, what, describe=False):
+def _group(items, what, describe=False, was=()):
+    """The topics (or methods) as they will be written. An entry keeps its inner name (saved verdicts and runs know a topic by it) and anything else your file
+    holds for it that this page does not show."""
     out, taken, labels = [], set(), set()
+    old_by = {t.get("name"): t for t in was if isinstance(t, dict) and t.get("name")}
     if not isinstance(items, list):
         raise ValueError("The %ss are not a list." % what)
     if len(items) > MAX_TOPICS:
@@ -158,10 +166,10 @@ def _group(items, what, describe=False):
             raise ValueError("“%s” needs at least one word or phrase to look for." % label)
         if len(keep) > MAX_TERMS:
             raise ValueError("“%s” has more than %d words and phrases." % (label, MAX_TERMS))
-        old = _clean(t.get("name"), 60)
-        name = old if old and re.fullmatch(r"[a-z0-9_]+", old) and old not in taken else _name(label, taken)     # (a topic keeps its inner name: saved verdicts know it by that)
+        old = str(t.get("name") or "")
+        name = old if old in old_by and old not in taken else _name(label, taken)     # (a topic keeps its inner name, as your file has it; a new one gets one from its label)
         taken.add(name)
-        row = {"name": name, "label": label, "terms": keep}
+        row = dict(old_by.get(name) or {}, name=name, label=label, terms=keep)
         if describe:
             row["description"] = _clean(t.get("description"), 400)
         out.append(row)
@@ -177,12 +185,12 @@ def save_interests(patch):
     if not isinstance(d, dict):
         d = {}
     if "topics" in patch:
-        topics = _group(patch["topics"], "topic")
+        topics = _group(patch["topics"], "topic", was=d.get("topics") or [])
         if not topics:
             raise ValueError("Keep at least one topic: papers are screened against your topics.")
         d["topics"] = topics
     if "methods" in patch:
-        d["methods"] = _group(patch["methods"], "method", describe=True)
+        d["methods"] = _group(patch["methods"], "method", describe=True, was=d.get("methods") or [])
     if "min_score" in patch:
         try:
             score = int(patch["min_score"])
