@@ -8067,6 +8067,210 @@ print("OK")
 
     check("browser: on a paywalled landing page only THIS article's PDF link is followed (its own link wherever the page puts it: aside, tab strip, 'footer'-named wrapper, other host, citation_pdf_url; not another site, a reference list, the footer, a banner PDF, another article or one whose DOI merely starts with ours)", t_link_follow)
     check("search memory: a verdict is reused for the same question and the same paper text (never another question, another text, an error, or one older than the number of days you set), a journal's year range is kept for a while, and the same search is the same saved run", t_search_memory)
+
+    def run_listing_checks():
+        """-> [(name, fn)]. Each check works in its own empty runs folder (pl_.RUNS is pointed at it and put back), counts the files the listing reads through pl_.load_json, and
+        shortens the 'just written' window so that it need not wait three seconds."""
+        import contextlib, time, pipeline as pl_
+
+        REAL_WINDOW = [None]
+
+        @contextlib.contextmanager
+        def runs_folder(window=0.25):
+            real = (pl_.RUNS, pl_.load_json, getattr(pl_, "_RUN_FRESH_NS", None))
+            REAL_WINDOW[0] = real[2]
+            d = tempfile.mkdtemp(prefix="jw-runs-"); reads = []
+            def spy(path, default):
+                reads.append(os.path.basename(path)); return real[1](path, default)
+            pl_.RUNS, pl_.load_json, pl_._RUN_FRESH_NS = d, spy, int(window * 1e9)
+            try:
+                yield d, reads
+            finally:
+                pl_.RUNS, pl_.load_json = real[0], real[1]
+                if real[2] is None:
+                    del pl_._RUN_FRESH_NS
+                else:
+                    pl_._RUN_FRESH_NS = real[2]
+                shutil.rmtree(d, ignore_errors=True)
+
+        def mk(kind="search", q="q", n=3, rid=None, **kw):
+            r = pl_.Run(kind, {"year_from": 2024, "year_to": 2024, "journals": ["A"], "topics": ["t"], "methods": [], "query": q} if kind == "search" else {"topics": ["t"], "query": ""}, rid)
+            for k in range(n):
+                r.add_paper({"id": "%s-p%d" % (q, k), "title": "Paper %d" % k, "abbr": "A", "verdict": "download" if k == 0 else "skip"})
+            r.status, r.stage = "done", "ready"
+            r.jstate = {"A": {"state": "done", "label": "3 new", "done": 3, "total": 3}}
+            for k, v in kw.items():
+                setattr(r, k, v)
+            r.save(force=True)
+            return r
+
+        def history():
+            return [mk(q="one"), mk(q="two", n=5), mk("weekly", rid="2026-W10_weekly", created="2026-03-03T10:00:00+00:00", week="2026-W10", checks=["2026-03-03T10:00:00+00:00"]),
+                    mk("weekly", rid="2026-W11_weekly", created="2026-03-10T10:00:00+00:00", week="2026-W11", checks=["2026-03-10T10:00:00+00:00"])]
+
+        def warm(reads, window=0.25):
+            """The files are no longer 'just written'; one listing reads them, and the next one must read NO file and say the same (this is what fails without the change)."""
+            time.sleep(window + 0.06)
+            first = pl_.list_runs(); del reads[:]
+            again = pl_.list_runs()
+            assert not reads, "nothing changed, and the listing read %d run file(s) again: %s" % (len(reads), reads)
+            assert again == first and not any("papers" in d for d in again), "the listing from memory differs from the one read from the files"
+            return again
+
+        def by_id(rid):
+            return next((d for d in pl_.list_runs() if d["id"] == rid), None)
+
+        def fn_of(r):
+            return r.id + ".json"
+
+        def t_unchanged():
+            with runs_folder() as (d, reads):
+                rs = history()
+                got = warm(reads)
+                assert [x["id"] for x in got] == [rs[3].id, rs[2].id] + [x["id"] for x in got[2:]] and {x["id"] for x in got[2:]} == {rs[0].id, rs[1].id}, [x["id"] for x in got]      # weekly newest week first, then the searches
+                a = next(x for x in got if x["id"] == rs[1].id)
+                assert a["n_papers"] == 5 and a["n_download"] == 1 and a["search_key"] == pl_.search_key(rs[1].params) and a["title"] == rs[1].title() and a["jstate"] == rs[1].jstate, a
+                assert got[0]["title"] == pl_.week_label("2026-W11") and got[0]["checks"] == ["2026-03-10T10:00:00+00:00"], got[0]
+                for _ in range(5):
+                    pl_.list_runs(); pl_.find_search(rs[0].params)
+                assert not reads, reads
+                assert pl_.find_search(rs[0].params)["id"] == rs[0].id and pl_.find_search(dict(rs[0].params, query="never ran")) is None and not reads
+
+        def t_copies():
+            with runs_folder() as (d, reads):
+                rs = history()
+                pristine = json.loads(json.dumps(warm(reads)))
+                for x in pl_.list_runs() + [pl_.find_search(rs[0].params)]:              # what a caller may do with what it was given
+                    x["title"] = "changed"; x["status"] = "changed"; x["params"]["query"] = "changed"; x["params"]["topics"].append("ZZ"); x.setdefault("mine", 1)
+                    x["checks"].append("zz"); x["jstate"].clear(); x["usage"]["in"] = 99; x.pop("search_key", None); x.pop("week", None)
+                assert pl_.list_runs() == pristine, "a caller that changed what the listing gave it changed the next listing"
+                assert pl_.find_search(rs[0].params)["id"] == rs[0].id and not reads
+                a, b = pl_.list_runs(), pl_.list_runs()
+                assert all(x is not y and x["params"] is not y["params"] and x["jstate"] is not y["jstate"] for x, y in zip(a, b)), "two listings share an object"
+
+        def t_saved_here():
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); r = rs[0]
+                r.status = "stopped"; r.add_paper({"id": "late", "title": "Late", "verdict": "download"}); r.checks = ["2026-05-01T09:00:00+00:00"]; r.save(force=True)
+                x = by_id(r.id)
+                assert x["status"] == "stopped" and x["n_papers"] == 4 and x["n_download"] == 2 and x["updated"] == "2026-05-01T09:00:00+00:00", x
+                assert reads == [fn_of(r)], "one run was saved; the listing read %s" % reads
+                pl_.list_runs()                                                       # a file written a moment ago is read each time: two saves inside one tick of the file system's clock
+                assert reads == [fn_of(r)] * 2, reads                                 # can leave the same size and times, so such a file is not trusted yet
+                assert REAL_WINDOW[0] is not None and REAL_WINDOW[0] >= 2 * 10**9, "the 'just written' window must cover a file system that keeps times to two seconds"
+                new = mk(q="brand new"); del reads[:]
+                assert pl_.find_search(new.params)["id"] == new.id and reads == [fn_of(r), fn_of(new)] or sorted(reads) == sorted([fn_of(r), fn_of(new)]), reads   # (r is still 'just written')
+                for k in range(6):                                                    # several saves in a row, the same length each time: each one is seen
+                    r.status = "st%02d" % k; r.save(force=True)
+                    assert by_id(r.id)["status"] == "st%02d" % k, k
+
+        def t_other_writer():
+            """Another process, or Dropbox bringing the other computer's copy: the file is replaced by one of the same length with the same modification time."""
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); r = rs[1]; p = os.path.join(d, fn_of(r))
+                st = os.stat(p); doc = json.load(open(p)); assert doc["status"] == "done"
+                doc["status"] = "oops"
+                tmp = p + ".dropbox.tmp"; open(tmp, "w").write(json.dumps(doc, ensure_ascii=False))
+                assert os.path.getsize(tmp) == st.st_size, (os.path.getsize(tmp), st.st_size)
+                os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns)); os.replace(tmp, p)
+                assert (os.stat(p).st_size, os.stat(p).st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+                assert by_id(r.id)["status"] == "oops", "a run file replaced by one of the same size and time is listed as it was before"
+                assert reads == [fn_of(r)], reads
+                warm(reads)
+                time.sleep(0.03); st = os.stat(p)                                      # rewritten in place (the same file, the same length), its time put back
+                with open(p, "r+") as f:
+                    f.write(json.dumps(dict(doc, status="new1"), ensure_ascii=False))
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+                assert (os.stat(p).st_size, os.stat(p).st_mtime_ns, os.stat(p).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino)
+                assert by_id(r.id)["status"] == "new1", "a run file rewritten in place is listed as it was before"
+                warm(reads)
+                json.dump({"id": "20260101-000000_search_x", "kind": "search", "params": {"year_from": 1, "year_to": 2}, "title": "from the other computer", "created": "2026-01-01T00:00:00+00:00",
+                           "stage": "ready", "status": "done", "n_papers": 1, "papers": [{"id": "x"}]}, open(os.path.join(d, "20260101-000000_search_x.json"), "w"))
+                x = by_id("20260101-000000_search_x")
+                assert x and x["title"] == "from the other computer" and x["search_key"] == pl_.search_key({"year_from": 1, "year_to": 2}) and "papers" not in x, x
+
+        def t_each_stat_field():
+            """A change in the size, the modification time, the change time or the file's number, each alone, makes the file be read again (the file system is asked through os.stat)."""
+            import types
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); p = os.path.join(d, fn_of(rs[0]))
+                real_stat = os.stat
+                for field in ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino"):
+                    def fake(path, *a, _f=field, **k):
+                        st = real_stat(path, *a, **k)
+                        if os.fspath(path) != p:
+                            return st
+                        ns_ = types.SimpleNamespace(**{n: getattr(st, n) for n in dir(st) if n.startswith("st_")})
+                        setattr(ns_, _f, getattr(st, _f) + 1)
+                        return ns_
+                    del reads[:]; os.stat = fake
+                    try:
+                        pl_.list_runs()
+                    finally:
+                        os.stat = real_stat
+                    assert reads == [fn_of(rs[0])], "%s changed and the file was not read again (%s)" % (field, reads)
+                    warm(reads)
+
+        def t_deleted():
+            import deletion
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads)
+                assert deletion.delete_run(rs[0].id) == rs[0].title(); del reads[:]
+                assert by_id(rs[0].id) is None and pl_.find_search(rs[0].params) is None and len(pl_.list_runs()) == 3 and not reads, reads
+                os.remove(os.path.join(d, fn_of(rs[2])))
+                assert by_id(rs[2].id) is None and len(pl_.list_runs()) == 2
+                assert len(pl_._RUN_HEADS) == 2, "a deleted run stays in memory: %s" % list(pl_._RUN_HEADS)
+                again = mk(q="one")                                                       # the same search run again later: a new file (perhaps of the same name)
+                assert pl_.find_search(again.params)["id"] == again.id
+                shutil.rmtree(d); assert pl_.list_runs() == []                            # (no runs folder at all)
+                os.makedirs(d)
+
+        def t_broken_file():
+            """A file that cannot be read (half-synced) is an error each time, as before, never remembered as 'no run'; once whole it is listed."""
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); p = os.path.join(d, fn_of(rs[0])); whole = open(p).read()
+                open(p, "w").write(whole[:200])
+                time.sleep(0.31)
+                for _ in range(2):
+                    try:
+                        pl_.list_runs(); raise AssertionError("a broken run file was listed")
+                    except ValueError:
+                        pass
+                open(p, "w").write(whole)
+                assert by_id(rs[0].id)["n_papers"] == 3
+                open(os.path.join(d, "empty.json"), "w").write("{}")                     # an empty record is no run (and costs no read once it is known)
+                warm(reads); assert len(pl_.list_runs()) == 4
+
+        def t_threads():
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); r = rs[0]; errs = []; stop = threading.Event()
+                def lister():
+                    try:
+                        while not stop.is_set():
+                            got = pl_.list_runs()
+                            assert len(got) == 4 and not any("papers" in x for x in got) and all(x["title"] for x in got)
+                            got[0]["title"] = ""; got[0]["params"].clear()
+                    except Exception:  # noqa: BLE001
+                        errs.append(traceback.format_exc())
+                ts = [threading.Thread(target=lister) for _ in range(6)]
+                [t.start() for t in ts]
+                for k in range(40):
+                    r.status = "s%03d" % k; r.save(force=True)
+                stop.set(); [t.join() for t in ts]
+                assert not errs, errs[0]
+                assert by_id(r.id)["status"] == "s039"
+
+        return [("run listing: with nothing changed no run file is read again, and the listing and find_search say the same as from the files", t_unchanged),
+                ("run listing: what a caller does to the runs it was given never shows in the next listing", t_copies),
+                ("run listing: a run saved by this process is listed at once, only its file is read again, and a file written a moment ago is read each time", t_saved_here),
+                ("run listing: a run file replaced or rewritten by someone else (the same size and time), and a new one, are listed at once", t_other_writer),
+                ("run listing: a change of size, time, change time or file number each makes the file be read again", t_each_stat_field),
+                ("run listing: a deleted run is gone at once and is forgotten", t_deleted),
+                ("run listing: a broken run file is an error each time, never remembered", t_broken_file),
+                ("run listing: listings and saves from several threads at once", t_threads)]
+
+    for _name, _fn in run_listing_checks():
+        check(_name, _fn)
     check("screening goes through the AI layer: its own model setting (not Ask), stopped by the monthly budget with the papers left unscreened, local-only mode applies, in the usage ledger and the run's cost (a billed refusal too), a refusal is not asked again, four batches at once work", t_screen_ai)
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)

@@ -615,15 +615,44 @@ def migrate_weekly():
     return merged
 
 
+_RUN_HEADS = {}                         # path of a run file -> (what the file system said of it, the run without its papers as JSON text; "" for a file that holds no run)
+_RUN_HEADS_LOCK = threading.Lock()      # (changing the table; reading one entry needs none)
+_RUN_FRESH_NS = 3 * 10**9               # a file written less than this long ago is not kept: two saves inside one tick of the file system's clock can leave the same size and times
+
+
+def _run_head(path):
+    """The run saved in `path` without its papers, or None (no file, an empty record). The file is parsed in full only when its size, modification time, change time or file number
+    differ from the last time (a save here, another process, Dropbox bringing the other computer's copy: each of them changes at least one); otherwise the copy kept in memory answers.
+    What is returned is always a new object: a caller may change it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None                     # (deleted between the listing of the folder and now)
+    sig = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+    hit = _RUN_HEADS.get(path)
+    if hit and hit[0] == sig:
+        return json.loads(hit[1]) if hit[1] else None
+    d = load_json(path, None)           # (a file that is not JSON raises here, as before, and is not kept)
+    if d:
+        d.pop("papers", None)
+    with _RUN_HEADS_LOCK:
+        if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) > _RUN_FRESH_NS:
+            _RUN_HEADS[path] = (sig, json.dumps(d, ensure_ascii=False) if d else "")
+        else:
+            _RUN_HEADS.pop(path, None)
+    return d
+
+
 def list_runs():
-    """Weekly runs newest week first, then archive searches newest first."""
-    out = []
+    """Weekly runs newest week first, then archive searches newest first. Each run file is read once and again only when it changed (_run_head)."""
+    out, seen = [], set()
     if os.path.isdir(RUNS):
         for fn in os.listdir(RUNS):
             if fn.endswith(".json"):
-                d = load_json(os.path.join(RUNS, fn), None)
+                path = os.path.join(RUNS, fn)
+                seen.add(path)
+                d = _run_head(path)
                 if d:
-                    d.pop("papers", None)
                     if d["kind"] == "search" and not d.get("search_key"):
                         d["search_key"] = search_key(d.get("params") or {})
                     if d["kind"] == "weekly":
@@ -631,6 +660,10 @@ def list_runs():
                         d["title"] = week_label(d["week"])
                         d.setdefault("checks", [d["created"]])
                     out.append(d)
+    if len(_RUN_HEADS) > len(seen):                      # runs that were deleted (or another folder's): forget them
+        with _RUN_HEADS_LOCK:
+            for k in [k for k in _RUN_HEADS if k not in seen]:
+                del _RUN_HEADS[k]
     out.sort(key=lambda d: d.get("week") or "", reverse=True)
     out.sort(key=lambda d: d["created"] if d["kind"] != "weekly" else "", reverse=True)
     out.sort(key=lambda d: d["kind"] != "weekly")
