@@ -5828,6 +5828,19 @@ print("OK")
         finally:
             fx_w.BASE, fx_w.STATE_DIR, fx_w.fetch_journal, fx_w.enrich, sys.argv, sys.stdout = keep3; shutil.rmtree(tmp3, ignore_errors=True)
         assert asked == [j["abbr"] for j in first14], asked
+        # switches flipped at the same moment (the server answers each request on its own thread): each reads the file, changes it and writes it back, and none may undo another
+        import threading as _th, time as _tm
+        keep_c = (wl.JOURNALS, wl._load_journals); tmp_c = tempfile.mkdtemp(prefix="jw-wlc-")
+        wl.JOURNALS = os.path.join(tmp_c, "journals.json"); shutil.copy(os.path.join(paths.DEFAULTS, "journals.json"), wl.JOURNALS)
+        wl._load_journals = lambda: (lambda d: (_tm.sleep(0.05), d)[1])(keep_c[1]())          # (slow enough that, without the lock, every thread has read the file before the first writes it)
+        flipped = ["JF", "JFE", "RFS", "AMJ", "SMJ", "JM"]
+        try:
+            ts = [_th.Thread(target=wl.switch, args=([a],), kwargs={"weekly": True}) for a in flipped]
+            [t.start() for t in ts]; [t.join(30) for t in ts]
+            on_c = {j["abbr"] for j in json.load(open(wl.JOURNALS))["journals"] if j.get("weekly", True)}
+            assert set(flipped) <= on_c, "a switch flipped at the same moment as another was lost: %s" % sorted(set(flipped) - on_c)
+        finally:
+            wl.JOURNALS, wl._load_journals = keep_c; shutil.rmtree(tmp_c, ignore_errors=True)
         # the weekly check reads only the journals that are on: the shipped list still reads the fourteen it read before (SSRN never)
         import pipeline as pl_w
         keep_tl = pl_w.topic_labels; wr = pl_w.weekly_run()
@@ -5837,7 +5850,7 @@ print("OK")
         finally:
             pl_w.topic_labels = keep_tl
         assert [j["abbr"] for j in pl_w.journals() if j.get("weekly", True)] == [j["abbr"] for j in first14], [j["abbr"] for j in pl_w.journals() if j.get("weekly", True)]
-    check("your journals and interests: the shipped list is the AIS basket and the UTD 24 with the new journals switched off; adding them never changes an entry of yours or adds one twice; a switch changes only itself; topics are checked before they are written and a refused save changes nothing", t_watchlist)
+    check("your journals and interests: the shipped list is the AIS basket and the UTD 24 with the new journals switched off; adding them never changes an entry of yours or adds one twice; a switch changes only itself, and switches flipped at the same moment are all kept; topics are checked before they are written and a refused save changes nothing", t_watchlist)
 
     check("saved searches: names and filters are cleaned, repeats refused, an empty list leaves no file", t_smart)
 

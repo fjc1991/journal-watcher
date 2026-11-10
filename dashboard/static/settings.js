@@ -17,6 +17,7 @@ const groupOf = t => AI_SUBS.some(([k]) => k === t) ? "ai" : t;
 let lastAI = "ai";      // the AI page you were on, for when you come back to the AI tab
 let dirty = false;      // something on this page was changed and not saved (pages with a Save button; a control that saves at once carries data-now)
 let watchChanged = false;      // journals or topics were changed: the Watch page is drawn from them once, so it is loaded again when Settings closes
+const SAVES = "#st-save, #la-save, #ps-save, #sy-save, #ab-feedsave";      // the Save buttons of the pages whose fields are not saved as you type
 const leaveOk = () => !dirty || confirm("You have changes on this page that are not saved.\n\nLeave without saving them?");
 
 function build() {
@@ -28,7 +29,7 @@ function build() {
   $$(".st-tabs button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
   $$(".st-sub button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t; render(); });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select") && !document.querySelector("dialog[open]")) close(); });      // (an open dialog, such as the list of shortcuts, takes its own Esc)
-  const touched = e => { if ($("#st-save", root) && !e.target.closest("[data-now]") && e.target.closest("#st-body")) dirty = true; };      // (a page with a Save button: what you type is not kept until you press it)
+  const touched = e => { if ($(SAVES, root) && !e.target.closest("[data-now]") && e.target.closest("#st-body")) dirty = true; };      // (a page with a Save button: what you type is not kept until you press it)
   root.addEventListener("input", touched); root.addEventListener("change", touched);
   addEventListener("beforeunload", e => { if (dirty && root && !root.classList.contains("hide")) { e.preventDefault(); e.returnValue = ""; } });
 }
@@ -41,7 +42,10 @@ export function close() {      // false: you chose to stay (something typed was 
 }
 export async function open(t) {
   build();
-  if (!root.classList.contains("hide") && t && t !== tab && !leaveOk()) return;      // already open, with something typed and not saved: ask before another page is drawn
+  if (!root.classList.contains("hide") && dirty) {      // already open, with something typed and not saved
+    if (!t || t === tab) return;                         // the page you are on was asked for: it stays as it is, with what you typed
+    if (!leaveOk()) return;                              // another page: ask first
+  }
   if (t) tab = t;
   if (window.About) About.close();
   root.classList.remove("hide"); document.body.classList.add("settings-open");
@@ -152,8 +156,8 @@ function renderAI(body) {
       <td class="c-test"><button class="btn small" data-test="${esc(n)}">Test</button><div class="tres"></div></td></tr>`).join("")}</table></div></div>
   <div class="card st-card"><h2>Which model does what</h2>
     <div class="st-main" id="st-main"><b>Use one for everything</b>
-      <select id="mn-p" data-now aria-label="Provider for all features">${pnames.map(n => `<option${mainP === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
-      <input type="text" id="mn-m" data-now list="dl-main" aria-label="Model for all features" value="${esc(mainM || "")}"><datalist id="dl-main">${((A.providers[mainP] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist>
+      <select id="mn-p" aria-label="Provider for all features">${pnames.map(n => `<option${mainP === n ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
+      <input type="text" id="mn-m" list="dl-main" aria-label="Model for all features" value="${esc(mainM || "")}"><datalist id="dl-main">${((A.providers[mainP] || {}).models || []).map(m => `<option value="${esc(m)}">`).join("")}</datalist>
       <button class="btn small" id="mn-test">Test</button><span class="tres"></span>
       <button class="btn" id="mn-apply">Apply to all features</button>
       <small id="mn-note" class="st-msg">${mixed}</small></div>
@@ -195,6 +199,7 @@ function renderAI(body) {
   $("#mn-test", body).onclick = e => { if (!mm.value.trim()) return note(mnote, "Type a model first.", true); test(e.currentTarget, mp.value, mm.value.trim(), null, true); };
   $("#mn-apply", body).onclick = () => {
     const p = mp.value, m = mm.value.trim(); if (!m) return note(mnote, "Type a model first.", true);
+    dirty = true;                                  // (the rows below are changed here, not by typing: they still need Save)
     let n = 0; const left = [];
     $$("tr[data-f]", body).forEach(tr => { const k = tr.dataset.f; if (k === "emb") return;
       if (WEB_ONLY.includes(k) && !(A.providers[p] || {}).web_search) { left.push($("b", tr).textContent); return; }
@@ -418,7 +423,7 @@ async function renderSync(body) {
   body.onclick = async e => {
     const msg = $("#sy-msg", body), b = e.target.closest("button"); if (!b) return;
     try {
-      if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); draw(); toast("Name saved."); }
+      if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); dirty = false; draw(); toast("Name saved."); }
       else if (b.dataset.merge) { const r = await api("/api/sync", {action: "merge", path: b.dataset.merge}); R = r; draw(); toast(`${r.said} The copy was set aside.`); window.dispatchEvent(new Event("jw-library-changed")); }
       else if (b.dataset.aside) { if (!confirm("Set this copy aside?\n\n" + b.dataset.aside + "\n\nIt moves to Papers/_conflicts/ and is not deleted.")) return; R = await api("/api/sync", {action: "set_aside", path: b.dataset.aside}); draw(); toast("Set aside."); }
       else if (b.id === "sy-keys") { const r = await api("/api/ai/keys/move", {}); D.ai = r.config; AI = r.config; inEnv = inEnvN(AI); R = await api("/api/sync"); draw(); toast(r.moved.length ? `Moved ${r.moved.length} key${r.moved.length === 1 ? "" : "s"} to the Keychain.` : "Nothing was moved."); if (Object.keys(r.kept).length) { const m = $("#sy-kmsg", body); if (m) m.textContent = "Not moved: " + Object.entries(r.kept).map(([k, v]) => k + " (" + v + ")").join("; "); } }
@@ -444,6 +449,7 @@ function updBlock(U) {
 }
 document.addEventListener("jw:update", e => { const b = document.querySelector("#st-body"); if (b && b._abPaint) b._abPaint(e.detail); });      // update.js: a look at the feed has ended
 async function renderAbout(body) {
+  dirty = false;      // (the page is drawn from what is saved: after a save, or when you come to it)
   let U, C = null; try { [U, C] = await Promise.all([api("/api/update"), api("/api/config").catch(() => null)]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   if (tab !== "about") return;                       // (the person went to another tab while this was loading)
   const canMove = !!(window.pywebview && window.pywebview.api && window.pywebview.api.change_home);          // the Mac app (app/jw_app.py): the same as its Data → Change data folder… menu
@@ -456,7 +462,7 @@ async function renderAbout(body) {
       <div id="ab-updblock">${updBlock(U)}</div>
       <p class="hint" id="ab-sig">${U.signed ? `Updates are checked against the author’s digital signature before anything is installed (${U.keys} signing key${U.keys === 1 ? "" : "s"} built into this app): a feed without a good signature is ignored.` : `This copy does not check an update’s digital signature (no signing key is built into it); it checks the download against the feed’s checksum only.`}</p>
       <div class="st-actions" style="margin:8px 0"><button class="btn${U.available ? " primary" : ""}" id="ab-go">${U.available ? "Update now…" : "Check for updates"}</button></div>
-      <label class="chk"><input type="checkbox" id="ab-auto"${U.auto ? " checked" : ""}> Look for updates by itself (a little after start-up and every six hours); a button appears in the top bar when one is ready</label>
+      <label class="chk"><input type="checkbox" id="ab-auto" data-now${U.auto ? " checked" : ""}> Look for updates by itself (a little after start-up and every six hours); a button appears in the top bar when one is ready</label>
       <details style="margin-top:10px"><summary class="hint" style="cursor:pointer">Update address</summary><label class="chk" style="margin-top:6px">Feed <input type="text" id="ab-feed" value="${esc(U.feed_url || "")}" placeholder="https://… /appcast.json" style="flex:1"> <button class="btn small" id="ab-feedsave">Save</button></label>
       <p class="hint">Where the app asks for news of new versions: a small <code>appcast.json</code> that <code>app/release.sh</code> writes. Leave it as it is unless you moved it.</p></details>
       <div class="st-msg" id="ab-msg"></div></div>`;
@@ -495,6 +501,7 @@ function detectResult(r) {
 }
 function renderLibraryAccessSigned(body, r) { const s = $("#la-signed", body); if (s) { s.textContent = "✓ Signed in · just now"; } else { const x = document.createElement("p"); x.className = "hint ok"; x.id = "la-signed"; x.textContent = "✓ Signed in · just now"; $(".st-actions", body).after(x); } }
 async function renderLibraryAccess(body, flash) {
+  dirty = false;      // (the page is drawn from what is saved: after a save, or when you come to it)
   let P, S; try { [P, S] = await Promise.all([api("/api/library/access"), api("/api/signins")]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   const modes = [["openathens", "My library uses OpenAthens", "Works on and off campus: on campus your network address usually gives access already, off campus Journal Watcher goes through your library’s OpenAthens sign-in. Its domain looks like myuni.ac.uk (you can also paste any go.openathens.net link from your library’s site)."],
     ["ezproxy", "My library gives me an EZproxy link", "Works on and off campus, like OpenAthens. A web address that begins your library’s sign-in, for example https://ezproxy.myuni.edu/login?url= (you can paste a whole proxied link: the part after url= is cut off)."],
@@ -504,7 +511,7 @@ async function renderLibraryAccess(body, flash) {
   const e = S.library || {}, st = e.signs_in && S.library.signed_in !== undefined ? S.library : null;
   body.innerHTML = `<div class="card st-card"><h2>Find my library’s settings</h2>
     <p class="hint">Paste your library’s web address (or any link to a database copied from its site). Journal Watcher reads a few of its pages, finds how it lets you in (OpenAthens, EZproxy, an EBSCO start page) and checks an OpenAthens domain with OpenAthens itself. Nothing is sent anywhere else.</p>
-    <div class="st-actions" style="margin-top:6px"><input type="text" id="la-find" value="${esc(P.home)}" placeholder="e.g. library.myuni.edu" style="flex:1;min-width:240px" aria-label="Your library's web address"><button class="btn primary" id="la-findgo">Find</button></div>
+    <div class="st-actions" style="margin-top:6px"><input type="text" id="la-find" data-now value="${esc(P.home)}" placeholder="e.g. library.myuni.edu" style="flex:1;min-width:240px" aria-label="Your library's web address"><button class="btn primary" id="la-findgo">Find</button></div>
     <div id="la-found" role="status" aria-live="polite"></div></div>
   <div class="card st-card"><h2>Your university library</h2>
     <p class="hint">Many journals are free to you through your university. Tell Journal Watcher how your library lets you in and it will use that to download papers. This is stored in <code>library.json</code> in your data folder; nothing is sent anywhere.</p>
@@ -564,6 +571,7 @@ async function renderLibraryAccess(body, flash) {
 }
 // Settings → Paper sources: the free keys and the address that let Journal Watcher find abstracts and open-access copies (saved in .env; keys never shown again)
 async function renderSources(body, flash) {
+  dirty = false;      // (the page is drawn from what is saved: after a save, or when you come to it)
   let S; try { S = await api("/api/sources"); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   const set = on => on ? `<span class="hint ok" style="margin:0">✓ saved</span>` : `<span class="hint" style="margin:0">not set</span>`;
   body.innerHTML = `<div class="card st-card"><h2>OpenAlex</h2>

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
@@ -19,6 +20,7 @@ JOURNALS = os.path.join(BASE, "journals.json")
 INTERESTS = os.path.join(BASE, "interests.json")
 SETS = {"ais": "AIS basket of eleven", "utd": "UTD 24"}
 MAX_TOPICS, MAX_TERMS, MAX_TERM = 40, 200, 80
+_lock = threading.RLock()        # one change at a time: each reads the file, changes it and writes it back, and two at once (two switches flipped quickly) would lose one
 
 
 def _defaults():
@@ -73,44 +75,46 @@ def journals():
 def add_missing():
     """Add the shipped journals your file does not have, each switched off (no weekly check, not ticked for a search) until you switch it on. No entry of yours
     is changed, and a journal you have under another short name (the same ISSN) is not added twice. Returns the names added."""
-    d = _load_journals()
-    mine = [j for j in d["journals"] if isinstance(j, dict)]
-    taken = {j.get("abbr") for j in mine}
-    added = []
-    for x in _defaults():
-        if any(_same(x, j) for j in mine) or x.get("abbr") in taken:
-            continue
-        d["journals"].append(dict(x, weekly=False, default_off=True))
-        added.append(x.get("name") or x["abbr"])
-    if added:
-        _write(JOURNALS, d)
-    return added
+    with _lock:
+        d = _load_journals()
+        mine = [j for j in d["journals"] if isinstance(j, dict)]
+        taken = {j.get("abbr") for j in mine}
+        added = []
+        for x in _defaults():
+            if any(_same(x, j) for j in mine) or x.get("abbr") in taken:
+                continue
+            d["journals"].append(dict(x, weekly=False, default_off=True))
+            added.append(x.get("name") or x["abbr"])
+        if added:
+            _write(JOURNALS, d)
+        return added
 
 
 def switch(abbrs, weekly=None, search=None):
     """Switch journals on or off for the weekly check and/or for a search by year. Only the two switches of the named journals change. A journal that cannot be
     read weekly (SSRN: it is only searched by words) or searched by year keeps that. Returns how many entries changed."""
     want = {str(a) for a in (abbrs or [])}
-    d = _load_journals()
-    n = 0
-    for j in d["journals"]:
-        if not isinstance(j, dict) or j.get("abbr") not in want:
-            continue
-        before = (j.get("weekly", True), bool(j.get("default_off")))
-        if weekly is not None and not j.get("needs_query"):
-            if weekly:
-                j.pop("weekly", None)
-            else:
-                j["weekly"] = False
-        if search is not None and _can_search(j):
-            if search:
-                j.pop("default_off", None)
-            else:
-                j["default_off"] = True
-        n += before != (j.get("weekly", True), bool(j.get("default_off")))
-    if n:
-        _write(JOURNALS, d)
-    return n
+    with _lock:
+        d = _load_journals()
+        n = 0
+        for j in d["journals"]:
+            if not isinstance(j, dict) or j.get("abbr") not in want:
+                continue
+            before = (j.get("weekly", True), bool(j.get("default_off")))
+            if weekly is not None and not j.get("needs_query"):
+                if weekly:
+                    j.pop("weekly", None)
+                else:
+                    j["weekly"] = False
+            if search is not None and _can_search(j):
+                if search:
+                    j.pop("default_off", None)
+                else:
+                    j["default_off"] = True
+            n += before != (j.get("weekly", True), bool(j.get("default_off")))
+        if n:
+            _write(JOURNALS, d)
+        return n
 
 
 def _clean(s, limit):
@@ -181,23 +185,24 @@ def save_interests(patch):
     words to leave out, fields this page does not show) is kept as it is."""
     if not isinstance(patch, dict):
         raise ValueError("Nothing to save.")
-    d = dl.load_json(INTERESTS, {}) if os.path.exists(INTERESTS) else {}
-    if not isinstance(d, dict):
-        d = {}
-    if "topics" in patch:
-        topics = _group(patch["topics"], "topic", was=d.get("topics") or [])
-        if not topics:
-            raise ValueError("Keep at least one topic: papers are screened against your topics.")
-        d["topics"] = topics
-    if "methods" in patch:
-        d["methods"] = _group(patch["methods"], "method", describe=True, was=d.get("methods") or [])
-    if "min_score" in patch:
-        try:
-            score = int(patch["min_score"])
-        except (TypeError, ValueError):
-            raise ValueError("The score a paper needs is a whole number.")
-        if not 1 <= score <= 20:
-            raise ValueError("The score a paper needs is between 1 and 20.")
-        d["min_score"] = score
-    _write(INTERESTS, d)
-    return interests()
+    with _lock:
+        d = dl.load_json(INTERESTS, {}) if os.path.exists(INTERESTS) else {}
+        if not isinstance(d, dict):
+            d = {}
+        if "topics" in patch:
+            topics = _group(patch["topics"], "topic", was=d.get("topics") or [])
+            if not topics:
+                raise ValueError("Keep at least one topic: papers are screened against your topics.")
+            d["topics"] = topics
+        if "methods" in patch:
+            d["methods"] = _group(patch["methods"], "method", describe=True, was=d.get("methods") or [])
+        if "min_score" in patch:
+            try:
+                score = int(patch["min_score"])
+            except (TypeError, ValueError):
+                raise ValueError("The score a paper needs is a whole number.")
+            if not 1 <= score <= 20:
+                raise ValueError("The score a paper needs is between 1 and 20.")
+            d["min_score"] = score
+        _write(INTERESTS, d)
+        return interests()

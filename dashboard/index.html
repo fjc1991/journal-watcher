@@ -699,8 +699,10 @@ function journalChips(box, cb, small, more) {
     el.append(g);
   }
 }
-// Journals whose feed carries no abstract: they are screened by title unless OpenAlex is asked for the abstract (which needs its free key).
-const noAbstract = abbrs => abbrs.filter(a => { const j = jinfo(a); return ["JMIS", "DSS", "NBER"].includes(a) || j.source === "crossref"; });
+// Journals that come without an abstract (JMIS, DSS, NBER: their feeds carry none), and journals that may (read through Crossref, which has an abstract for
+// some papers and not for others). A paper without one is screened by its title unless OpenAlex is asked for it, which needs its free key.
+const noAbstract = abbrs => abbrs.filter(a => ["JMIS", "DSS", "NBER"].includes(a));
+const maybeNoAbstract = abbrs => abbrs.filter(a => !["JMIS", "DSS", "NBER"].includes(a) && jinfo(a).source === "crossref");
 const someOf = (xs, n = 5) => xs.slice(0, n).join(", ") + (xs.length > n ? ` and ${xs.length - n} more` : "");
 function selectedJournals() { return [...document.querySelectorAll("#journalchips .chip.on")].map(c => c.dataset.abbr); }
 // the same string pipeline.search_key works out: two searches with this key are the same search (the server continues the saved one instead of starting a copy)
@@ -743,7 +745,8 @@ function updateEst() {
   $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · ` + (cost == null ? `cost not known: no price for ${esc(CFG.screen_model || "the screening model")} (Settings → AI → Prices)` : `est. <b>$${cost.toFixed(2)}</b>` + (CFG.est_cost_basis === "history" ? " (from what your earlier screenings cost)" : "")) +
     (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
     (js.some(j => jinfo(j).needs_query) ? `<br>SSRN is searched by words: only the ${jinfo("SSRN").limit || 200} best matches of your focus phrase are looked at${$("#focus").value.trim() ? "" : " — <b>type a focus phrase</b> to use it"}.` : "") +
-    (CFG.openalex_key || !noAbstract(js).length ? "" : `<br>The abstracts of ${esc(someOf(noAbstract(js)))} need a free OpenAlex key (Settings → Paper sources); otherwise ${noAbstract(js).length === 1 ? "it is" : "they are"} screened by title.`);
+    (CFG.openalex_key || !noAbstract(js).length ? "" : `<br>The abstracts of ${esc(someOf(noAbstract(js)))} need a free OpenAlex key (Settings → Paper sources); otherwise ${noAbstract(js).length === 1 ? "it is" : "they are"} screened by title.`) +
+    (CFG.openalex_key || !maybeNoAbstract(js).length ? "" : `<br>Some papers of ${esc(someOf(maybeNoAbstract(js)))} come without an abstract; with a free OpenAlex key it is looked up, otherwise those papers are screened by title.`);
   const key = searchKey(), known = RUNS.find(r => r.search_key === key);
   if (known) $("#est").innerHTML += `<br><b>You already ran this search</b> (${known.n_papers} papers, ${esc(fmtWhen(known.updated || known.created))}). Pressing Search continues it: its papers, verdicts and downloads stay, and only papers without a verdict are paid for.`;
 }

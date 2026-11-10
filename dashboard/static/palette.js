@@ -15,8 +15,8 @@ async function closeReader() {
   const gone = new Promise(r => { addEventListener("popstate", r, {once: true}); setTimeout(r, 450); });
   await window.Reader.close(); await gone;
 }
-async function nav(n) { if (window.Settings) window.Settings.close(); await closeReader(); ctx.go(n); }
-const readPaper = (row, opts) => { if (window.Settings) window.Settings.close(); ctx.readPaper(row, opts); };
+async function nav(n) { if (window.Settings && window.Settings.close() === false) return false; await closeReader(); ctx.go(n); return true; }      // (false: Settings stays open, you chose to keep what you typed)
+const readPaper = (row, opts) => { if (window.Settings && window.Settings.close() === false) return; ctx.readPaper(row, opts); };
 
 // ---------------------------------------------------------------- what can be found
 function build() {
@@ -45,11 +45,11 @@ function build() {
   add("act", "Look: Subtle or Bold…", "sparkle", "settings", async () => { await closeReader(); window.Settings && window.Settings.open("look"); }, {hint: "action", hay: "appearance colours subtle bold tint"});
   add("act", "Add a paper (PDF or DOI)", "add", "library", () => window.LibraryUI && window.LibraryUI.addDialog(), {hint: "action", hay: "import upload drop pdf doi new paper"});
   add("act", "Import references (Word, PDF, .ris / .bib…)", "add", "library", () => window.BibImport && window.BibImport.open(), {hint: "action", hay: "endnote mendeley zotero reference list references import bibtex ris overleaf bibliography word docx pdf powerpoint pptx syllabus reading list citations document"});
-  add("act", "Check for new papers", "watch", "watch", async () => { await nav({view: "run", j: null}); setTimeout(() => { const b = $("#weeklybtn"); if (b) { b.scrollIntoView({block: "center"}); b.focus(); } }, 250); }, {hint: "action", hay: "weekly check new papers journals fetch this week"});
-  add("act", "Sign in to publishers and my library…", "key", "watch", async () => { await nav({view: "run", j: null}); setTimeout(() => { const b = $("#signinbtn"); b && b.click(); }, 250); }, {hint: "action", hay: "sign in login publisher informs ais university library membership"});
+  add("act", "Check for new papers", "watch", "watch", async () => { if (await nav({view: "run", j: null}) === false) return; setTimeout(() => { const b = $("#weeklybtn"); if (b) { b.scrollIntoView({block: "center"}); b.focus(); } }, 250); }, {hint: "action", hay: "weekly check new papers journals fetch this week"});
+  add("act", "Sign in to publishers and my library…", "key", "watch", async () => { if (await nav({view: "run", j: null}) === false) return; setTimeout(() => { const b = $("#signinbtn"); b && b.click(); }, 250); }, {hint: "action", hay: "sign in login publisher informs ais university library membership"});
   add("act", "Welcome guide", "sparkle", "about", async () => { await closeReader(); window.Welcome && window.Welcome.open(); }, {hint: "action", hay: "welcome guide first steps set up help introduction tour"});
   add("act", "Keyboard shortcuts", "settings", "settings", shortcuts, {hint: "action", hay: "keyboard shortcuts keys help hotkeys"});
-  add("act", "New folder", "plus", "folders", async () => { await nav({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = $('[data-fp="new"]'); b && b.click(); }, 250); }, {hint: "action", hay: "create folder project"});
+  add("act", "New folder", "plus", "folders", async () => { if (await nav({view: "lib", j: null, tab: "folders"}) === false) return; setTimeout(() => { const b = $('[data-fp="new"]'); b && b.click(); }, 250); }, {hint: "action", hay: "create folder project"});
   return out;
 }
 
