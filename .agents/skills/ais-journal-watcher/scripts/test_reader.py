@@ -2502,6 +2502,27 @@ print("JSON" + json.dumps(out))
             ls._cache.clear()
     check("search: a card's text is built once, and again when the card is saved here, replaced by a sync, or unreadable for a moment", t_search_card_changes)
 
+    def t_search_same_time():
+        ls._cache.clear()
+        p_ = os.path.join(TMP, srows[3]["summary"])
+        try:
+            files_ = lambda q_: [x["file"][-6:] for x in ls.search(srows, q_)]      # noqa: E731
+            assert files_("ǆungla") == ["c3.pdf"] and files_("quokka") == []
+            st_ = os.stat(p_)
+            open(p_, "w", encoding="utf-8").write("Now about a **QUOKKA** colony, with a platform."); os.utime(p_, ns=(st_.st_atime_ns, st_.st_mtime_ns))
+            assert os.stat(p_).st_mtime_ns == st_.st_mtime_ns and os.path.getsize(p_) != st_.st_size
+            assert files_("quokka colony") == ["c3.pdf"] and files_("ǆungla") == [], "a summary of another length with the old modification time: the search still has the old words"
+            assert ls.search(srows, "quokka")[0]["snippets"][0]["text"].startswith("Now about a QUOKKA colony")
+            n_ = dict(ls.STATS)
+            assert files_("quokka") == ["c3.pdf"] and ls.STATS == n_                                   # and it is kept again: nothing is read or worked out twice
+            st_ = os.stat(p_); time.sleep(0.03)
+            open(p_, "w", encoding="utf-8").write("Now about a **WOMBAT** colony, with a platform."); os.utime(p_, ns=(st_.st_atime_ns, st_.st_mtime_ns))
+            assert (os.stat(p_).st_mtime_ns, os.path.getsize(p_)) == (st_.st_mtime_ns, st_.st_size) and os.stat(p_).st_ctime_ns != st_.st_ctime_ns
+            assert files_("wombat") == ["c3.pdf"] and files_("quokka") == [], "a summary of the same length with the old modification time: the search still has the old words"
+        finally:
+            open(p_, "w", encoding="utf-8").write(_SUMS[3]); _bump(p_, 300); ls._cache.clear()
+    check("search: a summary written again with its old modification time (another length, or the same length) is read again, never the old words", t_search_same_time)
+
     def t_search_standin():                 # (passes today; it is what keeps a kept lower case from ever answering for another text than the one it was made from)
         keep_ = (ls.summary_of, ls.card_text)
         try:
@@ -5974,6 +5995,140 @@ print("OK")
         for k in range(8):
             assert np.array_equal(out[k], pe.vectors(texts[k % 3::2] + [pe.row_text(r) for r in rows[k:k + 6]]))
 
+    def other_process(texts):
+        """What another process running this app does to the vector file: its own store (nothing of this one's memory) asks for these texts and appends what it has to make."""
+        mine = pe._mem
+        pe._mem = pe._Store()
+        try:
+            pe.vectors(texts)
+        finally:
+            pe._mem = mine
+
+    def records():
+        return (os.path.getsize(pe.CACHE) - 256) // REC
+
+    def t_upnext_probe_fails():
+        import hashlib
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        key = lambda t: hashlib.sha1(t.encode()).hexdigest()[:20]     # noqa: E731
+        old = {key(t): [round(float(x), 4) for x in v] for t, v in ((pe.row_text(r), ai.embed([pe.row_text(r)])[0]) for r in rows)}
+        orig = ai.embed
+        for err in (TimeoutError("timed out"), ConnectionResetError("reset"), ValueError("not JSON"), TypeError("not a list of vectors")):
+            os.remove(pe.CACHE) if os.path.exists(pe.CACHE) else None
+            with open(pe.OLD, "w") as f:
+                json.dump(old, f)
+            pe._mem.clear()
+            made, fails = [], [err]
+
+            def emb(t, **kw):
+                if fails:
+                    raise fails.pop()
+                made.extend(t)
+                return orig(t, **kw)
+            ai.embed = emb
+            try:
+                try:
+                    pe.queue(rows, 30)                                                                   # the model does not answer the one text that is asked to check the old file
+                except type(err):
+                    pass
+                assert pe.queue(rows, 30) == ref                                                        # it answers again
+                assert made == [pe.row_text(rows[0])], "%s: the old file was given up, %d texts were embedded" % (type(err).__name__, len(made))
+                assert records() == 24
+            finally:
+                ai.embed = orig
+
+    def t_upnext_meanwhile():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        cands = [{"id": "c%d" % i, "title": "Candidate number%d about auctions" % i} for i in range(60)]
+        pe.fits(cands, rows)
+        real, orig = pe._today, ai.embed
+        pe._today = lambda: real() + pe.KEEP_DAYS + 1
+        try:
+            pe._mem.clear()                                                                             # a start, 61 days later: the 60 candidates are old and nothing has asked for them
+            pe.vectors([pe.row_text(r) for r in rows])
+            busy = []
+
+            def emb(t, **kw):
+                if not busy:
+                    busy.append(1)
+                    other_process(["written meanwhile, one", "written meanwhile, two"])                 # another process adds two while this one waits for the model
+                return orig(t, **kw)
+            ai.embed = emb
+            pe.vectors(["this process's own new text"])
+            ai.embed = orig
+            assert records() == 24 + 60 + 3, records()
+            with pe._lock:
+                pe._mem.prune()                                                                         # (what the end of every Up next does)
+            with spy_embed() as texts:
+                pe.vectors(["written meanwhile, two", "written meanwhile, one", "this process's own new text"])
+                assert not texts, "what another process appended while this one was embedding was not seen: %r embedded again" % texts
+                pe._mem.clear()
+                pe.vectors(["written meanwhile, two", "written meanwhile, one", "this process's own new text"])
+                assert not texts, "this process's prune dropped what the other process had appended: %r" % texts
+                assert pe.queue(rows, 30) == ref and not texts
+                assert records() == 24 + 3, records()                                                   # once it has read them, the old candidates go as they should, and nothing else
+        finally:
+            pe._today, ai.embed = real, orig
+
+    def t_upnext_asked_marks():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        cands = [{"id": "c%d" % i, "title": "Candidate number%d about auctions" % i} for i in range(60)]
+        f1 = pe.fits(cands, rows)
+        real = pe._today
+        pe._today = lambda: real() + pe.KEEP_DAYS + 1
+        try:
+            pe._mem.clear()                                                                             # a start, 61 days later
+            assert pe.fits(cands, rows) == f1                                                           # the Watch page asks for all 60: they are in use
+            other_process(["the weekly check adds one"])
+            with spy_embed() as texts:
+                assert pe.queue(rows, 30) == ref and not texts                                          # the file is read again, and Up next asks for the library's texts only
+                assert records() == 24 + 60 + 1, "the candidates this process asked for since it started were dropped after another process wrote the file (%d records left)" % records()
+                assert pe.fits(cands, rows) == f1 and not texts, len(texts)
+            pe._mem.clear()                                                                             # (a real restart does forget who asked)
+            assert pe.queue(rows, 30) == ref and records() == 24 + 1, records()
+        finally:
+            pe._today = real
+
+    def t_upnext_replaced_while_read():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        whole = open(pe.CACHE, "rb").read()
+        assert len(whole) == 256 + 24 * REC
+        real = pe._sig
+        # (the file at the start, the look at it after which another process puts a file in its place, that file, how many of the library's 24 vectors it lacks)
+        for before, at, after, cut in ((whole, 1, whole[:256 + 14 * REC], 10),                        # it pruned: a shorter file, right after this process looked and before it read
+                                       (whole, 1, whole + whole[256:256 + 3 * REC], 0),               # a longer one
+                                       (b"not a vector file", 2, whole, 0)):                          # a damaged file is put right while this process finds that it cannot read it
+            with open(pe.CACHE, "wb") as f:
+                f.write(before)
+            pe._mem.clear()
+            looks = []
+
+            def sig():
+                s = real()
+                looks.append(1)
+                if len(looks) == at:
+                    with open(pe.CACHE + ".other", "wb") as f:
+                        f.write(after)
+                    os.replace(pe.CACHE + ".other", pe.CACHE)
+                    return s if at == 1 else real()
+                return s
+            pe._sig = sig
+            try:
+                with spy_embed() as texts:
+                    pe.vectors(["a brand new text"])
+                    assert texts == ["a brand new text"], texts
+                    assert records() == (len(after) - 256) // REC + 1, "a file replaced between the look at it and the reading of it was taken for a damaged one: %d records left" % records()
+                    pe._sig = real
+                    assert pe._mem.sig == real(), "the store does not know which file it read"
+                    del texts[:]
+                    assert pe.queue(rows, 30) == ref and len(texts) == cut, len(texts)                  # only what the other process had dropped is made again
+            finally:
+                pe._sig = real
+
     check("Up next is the same as before the matrix store: order, fit and suggested folder of every candidate", lambda: with_folders(t_upnext_pinned))
     check("Up next embeds a text once, looks the library up as a whole, and one changed text appends one record instead of writing the file again", lambda: with_folders(t_upnext_no_repeat))
     check("another embedding model in Settings: every vector is made again, none of the old model is used, another vector length does not break Up next", lambda: with_folders(t_upnext_model_change))
@@ -5982,6 +6137,10 @@ print("OK")
     check("the vector file of earlier versions is carried over once when it is by the model in Settings, and left as it was; one by another model is not used", lambda: with_folders(t_upnext_old_file))
     check("vectors nothing asks for any more are forgotten after KEEP_DAYS; the library's own and the young ones never are", lambda: with_folders(t_upnext_prune))
     check("eight threads at once ask for vectors: no text embedded twice, the same vectors after a restart", lambda: with_folders(t_upnext_threads))
+    check("the model failing to answer the check of the earlier versions' vector file (a time-out, a reset, a bad answer) does not give that file up: it is carried over at the next call", lambda: with_folders(t_upnext_probe_fails))
+    check("vectors another process appends while this one waits for the model are seen afterwards, not made again and not dropped by this one's prune", lambda: with_folders(t_upnext_meanwhile))
+    check("the vectors this process asked for since it started stay marked when another process writes the file: its prune does not drop them", lambda: with_folders(t_upnext_asked_marks))
+    check("a vector file replaced by another process between the look at it and the reading of it is read as it is, never taken for a damaged one and emptied", lambda: with_folders(t_upnext_replaced_while_read))
 
     def t_mcp_protocol():
         r = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})

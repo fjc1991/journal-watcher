@@ -79,21 +79,34 @@ class _Store:
         if self.loaded and model == self.model and (sig == self.sig or sig is None):
             return self
         import numpy as np
-        self.clear()
-        self.loaded, self.model = True, model
-        self.old = sig is None and os.path.exists(OLD)                   # (no file yet, but the one of earlier versions: vectors() hands it to carry() with the first texts asked for)
-        if sig is not None:
+        asked = {k for k, i in self.pos.items() if self.hit[i]} if self.hit is not None and model == self.model else ()     # (another process wrote the file: what this one asked for since it started is still in use)
+        for again in (True, True, False):
+            self.clear()
+            self.loaded, self.model = True, model
+            self.old = sig is None and os.path.exists(OLD)               # (no file yet, but the one of earlier versions: vectors() hands it to carry() with the first texts asked for)
+            if sig is None:
+                break
             try:
                 with open(CACHE, "rb") as f:
+                    s = os.fstat(f.fileno())
+                    sig = (s.st_ino, s.st_size, s.st_mtime_ns)           # the file that is read, which is not the one looked at above when another process put a new one in its place in between
                     h = json.loads(f.read(HDR).decode("utf-8"))
                     if h.get("v") == 1 and h.get("model") == model and isinstance(h.get("dim"), int) and 0 < h["dim"] < 100000:
                         rec = self._rec(h["dim"])
-                        a = np.frombuffer(f.read(), dtype=rec, count=(sig[1] - HDR) // rec.itemsize)        # (a record cut short at the end is not counted; add() removes it)
+                        buf = f.read()
+                        a = np.frombuffer(buf, dtype=rec, count=len(buf) // rec.itemsize)                    # (a record cut short at the end is not counted; add() removes it)
                         self._set([k.decode("ascii", "replace") for k in a["k"].tolist()], np.ascontiguousarray(a["v"]), a["d"].copy())
-            except (OSError, ValueError, AttributeError):                 # unreadable, or not this format: start again (add() replaces the file)
+            except (OSError, ValueError, AttributeError):                 # unreadable, or not this format: start again (add() replaces the file)…
                 self.clear()
                 self.loaded, self.model = True, model
+                now = _sig()
+                if again and now != sig:                                  # …unless it is another file by now (replaced or removed while it was read): that one is read
+                    sig = now
+                    continue
             self.sig = sig
+            break
+        if asked and self.hit is not None:
+            self.hit[[i for k, i in self.pos.items() if k in asked]] = True
         return self
 
     def carry(self, keys, texts):
@@ -107,14 +120,17 @@ class _Store:
             d = {k: v for k, v in d.items() if isinstance(v, list) and v and len(k) == 20} if isinstance(d, dict) else {}
             dim = Counter(len(v) for v in d.values()).most_common(1)[0][0] if d else 0
             probe = next(((k, t) for k, t in zip(keys, texts) if len(d.get(k) or ()) == dim), None) if d else None
-            if probe:
-                now = _rounded(ai.embed([probe[1]], kind="passage"))      # (if the model cannot be reached this raises, and the old file is looked at again next time)
+        except (OSError, ValueError, TypeError):
+            probe = None                                                   # unreadable: nothing is kept from it
+        if probe:
+            now = _rounded(ai.embed([probe[1]], kind="passage"))          # (outside the try: if the model does not answer, or answers badly, this raises whatever the error is, and the old file is looked at again next time)
+            try:
                 was = np.array([d[probe[0]]], dtype="float32")
                 if now.shape == was.shape and float(np.abs(now - was).max()) <= 0.002:
                     got = [k for k, v in d.items() if len(v) == dim]
                     self.add(got, np.array([d[k] for k in got], dtype="float32"))
-        except (OSError, ValueError, TypeError):
-            pass                                                           # unreadable: nothing is kept from it
+            except (OSError, ValueError, TypeError):
+                pass
         self.old = False
 
     def _write(self, rows):
@@ -145,6 +161,7 @@ class _Store:
             self._write(sorted(self.pos.values()))                        # the file was deleted while the app ran: write what is in memory again
         rec = np.zeros(len(keys), dtype=self._rec(self.dim))
         rec["k"], rec["d"], rec["v"] = [k.encode("ascii") for k in keys], min(_today(), 65535), new
+        moved = _sig() != self.sig                                        # another process wrote the file since this one read it (while the model was working)
         size = os.path.getsize(CACHE)
         whole = HDR + (size - HDR) // rec.itemsize * rec.itemsize
         if whole != size:
@@ -154,7 +171,7 @@ class _Store:
         n = len(self.mat)
         self.mat, self.day, self.hit = np.concatenate([self.mat, new]), np.concatenate([self.day, rec["d"]]), np.concatenate([self.hit, np.ones(len(keys), dtype=bool)])
         self.pos.update((k, n + i) for i, k in enumerate(keys))
-        self.sig = _sig()
+        self.sig = None if moved else _sig()                              # (None: the next ready() reads the whole file, theirs and this one's, and prune() does nothing until then)
 
     def prune(self):
         """Forget the vectors that nothing has asked for since the app started and that are older than KEEP_DAYS (texts that were edited or deleted, candidates of old runs), once they

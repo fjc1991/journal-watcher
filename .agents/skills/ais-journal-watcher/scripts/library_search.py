@@ -1,7 +1,7 @@
 """Search the library: title, authors, journal, topics, the summary the pipeline wrote, *and what you wrote yourself*
 (highlights, comments, note cards, one-line takeaways). Plus the highlights hub (every highlight across all papers).
 
-Works on the rows of pipeline.library(). In memory with an mtime cache — plenty fast for thousands of papers; if the library
+Works on the rows of pipeline.library(). In memory with a cache by each file's times and size — plenty fast for thousands of papers; if the library
 ever outgrows that, swap the scan for SQLite FTS5 without changing the callers.
 
     library_search.search(rows, q="platform", status="reading", folder="gov", tag=<id>, notes=True, sort="opened")
@@ -19,21 +19,22 @@ import download as dl  # noqa: E402
 import notes_store as ns  # noqa: E402
 
 ROOT = dl.ROOT
-_cache = {}     # path -> (mtime_ns, what the loader read, {name: (made from, made)}): what is worked out from a file (_kept) lives and dies with that reading of it
+_cache = {}     # path -> ((mtime_ns, size, ctime_ns), what the loader read, {name: (made from, made)}): what is worked out from a file (_kept) lives and dies with that reading of it
 STATS = {"read": 0, "made": 0}      # files read, and things worked out from one: a search that changes nothing on disk adds to neither (the tests count on it)
 
 
 def _cached(path, loader):
     try:
-        mt = os.stat(path).st_mtime_ns
+        st = os.stat(path)
     except OSError:
         return None
+    sig = (st.st_mtime_ns, st.st_size, st.st_ctime_ns)       # (the size and the change time too: a file written again with its old modification time is still read again)
     hit = _cache.get(path)
-    if hit and hit[0] == mt:
+    if hit and hit[0] == sig:
         return hit[1]
     val = loader(path)
     STATS["read"] += 1
-    _cache[path] = (mt, val, {})
+    _cache[path] = (sig, val, {})
     return val
 
 
