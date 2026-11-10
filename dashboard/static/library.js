@@ -14,7 +14,14 @@ const SEL = new Set();
 const ST = {toread: "To read", reading: "Reading", read: "Read"};
 const lib = () => ctx.getLib();
 const authors = a => { const xs = Array.isArray(a) ? a : (a ? String(a).split(/;\s*/) : []); return xs.slice(0, 4).join(", ") + (xs.length > 4 ? ` +${xs.length - 4} more` : ""); };
-const byFile = f => lib().findIndex(r => r.file === f);
+// where a paper is in the list the page holds. The Map is made once per list: index.html replaces the whole array on every reload (LIB = await api(...)) and nothing
+// adds to it, removes from it or reorders it in place, so "is it still the same array" is all there is to check. (As findIndex did: the first row with that file, or -1.)
+let IDX = null, IDX_OF = null;
+const byFile = f => {
+  const L = lib();
+  if (IDX_OF !== L) { IDX = new Map(); L.forEach((r, i) => { if (!IDX.has(r.file)) IDX.set(r.file, i); }); IDX_OF = L; }
+  const i = IDX.get(f); return i === undefined ? -1 : i;
+};
 const q2s = o => Object.entries(o).filter(([, v]) => v !== "" && v !== false && v != null).map(([k, v]) => k + "=" + encodeURIComponent(v === true ? "1" : v)).join("&");
 
 async function loadFolders() { try { FOLDERS = await api("/api/folders"); } catch (e) { FOLDERS = []; } ctx && ctx.syncNav && ctx.syncNav(); }
@@ -50,16 +57,27 @@ function row(r, i, snips) {
       ${r.book ? `<button class="btn small" data-chap="${esc(r.file)}" aria-expanded="false" title="The chapters of this book: open it at one, search inside one, say where printed page 1 is">Chapters</button>` : ""}
       <button class="btn primary small" data-read="${i}">${ico("read", "sm")} Read</button>
       <span class="menuwrap"><button class="btn small" data-more aria-haspopup="true" aria-label="More actions" title="More: status, summary, PDF, folders, takeaway">${ico("more", "sm")}</button>
-        <div class="menu card hide rowmenu" role="menu">
-          <label class="rm-st"><span>Reading status</span><select class="stsel" data-st="${esc(r.file)}"><option value="">None</option>${Object.entries(ST).map(([k, v]) => `<option value="${k}"${st.status === k ? " selected" : ""}>${v}</option>`).join("")}</select></label>
+        <div class="menu card hide rowmenu" role="menu"></div></span>
+    </div>${r.book ? `<div class="chaplist hide"></div>` : ""}</div>`;
+}
+// what is in a row's ⋯ menu. It is made when the menu is opened (openRowMenu), not with the row: it was more than half of what a row costs to draw, and most are never opened
+function rowMenu(r, i) {
+  const st = r.state || {};
+  return `<label class="rm-st"><span>Reading status</span><select class="stsel" data-st="${esc(r.file)}"><option value="">None</option>${Object.entries(ST).map(([k, v]) => `<option value="${k}"${st.status === k ? " selected" : ""}>${v}</option>`).join("")}</select></label>
           ${summarised(r) ? `<button data-i="${i}" role="menuitem">${ico("sum", "sm")} Summary</button>` : ""}
           <a target="_blank" href="${fileUrl(r.file)}" role="menuitem">${ico("papers", "sm")} Open the PDF</a>
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
           ${r.book ? "" : `<button data-setkind="${esc(r.file)}" role="menuitem">${ico("papers", "sm")} Type: ${esc((KINDS.find(k => k[0] === (r.kind || "journal")) || KINDS[0])[2])}…</button>`}
-          <button data-delitem="${esc(r.file)}" role="menuitem" class="danger">${ico("x", "sm")} Delete this ${r.book ? "book" : "paper"}…</button>
-        </div></span>
-    </div>${r.book ? `<div class="chaplist hide"></div>` : ""}</div>`;
+          <button data-delitem="${esc(r.file)}" role="menuitem" class="danger">${ico("x", "sm")} Delete this ${r.book ? "book" : "paper"}…</button>`;
+}
+// fills a row's menu from the paper as it is now, each time it is opened (so it is never out of date), and binds its "Summary" (the other items are handled in wireRows)
+function openRowMenu(m) {
+  const el = m.closest(".librow"), i = el ? byFile(el.dataset.file) : -1;
+  if (i < 0) return false;
+  m.innerHTML = rowMenu(lib()[i], i);
+  m.querySelectorAll("[data-i]").forEach(b => b.onclick = () => ctx.openLib(lib()[+b.dataset.i]));
+  return true;
 }
 function redrawRow(file) {
   const i = byFile(file), el = document.querySelector(`.librow[data-file="${CSS.escape(file)}"]`);
@@ -101,6 +119,7 @@ function top(el, opts) {
       <div id="lib-shelf"></div>
       <div id="lib-upnext"></div>
       <div id="lib-results"></div>
+      <div class="papersmore hide" id="lr-more"><button class="btn" id="lr-moremore" type="button">Show more</button></div>
     </div>
     <div id="lib-folders" class="hide"></div><div id="lib-books" class="hide"></div><div id="lib-ask" class="hide"></div><div id="lib-discover" class="hide"></div><div id="lib-hl" class="hide"></div><div id="lib-review" class="hide"></div><div id="lib-tags" class="hide"></div><div class="actionbar card hide" id="lib-actionbar"></div>`;
   const bind = (id, ev, fn) => $("#" + id, el).addEventListener(ev, fn);
@@ -120,6 +139,10 @@ function top(el, opts) {
     if (e.target.closest("[data-savesearch]")) { const n = prompt("Name this search (it will be kept next to your folders):", F.q || ""); if (!n || !n.trim()) return; try { SMART = (await api("/api/smart", {action: "add", name: n.trim(), filters: pickFilters()})).searches; toast("Saved."); fillControls(el); } catch (er) { notifyError(er); } return; }
     const c = e.target.closest("[data-unf]"); if (!c) return; if (c.dataset.unf === "all") Object.assign(F, {status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false}); else F[c.dataset.unf] = c.dataset.unf === "star" || c.dataset.unf === "notes" ? false : ""; fillControls(el); results(opts); });
   bind("lf-export", "click", e => { e.stopPropagation(); exportMenu($("#lf-exportmenu", el), {}); });
+  bind("lr-moremore", "click", () => moreRows());
+  if (MORE_IO) MORE_IO.disconnect();                              // (this head is built anew each time the Library is drawn: the old watcher goes with the old one)
+  MORE_IO = "IntersectionObserver" in window ? new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) moreRows(); }, {rootMargin: "800px 0px"}) : null;
+  if (MORE_IO) MORE_IO.observe($("#lr-more", el));
   $$(".libtabs button", el).forEach(b => b.onclick = () => { F.tab = b.dataset.tab; tabs(el, opts); });
   if (opts && opts.browse) {                                      // the Library's home: the journal tiles first, then Continue reading and Up next below them
     const sh = document.createElement("div"); sh.id = "lib-shelves";
@@ -414,7 +437,7 @@ async function inBooks(box) {                       // the words inside the book
 let FT = null, FT_BUSY = false;                        // the words being searched for inside the PDFs; while they are the search box's text, a filter or a late keystroke repeats that search instead of the title search
 async function fulltext(opts) {
   const q = F.q.trim(), box = $("#lib-results"); if (!box) return; if (!q) return toast("Type the words to look for first.");
-  if (FT_BUSY) return; FT = F.q; FT_BUSY = true; ++seq; if (opts && opts.browse) opts.browse.classList.add("hide"); $("#lib-shelf").classList.add("hide"); $("#lib-upnext").classList.add("hide");
+  if (FT_BUSY) return; FT = F.q; FT_BUSY = true; ++seq; RES = null; drawMoreBtn(); if (opts && opts.browse) opts.browse.classList.add("hide"); $("#lib-shelf").classList.add("hide"); $("#lib-upnext").classList.add("hide");
   box.innerHTML = `<div class="reshead">Looking inside the PDFs…</div>`; let res = null;
   try {
     const r = await fetch("/api/library/fulltext", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q, scope: {folder: F.folder, journal: F.journal, year: F.year, tag: F.tag, status: F.status}})});
@@ -434,6 +457,25 @@ async function fulltext(opts) {
 }
 const active = () => !!(F.q || F.status || F.star || F.folder || F.journal || F.year || F.tag || F.kind || F.notes || F.list);
 let seq = 0;
+// The list draws the papers that match RES_STEP at a time (a library can have thousands): more come as you scroll near the end, or with "Show more".
+// RES is the list on the page: every match as the server gave it (Select all and the count use that, not the rows drawn), and how many of them are drawn.
+const RES_STEP = 100;
+let RES = null, MORE_IO = null;
+const resRows = (from, to) => RES.res.slice(from, to).map(x => { const i = byFile(x.file); return i < 0 ? "" : row(lib()[i], i, x.snippets); }).join("");
+function drawMoreBtn() {
+  const m = $("#lr-more"); if (!m) return;
+  const left = RES ? RES.res.length - RES.n : 0;
+  m.classList.toggle("hide", left <= 0);
+  if (left > 0) $("#lr-moremore").textContent = `Show ${Math.min(RES_STEP, left)} more (${left} left)`;
+}
+function moreRows() {
+  const box = $("#lib-results"); if (!box || !RES || RES.n >= RES.res.length) return;
+  const from = RES.n; RES.n = Math.min(RES.res.length, from + RES_STEP);
+  const t = document.createElement("template"); t.innerHTML = resRows(from, RES.n);
+  bindRows(t.content); box.append(t.content);
+  drawMoreBtn();
+  const m = $("#lr-more"); if (MORE_IO && m) { MORE_IO.unobserve(m); MORE_IO.observe(m); }      // (asked again: if the end of the list is still near after these rows, the next ones come too)
+}
 async function results(opts) {
   const box = $("#lib-results"); if (!box) return;
   if (FT !== null && F.q === FT) return fulltext(opts);
@@ -442,15 +484,17 @@ async function results(opts) {
   if (opts && opts.browse) opts.browse.classList.toggle("hide", on);
   $("#lib-shelf").classList.toggle("hide", on); $("#lib-upnext").classList.toggle("hide", on);
   fillFlags();
-  if (!on) { box.innerHTML = ""; shelf(); return; }
-  const my = ++seq;
+  if (!on) { ++seq; RES = null; drawMoreBtn(); box.innerHTML = ""; shelf(); return; }      // (++seq: a search still on its way must not draw its papers onto the home page when it arrives)
+  const my = ++seq, key = q2s(F);
   let res = [];
-  try { res = await api("/api/library/search?" + q2s(F)); } catch (e) { box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
+  try { res = await api("/api/library/search?" + key); } catch (e) { if (my !== seq) return; RES = null; drawMoreBtn(); box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
   if (my !== seq) return;
   const found = res.map(x => lib()[byFile(x.file)]).filter(Boolean);
+  // a new search or filter starts with RES_STEP rows; the same list drawn again (a folder ticked, a type set, a paper deleted, back from the reader) keeps as many as were drawn, so the page does not jump
+  RES = {key, res, n: Math.min(res.length, Math.max(RES_STEP, RES && RES.key === key ? RES.n : 0))};
   box.innerHTML = `<div class="reshead">${res.length} paper${res.length === 1 ? "" : "s"}${F.q ? ` matching “${esc(F.q)}”` : ""}${res.length ? ` <button class="linkbtn" id="lr-selall" title="Tick every paper listed here: then Add to folder, Export, Set type…">Select all ${res.length}</button>` : ""}${found.length ? readyKey(found) : ""}</div>` +
-    (res.map(x => { const i = byFile(x.file); return i < 0 ? "" : row(lib()[i], i, x.snippets); }).join("") || `<div class="card empty"><h2>Nothing matches</h2>Try fewer filters or other words.</div>`);
-  bindRows(box);
+    (resRows(0, RES.n) || `<div class="card empty"><h2>Nothing matches</h2>Try fewer filters or other words.</div>`);
+  bindRows(box); drawMoreBtn();
   const sa = $("#lr-selall", box); if (sa) sa.onclick = () => { res.forEach(x => SEL.add(x.file)); $$(".rsel", box).forEach(c => { c.checked = true; }); actionbar(); };
   actionbar();
 }
@@ -514,7 +558,7 @@ function wireRows() {
   });
   root.addEventListener("click", e => {
     const more = e.target.closest("[data-more]");
-    if (more) { e.stopPropagation(); const m = more.parentElement.querySelector(".menu"), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); m.classList.toggle("hide", !was); return; }
+    if (more) { e.stopPropagation(); const m = more.parentElement.querySelector(".menu"), was = m.classList.contains("hide"); $$(".menuwrap .menu").forEach(x => x.classList.add("hide")); if (was && m.classList.contains("rowmenu") && !openRowMenu(m)) return; m.classList.toggle("hide", !was); return; }
     const pick = e.target.closest(".rowmenu button, .rowmenu a"); if (pick) pick.closest(".menu").classList.add("hide");
     const star = e.target.closest("[data-star]"), fold = e.target.closest("[data-fold]"), take = e.target.closest("[data-take]"), of = e.target.closest("[data-openfolder]"), cd = e.target.closest("[data-card]"), del = e.target.closest("[data-delitem]");
     const sk = e.target.closest("[data-setkind]");
