@@ -126,6 +126,10 @@ class Fake(BaseHTTPRequestHandler):
             if k == 0 and getattr(Fake, "web_urls", None):      # web-search citations, as OpenRouter / OpenAI send them
                 delta["annotations"] = [{"url_citation": {"url": u, "title": "page"}} for u in Fake.web_urls]
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": delta}]}) + "\n\n").encode())
+        fin = getattr(Fake, "ending", None)           # how the answer ended, in a last piece with an empty delta ("length": it hit the length limit); a function of the request, or the word itself
+        fin = fin(body) if callable(fin) else fin
+        if fin:
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": fin}]}) + "\n\n").encode())
         if "stream_options" in body:
             self.wfile.write(("data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 50,
                               "prompt_tokens_details": {"cached_tokens": 200}}}) + "\n\n").encode())
@@ -1094,6 +1098,22 @@ def main():
             assert len(SEEN) == n1 and again2[-1]["cached"] is True and next(m for m in again2 if m["type"] == "final")["text"] == final
             list(bk.summary_stream(brel, 1, "A Test Book", fresh=True))
             assert len(SEEN) == n1 + 1, "a fresh summary really asks"
+            assert SEEN[-1][1]["max_tokens"] == 2400, SEEN[-1][1]["max_tokens"]          # (room for a model that counts its thinking in the limit)
+            # --- an answer that stopped at the length limit: shown, said, not saved in place of the complete one, and not cached
+            Fake.ending = "length"
+            try:
+                Fake.pieces = ["**Argument.** Half of it (p. 3"]
+                cut = list(bk.summary_stream(brel, 1, "A Test Book", fresh=True))
+                assert [m["type"] for m in cut][-2:] == ["final", "done"] and cut[-1]["cut_off"] is True and cut[-1]["saved"] is False and cut[-1]["cached"] is False, cut[-2:]
+                assert cut[-2]["text"].startswith("**Argument.** Half of it") and bk.info_at(bpdf)["summaries"]["3-4"]["text"] == final, "the complete summary is not replaced by half of one"
+                i0 = bk.info_at(bpdf); del i0["summaries"]["3-4"]; bk._write_info(bpdf, i0); ai.cache_clear()       # (no saved summary and no saved answer: the next two really ask)
+                n2 = len(SEEN); cut = list(bk.summary_stream(brel, 1, "A Test Book")); cut = list(bk.summary_stream(brel, 1, "A Test Book"))
+                assert len(SEEN) == n2 + 2 and cut[-1]["cut_off"] is True and "3-4" not in bk.info_at(bpdf)["summaries"] and bk.summary_estimate(brel, 1)["saved"] is False, (len(SEEN) - n2, cut[-1])
+            finally:
+                Fake.ending = None
+            Fake.pieces = ["**Argument.** It argues something. ", "**Key points.**\n- A claim (p. 3).\n- Another (pp. 3-4).\n"]
+            whole = list(bk.summary_stream(brel, 1, "A Test Book"))
+            assert whole[-1]["saved"] is True and not whole[-1].get("cut_off") and bk.info_at(bpdf)["summaries"]["3-4"]["text"] == final, whole[-1]
             # --- the offset can still be changed afterwards, and the summary stays
             bk.set_offset(brel, 2)
             ki = bk.info_at(bpdf)
@@ -1226,6 +1246,29 @@ def main():
             reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""]); n1 = len(mine())
             assert bj.start(brel) is True; st = wait()
             assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and st["made"] == 0 and "empty" in st["failed"][0]["error"] and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            # --- three parts in a row stopped at the length limit: the same (half a summary is never saved as done, nor cached), and the reason is said
+            reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: ["Half a summ"]); n1 = len(mine()); Fake.ending = "length"
+            try:
+                assert bj.start(brel) is True; st = wait()
+            finally:
+                Fake.ending = None
+            assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and "cut off at the model’s length limit" in st["stopped"] and st["made"] == 0, st
+            assert all("cut off" in f["error"] for f in st["failed"]) and len(st["failed"]) == 3 and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            # --- the overview stopped at the length limit: the parts are kept, no overview is saved, and pressing again asks for it again (it was not cached)
+            reset(t=[[1, "A1", 1], [1, "B2", 2]], sums={}); answers(overview=lambda b: ["Half an over"]); n1 = len(mine())
+            Fake.ending = lambda body: "length" if sysof(body).startswith("You write an OVERVIEW") else None
+            try:
+                assert bj.start(brel) is True; st = wait()
+                assert st["made"] == 2 and not st["failed"] and st["overview"] is False and "The overview could not be written" in st["stopped"] and "cut off at the model’s length limit" in st["stopped"], st
+                assert "overview" not in bk.info_at(bpdf) and len(bk.info_at(bpdf)["summaries"]) == 2 and len(mine()) - n1 == 3 and mine()[-1]["max_tokens"] == 4000, (len(mine()) - n1, mine()[-1]["max_tokens"])
+                try:
+                    bk.write_overview(brel); raise AssertionError("a cut-off overview was saved")
+                except ai.AIError as ex:
+                    assert "cut off" in str(ex) and "not saved" in str(ex), str(ex)
+                assert len(mine()) - n1 == 4 and "overview" not in bk.info_at(bpdf)
+            finally:
+                Fake.ending = None
+            answers(); assert bk.write_overview(brel)["text"] == "OV (p. 2)." and len(mine()) - n1 == 5
             # --- one part fails, the others are made: the job goes on, but no overview is written while a part is missing; pressing again does only that part, then the overview
             reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""] if chap(b) == "B2" else ["S-%s (p. 3)." % chap(b)])
             assert bj.start(brel) is True; st = wait()
@@ -2243,6 +2286,20 @@ print("JSON" + json.dumps(out))
             ai_.chat = lambda feature, messages, **kw: R2()
             a2 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
             assert a2["short"] is True and len(a2["entries"]) == 1 and a2["entries"][0]["doi"] == "10.1287/mnsc.2021.4209" and "printed" not in a2["entries"][0]["why"], a2
+            # the same through the real AI layer and an OpenAI-style provider: an answer that ended with "length" says so, even when what arrived happens to be whole
+            ai_.chat = keep[-1]; pieces_ = getattr(Fake, "pieces", None); Fake.pieces = [R.text]; Fake.ending = "length"
+            try:
+                a3 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
+                assert a3["type"] == "done" and a3["short"] is True and len(a3["entries"]) == 2, a3
+                Fake.ending = None
+                a4 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
+                assert a4["type"] == "done" and a4["short"] is False, a4
+            finally:
+                Fake.ending = None
+                if pieces_ is None:
+                    del Fake.pieces
+                else:
+                    Fake.pieces = pieces_
             def boom(*a, **k):
                 raise ai_.AIError("This month's AI budget is used up.")
             ai_.chat = boom
@@ -3236,6 +3293,108 @@ print("OK")
         Fake.pieces = ["The sample has ", "120 firms (2)."]
     check("pipeline summaries go through the AI layer: your template, any provider, cost added to the run", t_summary)
 
+    def t_cut_off():
+        import pipeline as pl
+        import audio as au_, citeuse as cu_
+        chats = lambda: sum(1 for x in SEEN if x[0].endswith("/chat/completions"))  # noqa: E731
+        msg = [{"role": "user", "content": "explain CUT OFF"}]
+        target = os.path.join(TMP, "cut.pdf"); shutil.copy(pdf, target); usage = pl.Usage()
+        Fake.pieces = ["Half an ans"]; Fake.ending = "length"
+        try:
+            e0 = ai.cache_stats()["entries"]; n0 = chats()
+            r1 = ai.chat("explain", msg, system="s", cache=True)                                        # (never raised: the connection test and the references importer use such answers)
+            assert r1.stop == "length" and r1.cut_off is True and r1.text == "Half an ans", r1.stop
+            assert ai.cache_stats()["entries"] == e0, "a cut-off answer is not kept in the cache"
+            r2 = ai.chat("explain", msg, system="s", cache=True)
+            assert chats() == n0 + 2 and not r2.cached, "asking again really asks again"
+            # --- the pages are told
+            a = list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]
+            assert a["type"] == "done" and a["cut_off"] is True and not a["cached"], a
+            n1 = chats(); a = list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]
+            assert chats() == n1 + 1 and a["cut_off"] is True and not a["cached"], a
+            e = list(explain.stream(pdf, {"title": "P"}, text="Our sample covers 120 firms", page=1, custom="Say it, CUT"))[-1]
+            assert e["type"] == "done" and e["cut_off"] is True, e
+            s = list(ask.summary_stream(target, {"title": "Platforms CUT"}))[-1]
+            assert s["type"] == "done" and s["cut_off"] is True, s
+            b = list(au_._stream("You write a script.", "Notes of the paper, CUT.", False))[-1]
+            assert b["type"] == "done" and b["cut_off"] is True and SEEN[-1][1]["max_tokens"] == 2200, (b, SEEN[-1][1]["max_tokens"])
+            c = cu_.answer("Smith (2020). A paper.", ["Smith (2020) shows CUT."])
+            assert c["cut_off"] is True and c["text"] == "Half an ans", c
+            # --- suggested questions: half a JSON answer is no list, and it is not kept for ever
+            n1 = chats()
+            assert ask.suggest(pdf, "CUT q", "CUT a") == [] and ask.suggest(pdf, "CUT q", "CUT a") == [] and chats() == n1 + 2, chats() - n1
+            # --- a paper's summary: nothing is written, the reason is said, the cost still counts
+            try:
+                pl.summarize({"title": "Platforms"}, target, usage); raise AssertionError("a cut-off summary was written")
+            except ai.AIError as x:
+                assert "cut off at the model’s length limit" in str(x) and "not saved" in str(x) and "try again" in str(x), str(x)
+            assert not os.path.exists(target[:-4] + ".md") and usage.cost() > 0
+            # --- in a run, the note on the paper (its first 100 characters are kept) still says why and that it can be tried again
+            import types as _t
+            pp = {"id": "cut1", "file": target}
+            pl._summarize_one(_t.SimpleNamespace(usage=pl.Usage(), save=lambda: None), pp, lambda *a: None)
+            assert pp["dl_note"] == "summary failed: The summary was cut off at the model’s length limit, so it was not saved. You can try again." and "summary" not in pp, pp
+            # --- the older direct path (no summary template): the same
+            class _LM:
+                stop_reason, content = "max_tokens", [_t.SimpleNamespace(type="text", text="Half a summ")]
+                usage = _t.SimpleNamespace(input_tokens=5, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+            class _LS:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def get_final_message(self): return _LM()
+            keep_ = (prefs.summary_prompt, pl.client)
+            prefs.summary_prompt = lambda *a, **k: ""; pl.client = lambda: _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _LS())))
+            try:
+                pl.summarize({"title": "Platforms"}, target, pl.Usage()); raise AssertionError("a cut-off summary was written (direct path)")
+            except RuntimeError as x:
+                assert "cut off at the model’s length limit" in str(x) and "try again" in str(x), str(x)
+            finally:
+                prefs.summary_prompt, pl.client = keep_
+            assert not os.path.exists(target[:-4] + ".md")
+        finally:
+            Fake.ending = None
+        # --- the same requests, complete this time: asked (nothing was cached), marked as complete, and cached as before
+        n1 = chats()
+        r3 = ai.chat("explain", msg, system="s", cache=True); assert chats() == n1 + 1 and r3.stop is None and not r3.cut_off and not r3.cached
+        assert ai.chat("explain", msg, system="s", cache=True).cached and chats() == n1 + 1
+        a = list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]; assert a["cut_off"] is False and not a["cached"], a
+        assert list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]["cached"] is True
+        assert cu_.answer("Smith (2020). A paper.", ["Smith (2020) shows CUT."])["cut_off"] is False
+        assert pl.summarize({"title": "Platforms"}, target, pl.Usage()) == "Half an ans" and os.path.exists(target[:-4] + ".md")
+        Fake.ending = "stop"
+        try:
+            r4 = ai.chat("explain", [{"role": "user", "content": "explain STOP"}], system="s", cache=True)
+            assert r4.stop == "stop" and not r4.cut_off and ai.chat("explain", [{"role": "user", "content": "explain STOP"}], system="s", cache=True).cached
+        finally:
+            Fake.ending = None
+        for stop, cut in (("max_tokens", True), ("model_context_window_exceeded", True), ("length", True), ("end_turn", False), ("stop", False), ("refusal", False), ("content_filter", False), (None, False)):
+            assert ai.Result("x", {}, "fake", "m1", cost=0.0, stop=stop).cut_off is cut, stop
+        Fake.pieces = ["The sample has ", "120 firms (2)."]
+    check("an answer that stopped at the length limit is marked cut off (OpenAI-style 'length'), is given back but never cached, the pages are told, and it is not written as a paper's summary", t_cut_off)
+
+    def t_cut_off_claude():
+        import types as _t
+        class _M:
+            stop_reason, content = "max_tokens", [_t.SimpleNamespace(type="text", text="Half an ans")]
+            usage = _t.SimpleNamespace(input_tokens=5, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0, server_tool_use=None)
+        class _S:
+            def __init__(self): self.text_stream = iter(["Half an ans"])
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get_final_message(self): return _M()
+        calls = []
+        ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: calls.append(1) or _S())))
+        c = json.loads(json.dumps(CFG)); c["providers"]["anth"] = {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["m1"]}; write_cfg(c)
+        try:
+            e0 = ai.cache_stats()["entries"]
+            for _ in range(2):
+                r = ai.chat("ask", [{"role": "user", "content": "claude CUT"}], cache=True, override={"provider": "anth", "model": "m1"})
+                assert r.stop == "max_tokens" and r.cut_off is True and not r.cached and r.text == "Half an ans", r.stop
+            assert len(calls) == 2 and ai.cache_stats()["entries"] == e0
+        finally:
+            ai._clients.pop("a", None); write_cfg(CFG)
+    check("Claude's stop reason max_tokens is a cut-off answer too: given back, not cached, asked again", t_cut_off_claude)
+
 
     print("round 2 backend: paper cards, folder evidence, Research Ideas Lab")
     CFG2 = json.loads(json.dumps(CFG)); CFG2["providers"]["websearch"] = {"type": "openai_compat", "base_url": URL, "key_env": "FAKE_KEY", "models": ["m1"], "web_body": {"plugins": [{"id": "web"}]}}
@@ -3487,7 +3646,15 @@ print("OK")
     def t_develop():
         Fake.responder = ideas_responder
         doc = idl.load(fid); target = doc["ideas"][0]
+        Fake.ending = "length"                               # an outline that stopped at the length limit: streamed and said, not kept as the idea's outline, not cached
+        try:
+            n0 = len(SEEN); cut = list(idl.develop(fid, target["id"]))
+        finally:
+            Fake.ending = None
+        assert cut[-1]["type"] == "done" and cut[-1]["cut_off"] is True and "".join(m.get("delta", "") for m in cut).startswith("## Working title") and len(SEEN) == n0 + 1, cut[-1]
+        assert "developed" not in idl.load(fid)["ideas"][0] and idl.load(fid)["rev"] == doc["rev"], idl.load(fid)["ideas"][0].get("developed")
         out = list(idl.develop(fid, target["id"]))
+        assert len(SEEN) == n0 + 2 and out[-1]["cut_off"] is False and not out[-1]["cached"], out[-1]
         assert out[-1]["type"] == "done" and "".join(m.get("delta", "") for m in out).startswith("## Working title")
         sent = str(SEEN[-1][1]["messages"][-1]["content"]); assert target["research_question"] in sent and "Smith et al. (2026)" in sent and "Panel DiD" in sent
         assert idl.load(fid)["ideas"][0]["developed"]["text"].startswith("## Working title")
@@ -3540,6 +3707,13 @@ print("OK")
         assert not any(m["type"] == "status" and "first time" in m["msg"] for m in again) and again[-1]["cached"] is True and chats() == n0     # indexed once, answer cached
         h = list(ma.stream(ROWS4, "and why?", "passages", history=[{"q": "How large is the sample of firms?", "a": "120 firms (1)."}], fresh=True))
         assert [m["role"] for m in SEEN[-1][1]["messages"]] == ["system", "user", "assistant", "user"] and h[-1]["type"] == "done"
+        assert msgs[-1]["cut_off"] is False
+        Fake.ending = "length"                               # an answer that stopped at the length limit: the page is told, and it is asked again next time
+        try:
+            n0 = chats(); c1 = list(ma.stream(ROWS4, "Which firms were left out of the sample?", "passages"))[-1]; c2 = list(ma.stream(ROWS4, "Which firms were left out of the sample?", "passages"))[-1]
+        finally:
+            Fake.ending = None
+        assert c1["type"] == "done" and c1["cut_off"] is True and c2["cut_off"] is True and not c2["cached"] and chats() == n0 + 2, (c1, c2, chats() - n0)
         Fake.responder = None
     check("ask several papers: passages from different papers, labelled with paper and page; indexed once; follow-ups carry history; invented citations flagged", t_multi_passages)
 
@@ -3844,6 +4018,26 @@ print("OK")
     def t_folder_cleanup2():
         fo.delete(fid2); assert not any(os.path.exists(os.path.join(fo.DIR, fid2 + x)) for x in (".json", ".ask.json", ".matrix.json"))
     check("deleting a folder also deletes its conversation and matrix", t_folder_cleanup2)
+
+    def t_draft_cut_off():
+        Fake.responder = lambda body: ["## Trust\nPlatform rules shape how participants behave [P1-1]. A second study agrees with this and adds that"]
+        st = {"topic": "Trust on platforms", "words": 300, "files": [r["file"] for r in ROWS[:3]]}
+        try:
+            Fake.ending = "length"; n0 = len(SEEN)
+            m1 = list(rw.stream("cutdraft", ROWS, st)); m2 = list(rw.stream("cutdraft", ROWS, st))
+            assert m1[-1]["type"] == "done" and m1[-1]["cut_off"] is True and m2[-1]["cut_off"] is True and not m2[-1]["cached"] and len(SEEN) == n0 + 2, (m1[-1], m2[-1], len(SEEN) - n0)
+            d1 = next(m for m in m1 if m["type"] == "draft")["doc"]
+            assert d1["cut_off"] is True and rw.load("cutdraft")["cut_off"] is True and rw.load("cutdraft")["raw"].endswith("adds that"), "kept, and marked as unfinished"
+            ed = rw.update("cutdraft", raw=d1["raw"] + " entry rises [P2-1].")
+            assert ed["cut_off"] is False and rw.load("cutdraft")["cut_off"] is False, "once you have edited it, it is yours"
+            Fake.ending = None
+            m3 = list(rw.stream("cutdraft", ROWS, st))
+            assert len(SEEN) == n0 + 3 and m3[-1]["cut_off"] is False and rw.load("cutdraft")["cut_off"] is False and list(rw.stream("cutdraft", ROWS, st))[-1]["cached"] is True, m3[-1]
+        finally:
+            Fake.ending = None; Fake.responder = None
+            if os.path.exists(rw.path("cutdraft")):
+                os.remove(rw.path("cutdraft"))
+    check("related work: a draft that stopped at the length limit is kept but marked as cut off (until you edit it), and is not cached", t_draft_cut_off)
 
     def t_related_work():
         P = {"P1": {"file": "a.pdf", "title": "A", "label": "Tian & Xue", "year": "2026", "short": "Tian & Xue (2026)", "ref": ["Tian, J., & Xue, K. (2026). A. ", "Journal", "."], "key": "k1", "doi": ""},

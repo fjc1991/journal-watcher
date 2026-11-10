@@ -20,4 +20,4 @@ def answer(ref_text, contexts, fresh=False):
         raise ai.AIError("No sentence of the paper cites this reference in its text.")
     msg = "REFERENCE: %s\n\nSENTENCES THAT CITE IT:\n%s" % (re.sub(r"\s+", " ", str(ref_text))[:500], "\n".join("%d. %s" % (i + 1, c) for i, c in enumerate(ctx)))
     res = ai.chat("explain", [{"role": "user", "content": msg}], system=SYSTEM, max_tokens=220, cache=True, fresh=fresh)
-    return {"text": res.text.strip(), "cost": res.cost, "cached": res.cached, "model": res.model}
+    return {"text": res.text.strip(), "cost": res.cost, "cached": res.cached, "model": res.model, "cut_off": res.cut_off}

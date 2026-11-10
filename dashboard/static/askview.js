@@ -21,7 +21,8 @@ function answerFrame(t, o, cls = "") {
   if (!parts.length) parts.push({id: "lead", title: "Answer", short: "Answer", icon: "sparkle", tone: "lead", body: `<span class="ask-status">${esc(t.status || "Thinking…")}</span>`});
   if (o.sources && !live) parts.push({id: "sources", title: "Sources", icon: "link", count: o.sources.count, note: o.sources.note || "", collapsed: true, body: o.sources.html});
   const invalid = t.invalid && t.invalid.length ? callout("warn", `Citation${t.invalid.length > 1 ? "s" : ""} ${t.invalid.join(", ")} referred to passages the model was never given — don’t rely on ${t.invalid.length > 1 ? "them" : "it"}.`) : "";
-  return frame({tool: "ask", kind: cls === "alt" ? "Second opinion" : "Answer", icon: "ask", key: o.key, cls, meta: chips(t), sections: parts, jump: !live, actions: live ? "" : o.actions || "", notices: (o.notices || "") + invalid});
+  const cut = t.cut_off ? callout("warn", `This answer was cut off at the model’s length limit; the end is missing. Ask again, or ask for something shorter.${cls === "alt" ? "" : ` <button class="rd-btn" data-t="regen">Ask again</button>`}`) : "";      // (never kept in the saved answers, so asking again really asks)
+  return frame({tool: "ask", kind: cls === "alt" ? "Second opinion" : "Answer", icon: "ask", key: o.key, cls, meta: chips(t), sections: parts, jump: !live, actions: live ? "" : o.actions || "", notices: (o.notices || "") + cut + invalid});
 }
 
 export function turnHtml(t, i, o) {

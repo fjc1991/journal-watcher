@@ -276,10 +276,11 @@ async function onClick(e) {
 async function develop(idea, card) {
   if (idea.developed) { L.itab[idea.id] = "outline"; return redrawIdea(idea.id); }
   if (L.busy) return; L.busy = true; L.itab[idea.id] = "outline"; redrawIdea(idea.id);
-  const box = $(`#dev-${idea.id}`, L.root); box.classList.remove("empty"); box.innerHTML = `<span class="ask-status">Developing the idea…</span>`; let text = "";
+  const box = $(`#dev-${idea.id}`, L.root); box.classList.remove("empty"); box.innerHTML = `<span class="ask-status">Developing the idea…</span>`; let text = "", cut = false;
   try { await ndjson("/api/ai/ideas/develop", {id: L.fid, idea: idea.id}, m => {
     if (m.type === "text") { text += m.delta; box.innerHTML = outlineHtml(idea, text); } else if (m.type === "error") throw new Error(m.error);
-    else if (m.type === "done") { idea.developed = {text, model: m.model, cost: m.cost}; L.doc.rev = m.rev || L.doc.rev; } }); }
+    else if (m.type === "done") { L.doc.rev = m.rev || L.doc.rev; if (m.cut_off) cut = true; else idea.developed = {text, model: m.model, cost: m.cost}; } });
+    if (cut) box.insertAdjacentHTML("beforeend", callout("warn", `This outline was cut off at the model’s length limit; the end is missing, so it was not kept with the idea. <button class="rd-btn" data-a="develop">Develop it again</button>`)); }
   catch (e) { box.innerHTML = errBox(e, {retry: 'data-a="develop"'}); }
   L.busy = false; if (idea.developed) redrawIdea(idea.id);
 }

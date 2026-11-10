@@ -29,11 +29,11 @@ Cover, in this order: what the papers are about together; what they agree on; wh
 
 
 def _stream(system, material, fresh):
-    for kind, v in ai.stream("audio", [{"role": "user", "content": material}], system=system, max_tokens=1100, cache=True, fresh=fresh):
+    for kind, v in ai.stream("audio", [{"role": "user", "content": material}], system=system, max_tokens=2200, cache=True, fresh=fresh):
         if kind == "text":
             yield {"type": "text", "delta": v}
         else:
-            yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached}
+            yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "cut_off": v.cut_off}
 
 
 def stream_paper(pdf, meta, fresh=False):

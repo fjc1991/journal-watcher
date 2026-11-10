@@ -16,7 +16,7 @@ const curPages = () => chap >= 0 && chapters[chap] ? {from: chapters[chap].start
 const STARTERS = ["What is the main contribution of this paper?", "What theory, method and sample does it use?",
   "List the hypotheses or propositions and whether they were supported.", "What are the limitations and the suggested future research?"];
 const saveChat = debounce(() => fetch("/api/doc/chat", {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-  body: JSON.stringify({file: S.file, turns: turns.filter(t => t.done || t.text).map(({q, text, passages, model, cost, cached, invalid, follow, alt, pages}) => ({q, text, passages, model, cost, cached, invalid, follow, alt, pages, done: true}))})}).catch(() => {}), 600);
+  body: JSON.stringify({file: S.file, turns: turns.filter(t => t.done || t.text).map(({q, text, passages, model, cost, cached, invalid, cut_off, follow, alt, pages}) => ({q, text, passages, model, cost, cached, invalid, cut_off, follow, alt, pages, done: true}))})}).catch(() => {}), 600);
 
 export function mount(el) {
   panel = el; S.fn.askAbout = askAbout;
@@ -94,7 +94,7 @@ async function run(q, extra, onMsg) {
 function apply(t, m) {
   if (m.type === "status") t.status = m.msg; else if (m.type === "passages") t.passages = m.passages;
   else if (m.type === "text") t.text += m.delta; else if (m.type === "error") t.error = m.error;
-  else if (m.type === "done") Object.assign(t, {done: true, model: (m.provider ? m.provider + " · " : "") + (m.model || ""), cost: m.cost, cached: m.cached, invalid: m.invalid});
+  else if (m.type === "done") Object.assign(t, {done: true, model: (m.provider ? m.provider + " · " : "") + (m.model || ""), cost: m.cost, cached: m.cached, invalid: m.invalid, cut_off: m.cut_off || undefined});      // cut_off: it stopped at the model’s length limit (said with the answer, and remembered with the conversation)
 }
 const redraw = i => { const el = log.querySelector(`.ask-turn[data-i="${i}"]`); if (el) { el.outerHTML = turnHtml(turns[i], i); log.scrollTop = log.scrollHeight; } };
 
@@ -121,7 +121,7 @@ async function turnAction(i, a) {
   if (a === "regen") return ask(t.q, {replace: i, fresh: true});
   if (a === "copy") return S.fn.copyText(t.text, "Answer copied.");
   if (a === "save") { const p = C.nextPos(); N.addCard({type: "ai", question: t.q, text: t.text, cites: t.passages, model: t.model, x: p.x, y: p.y, w: 340}); S.fn.showTab("notes"); return toast("Saved to your notes."); }
-  if (a === "usealt" && t.alt) { Object.assign(t, {text: t.alt.text, model: t.alt.model, cost: t.alt.cost, cached: t.alt.cached, invalid: t.alt.invalid}); delete t.alt; redraw(i); return saveChat(); }
+  if (a === "usealt" && t.alt) { Object.assign(t, {text: t.alt.text, model: t.alt.model, cost: t.alt.cost, cached: t.alt.cached, invalid: t.alt.invalid, cut_off: t.alt.cut_off}); delete t.alt; redraw(i); return saveChat(); }
   if (a === "dropalt") { delete t.alt; redraw(i); return saveChat(); }
   if (a === "compare") return comparePick(i);
   if (a === "follow") { try { const r = await api("/api/ai/suggest", {file: S.file, q: t.q, a: t.text}); t.follow = r.questions; redraw(i); saveChat(); } catch (e) { notifyError(e); } }

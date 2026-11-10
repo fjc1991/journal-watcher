@@ -1302,6 +1302,8 @@ def summarize(p, pdf_path, usage, template=None):
         text = res.text.strip()
         if not text:                    # an empty file would count as a summary for ever (the "Ready to read" bar, and nothing would ask again)
             raise ai.AIError("%s · %s returned an empty summary" % (res.provider, res.model))
+        if res.cut_off:                 # half a summary would count as the summary for ever too (nothing asks again once the .md exists)
+            raise ai.AIError("The summary was cut off at the model’s length limit, so it was not saved. You can try again.")       # (short: the run page shows the first 100 characters of it)
         with open(md_path, "w") as f:
             f.write(text + "\n")
         return text
@@ -1321,6 +1323,8 @@ def summarize(p, pdf_path, usage, template=None):
     usage.add(msg.usage)
     if msg.stop_reason == "refusal":
         raise RuntimeError("summary declined by the model")
+    if msg.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+        raise RuntimeError("The summary was cut off at the model’s length limit, so it was not saved. You can try again.")
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     with open(md_path, "w") as f:
         f.write(text + "\n")

@@ -93,6 +93,17 @@ class Cancelled(AIError):
     """The user pressed Cancel in the activity tray: the call stops between two pieces of the answer (what was already generated is still billed)."""
 
 
+class CutOff(AIError):
+    """The answer stopped at the model's length limit and was not kept. `result` is the Result (already logged and billed); `text` is what the page may still show."""
+
+    def __init__(self, message, result=None, text=""):
+        super().__init__(message)
+        self.result, self.text = result, text
+
+
+CUT_OFF_STOPS = frozenset({"max_tokens", "model_context_window_exceeded", "length"})      # how an answer that hit a length limit ends: Anthropic's stop_reason (the first two), the finish_reason of OpenAI-style providers (OpenAI, Gemini, OpenRouter, Ollama)
+
+
 # ---------------------------------------------------------------- config
 
 SCREEN_FEATURE = {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}      # the screening of new papers (pipeline.screen): what it used before it had a setting of its own
@@ -389,6 +400,11 @@ class Result:
         self.sources, self.searches, self.cached = sources or [], searches, cached
         self.cost = cost if cost is not None else cost_of(model, self.usage, searches, provider)
 
+    @property
+    def cut_off(self):
+        """True when the answer stopped at a length limit and not because it was finished: its end is missing, so it is never cached and never saved as if complete."""
+        return str(self.stop or "").lower() in CUT_OFF_STOPS
+
 
 def cost_of(model, usage, searches=0, provider=None):
     """USD for these tokens of `model` at `provider` (prices.lookup: your price, OpenRouter's list, the built-in table, free on this computer), plus web searches
@@ -610,7 +626,8 @@ def cache_stats():
 
 def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_search=False, cache=False, fresh=False, override=None, cache_if=None):
     """Yield ("text", delta) as the answer arrives, then ("done", Result). `schema` asks for JSON matching it.
-    cache_if(text) -> bool lets the caller keep a bad answer (cut-off JSON, say) out of the cache, so asking again really asks again."""
+    cache_if(text) -> bool lets the caller keep a bad answer (cut-off JSON, say) out of the cache, so asking again really asks again.
+    An answer that stopped at the length limit (Result.cut_off) is still returned, never raised (the connection test and the references importer use such answers), but it is never cached."""
     if act.is_cancelled():
         raise Cancelled("Cancelled.")
     name, p, f = _route(feature, override, web_search)
@@ -635,7 +652,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
                 raise Cancelled("Cancelled.")
             if kind == "done":
                 _log(feature, v, sent)
-                if key and (cache_if is None or cache_if(v.text)):
+                if key and not v.cut_off and (cache_if is None or cache_if(v.text)):
                     os.makedirs(CACHE, exist_ok=True)
                     tmp = dl.tmp_path(os.path.join(CACHE, key + ".json"))
                     with open(tmp, "w", encoding="utf-8") as fh:
@@ -752,7 +769,7 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
             raise _http_error(name, e, raw)
         except urllib.error.URLError as e:
             raise AIError("Can’t reach %s at %s (%s)%s" % (name, p["base_url"], e.reason, " — is Ollama running?" if name == "ollama" else ""))
-    text, usage, sources, seen, refusal, filtered = "", {}, [], set(), "", False
+    text, usage, sources, seen, refusal, filtered, finish = "", {}, [], set(), "", False, None
     with resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -775,6 +792,8 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
                     yield "text", d["content"]
                 if d.get("refusal"):                        # OpenAI's structured outputs answer a refusal in this field instead of the JSON
                     refusal += d["refusal"]
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]            # how the answer ended: "stop", "length" (it hit the length limit), "content_filter", ...
                 if ch.get("finish_reason") == "content_filter":
                     filtered = True
                 for a in d.get("annotations") or []:        # OpenRouter / OpenAI web citations
@@ -785,7 +804,7 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
                 usage = ev["usage"]
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
     res = Result(text, {"in": max(0, usage.get("prompt_tokens", 0) - cached), "out": usage.get("completion_tokens", 0),
-                        "cache_read": cached}, name, f["model"], cost=usage.get("cost"), sources=sources)
+                        "cache_read": cached}, name, f["model"], cost=usage.get("cost"), sources=sources, stop=finish)
     if (refusal or filtered) and not text.strip():
         res.stop = "refusal"
         raise Declined("The model declined to answer this." + (" (%s)" % refusal.strip()[:160] if refusal.strip() else ""), res)

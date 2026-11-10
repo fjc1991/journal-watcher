@@ -30,6 +30,16 @@ PROJECT = os.path.abspath(os.path.join(SKILL, "..", "..", ".."))
 TMP = tempfile.mkdtemp(prefix="jw-ui-")
 FAILS = []
 SEEN = []          # requests the fake AI provider received
+CUT_NEXT = [0]     # how many of the fake provider's next answers end as cut off at the length limit (a question with the word CUTOFF always does)
+
+
+def cut_now(text):
+    if "CUTOFF" in text:
+        return True
+    if CUT_NEXT[0] > 0:
+        CUT_NEXT[0] -= 1
+        return True
+    return False
 
 
 def check(name, cond, extra=""):
@@ -147,6 +157,8 @@ class Fake(BaseHTTPRequestHandler):
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {"content": out[i:i + 24]}}]}) + "\n\n").encode())
             if "SLOW" in text:
                 self.wfile.flush(); time.sleep(0.15)
+        if cut_now(text):                # the answer stops at the model's length limit: all its words, then finish_reason "length"
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "length"}]}) + "\n\n").encode())
         self.wfile.write(("data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 500, "completion_tokens": 40}}) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n"); self.close_connection = True
 
@@ -238,6 +250,8 @@ class Fake(BaseHTTPRequestHandler):
             if k == 0 and urls:
                 delta["annotations"] = urls
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": delta}]}) + "\n\n").encode())
+        if cut_now(str(body["messages"][-1]["content"])):                # the answer stops at the model's length limit: all its words, then finish_reason "length"
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "length"}]}) + "\n\n").encode())
         self.wfile.write(("data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 800, "completion_tokens": 300}}) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n"); self.close_connection = True
 
@@ -796,6 +810,10 @@ fx.fetch_journal = lambda j: []                                                 
             page.evaluate(JS_SELECT, [1, "Platform effects are large"]); page.wait_for_selector("#rd-sel:not(.hide)")
             page.click('#rd-sel [data-s="explain"]'); page.click(".rd-expmenu [data-id='plain']"); page.wait_for_selector(".ex-act:not(.hide)", timeout=15000)
             check("asking the same thing again is answered from the cache (no new request)", len([x for x in SEEN if "chat" in x[0]]) == n_req + 1 and "cached" in page.inner_text(".ex-meta"))
+            CUT_NEXT[0] = 1; page.click('.rd-exp .ex-act [data-x="again"]'); page.wait_for_selector(".rd-exp .ex-body .of-co.warn", timeout=15000)
+            check("an explanation that stopped at the model's length limit says its end is missing, with a way to ask again", "cut off at the model’s length limit" in page.inner_text(".rd-exp .ex-body .of-co.warn") and "EXPLAINED" in page.inner_text(".ex-body") and page.locator('.rd-exp .of-co.warn [data-x="again"]').count() == 1, page.inner_text(".ex-body")[-200:])
+            page.click('.rd-exp .of-co.warn [data-x="again"]'); page.wait_for_function("!document.querySelector('.rd-exp .of-co.warn')", timeout=15000); page.wait_for_selector(".ex-act:not(.hide)", timeout=15000)
+            check("…and its Ask again button asks the provider again; a complete answer has no such note", len([x for x in SEEN if "chat" in x[0]]) == n_req + 3 and "EXPLAINED" in page.inner_text(".ex-body") and page.locator(".rd-exp .of-co.warn").count() == 0, "%d requests" % (len([x for x in SEEN if "chat" in x[0]]) - n_req))
             page.click('.rd-exp [data-x="save"]'); page.wait_for_selector(".nc-card.ai", timeout=5000)
             page.click(".rd-exp [data-x='close']") if page.locator(".rd-exp:not(.hide)").count() else None
 
@@ -941,16 +959,37 @@ fx.fetch_journal = lambda j: []                                                 
             check("💡 suggests follow-up questions", page.locator(".ask-turn [data-starter]").count() == 4)
             page.wait_for_timeout(1200)
             check("the conversation is saved next to the paper (and the reader asks first, so nothing else is created)", os.path.exists(sidecar(2, ".chat.json")) and len(json.load(open(sidecar(2, ".chat.json")))["turns"]) == 2)
+            cut_reqs = lambda: len([x for x in SEEN if "chat" in x[0] and "CUTOFF" in json.dumps(x[1])])  # noqa: E731
+            page.fill("#ask-q", "CUTOFF How many firms are there?"); page.click('#reader [data-k="send"]')
+            page.wait_for_selector(".ask-turn >> nth=-1 >> .of-co.warn:has-text('cut off')", timeout=30000)
+            note_ = page.inner_text(".ask-turn >> nth=-1 >> .of-co.warn")
+            check("an answer that stopped at the model's length limit says so with the answer (its end is missing), with a way to ask again",
+                  "This answer was cut off at the model’s length limit; the end is missing." in note_ and "120 firms" in page.inner_text(".ask-turn >> nth=-1") and page.locator(".ask-turn >> nth=-1 >> .of-co.warn [data-t=regen]").count() == 1 and page.locator(".ask-turn .of-co.warn:has-text('cut off')").count() == 1, note_)
+            page.click(".ask-turn >> nth=-1 >> .of-co.warn [data-t=regen]")
+            for _ in range(100):
+                if cut_reqs() == 2:
+                    break
+                page.wait_for_timeout(100)
+            page.wait_for_selector(".ask-turn >> nth=-1 >> .of-co.warn:has-text('cut off')", timeout=30000)
+            check("…and its Ask again button asks the provider again", cut_reqs() == 2 and page.locator(".ask-turn").count() == 3, "%d requests, %d turns" % (cut_reqs(), page.locator(".ask-turn").count()))
+            page.wait_for_timeout(1200)
+            chat_ = json.load(open(sidecar(2, ".chat.json")))["turns"]
+            check("the saved conversation remembers which answer was cut off", [t_.get("cut_off") for t_ in chat_] == [None, None, True], str([t_.get("cut_off") for t_ in chat_]))
             page.click('.rd-tabs button[data-tab="sum"]'); page.select_option("#sum-t", "tldr"); page.click("#sum-go"); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
             check("a summary can be generated with another template (not saved until you say so)", "FAKE SUMMARY" in page.inner_text("#sum-body") and not os.path.exists(sidecar(2, ".md")))
             check("…in titled sections, the TL;DR first and highlighted as the lead", [t.strip().lower() for t in page.locator("#sum-body .of-sec h4").all_inner_texts()] == ["tl;dr", "method", "key findings"] and page.locator("#sum-body .of-sec.lead").count() == 1 and "not saved yet" in page.inner_text("#sum-body"),
                   str(page.locator("#sum-body .of-sec h4").all_inner_texts()))
+            CUT_NEXT[0] = 1; page.click("#sum-act [data-sx='again']"); page.wait_for_selector("#sum-body .of-co.warn:has-text('cut off')", timeout=30000); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
+            check("a summary that stopped at the model's length limit says its end is missing and cannot be saved as the paper's summary (no such button; Generate again is offered)",
+                  "cut off at the model’s length limit" in page.inner_text("#sum-body .of-co.warn") and page.locator("#sum-act [data-sx='replace']").count() == 0 and page.locator("#sum-act [data-sx='notes']").count() == 1 and page.locator("#sum-body .of-co.warn [data-sx='again']").count() == 1 and not os.path.exists(sidecar(2, ".md")), page.inner_text("#sum-act"))
+            page.click("#sum-body .of-co.warn [data-sx='again']"); page.wait_for_selector("#sum-act [data-sx='replace']", timeout=30000)
+            check("…and generating it again gives a complete one that can be saved", page.locator("#sum-body .of-co.warn").count() == 0 and "FAKE SUMMARY" in page.inner_text("#sum-body"))
             page.click("#sum-act [data-sx='replace']"); page.wait_for_timeout(800)
             check("…and saved as the paper's summary on request", os.path.exists(sidecar(2, ".md")) and "FAKE SUMMARY" in open(sidecar(2, ".md")).read())
             page.reload(); page.wait_for_selector("#libitem"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
             page.locator('.librow:has-text("Citations and Links") [data-read]').click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
             page.click('.rd-tabs button[data-tab="ask"]'); page.wait_for_selector(".ask-turn", timeout=10000)
-            check("after a reload the conversation is still there", page.locator(".ask-turn").count() == 2)
+            check("after a reload the conversation is still there (and the cut-off answers still say so)", page.locator(".ask-turn").count() == 3 and page.locator(".ask-turn .of-co.warn:has-text('cut off')").count() == 1, "%d turns, %d notes" % (page.locator(".ask-turn").count(), page.locator(".ask-turn .of-co.warn:has-text('cut off')").count()))
             page.click('.rd-tabs button[data-tab="toc"]'); page.click("#toc-seg [data-v='pages']"); page.wait_for_function("document.querySelectorAll('#thumb-list .thumb canvas').length === 2", timeout=10000)
             page.wait_for_timeout(800)
             check("page thumbnails are drawn", page.locator("#thumb-list .thumb").count() == 2)
@@ -1044,7 +1083,11 @@ fx.fetch_journal = lambda j: []                                                 
             check("a paper card is saved beside the PDF", os.path.exists(sidecar(0, ".card.json")) and json.load(open(sidecar(0, ".card.json")))["rev"] == 1)
             page.evaluate("""() => { const sp = []; window.__spoken = sp; Object.defineProperty(window, "speechSynthesis", {configurable: true, value: {getVoices() { return []; }, speak(u) { sp.push(u.text); setTimeout(() => u.onend && u.onend(), 5); }, cancel() {}, pause() {}, resume() {}, speaking: false, addEventListener() {}}});
               Object.defineProperty(window, "SpeechSynthesisUtterance", {configurable: true, value: function (t) { this.text = t; }}); }""")
-            page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
+            brief_reqs = lambda: len([b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the script of a short spoken briefing")])  # noqa: E731
+            n_brief = brief_reqs(); CUT_NEXT[0] = 1; page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
+            check("a briefing that stopped at the model's length limit says its end is missing", "cut off at the model’s length limit" in page.inner_text("#lsn-meta"), page.inner_text("#lsn-meta"))
+            page.click('[data-l="close"]'); page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
+            check("…and opening it again has it written again (it was not kept in the saved answers), complete this time", brief_reqs() == n_brief + 2 and "cut off" not in page.inner_text("#lsn-meta") and "saved" not in page.inner_text("#lsn-meta"), "%d requests; %s" % (brief_reqs() - n_brief, page.inner_text("#lsn-meta")))
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the script of a short spoken briefing")][-1]
             check("🎧 Listen on the Card tab writes a short script from the card (the model is told to write for the ear)", "PAPER:" in req["messages"][-1]["content"] and "for the ear" in req["messages"][0]["content"] and page.locator(".lsn-s").count() >= 6 and "two minutes" in page.inner_text("#lsn-body"))
             page.click("#lsn-play")
@@ -1106,7 +1149,10 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.idea >> nth=0 >> [data-a="star"]'); page.fill(".idea >> nth=0 >> .idea-note", "Talk to my supervisor"); page.wait_for_timeout(1200)
             board = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")))
             check("star and note are saved in Papers/_folders/lab.ideas.json", any(x["star"] and x["note"] == "Talk to my supervisor" for x in board["ideas"]) and board["runs"])
-            page.click('.idea >> nth=0 >> [data-a="develop"]'); page.wait_for_selector(".idea-dev .of-sec", timeout=60000)
+            CUT_NEXT[0] = 1; page.click('.idea >> nth=0 >> [data-a="develop"]'); page.wait_for_selector(".idea-dev .of-co.warn:has-text('cut off')", timeout=60000)
+            check("an outline that stopped at the model's length limit is shown with a note that its end is missing, and is not kept with the idea",
+                  "working title" in page.inner_text(".idea-dev").lower() and "not kept" in page.inner_text(".idea-dev .of-co.warn") and "developed" not in open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")).read() and "✓" not in page.locator('.idea >> nth=0 >> .idea-tabs .on').inner_text(), page.inner_text(".idea-dev")[-200:])
+            page.click('.idea-dev .of-co.warn [data-a="develop"]'); page.wait_for_function("!document.querySelector('.idea-dev .of-co.warn')", timeout=60000); page.wait_for_selector(".idea-dev .of-sec", timeout=60000)
             page.wait_for_function("(document.querySelector('.idea .idea-tabs .on') || {}).textContent.includes('✓')", timeout=60000)   # (the sections show while the answer still streams; the ✓ only once the server has saved it on the board)
             check("the outline appears in sections on the Outline tab of the idea card", page.locator('.idea >> nth=0 >> .idea-tabs .on').inner_text().strip().startswith("Outline") and page.locator(".idea-dev .of-sec").count() >= 2)
             check("Develop turns the idea into an outline saved on the board", "working title" in page.inner_text(".idea-dev").lower() and "developed" in open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")).read())
@@ -1126,7 +1172,13 @@ fx.fetch_journal = lambda j: []                                                 
             check("the folder has a Related work tab that lists its papers (all with cards ticked) and what the draft will cost", page.locator('.fvtabs [data-ft="draft"]').count() == 1 and page.locator("input[data-pf]:checked").count() == 3)
             page.fill("#dr-topic", "We study how transparency rules change who joins a platform."); page.select_option("#dr-words", "300")
             page.wait_for_function("document.querySelector('#dr-est').textContent.includes('·')", timeout=10000)
-            page.click('[data-dr="go"]'); page.wait_for_selector('.of[data-tool="draft"]', timeout=60000)
+            CUT_NEXT[0] = 1; page.click('[data-dr="go"]'); page.wait_for_selector('.of[data-tool="draft"]', timeout=60000)
+            draft_file = os.path.join(TMP, "Papers", "_folders", "lab.draft.json")
+            check("a draft that stopped at the model's length limit is kept, and its Check section says first that its end is missing",
+                  "This draft was cut off at the model’s length limit" in page.inner_text('.of-sec[data-sec="check"]') and page.locator('.of-sec[data-sec="check"] .of-co.warn').count() >= 1 and json.load(open(draft_file))["cut_off"] is True, page.inner_text('.of-sec[data-sec="check"]')[:200])
+            n_dr = len([b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the RELATED WORK")])
+            page.click('[data-dr="go"]'); page.wait_for_function("!document.querySelector('.of-sec[data-sec=\"check\"]') || !document.querySelector('.of-sec[data-sec=\"check\"]').innerText.includes('cut off')", timeout=60000); page.wait_for_selector('.of[data-tool="draft"]', timeout=60000)
+            check("…and writing it again gives a complete draft without that note", len([b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the RELATED WORK")]) == n_dr + 1 and "cut off" not in page.inner_text('.of-sec[data-sec="check"]') and json.load(open(draft_file))["cut_off"] is False, page.inner_text('.of-sec[data-sec="check"]')[:200])
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the RELATED WORK")][-1]
             user = req["messages"][1]["content"] if len(req["messages"]) > 1 else ""
             check("the model got the cards as numbered notes, your study and the length, and nothing else", "P1-1 [question]" in user and "P3-" in user and "transparency rules" in user and "about 300 words" in user.lower(), user[:300])
@@ -1182,6 +1234,11 @@ fx.fetch_journal = lambda j: []                                                 
             check("reading the cards sends their lines with section and page", "findings, p. " in req["messages"][-1]["content"] and "cards" in req["messages"][0]["content"])
             check("the second question carries the first as history", [m["role"] for m in req["messages"]][1:3] == ["user", "assistant"])
             shot(page, "11-ask-folder")
+            page.fill("#am-q", "CUTOFF Which samples do they use?"); page.click('[data-k="send"]'); page.wait_for_selector(".am-log .ask-turn >> nth=2 >> .of-co.warn:has-text('cut off')", timeout=90000)
+            page.wait_for_timeout(1200)
+            check("a folder answer that stopped at the model's length limit says so too (with Ask again), and the saved conversation remembers it",
+                  "This answer was cut off at the model’s length limit; the end is missing." in page.inner_text(".am-log .ask-turn >> nth=2 >> .of-co.warn") and page.locator(".am-log .ask-turn >> nth=2 >> .of-co.warn [data-t=regen]").count() == 1
+                  and [t_.get("cut_off") for t_ in json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.ask.json")))["turns"]] == [None, None, True], page.inner_text(".am-log .ask-turn >> nth=2")[-200:])
             page.click('[data-k="clear"]'); page.wait_for_selector(".am-log .empty"); page.wait_for_timeout(900)
             check("clearing the conversation deletes its file", not os.path.exists(os.path.join(TMP, "Papers", "_folders", "lab.ask.json")))
 
@@ -2258,6 +2315,15 @@ fx.fetch_journal = lambda j: []                                                 
             check("opening and closing it again sends nothing", len(chat_calls("You summarise ONE chapter")) == n_sum1)
             page.click("[data-chap-redo]"); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_function("document.querySelector('[data-sumbox=\"1\"] .pmeta') && document.querySelector('[data-sumbox=\"1\"] .pmeta').textContent.includes('Written by')", timeout=60000)
             check("'Write it again' asks again (after showing the cost again)", len(chat_calls("You summarise ONE chapter")) == n_sum1 + 1)
+            bj_sum = lambda: json.load(open(os.path.join(TMP, ep_row["file"])[:-4] + ".book.json", encoding="utf-8")).get("summaries")  # noqa: E731
+            kept_sum = bj_sum(); CUT_NEXT[0] = 1
+            page.click("[data-chap-redo]"); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_selector('[data-sumbox="1"] [role=alert]:has-text("cut off")', timeout=60000)
+            cut_txt = page.inner_text('[data-sumbox="1"]')
+            check("a chapter summary that stopped at the model's length limit is shown with a note that its end is missing and is not saved with the book (the complete one saved before stays)",
+                  "FAKE CHAPTER SUMMARY" in cut_txt and "cut off at the model’s length limit" in cut_txt and "not saved" in cut_txt and "Written by" not in cut_txt and len(chat_calls("You summarise ONE chapter")) == n_sum1 + 2 and bj_sum() == kept_sum and kept_sum, cut_txt[-250:])
+            page.click('[data-sumbox="1"] [role=alert] [data-chap-redo]'); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_function("document.querySelector('[data-sumbox=\"1\"] .pmeta') && document.querySelector('[data-sumbox=\"1\"] .pmeta').textContent.includes('Written by')", timeout=60000)
+            check("…and 'Write it again' in that note asks again and shows the complete one, without the note", len(chat_calls("You summarise ONE chapter")) == n_sum1 + 3 and page.locator('[data-sumbox="1"] [role=alert]').count() == 0 and "FAKE CHAPTER SUMMARY" in page.inner_text('[data-sumbox="1"]') and "FAKE CHAPTER SUMMARY" in bj_sum()["%d-%d" % (c2["start"], c2["end"])]["text"],
+                  "%d requests" % (len(chat_calls("You summarise ONE chapter")) - n_sum1))
             # ask about one chapter: the reader's Ask tab opens limited to it
             page.click('#bk-list [data-chap-ask="1"]'); page.wait_for_selector(".rd-band .textLayer span", timeout=60000); page.wait_for_selector("#ask-chapsel", timeout=10000)
             check("'Ask about it' opens the book in the reader on the Ask tab with that chapter chosen", page.eval_on_selector("#ask-chapsel", "e => e.value") == "1" and page.locator('.rd-tabs button[data-tab="ask"].on').count() == 1 and "Chapter 2" in page.inner_text("#ask-chapsel"), page.inner_text("#ask-chapsel"))

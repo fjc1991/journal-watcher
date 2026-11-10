@@ -493,11 +493,11 @@ def develop(fid, idea_id):
         with _lock:
             cur = load(fid)
             tgt = next((x for x in cur["ideas"] if x["id"] == idea_id), None)
-            if tgt:
+            if tgt and not res.cut_off:                    # an outline that stopped at the length limit is shown with a note, not kept as the idea's outline
                 tgt["developed"] = {"text": text, "model": "%s · %s" % (res.provider, res.model), "cost": res.cost, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
                 cur["rev"] += 1
                 _write(fid, cur)
-        yield {"type": "done", "cost": res.cost, "cached": res.cached, "model": res.model, "provider": res.provider, "rev": cur["rev"]}
+        yield {"type": "done", "cost": res.cost, "cached": res.cached, "model": res.model, "provider": res.provider, "rev": cur["rev"], "cut_off": res.cut_off}
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
     except Exception as e:  # noqa: BLE001

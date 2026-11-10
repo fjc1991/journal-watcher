@@ -233,12 +233,13 @@ async function chapterSummary(card, box, i, fresh) {         // the estimate fir
     <div class="row" style="gap:8px"><button class="btn primary small" data-sum-go>${fresh ? "Write it again" : "Write the summary"}</button><button class="btn small" data-sum-no>Cancel</button></div></div>`;
   $("[data-sum-no]", out).onclick = () => { out.innerHTML = c.summary ? sumHtml(c.summary) : ""; if (!c.summary) out.classList.add("hide"); };
   $("[data-sum-go]", out).onclick = async () => {
-    out.innerHTML = `<div class="pmeta" role="status">Writing the summary…</div><div class="of-md" data-live></div>`; let text = "", fin = null;
+    out.innerHTML = `<div class="pmeta" role="status">Writing the summary…</div><div class="of-md" data-live></div>`; let text = "", fin = null, cut = null;
     try {
       await lines("/api/ai/chapter", {file, chapter: i, fresh: !!fresh}, m => {
         if (m.type === "text") { text += m.delta; $("[data-live]", out).innerHTML = md(text); } else if (m.type === "final") { fin = m.text; } else if (m.type === "error") throw new Error(m.error);
-        else if (m.type === "done") { c.summary = {text: fin || text, model: m.model, cost: m.cost, left_out: m.left_out}; }
+        else if (m.type === "done") { if (m.cut_off) cut = fin || text; else c.summary = {text: fin || text, model: m.model, cost: m.cost, left_out: m.left_out}; }
       });
+      if (cut != null) { out.innerHTML = `<div class="of-md">${md(cut)}</div><div class="pmeta bad" role="alert">This summary was cut off at the model’s length limit; the end is missing, so it was not saved with the book. <button class="linkbtn" data-chap-redo>Write it again</button></div>`; return; }       // (a complete summary saved earlier is still the book’s)
       out.innerHTML = sumHtml(c.summary); const b = $(`[data-chap-sum="${i}"]`, box); if (b) b.textContent = "Summary";
     } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }
   };

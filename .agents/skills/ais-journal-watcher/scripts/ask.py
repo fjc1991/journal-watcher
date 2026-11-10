@@ -76,7 +76,7 @@ def summary_stream(pdf_path, meta, template_id=None, fresh=False):
             if kind == "text":
                 yield {"type": "text", "delta": v}
             else:
-                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached}
+                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "cut_off": v.cut_off}    # cut_off: it stopped at the model's length limit, so the page does not offer to save it as the paper's summary
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
     except Exception as e:  # noqa: BLE001
@@ -131,7 +131,7 @@ def stream(pdf_path, question, mode="rag", history=None, override=None, fresh=Fa
             if kind == "text":
                 yield {"type": "text", "delta": v}
             else:
-                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "invalid": invalid_citations(v.text, len(chosen))}
+                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "cut_off": v.cut_off, "invalid": invalid_citations(v.text, len(chosen))}
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
     except Exception as e:  # noqa: BLE001

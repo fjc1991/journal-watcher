@@ -46,8 +46,8 @@ function sectionsOf(doc) {
   const order = [], R = doc.render;
   const parts = mdParts(doc.raw, {render: t => cites(md(t), doc, order), leadTitle: ""});
   const refs = (R.refs || []).map(r => `<li${doc.style === "numbered" ? ` value="${r.n}"` : ""}>${esc(r.ref[0])}${r.ref[1] ? `<i>${esc(r.ref[1])}</i>` : ""}${esc(r.ref[2])} <button class="linkbtn" data-open="${esc(r.file)}">Open</button></li>`).join("");
-  const probs = (doc.invalid ? 1 : 0) + (doc.uncited.length ? 1 : 0) + (doc.unused.length ? 1 : 0) + ((doc.missing || []).length ? 1 : 0);
-  const check = (doc.invalid ? callout("warn", `${doc.invalid} citation${doc.invalid === 1 ? "" : "s"} pointed at notes that don’t exist and ${doc.invalid === 1 ? "was" : "were"} removed from the text you copy or export.`) : "") +
+  const probs = (doc.invalid ? 1 : 0) + (doc.uncited.length ? 1 : 0) + (doc.unused.length ? 1 : 0) + ((doc.missing || []).length ? 1 : 0) + (doc.cut_off ? 1 : 0);
+  const check = (doc.cut_off ? callout("warn", "This draft was cut off at the model’s length limit; the end is missing. Finish it by hand, or write it again with fewer words or fewer papers.") : "") + (doc.invalid ? callout("warn", `${doc.invalid} citation${doc.invalid === 1 ? "" : "s"} pointed at notes that don’t exist and ${doc.invalid === 1 ? "was" : "were"} removed from the text you copy or export.`) : "") +
     (doc.uncited.length ? `<details class="dr-unc"><summary>${doc.uncited.length} sentence${doc.uncited.length === 1 ? "" : "s"} carry no citation: check them, add a source or cut them</summary><ul>${doc.uncited.map(s => `<li>${esc(s)}</li>`).join("")}</ul></details>` : "") +
     (doc.unused.length ? `<div class="dr-ck">${ico("info", "sm")} Not cited: ${doc.unused.map(u => esc(u.cite)).join("; ")}</div>` : "") +
     ((doc.missing || []).length ? `<div class="dr-ck">${ico("info", "sm")} Left out because they have no card: ${doc.missing.map(u => esc((u.title || "").slice(0, 60))).join("; ")}</div>` : "") +
@@ -136,7 +136,7 @@ async function write(again) {
         else if (m.type === "draft") { D.data.doc = m.doc; D.form.style = m.doc.style; D.form.pages = m.doc.pages; } else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
-    if (done) toast("Draft written" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
+    if (done) toast((done.cut_off ? "Draft written, but it was cut off at the model’s length limit (see “Check before you use it”)" : "Draft written") + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
   } catch (e) { D.busy = false; draw(); if ($("#dr-st", D.el)) $("#dr-st", D.el).innerHTML = errInline(e); if (!/Cancelled/.test(e.message)) notifyError(e); return; }
   D.busy = false; draw();
 }

@@ -4,7 +4,7 @@
 // "⋯ N lines hidden" gaps between them. Highlights are fractions of the page, so every band can draw them.
 import * as pdfjs from "/static/vendor/pdfjs/pdf.mjs";
 import {errBox, notifyError, ico, S, $, $$, esc, fileUrl, clamp, debounce, toast, md, COLORS, colorOf, colorName, legend, emit, on, BOOK_HOW, BOOK_STALE, bookEmpty, usd, exactCost} from "./state.js";
-import {frame, mdParts, chipList, wire as wireOut} from "./output.js";
+import {frame, mdParts, chipList, callout, wire as wireOut} from "./output.js";
 import * as N from "./notes.js";
 import * as T from "./text.js";
 
@@ -713,9 +713,9 @@ async function genSummary(fresh) {
         if (S.file !== forFile) { rd.cancel().catch(() => {}); return; }       // (another paper was opened meanwhile: its tab is not written over)
         if (m.type === "text") { text += m.delta; el.innerHTML = sumFrame(text, {live: true, key: "gen", title: tplName}); } else if (m.type === "error") throw new Error(m.error); else if (m.type === "done") done = m; }
     }
-    el._gen = text; el._model = done ? done.model : "";
-    el.innerHTML = sumFrame(text, {key: "gen", title: tplName, meta: [done && {t: done.provider + " · " + done.model}, done && (done.cached ? {t: "cached"} : done.cost != null ? {t: exactCost(done.cost)} : null), {t: "not saved yet", cls: "edited", title: "Use the buttons below to keep it"}]});
-    act.innerHTML = `<button class="rd-btn" data-sx="notes">→ Save to notes</button><button class="rd-btn" data-sx="replace">${S.meta.summary ? "Replace the saved summary" : "Save as this paper’s summary"}</button><button class="rd-btn" data-sx="copy">Copy</button><button class="rd-btn" data-sx="again" title="Generate again, ignoring the stored answer">⟳</button>`;
+    el._gen = text; el._model = done ? done.model : ""; const cut = !!(done && done.cut_off);          // it stopped at the model’s length limit: shown, but never offered as the paper’s summary
+    el.innerHTML = sumFrame(text, {key: "gen", title: tplName, notices: cut ? callout("warn", `This summary was cut off at the model’s length limit; the end is missing, so it can’t be saved as this paper’s summary. <button class="rd-btn" data-sx="again">Generate again</button>`) : "", meta: [done && {t: done.provider + " · " + done.model}, done && (done.cached ? {t: "cached"} : done.cost != null ? {t: exactCost(done.cost)} : null), {t: "not saved yet", cls: "edited", title: "Use the buttons below to keep it"}]});
+    act.innerHTML = `<button class="rd-btn" data-sx="notes">→ Save to notes</button>${cut ? "" : `<button class="rd-btn" data-sx="replace">${S.meta.summary ? "Replace the saved summary" : "Save as this paper’s summary"}</button>`}<button class="rd-btn" data-sx="copy">Copy</button><button class="rd-btn" data-sx="again" title="Generate again, ignoring the stored answer">⟳</button>`;
     act.classList.remove("hide"); $("#sum-saved", root).classList.toggle("hide", !S.meta.summary);
   } catch (e) { if (S.file === forFile) el.innerHTML = errBox(e, {retry: 'data-sx="again"'}); }
   finally { $("#sum-go", root).disabled = false; }            // (also when another paper was opened meanwhile: its Generate button works)

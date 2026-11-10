@@ -319,10 +319,10 @@ def stream(fid, rows, settings, fresh=False):
             doc = {"version": 1, "rev": old.get("rev", 0) + 1, "settings": s, "style": s["style"], "pages": s["pages"], "raw": raw, "papers": pt, "notes": nt,
                    "model": "%s · %s" % (res.provider, res.model), "cost": res.cost, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                    "words": len(re.findall(r"\w+", re.sub(r"#+\s.*", "", PAREN.sub("", NARR.sub("", raw))))), "invalid": ck["invalid"], "uncited": ck["uncited"][:30],
-                   "unused": ck["unused"], "missing": missing}
+                   "unused": ck["unused"], "missing": missing, "cut_off": res.cut_off}       # cut_off: it stopped at the model's length limit; kept (you can finish it by hand) and marked as unfinished until you edit it
             _write(fid, doc)
         yield {"type": "draft", "doc": {**doc, "render": render(doc)}}
-        yield {"type": "done", "cost": res.cost, "cached": res.cached, "model": res.model, "provider": res.provider}
+        yield {"type": "done", "cost": res.cost, "cached": res.cached, "model": res.model, "provider": res.provider, "cut_off": res.cut_off}
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
     except Exception as e:  # noqa: BLE001
@@ -345,6 +345,7 @@ def update(fid, raw=None, style=None, pages=None, rev=None):
         if raw is not None:
             doc["raw"] = str(raw)[:60000]
             doc["edited"] = True
+            doc["cut_off"] = False                 # the text is yours now: the "cut off" note goes
             ck = check(doc["raw"], doc["papers"], doc["notes"])
             doc.update({"invalid": ck["invalid"], "uncited": ck["uncited"][:30], "unused": ck["unused"],
                         "words": len(re.findall(r"\w+", re.sub(r"#+\s.*", "", PAREN.sub("", NARR.sub("", doc["raw"])))))})
