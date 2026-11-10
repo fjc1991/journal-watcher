@@ -49,13 +49,44 @@ EST_SCREEN_COST_PER_PAPER = 0.0015  # Claude Sonnet 5.5's price for what one pap
 EST_SCREEN_CHARS, EST_SCREEN_OUT = 1500, 60      # one paper in a screening batch: its share of the prompt and the abstract (characters), and its verdict (tokens)
 
 
-def est_screen_cost_per_paper():
-    """What screening one paper costs with the model chosen for screening (Settings → AI), or None when its price is not known."""
+SCREEN_HISTORY_MIN = 50        # papers on record (sent to the same provider and model) before the estimate rests on what they cost: two full batches
+SCREEN_HISTORY_CALLS = 200     # only the most recent screening calls count: a price or a prompt that changed long ago should not hold the estimate
+
+
+def screen_history(provider, model):
+    """What your earlier screening with this provider and model cost, from the usage ledger: (papers sent, mean cost per paper). Only the calls that say how many
+    papers they carried (so not a Settings Test, nor a call made before the ledger recorded it) and that have a price; an answer that could not be used was paid for
+    too, so it counts."""
+    import ai
+    rows = [r for r in ai._rows() if r.get("feature") == "screen" and r.get("provider") == provider and r.get("model") == model
+            and type(r.get("papers")) is int and r["papers"] > 0 and not r.get("cached") and not r.get("cancelled")
+            and isinstance(r.get("cost"), (int, float))][-SCREEN_HISTORY_CALLS:]
+    n = sum(r["papers"] for r in rows)
+    return n, (sum(r["cost"] for r in rows) / n if n else None)
+
+
+def screen_estimate(provider=None, model=None):
+    """(what screening one paper costs, what that rests on) with the model chosen for screening (Settings → AI), or the one given: "history" = the mean of what your
+    earlier screenings with it cost per paper, once SCREEN_HISTORY_MIN papers are on record; else "prices" = its price for EST_SCREEN_CHARS in and EST_SCREEN_OUT out;
+    (None, None) when neither is known."""
     try:
         import ai
-        return ai.estimate("screen", EST_SCREEN_CHARS, EST_SCREEN_OUT)
+        if not model:
+            provider, model = ai.feature_model("screen")
+        if not model:
+            return None, None
+        n, mean = screen_history(provider, model)
+        if n >= SCREEN_HISTORY_MIN:
+            return mean, "history"
+        per = ai.cost_of(model, {"in": int(EST_SCREEN_CHARS / 3.3), "out": EST_SCREEN_OUT}, 0, provider)
+        return per, ("prices" if per is not None else None)
     except Exception:  # noqa: BLE001      (the AI layer is not installed: the direct Anthropic path screens with Claude Sonnet 5.5)
-        return EST_SCREEN_COST_PER_PAPER
+        return EST_SCREEN_COST_PER_PAPER, "prices"
+
+
+def est_screen_cost_per_paper(provider=None, model=None):
+    """What screening one paper costs with the model chosen for screening (or the one given), or None when it is not known: see screen_estimate."""
+    return screen_estimate(provider, model)[0]
 
 for _k, _v in dl.load_env().items():
     os.environ.setdefault(_k, _v)
@@ -967,25 +998,37 @@ def screen_test(provider, model):
 class BatchFailed(Exception):
     """One batch of papers could not be judged. `reason` is why, in the provider's own words where there are some: it is shown on each paper's card and in the log."""
 
-    def __init__(self, reason):
+    def __init__(self, reason, partial=None):
         super().__init__(reason)
         self.reason = reason
+        self.partial = partial or {}       # {n: result} of the papers that were judged all the same (the halves of a batch that was split after a cut-off answer)
 
 
-def _screen_batch(system, batch, usage, override=None):
+SPLIT_DEPTH = 2                # a batch whose answer was cut off is halved at most this many times (25 → 13 → 7 papers: 1 + 2 + 4 requests at most, never one per paper)
+
+
+def _screen_batch(system, batch, usage, override=None, stop=None):
     """One batch of papers judged by the model of the "screen" feature (Settings → AI), through the AI layer: the monthly budget stops it, local-only mode applies, and
     every call is in the usage ledger. Returns {n: result}. Raises ai.Blocked when nothing more may be asked, or the ai.AIError of an answer that asking again cannot change
-    (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either. Raises BatchFailed (with the reason) when this batch could not be judged."""
+    (ai.retryable: a refused request, key, credit or model): the caller stops the whole screening on either. Raises BatchFailed (with the reason) when this batch could not be judged.
+    An answer that is not the JSON asked for is not simply sent again: if `stop` (the researcher's Stop) is set, nothing more is sent and None is returned (the papers
+    stay unscreened); an answer cut off at the length limit is asked again as two halves (SPLIT_DEPTH; BatchFailed.partial then holds the verdicts of the halves that
+    did answer); anything else is asked once more, and no further."""
     items = []
     for n, p in enumerate(batch, 1):
         items.append({"n": n, "journal": p.get("abbr"), "year": (p.get("pub_date") or "")[:4],
                       "title": p.get("title"), "keywords": p.get("keywords"),
                       "abstract": (p.get("abstract") or "")[:1800] or None})
-    why = "no answer"
+    return _ask_verdicts(system, items, usage, override, stop, SPLIT_DEPTH)
+
+
+def _ask_verdicts(system, items, usage, override, stop, depth):
+    """The verdicts {n: result} for these papers of one batch (each carries its number n in the batch, so the halves of a split batch merge back); see _screen_batch."""
+    why, resent = "no answer", False
     for attempt in range(3):
         try:
             res = ai.chat("screen", [{"role": "user", "content": json.dumps(items, ensure_ascii=False)}], system=system, schema=SCREEN_SCHEMA, max_tokens=8000,
-                          override=override)
+                          override=override, log={"papers": len(items)})       # (the ledger row says how many papers it carried: the estimate rests on it, see screen_history)
         except ai.Declined as e:
             if e.result is not None:
                 usage.add_result(e.result)                     # a refusal is billed too
@@ -1003,7 +1046,31 @@ def _screen_batch(system, batch, usage, override=None):
         try:
             out = json.loads(res.text)["results"]
         except (ValueError, KeyError, TypeError):
-            why = "the model's answer was not the JSON that screening asks for (%s)" % (re.sub(r"\s+", " ", res.text or "").strip()[:80] or "it was empty")
+            if stop is not None and stop.is_set():             # Stop was pressed meanwhile: nothing is sent again, and the papers stay unscreened
+                return None
+            began = re.sub(r"\s+", " ", res.text or "").strip()[:80] or "it was empty"
+            if getattr(res, "cut_off", False):                 # the answer hit the length limit: the same request would be cut off the same way, so ask for half the papers at a time
+                if len(items) < 2 or depth <= 0:
+                    raise BatchFailed("the model's answer was cut off at its length limit before the verdicts were complete (%s)" % began)
+                mid = (len(items) + 1) // 2
+                got, whys = {}, []
+                for half in (items[:mid], items[mid:]):
+                    try:
+                        part = _ask_verdicts(system, half, usage, override, stop, depth - 1)
+                    except BatchFailed as e:
+                        got.update(e.partial)
+                        whys.append(e.reason)
+                        continue
+                    if part is None:                           # stopped: nothing of this batch is kept (the caller leaves its papers unscreened)
+                        return None
+                    got.update(part)
+                if whys:
+                    raise BatchFailed(whys[0], got)
+                return got
+            why = "the model's answer was not the JSON that screening asks for (%s)" % began
+            if resent:                                         # asked once more already: a third identical request would only be paid for again
+                break
+            resent = True
             continue
         return {r["n"]: r for r in out if isinstance(r, dict) and isinstance(r.get("n"), int)}
     raise BatchFailed(why)
@@ -1139,7 +1206,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             if halt.is_set() or stop.is_set():
                 return None              # never sent: the papers stay unscreened
             try:
-                return _screen_batch(system, b, run.usage, override)
+                return _screen_batch(system, b, run.usage, override, stop)
             except ai.AIError:
                 halt.set()
                 raise
@@ -1164,9 +1231,9 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
                         blocked = e
                     continue
                 except BatchFailed as e:
-                    res, why = {}, e.reason
-                    emit("log", {"msg": "Screening failed for %d papers: %s" % (len(batch), why[:300]), "level": "warn"})
-                if res is None:                                # not sent (see one): left unscreened, to pick up later
+                    res, why = e.partial, e.reason             # (partial: the halves of a split batch that did answer keep their verdicts)
+                    emit("log", {"msg": "Screening failed for %d papers: %s" % (len([n for n in range(1, len(batch) + 1) if not res.get(n)]), why[:300]), "level": "warn"})
+                if res is None:                                # not sent (see one), or stopped half-way (see _screen_batch): left unscreened, to pick up later
                     continue
                 if res:
                     answered += 1                              # (a batch that failed gave no verdict: it does not count as screened by this model)
@@ -1219,10 +1286,7 @@ def screen(run, emit, stop, ids=None, batch_size=25, workers=4):
             ov = {"provider": prov, "model": b["model"]}
             fp2 = screen_fingerprint(system, ov)
             reused0 = run.reused
-            try:
-                est2 = ai.cost_of(b["model"], {"in": int(EST_SCREEN_CHARS / 3.3), "out": EST_SCREEN_OUT}, 0, prov)
-            except Exception:  # noqa: BLE001
-                est2 = None
+            est2 = est_screen_cost_per_paper(prov, b["model"])
             rest = reuse(rest, fp2, est2)
             blocked2, answered2 = run_pass(rest, ov, fp2)
             if answered2 or run.reused > reused0:

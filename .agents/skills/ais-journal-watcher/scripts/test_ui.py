@@ -488,7 +488,7 @@ def fake_ssrn(query, y0, y1, limit=200, progress=None):                         
     open(SSRNLOG, 'a').write('%s|%s|%s|%s\n' % (query, y0, y1, limit))
     return [{'title': 'Platform governance on SSRN %d' % i, 'doi': '10.2139/ssrn.99000%d%d' % (y0, i), 'pub_date': '%d-01' % y0, 'abstract': 'We study platform governance on SSRN.', 'keywords': None, 'authors': ['A. Author']} for i in range(2)]
 fx.crossref_ssrn = fake_ssrn
-def fake_screen(system, batch, usage, override=None):                                          # what the model is asked, one line per batch (the test counts them)
+def fake_screen(system, batch, usage, override=None, stop=None):                                          # what the model is asked, one line per batch (the test counts them)
     open(SCREENLOG, 'a').write('%d\n' % len(batch))
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen
@@ -997,6 +997,7 @@ fx.fetch_journal = lambda j: []                                                 
 
             page.click("#settingsbtn"); page.wait_for_selector("#st-body tr[data-p]")
             check("settings: providers, per-feature models and a key-free status", page.locator("tr[data-f]").count() >= 17 and page.locator("tr[data-f='ideas']").count() == 1 and "key found" in page.inner_text("tr[data-p='fake']"))
+            check("settings: the three small helper features (suggested questions, spoken briefings, flashcards) say that a cheap model is enough", all("a cheap model is enough" in page.inner_text("tr[data-f='%s']" % k_) for k_ in ("suggest", "audio", "flashcards")), page.inner_text("tr[data-f='suggest']"))
             JS_TIDY = """(() => { const r = e => e.getBoundingClientRect(), mid = e => r(e).top + r(e).height / 2;
               const rows = [...document.querySelectorAll('tr[data-p]')], keyRows = rows.filter(t => { const i = t.querySelector('input[type=password]'); return i && i.offsetParent !== null; });
               const hs = rows.map(t => Math.round(r(t).height)), feat = [...document.querySelectorAll('tr[data-f]:not([data-f=emb])')];
@@ -3346,6 +3347,20 @@ fx.fetch_journal = lambda j: []                                                 
             check("'calls without a price' opens Settings → AI at the prices, where each model says where its price comes from (m1: typed in Settings)", any(m == "m1" and s.startswith("yours") for m, s in rows_), str(rows_))
             cfg_ = api("/api/config")
             check("the screening estimate is the screening model's price, and the page knows that model's name", cfg_.get("est_cost_per_paper") is not None and abs(cfg_["est_cost_per_paper"] - (1500 / 3.3 * 1.0 + 60 * 2.0) / 1e6) < 1e-6 and cfg_.get("screen_model") == "m1", str({k: cfg_.get(k) for k in ("est_cost_per_paper", "screen_model")}))
+            est_js_ = "(async () => { CFG = await api('/api/config'); updateEst(); return document.querySelector('#est').textContent; })()"
+            est0_ = page.evaluate(est_js_)
+            check("with no screening on record the estimate rests on the price, and the search form says nothing more", cfg_.get("est_cost_basis") == "prices" and "est. $" in est0_ and "earlier screenings" not in est0_, str(cfg_.get("est_cost_basis")) + " " + est0_[:200])
+            led_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "ai_usage.jsonl"); led_n_ = os.path.getsize(led_)
+            try:
+                with open(led_, "a", encoding="utf-8") as f_:                # two earlier screening calls of 25 papers each with this model, $0.05 each: $0.002 a paper
+                    for _ in range(2):
+                        f_.write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "screen", "papers": 25, "in": 1, "out": 1, "cost": 0.05, **cfg_["screen_feature"]}) + "\n")
+                cfg2_ = api("/api/config"); est1_ = page.evaluate(est_js_)
+                check("once 50 screened papers are on record the estimate is what they cost per paper, and the search form says so in one phrase", cfg2_.get("est_cost_basis") == "history" and abs(cfg2_["est_cost_per_paper"] - 0.002) < 1e-9 and "(from what your earlier screenings cost)" in est1_,
+                      str({k: cfg2_.get(k) for k in ("est_cost_per_paper", "est_cost_basis")}) + " " + est1_[:200])
+            finally:
+                os.truncate(led_, led_n_)
+            page.evaluate(est_js_)
             page.evaluate("window.Settings && Settings.close()")
 
             print("you can delete what you added")

@@ -429,7 +429,7 @@ def _sent(messages, system):
     return n, re.sub(r"\s+", " ", last)[:180]
 
 
-def _log(feature, r, sent=None, note=None):
+def _log(feature, r, sent=None, extra=None):
     row = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "feature": feature, "provider": r.provider,
            "model": r.model, **r.usage, "cost": 0.0 if r.cached else r.cost}
     act.add_cost(row["cost"])           # the activity tray shows what the running job has cost so far
@@ -439,6 +439,8 @@ def _log(feature, r, sent=None, note=None):
         row["cached"] = True
     if sent:
         row["chars"], row["preview"] = sent
+    if extra:
+        row.update({k: v for k, v in extra.items() if k not in row})      # the caller's own facts about the call (screening: how many papers it carried); never over a field of the ledger
     with _lock:
         os.makedirs(STATE, exist_ok=True)
         with open(LEDGER, "a", encoding="utf-8") as f:
@@ -624,10 +626,11 @@ def cache_stats():
 
 # ---------------------------------------------------------------- chat
 
-def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_search=False, cache=False, fresh=False, override=None, cache_if=None):
+def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_search=False, cache=False, fresh=False, override=None, cache_if=None, log=None):
     """Yield ("text", delta) as the answer arrives, then ("done", Result). `schema` asks for JSON matching it.
     cache_if(text) -> bool lets the caller keep a bad answer (cut-off JSON, say) out of the cache, so asking again really asks again.
-    An answer that stopped at the length limit (Result.cut_off) is still returned, never raised (the connection test and the references importer use such answers), but it is never cached."""
+    An answer that stopped at the length limit (Result.cut_off) is still returned, never raised (the connection test and the references importer use such answers), but it is never cached.
+    log: extra fields for this call's row in the usage ledger (screening writes {"papers": n}: how many papers the request carried)."""
     if act.is_cancelled():
         raise Cancelled("Cancelled.")
     name, p, f = _route(feature, override, web_search)
@@ -638,7 +641,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
         if hit:
             r = Result(hit["text"], hit.get("usage"), name, f["model"], cost=0.0, sources=hit.get("sources"), cached=True)
             yield "text", r.text
-            _log(feature, r, sent)
+            _log(feature, r, sent, log)
             yield "done", r
             return
     run = _anthropic if p.get("type") == "anthropic" else _compat
@@ -651,7 +654,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
                 _log_cancelled(feature, name, f, sent, "".join(got))
                 raise Cancelled("Cancelled.")
             if kind == "done":
-                _log(feature, v, sent)
+                _log(feature, v, sent, log)
                 if key and not v.cut_off and (cache_if is None or cache_if(v.text)):
                     os.makedirs(CACHE, exist_ok=True)
                     tmp = dl.tmp_path(os.path.join(CACHE, key + ".json"))
@@ -661,7 +664,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
             yield kind, v
     except Declined as e:
         if e.result is not None:                           # a refusal is billed like any answer: it counts in the ledger, the budget and Settings → Usage
-            _log(feature, e.result, sent)
+            _log(feature, e.result, sent, log)
         raise
 
 

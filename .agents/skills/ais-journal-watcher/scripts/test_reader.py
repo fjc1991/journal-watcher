@@ -6628,7 +6628,7 @@ print("OK")
         import pipeline as pl_
         abbr = pl_.journals()[0]["abbr"]
         hit = [{"term": "DiD", "field": "abstract", "text": "DiD"}]
-        def fake_batch(system, batch, usage, override=None):
+        def fake_batch(system, batch, usage, override=None, stop=None):
             return {n: {"n": n, "verdict": ["download", "borderline", "skip"][n % 3], "relevance": 10 * n, "topics": [], "reason": "r%d" % n, "method": "Econometrics (DiD)"}
                     for n, _ in enumerate(batch, 1)}
         def arts(with_hits):
@@ -6688,7 +6688,7 @@ print("OK")
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
         asked, fetched, events = [], [], []
-        def fake_batch(system, batch, usage, override=None):
+        def fake_batch(system, batch, usage, override=None, stop=None):
             asked.extend(p["title"] for p in batch)
             return {n: {"n": n, "verdict": "download" if "Platform" in p["title"] else "skip", "relevance": 80, "topics": [topic], "reason": "because", "method": None} for n, p in enumerate(batch, 1)}
         real = (pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts)
@@ -6728,7 +6728,7 @@ print("OK")
             asked.clear(); r6 = run_with(); pl_.screen(r6, emit, stop)                           # older than the number of days: asked again, and remembered afresh
             assert len(asked) == 3 and r6.reused == 0
             asked.clear(); r7 = run_with(); pl_.screen(r7, emit, stop); assert not asked and r7.reused == 3
-            pl_._screen_batch = lambda system, batch, usage, override=None: {}                                  # a failure is an error verdict and is never remembered
+            pl_._screen_batch = lambda system, batch, usage, override=None, stop=None: {}                                  # a failure is an error verdict and is never remembered
             asked.clear(); r8 = run_with(query="fails"); pl_.screen(r8, emit, stop)
             assert {r8.papers[i]["verdict"] for i in r8.papers} == {"error"}
             pl_._screen_batch = fake_batch
@@ -7111,12 +7111,51 @@ print("OK")
             assert len(chat_calls()) - n0 == 6, len(chat_calls()) - n0                                                        # 2 batches x 3 tries
             assert {r3.papers[i]["verdict"] for i in r3.order} == {"error"} and all("upstream overloaded" in r3.papers[i]["reason"] and "HTTP 503" in r3.papers[i]["reason"] for i in r3.order), [r3.papers[i]["reason"] for i in r3.order]
             assert sum(1 for e, d in events if e == "log" and "Screening failed for" in d["msg"]) == 2 and r3.screen_error == ""
-            # 4. a summariser: it answers, in prose: every answer is paid for and in the ledger, and the reason says it was not the JSON (with how it began)
+            # 4. a summariser: it answers, in prose: it is asked once more and no further (two requests, not three), every answer is paid for and in the ledger, and the
+            #    reason says it was not the JSON (with how it began)
             Fake.http_error = None; Fake.responder = lambda body: ["This paper studies how ", "platforms nudge users."]
             n0, rows0 = len(chat_calls()), len(ai.usage_log(100000))
             r4 = new_run("prose", n=2); pl_.screen(r4, emit, stop, batch_size=2, workers=1)
-            assert len(chat_calls()) - n0 == 3 and len(ai.usage_log(100000)) - rows0 == 3
+            assert len(chat_calls()) - n0 == 2 and len(ai.usage_log(100000)) - rows0 == 2, (len(chat_calls()) - n0, len(ai.usage_log(100000)) - rows0)
             assert {r4.papers[i]["verdict"] for i in r4.order} == {"error"} and all("not the JSON" in r4.papers[i]["reason"] and "This paper studies" in r4.papers[i]["reason"] for i in r4.order), r4.papers[r4.order[0]]["reason"]
+            # 4b. an answer cut off at the length limit is not sent again as it was: the batch is asked again as two halves (the papers keep their numbers), every paper
+            #     gets its verdict, and the cut-off answer is paid for and counted like the others
+            asked = lambda body: [it["n"] for it in json.loads(body["messages"][-1]["content"])]
+            Fake.responder = lambda body: [verdicts(body)[0][:40]] if len(asked(body)) > 2 else verdicts(body)
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            n0, rows0, events[:] = len(chat_calls()), len(ai.usage_log(100000)), []
+            r4b = new_run("cutoff", n=4); pl_.screen(r4b, emit, stop, batch_size=4, workers=1)
+            sent = [asked(b) for b in chat_calls()[n0:]]
+            assert sent == [[1, 2, 3, 4], [1, 2], [3, 4]], sent
+            assert all(r4b.papers[i]["verdict"] == "download" for i in r4b.order) and len(ai.usage_log(100000)) - rows0 == 3, [r4b.papers[i].get("verdict") for i in r4b.order]
+            assert abs(r4b.usage.cost() - sum(x["cost"] for x in ai.usage_log(3))) < 1e-9 and not any(e == "log" and "Screening failed" in d["msg"] for e, d in events)
+            # 4c. every answer is cut off, however small the batch: halved twice and no further (1 + 2 + 4 requests for 8 papers, never one per paper), and the reason says so
+            Fake.responder = lambda body: ['{"results": [{"n": 1, "verd']; Fake.ending = "length"
+            n0 = len(chat_calls()); r4c = new_run("cutall", n=8); pl_.screen(r4c, emit, stop, batch_size=8, workers=1)
+            sent = [asked(b) for b in chat_calls()[n0:]]
+            assert sent == [[1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4], [1, 2], [3, 4], [5, 6, 7, 8], [5, 6], [7, 8]], sent
+            assert all(r4c.papers[i]["verdict"] == "error" and "cut off" in r4c.papers[i]["reason"] for i in r4c.order), r4c.papers[r4c.order[0]]
+            n0 = len(chat_calls()); r4c1 = new_run("cutone", n=1); pl_.screen(r4c1, emit, stop, batch_size=1, workers=1)      # one paper cannot be halved: asked once
+            assert len(chat_calls()) - n0 == 1 and r4c1.papers["cutone-0"]["verdict"] == "error" and "cut off" in r4c1.papers["cutone-0"]["reason"], (len(chat_calls()) - n0, r4c1.papers["cutone-0"])
+            # 4d. one half answers, the other answers in prose (asked twice): the papers that were judged keep their verdicts, only the others fail, and the log counts those
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else (verdicts(body) if asked(body)[0] == 1 else ["Sorry, prose."])
+            n0, events[:] = len(chat_calls()), []
+            r4d = new_run("half", n=4); pl_.screen(r4d, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2], [3, 4], [3, 4]], [asked(b) for b in chat_calls()[n0:]]
+            assert [r4d.papers[i]["verdict"] for i in r4d.order] == ["download", "download", "error", "error"] and "not the JSON" in r4d.papers["half-3"]["reason"], [r4d.papers[i].get("reason") for i in r4d.order]
+            assert [d["msg"] for e, d in events if e == "log" and "Screening failed" in d["msg"]][0].startswith("Screening failed for 2 papers"), [d["msg"] for e, d in events if e == "log"]
+            Fake.ending = None
+            # 4e. Stop pressed while an answer that cannot be used came in: nothing is sent again, and the papers are left unscreened (not marked as failed)
+            st2 = threading.Event()
+            Fake.responder = lambda body: (st2.set(), ["Not JSON at all."])[1]
+            n0 = len(chat_calls()); r4e = new_run("stopped", n=2); pl_.screen(r4e, emit, st2, batch_size=2, workers=1)
+            assert len(chat_calls()) - n0 == 1 and not any(r4e.papers[i].get("verdict") for i in r4e.order), (len(chat_calls()) - n0, [r4e.papers[i].get("verdict") for i in r4e.order])
+            st3 = threading.Event()                                                                                        # …and the same for an answer that was cut off: its halves are not asked
+            Fake.responder = lambda body: (st3.set(), ["{"])[1]; Fake.ending = "length"
+            n0 = len(chat_calls()); r4f = new_run("stoppedcut", n=4); pl_.screen(r4f, emit, st3, batch_size=4, workers=1)
+            assert len(chat_calls()) - n0 == 1 and not any(r4f.papers[i].get("verdict") for i in r4f.order), (len(chat_calls()) - n0, [r4f.papers[i].get("verdict") for i in r4f.order])
+            Fake.ending = None
             # 5. an answer that leaves a paper out: only that paper fails, and says so
             Fake.responder = lambda body: [json.dumps({"results": [{"n": 1, "verdict": "skip", "relevance": 5, "topics": [], "method": "Survey", "reason": "no"}]})]
             r5 = new_run("partial", n=2); pl_.screen(r5, emit, stop, batch_size=2, workers=1)
@@ -7138,7 +7177,7 @@ print("OK")
             no = pl_.screen_test("fake", "m1"); assert not no["ok"] and no["error"].startswith("Can’t screen papers: the provider refused") and "HTTP 404" in no["error"], no
             assert ai.test("fake", "m1")["ok"]                                                                             # …while the plain test says the model works: why the screening test exists
         finally:
-            Fake.http_error = None; Fake.responder = None; pl_.time.sleep = real_sleep
+            Fake.http_error = None; Fake.responder = None; Fake.ending = None; pl_.time.sleep = real_sleep
             if saved_cfg is None:
                 os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
             else:
@@ -7229,7 +7268,59 @@ print("OK")
                 open(ai.CONFIG, "w").write(saved[4])
             shutil.rmtree(root, ignore_errors=True)
 
-    check("screening errors: the provider's own words on every failed paper; a refused request (a model without structured output, a refused key) stops at the first batch and leaves the papers unscreened with the reason on the run; a busy provider or prose marks only that batch; Retry screening asks again; the screening Test finds a model that cannot screen", t_screen_errors)
+    check("screening errors: the provider's own words on every failed paper; a refused request (a model without structured output, a refused key) stops at the first batch and leaves the papers unscreened with the reason on the run; a busy provider or prose marks only that batch (prose is asked twice, not three times); a cut-off answer is asked again in halves, twice at most; Stop sends nothing again; Retry screening asks again; the screening Test finds a model that cannot screen", t_screen_errors)
+
+    def t_screen_estimate():
+        """The screening estimate rests on what your earlier screenings with the same provider and model cost per paper (the ledger rows that say how many papers they
+        carried, the last 200 of them), once 50 papers are on record; else on the price; a Settings Test, another provider or model, a saved answer or a call without a
+        price never counts. A screening call writes its number of papers on its ledger row; the Settings Test does not."""
+        import pipeline as pl_
+        saved = (ai.LEDGER, open(ai.CONFIG).read() if os.path.exists(ai.CONFIG) else None)
+        ai.LEDGER = os.path.join(TMP, "ledger-screen-est.jsonl")
+        def row(**k):
+            open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "screen", "provider": "fake", "model": "m1", "in": 1, "out": 1, **k}) + "\n")
+        feats = {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "fake", "model": "m1"}}
+        try:
+            write_cfg({**CFG, "features": feats})
+            by_price = (int(1500 / 3.3) * 1.0 + 60 * 2.0) / 1e6
+            assert pl_.screen_estimate() == (by_price, "prices"), pl_.screen_estimate()                                  # nothing on record: the price
+            row(cost=0.05, papers=25); row(cost=0.01); row(cost=0.07, papers=24)                                           # 49 papers (one too few), and a Settings Test (no number of papers)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 49 and abs(mean - 0.12 / 49) < 1e-12, (n, mean)
+            assert pl_.screen_estimate() == (by_price, "prices") and pl_.est_screen_cost_per_paper() == by_price, pl_.screen_estimate()
+            row(cost=0.005, papers=1)                                                                                      # the 50th paper: from here on, what they cost
+            row(cost=9.0, papers=25, provider="other"); row(cost=9.0, papers=25, model="m2"); row(cost=9.0, papers=25, feature="ask"); row(cost=0.0, papers=25, cached=True)
+            row(cost=None, papers=25); row(cost=9.0, papers=25, cancelled=True); row(cost=9.0, papers=0); row(cost=9.0, papers="25")
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 50 and abs(mean - 0.0025) < 1e-12, (n, mean)
+            per, basis = pl_.screen_estimate(); assert basis == "history" and abs(per - 0.0025) < 1e-12 and pl_.est_screen_cost_per_paper() == per, (per, basis)
+            assert pl_.screen_estimate("fake", "m9") == (None, None) and pl_.est_screen_cost_per_paper("fake", "m9") is None      # a model with no price and nothing on record: not known
+            write_cfg({**CFG, "prices": {}, "features": feats})
+            assert pl_.screen_estimate()[1] == "history" and abs(pl_.est_screen_cost_per_paper() - 0.0025) < 1e-12        # no price, but 50 papers on record: still known
+            write_cfg({**CFG, "features": feats})
+            for _ in range(pl_.SCREEN_HISTORY_CALLS - 1):                                                                  # only the most recent 200 calls count: the three old ones age out one by one
+                row(cost=0.001, papers=1)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 200 and abs(mean - (0.005 + 199 * 0.001) / 200) < 1e-12, (n, mean)
+            row(cost=0.001, papers=1)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 200 and abs(mean - 0.001) < 1e-12, (n, mean)
+            # a real screening writes the number of papers each request carried on its ledger row (a batch of 3, then one of 2); the Settings Test does not
+            os.remove(ai.LEDGER)
+            if os.path.exists(pl_.VERDICTS): os.remove(pl_.VERDICTS)
+            Fake.responder = lambda body: [json.dumps({"results": [{"n": it["n"], "verdict": "skip", "relevance": 1, "topics": [], "method": "Survey", "reason": "no"} for it in json.loads(body["messages"][-1]["content"])]})]
+            r = pl_.Run("weekly", {"topics": [], "query": "the estimate"})
+            for k in range(5):
+                r.add_paper({"id": "est-%d" % k, "title": "Paper %d" % k, "abbr": pl_.journals()[0]["abbr"], "pub_date": "2026-09-01", "abstract": "About something.", "keywords": None})
+            pl_.screen(r, lambda *a, **k: None, threading.Event(), batch_size=3, workers=1)
+            rows = ai.usage_log(10)
+            assert sorted(x.get("papers") or 0 for x in rows) == [2, 3] and all(x["feature"] == "screen" for x in rows), rows
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 5 and mean > 0 and abs(mean - sum(x["cost"] for x in rows) / 5) < 1e-12, (n, mean)
+            assert pl_.screen_test("fake", "m1")["ok"] and "papers" not in ai.usage_log(1)[0] and pl_.screen_history("fake", "m1")[0] == 5, ai.usage_log(1)[0]
+            ai.chat("ask", [{"role": "user", "content": "hello"}]); assert "papers" not in ai.usage_log(1)[0]             # (and no other call carries it)
+        finally:
+            Fake.responder = None; ai.LEDGER = saved[0]
+            if saved[1] is None:
+                os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
+            else:
+                open(ai.CONFIG, "w").write(saved[1])
+    check("the screening estimate: from what earlier screenings with the same model cost per paper (the ledger rows that say how many papers, the last 200 calls, once 50 papers are on record), else the price; a Test, another model, a saved or unpriced call never counts; a screening call records its number of papers", t_screen_estimate)
     check("summarise the papers without a summary: only downloaded papers (no book, missing PDF or failed download), a cost guess that says what it rests on, one background job in the tray, a summary beside each PDF, skipped if written meanwhile, stopped by a refused key, the budget or three failures in a row, never an empty summary", t_summaries_job)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)

@@ -13,6 +13,13 @@ Usage (from the project root, inside .venv):
     ... --max-papers 5    # cap downloads this run (default 10)
 
 First time: `python .agents/skills/ais-journal-watcher/scripts/browser.py login`.
+
+What it costs and where that is counted: the agent's own conversation with Claude
+(the screening, the table, the report) is sent straight to Anthropic with your
+ANTHROPIC_API_KEY. The monthly budget in Settings → AI does not stop it, and it is
+not in the usage record (Settings → Usage); its tokens and an estimated cost are
+printed at the end. The summaries it writes (summarize_pdf) go through the app's AI
+layer: the budget applies to them and they are in the usage record.
 """
 import csv
 import json
@@ -355,7 +362,12 @@ def kickoff():
 
 # ---------------------------------------------------------------- main
 
+SPENDING_NOTE = ("Note: this agent's own conversation with Claude (the screening, the table, the report) is billed to your Anthropic key directly: the monthly budget "
+                 "in Settings → AI does not stop it, and it is not in the usage record (Settings → Usage). The summaries it writes are counted in both.")
+
+
 def run():
+    print(SPENDING_NOTE + " The agent's own tokens and cost are printed at the end.\n", flush=True)      # said before anything is spent
     messages = [{"role": "user", "content": kickoff()}]
     while True:
         runner = CLIENT.beta.messages.tool_runner(
@@ -393,6 +405,7 @@ def run():
         messages.append({"role": "user", "content": reply})
     print("\nTokens: in %(in)d · out %(out)d · cache write %(cache_write)d · cache read %(cache_read)d"
           % USAGE + " · est. cost $%.2f" % cost())
+    print("(The agent's own conversation only: outside the monthly budget and the usage record. The summaries it wrote are in Settings → Usage.)")
 
 
 INTERESTS = load_json(os.path.join(BASE, "interests.json"), {"topics": []})
