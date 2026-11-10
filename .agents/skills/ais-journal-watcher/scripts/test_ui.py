@@ -3776,6 +3776,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("after a save nothing is asked on leaving, and the Watch page is drawn again with the new journals and topics", len(dialogs) == n_dlg and "Auction design" in page.inner_text("#topicchips") and page.locator("#journalchips .chip").count() == 39)
             g_ = page.evaluate("""[...document.querySelectorAll('#journalchips .chipgroup')].map(g => [g.querySelector('.chiphead') ? g.querySelector('.chiphead').textContent.split(' (')[0] : '', g.querySelectorAll('.chip').length, g.querySelectorAll('.chip.on').length])""")
             check("the journals to search are grouped by list, each with its own all / none; a journal that is off in Settings does not start ticked", [x[0] for x in g_] == ["AIS basket of eleven", "UTD 24", "Other"] and g_[0][1] == 11 and g_[1][1] == 22 and g_[0][2] == 6 and sum(x[1] for x in g_) == 39, str(g_))
+            page.click('.tabs button[data-tab="search"]'); page.wait_for_selector("#jall", state="visible")
             page.click("#jall"); on1_ = page.locator("#journalchips .chip.on").count()
             page.click('#journalchips .chipgroup >> nth=1 >> .chiphead a[data-g="1"]'); on2_ = page.locator("#journalchips .chipgroup >> nth=1 >> .chip.on").count()
             check("'all' above the lists ticks only the journals you have on; a list's own 'all' ticks every journal of that list", on1_ < 20 and on2_ == 22 and "on" in page.get_attribute('#journalchips .chip[data-abbr="JFE"]', "class"), str((on1_, on2_)))

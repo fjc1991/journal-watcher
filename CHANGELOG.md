@@ -6,6 +6,16 @@ Release notes: `.github/workflows/release.yml` reads the bullets under the headi
 
 Everything since 1.2.9, in one release.
 
+Your journals and your interests, in the app:
+
+- **Settings → Journals & interests (new).** Your topics, the words each one looks for, and the methods can be changed in the app; they are checked before they are saved. Until now this meant editing a file by hand, and the app screened against three example topics. The welcome guide has a new step for it.
+- **The AIS basket of eleven and the UTD 24.** The 24 journals of these two lists that were not watched before are in the journal list, each switched off until you switch it on: for the weekly check, for a search by year, or both. If you already have a journal list, one button adds the ones it lacks without changing any entry of yours. For publishers the app has no route of its own for (SAGE, Oxford, the Academy of Management and others), free copies and your university library are tried.
+- **The Watch page copes with many journals.** Journals are grouped by list, each list with its own all / none. In a weekly check, the journals with nothing new are folded into one line. Every journal has its own colour.
+- **"Check for new papers" says what it may cost** before you press it: how many journals, about how many new papers a week, the most that screening them costs with the model you chose, and what you have spent this month.
+- **Settings asks before it drops what you typed.** Leaving a page with changes you have not saved asks first.
+- **Errors stay on screen until you close them** (they used to vanish after four seconds), and a downloaded paper's main button is **Read**, which opens it in the app's reader; **PDF** opens the file.
+- **Search (⌘K / Ctrl K) reaches everything:** every Settings page, Library › Books, the sign-ins, the welcome guide and the weekly check. **?** shows the keyboard shortcuts. Journal chips and past runs can be used from the keyboard, and the reader's tooltips name ⌘ on a Mac.
+
 Faster with a large library:
 
 - **The Library opens and searches faster.** A long list draws its first 100 papers at once and the rest as you scroll (or press "Show more"); "Select all" and the bulk actions still cover every match. A search with words in it is about three times faster once the library has been read. The list of your papers is no longer rebuilt from every file on every click: at 3,000 papers it takes about a third of the time, and saving a highlight or your place in a paper no longer rebuilds it at all.
