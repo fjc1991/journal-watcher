@@ -218,24 +218,29 @@ def paper_key(p):
 # through Dropbox, changes these files without telling this one.
 
 _LIB_LOCK = threading.RLock()      # one thread at a time checks the disk and builds rows (no other lock is taken while it is held)
-_LIB_FILES = {}                    # (path, tag) -> (signature, settled, value): what a file said when it had this mtime, size and inode
+_LIB_FILES = {}                    # (path, tag) -> (signature, settled, value): what a file said when it had these times, this size and this inode
+_LIB_UNREAD = object()             # a loader's answer for a file that is there but that the system would not let it read (locked, still syncing): never kept
 LIB_RACY_NS = 2_000_000_000        # a file changed less than this long before it was read is read again next time: a second write within the timestamp's resolution
-                                   # (1 s on HFS+, 2 s on exFAT, a few ms on ext4) with the same size would otherwise look unchanged
+                                   # (1 s on HFS+, 2 s on exFAT, a few ms on ext4) with the same size would otherwise look unchanged. "Changed" is the later of
+                                   # the modification time and the change time: a sync client sets the first to the other computer's time of saving, this
+                                   # computer sets the second itself when the file arrives
 LIB_STATS = {"reads": 0}           # how often a file was parsed (the tests look at it)
 
 
 def _lib_sig(path):
-    """(mtime in ns, size, inode) of a file or folder, None when it is not there."""
+    """(the later of mtime and ctime, mtime, ctime, all in ns, size, inode) of a file or folder, None when it is not there. The change time is in it because a
+    file rewritten in place with the same length can be given its old modification time back (a sync client, a restore), but never its old change time."""
     try:
         st = os.stat(path)
     except OSError:
         return None
-    return (st.st_mtime_ns, st.st_size, st.st_ino)
+    return (max(st.st_mtime_ns, st.st_ctime_ns), st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
 
 
 def _lib_file(path, load, default=None, tag=None):
     """load(path), read again only when the file's signature changed (or it was too new to trust: LIB_RACY_NS); `default` when the file is not there.
-    What load raises is raised (and nothing is kept), as before."""
+    What load raises is raised (and nothing is kept), as before. A load that answers _LIB_UNREAD could not read the file: `default` is returned and nothing is kept
+    either, so the next call asks again."""
     k = (path, tag)
     sig = _lib_sig(path)
     if sig is None:
@@ -247,6 +252,9 @@ def _lib_file(path, load, default=None, tag=None):
     now = time.time_ns()
     LIB_STATS["reads"] += 1
     val = load(path)
+    if val is _LIB_UNREAD:
+        _LIB_FILES.pop(k, None)
+        return default
     _LIB_FILES[k] = (sig, sig[0] < now - LIB_RACY_NS, val)
     return val
 
@@ -289,12 +297,12 @@ def _lib_member():
     now = time.time_ns()
     LIB_STATS["reads"] += 1
     val = fo.membership()
-    _LIB_FILES[(fo.DIR, "member")] = (sig, all(len(s) == 4 and s[1] < now - LIB_RACY_NS for s in sig), val)
+    _LIB_FILES[(fo.DIR, "member")] = (sig, all(len(s) == 6 and s[1] < now - LIB_RACY_NS for s in sig), val)
     return val
 
 
 def _lib_notes(path):
-    return ns.counts(path[:-len(".notes.json")] + ".pdf")
+    return ns.counts(path[:-len(".notes.json")] + ".pdf", _LIB_UNREAD)
 
 
 def _lib_own(v):
@@ -326,7 +334,7 @@ def _lib_row(b, state, member, dirs):
     r["key"], r["state"], r["folders"] = key, _lib_own(st) if st else {}, list(member.get(key, []))
     if r.get("journal") == "Books":              # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
         r["book"] = copy.deepcopy(_lib_file(stem + ".book.json", lambda p: dl.load_json(p, {}), {})) if has(".book.json") else {}
-    side = _lib_file(stem + ".paper.json", lambda p: kinds.read_sidecar(pdf, key), {}, key) if has(".paper.json") else {}
+    side = _lib_file(stem + ".paper.json", lambda p: kinds.read_sidecar(pdf, key, _LIB_UNREAD), {}, key) if has(".paper.json") else {}
     r["kind"], r["kind_label"] = kinds.of_row(r, side)     # journal article, preprint, conference paper, other (kinds.py)
     r["year"] = year
     return r
@@ -714,19 +722,26 @@ def set_j(run, emit, abbr, **kw):
 
 
 FEEDS_AT_ONCE = 3                                        # feeds being read at once, the one of the journal whose turn it is included (always of different hosts)
-FEED_HOST_PAUSE = 1.0                                    # seconds between two feeds of one host (one after the other, never at once)
+FEED_HOST_PAUSE = 0.3                                    # seconds between one host's answer and the next feed asked of it (one after the other, never at once)
 NOT_AHEAD = ("api.crossref.org", "api.openalex.org")     # never read ahead: the lookups of the journal whose turn it is ask these hosts
 
 
 def feed_host(j):
     """The host a journal's feed is read from, or None for a journal that is not read ahead: one read through Crossref (source "crossref"), or a feed without a host."""
-    if j.get("source") != "rss":
+    feed = j.get("feed")
+    if j.get("source") != "rss" or not isinstance(feed, str):           # (a feed line that is not text is not read ahead: reading it in its turn fails for that journal only)
         return None
     try:
-        host = urllib.parse.urlsplit(j.get("feed") or "").hostname      # (in small letters)
+        host = urllib.parse.urlsplit(feed).hostname                     # (in small letters)
     except ValueError:
         return None
     return host if host and host not in NOT_AHEAD else None
+
+
+_FEEDS = threading.Condition()                           # guards the three below. They are the process's, not one check's: a feed that a stopped check left
+_FEEDS_FLYING = [0]                                      # being read still has its place and its host, so the next check waits for it instead of asking beside it
+_FEEDS_BUSY = set()                                      # hosts being asked now
+_FEEDS_FREE_AT = {}                                      # host -> when it may be asked again (FEED_HOST_PAUSE after its last answer)
 
 
 class _FeedsAhead:
@@ -734,36 +749,47 @@ class _FeedsAhead:
     feeds of the journals after it. Only reading is done here (fx.fetch_journal: one request and its parsing, no state): the check itself takes the answers one
     journal at a time and in the journals' order through get(), so what is shown, saved and remembered, and in which order, is as with one feed at a time.
     One host is asked by one thread at a time, its journals in their order and FEED_HOST_PAUSE apart, so no host gets two requests at once or more requests than
-    before. A journal read through Crossref is not read ahead: get() reads it in its turn, in the caller's thread, and so it does a feed that nobody has started
+    before; this holds across checks too (see _FEEDS). The journal whose turn it is gets the next free place before any journal after it. A journal read through Crossref is not read ahead: get() reads it in its turn, in the caller's thread, and so it does a feed that nobody has started
     when its turn comes (so a turn that has begun always gets its feed, Stop or not, as before). After close(), or once `stop` is set, nothing more is read ahead
-    (a feed being read is finished and dropped). The threads are daemons: quitting does not wait for a feed."""
+    (a feed being read is finished and dropped). The threads are daemons: quitting does not wait for a feed. Nothing is read before start()."""
 
     def __init__(self, js, stop):
         self.fetch = fx.fetch_journal                    # (taken once: a thread that outlives the check never calls whatever the name means later)
         self.js, self.stop = list(js), stop
-        self.cond = threading.Condition()
+        self.cond = _FEEDS
         self.closed = False
-        self.flying = 0                                  # feeds being read now (never more than FEEDS_AT_ONCE)
-        self.busy = set()                                # hosts being asked now
-        self.free_at = {}                                # host -> when it may be asked again (FEED_HOST_PAUSE after its last answer)
+        self.turn = None                                 # the journal whose turn it is while it waits in get() for its host or a place (else None)
         self.hosts = [feed_host(j) for j in self.js]
         self.todo = [n for n, host in enumerate(self.hosts) if host]      # journals nobody has started reading, in their order
         self.box = [{"done": threading.Event(), "items": None, "error": None} for _ in self.js]
+
+    def start(self):
+        """Start reading ahead. Called where close() is certain to follow (a thread that cannot be started must not leave the others reading on)."""
         for _ in range(min(FEEDS_AT_ONCE, len(set(self.hosts) - {None}))):
             threading.Thread(target=self._work, daemon=True).start()
 
-    def _free(self, n):
-        """Whether journal n's feed may be asked now (call with self.cond held): a place of the FEEDS_AT_ONCE is free, and its host is not being asked and has had its pause."""
+    def _host_free(self, n):
         host = self.hosts[n]
-        return self.flying < FEEDS_AT_ONCE and (not host or (host not in self.busy and time.monotonic() >= self.free_at.get(host, 0)))
+        return not host or (host not in _FEEDS_BUSY and time.monotonic() >= _FEEDS_FREE_AT.get(host, 0))
+
+    def _free(self, n, ahead=False):
+        """Whether journal n's feed may be asked now (call with self.cond held): a place of the FEEDS_AT_ONCE is free, and its host is not being asked and has had its pause.
+        ahead: asked by a thread that reads ahead. While the journal whose turn it is waits, such a thread starts nothing if that journal only lacks a place (the next
+        one that frees is its), and leaves one place for it if it waits for its host."""
+        places = FEEDS_AT_ONCE
+        if ahead and self.turn is not None:
+            if self._host_free(self.turn):
+                return False
+            places -= 1
+        return _FEEDS_FLYING[0] < places and self._host_free(n)
 
     def _take(self, n):
         """Journal n is being read from now on (call with self.cond held, after _free(n))."""
         if n in self.todo:
             self.todo.remove(n)
-        self.flying += 1
+        _FEEDS_FLYING[0] += 1
         if self.hosts[n]:
-            self.busy.add(self.hosts[n])
+            _FEEDS_BUSY.add(self.hosts[n])
 
     def _read(self, n):
         b, host = self.box[n], self.hosts[n]
@@ -773,10 +799,10 @@ class _FeedsAhead:
             b["error"] = e
         finally:
             with self.cond:
-                self.flying -= 1
+                _FEEDS_FLYING[0] -= 1
                 if host:
-                    self.busy.discard(host)
-                    self.free_at[host] = time.monotonic() + FEED_HOST_PAUSE
+                    _FEEDS_BUSY.discard(host)
+                    _FEEDS_FREE_AT[host] = time.monotonic() + FEED_HOST_PAUSE
                 self.cond.notify_all()
             b["done"].set()
 
@@ -787,7 +813,7 @@ class _FeedsAhead:
                 while True:
                     if self.closed or self.stop.is_set() or not self.todo:
                         return
-                    n = next((k for k in self.todo if self._free(k)), None)
+                    n = next((k for k in self.todo if self._free(k, True)), None)
                     if n is not None:
                         break
                     self.cond.wait(0.1)
@@ -802,9 +828,14 @@ class _FeedsAhead:
             if mine:
                 if n in self.todo:
                     self.todo.remove(n)                  # (from now on no other thread starts it)
-                while not self._free(n):
-                    self.cond.wait(0.1)
-                self._take(n)
+                self.turn = n
+                try:
+                    while not self._free(n):
+                        self.cond.wait(0.1)
+                    self._take(n)
+                finally:
+                    self.turn = None
+                    self.cond.notify_all()
         if mine:
             self._read(n)
         b = self.box[n]
@@ -823,6 +854,7 @@ def fetch_weekly(run, emit, stop):
     js = [j for j in journals() if j.get("weekly", True)]
     ahead = _FeedsAhead(js, stop)
     try:
+        ahead.start()
         _fetch_weekly(run, emit, stop, js, ahead)
     finally:
         ahead.close()

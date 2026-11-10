@@ -2306,6 +2306,15 @@ def _daily_snapshot():
         print("(no snapshot today: %s)" % str(e)[:120])
 
 
+def _has_anthropic():
+    """Whether the SDK is installed (looked for, not loaded: loading it is what made starting slow). A look that fails, as for a stand-in module that says nothing
+    about where it came from, counts as installed: starting never stops over it."""
+    try:
+        return importlib.util.find_spec("anthropic") is not None
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def start(port=8765, quiet=False):
     """Everything main() does except waiting for requests. The Mac app runs the server in a thread of its own process with this.
     Returns (server, url), or (None, url) when a dashboard for this folder already runs (url is where)."""
@@ -2316,7 +2325,7 @@ def start(port=8765, quiet=False):
         return None, other.get("url")
     if not os.environ.get("ANTHROPIC_API_KEY") and not quiet:
         print("WARNING: ANTHROPIC_API_KEY missing from .env — screening and summaries will fail.")
-    if importlib.util.find_spec("anthropic") is None and not quiet:      # (looked for, not loaded: loading it is what made starting slow)
+    if not quiet and not _has_anthropic():
         print("AI features unavailable (No module named 'anthropic') — run: pip install -r requirements.txt")
     for canon, olds in pl.migrate_weekly():
         print("Merged %d weekly runs into %s" % (len(olds), canon))

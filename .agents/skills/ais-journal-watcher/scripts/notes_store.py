@@ -15,6 +15,7 @@ import atexit
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -29,15 +30,18 @@ LISTS = ("highlights", "cards", "bookmarks")  # the per-paper collections
 BOARD = ("frames", "links")                   # the notes canvas: labelled frames around cards, arrows between cards (saved when present)
 
 _lock = threading.RLock()
-# the content hash of every PDF this process has hashed or remembers from an earlier run: path -> (size, mtime_ns, inode, sha1). An entry is used only while the file's
-# size, modification time and inode are exactly these; anything else is hashed again. The map is kept on THIS computer (SHA_CACHE, in paths.LOCAL), never in the shared folder.
+# the content hash of every PDF this process has hashed or remembers from an earlier run: path -> (size, mtime_ns, inode, ctime_ns, sha1). An entry is used only while the file's
+# size, modification time, inode and change time are exactly these; anything else is hashed again. The map is kept on THIS computer (SHA_CACHE, in paths.LOCAL), never in the shared folder.
 _sha = {}
+_sha_own = set()                     # the paths this process hashed itself (guarded by _sha_lock): only these override what is in the saved map now
+_SHA_HEX = re.compile(r"[0-9a-f]{40}\Z")
 _sha_lock = threading.Lock()         # guards _sha and _sha_state; never held while a PDF is read or the map is written (it may be taken while _lock is held, never the other way round)
 _sha_io = threading.Lock()           # one writer of SHA_CACHE at a time in this process
 _sha_state = {"loaded": False, "dirty": False, "timer": None, "last": None}       # last: (path, signature, sha1) of the PDF hashed last, for sha1_known only
 SHA_CACHE = os.path.join(dl.LOCAL, "pdf_sha1.json")
 SHA_SAVE_S = 5.0                     # the map is written this long after a new hash (one write for a whole pass over the library)
 SHA_YOUNG_NS = 2_000_000_000         # a file changed less than 2 s ago is hashed but not remembered: a second change inside the file system's time step could not be told apart
+                                     # ("changed": the later of its modification time and its change time)
 
 
 class Conflict(Exception):
@@ -86,7 +90,16 @@ def sidecars(pdf):
 
 
 def _sha_sig(st):
-    return (st.st_size, st.st_mtime_ns, st.st_ino)
+    """What tells that a file is still the one that was hashed. The change time is in it because a file rewritten in place with the same length can be given its old
+    modification time back (a sync client, a restore), but never its old change time."""
+    return (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns)
+
+
+def _sha_fits(pdf, entry):
+    try:
+        return _sha_sig(os.stat(pdf)) == entry[:4]
+    except OSError:
+        return False
 
 
 def _sha_file(pdf):
@@ -98,15 +111,16 @@ def _sha_file(pdf):
 
 
 def _sha_read():
-    """What SHA_CACHE holds, as {path: (size, mtime_ns, inode, sha1)}; {} when it is missing, damaged or from another version."""
+    """What SHA_CACHE holds, as {path: (size, mtime_ns, inode, ctime_ns, sha1)}; {} when it is missing, damaged in any way or from another version (version 1 had no
+    change time: its files are hashed again once). Never raises."""
     try:
         with open(SHA_CACHE, encoding="utf-8") as f:
             d = json.load(f)
-        if d.get("v") != 1:
+        if d.get("v") != 2:
             return {}
-        return {p: (int(e[0]), int(e[1]), int(e[2]), e[3]) for p, e in d["files"].items()
-                if isinstance(e, list) and len(e) == 4 and isinstance(e[3], str) and len(e[3]) == 40}
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {p: (int(e[0]), int(e[1]), int(e[2]), int(e[3]), e[4]) for p, e in d["files"].items()
+                if isinstance(e, list) and len(e) == 5 and isinstance(e[4], str) and _SHA_HEX.match(e[4])}
+    except Exception:  # noqa: BLE001        (a number too large, a file nested too deep, anything: a damaged map is an empty one)
         return {}
 
 
@@ -118,12 +132,15 @@ def _sha_hit(pdf, sig):
             for p, e in _sha_read().items():
                 _sha.setdefault(p, e)
         hit = _sha.get(pdf)
-        return hit[3] if hit and hit[:3] == sig else None
+        if hit and hit[:4] == sig:
+            _sha_own.add(pdf)            # (confirmed against the file as it is now)
+            return hit[4]
+        return None
 
 
 def sha_flush():
     """Write the map to SHA_CACHE now (it is written by itself SHA_SAVE_S after a new hash, and not at all when nothing new was hashed). What another process wrote meanwhile
-    is kept; files that are gone are dropped."""
+    is kept, also for a file this process only knows from the map it read at its start (what it hashed or confirmed itself wins); files that are gone are dropped."""
     with _sha_lock:
         t, _sha_state["timer"] = _sha_state["timer"], None
         if t:
@@ -132,15 +149,20 @@ def sha_flush():
             return
         _sha_state["dirty"] = False
         mine = dict(_sha)
+        own = set(_sha_own)
     with _sha_io:
-        files = {p: list(e) for p, e in {**_sha_read(), **mine}.items() if os.path.exists(p)}
+        merged = dict(mine)
+        for p, e in _sha_read().items():         # what is saved now wins, except over an entry this process hashed or confirmed itself that still fits the file
+            if p not in mine or (mine[p] != e and not (p in own and _sha_fits(p, mine[p]))):
+                merged[p] = e
+        files = {p: list(e) for p, e in merged.items() if os.path.exists(p)}
         if not files and not os.path.exists(SHA_CACHE):
             return                       # (nothing to keep and nothing to correct: no folder is made for an empty map)
         try:
             os.makedirs(os.path.dirname(SHA_CACHE), exist_ok=True)
             tmp = dl.tmp_path(SHA_CACHE)
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"v": 1, "files": files}, f, ensure_ascii=False)
+                json.dump({"v": 2, "files": files}, f, ensure_ascii=False)
             os.replace(tmp, SHA_CACHE)
         except OSError:                  # (a read-only or full disk: the hashes are simply worked out again next time)
             pass
@@ -150,11 +172,12 @@ def sha_forget():
     """Forget what is in memory, as after a restart (the saved map is read again at the next sha1_of). For tests."""
     with _sha_lock:
         _sha.clear()
+        _sha_own.clear()
         _sha_state["loaded"], _sha_state["last"] = False, None
 
 
 def sha1_of(pdf):
-    """The SHA-1 of the file's content. Read from the file only when its size, modification time or inode differ from the last time it was hashed (here, or in an earlier run)."""
+    """The SHA-1 of the file's content. Read from the file only when its size, modification time, change time or inode differ from the last time it was hashed (here, or in an earlier run)."""
     st = os.stat(pdf)
     sig = _sha_sig(st)
     hit = _sha_hit(pdf, sig)
@@ -166,10 +189,11 @@ def sha1_of(pdf):
         same = _sha_sig(os.stat(pdf)) == sig            # (changed while it was read: the hash is of a mixture, so it is not remembered)
     except OSError:
         same = False
-    if not same or time.time_ns() - st.st_mtime_ns < SHA_YOUNG_NS:
+    if not same or time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) < SHA_YOUNG_NS:
         return sha
     with _sha_lock:
         _sha[pdf] = sig + (sha,)
+        _sha_own.add(pdf)
         _sha_state["dirty"] = True
         if _sha_state["timer"] is None:
             t = threading.Timer(SHA_SAVE_S, sha_flush)
@@ -294,9 +318,18 @@ def save(pdf, notes, base_rev, doc=None):
         return out
 
 
-def counts(pdf):
-    """{"highlights": n, "cards": n} for the Library chip, or None if the paper has no notes."""
-    d = _read(notes_path(pdf)) if os.path.exists(notes_path(pdf)) else None
+def counts(pdf, refused=None):
+    """{"highlights": n, "cards": n} for the Library chip, or None if the paper has no notes. refused: what to answer instead of None when the file is there but the
+    system would not let it be read (the library list does not remember such an answer)."""
+    if not os.path.exists(notes_path(pdf)):
+        return None
+    try:
+        with open(notes_path(pdf), encoding="utf-8") as f:
+            d = json.load(f)
+    except OSError:
+        return refused
+    except ValueError:
+        return None
     if not isinstance(d, dict):
         return None
     n = {k: len(d.get(k) or []) for k in ("highlights", "cards")}

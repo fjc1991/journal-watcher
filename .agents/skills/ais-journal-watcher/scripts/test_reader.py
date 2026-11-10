@@ -889,6 +889,31 @@ def main():
     HD = os.path.join(PAPERS, "2026-06", "HASH"); os.makedirs(HD, exist_ok=True)
     true_sha = lambda p: hashlib.sha1(builtins.open(p, "rb").read()).hexdigest()  # noqa: E731
 
+    class Later:
+        """A module's clock, `ahead` seconds ahead of the real one. A file changed in the last two seconds is not trusted (on purpose), and "changed" includes the change
+        time, which no test can set back: with this clock a file made a moment ago counts as old. `with clock.real():` gives the real time for what is about new files."""
+        def __init__(self, ahead=3.0):
+            self.ahead = ahead
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def time_ns(self):
+            return time.time_ns() + int(self.ahead * 1e9)
+
+        def real(self):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                was, self.ahead = self.ahead, 0.0
+                try:
+                    yield
+                finally:
+                    self.ahead = was
+            return cm()
+    ns_clock = ns.time = Later()             # (until the end of this section)
+
     def settled(p, age=3600):
         """Give the file a modification time in the past: a file changed in the last two seconds is hashed but (on purpose) not remembered."""
         t = time.time() - age; os.utime(p, (t, t)); return p
@@ -941,7 +966,7 @@ def main():
         assert ns.sha1_of(a) == true_sha(a), "replaced by a file with the same size and time"
         # 4. written again in place within the same instant (same size, same time, same inode: nothing to tell by) just after it was hashed: a file this fresh is not remembered
         builtins.open(a, "wb").write(b"p" * n); st = os.stat(a)
-        with pdf_reads() as r:
+        with pdf_reads() as r, ns_clock.real():
             assert ns.sha1_of(a) == ns.sha1_of(a) == true_sha(a) and r.n == 2, "a file written a moment ago was not read each time: %d" % r.n
             assert ns.sha1_known(a) == true_sha(a) and r.n == 2          # (the one hashed last is still known to the cost line, which only measures; nothing is opened for it)
         with builtins.open(a, "r+b") as f:
@@ -994,7 +1019,9 @@ def main():
             os.remove(ns.SHA_CACHE)                                    # written rarely: passes that find every hash remembered write nothing
             assert [ns.sha1_of(p) for p in ps] == want
             ns.sha_flush(); assert not os.path.exists(ns.SHA_CACHE), "the map was written again although nothing new was hashed"
-            young = os.path.join(HD, "young.pdf"); builtins.open(young, "wb").write(b"%PDF just written"); ns.sha1_of(young)
+            young = os.path.join(HD, "young.pdf"); builtins.open(young, "wb").write(b"%PDF just written")
+            with ns_clock.real():
+                ns.sha1_of(young)
             ns.sha_flush(); assert not os.path.exists(ns.SHA_CACHE), "a file written a moment ago went into the saved map"
             ns.sha_forget(); assert [ns.sha1_of(p) for p in ps] == want; ns.sha_flush()
             assert sorted(json.load(builtins.open(ns.SHA_CACHE))["files"]) == sorted(ps)
@@ -1014,7 +1041,7 @@ def main():
             other = os.path.join(HD, "other-process.pdf"); builtins.open(other, "wb").write(b"%PDF other"); settled(other)
             d = json.load(builtins.open(ns.SHA_CACHE)); so = os.stat(other)
             assert ps[2] not in d["files"], "a deleted file stayed in the saved map"
-            d["files"][other] = [so.st_size, so.st_mtime_ns, so.st_ino, true_sha(other)]; d["files"][ps[2]] = [1, 2, 3, "0" * 40]; json.dump(d, builtins.open(ns.SHA_CACHE, "w"))
+            d["files"][other] = [so.st_size, so.st_mtime_ns, so.st_ino, so.st_ctime_ns, true_sha(other)]; d["files"][ps[2]] = [1, 2, 3, 4, "0" * 40]; json.dump(d, builtins.open(ns.SHA_CACHE, "w"))
             ns.SHA_SAVE_S = 0.05
             extra = hash_pdfs(1, "late")[0]; ns.sha1_of(extra)
             t0 = time.time()
@@ -1022,19 +1049,20 @@ def main():
                 time.sleep(0.05)
             files = json.load(builtins.open(ns.SHA_CACHE))["files"]
             assert extra in files and other in files and ps[2] not in files and ps[0] in files, sorted(files)
-            assert files[extra] == [os.stat(extra).st_size, os.stat(extra).st_mtime_ns, os.stat(extra).st_ino, true_sha(extra)], files[extra]
+            assert files[extra] == [os.stat(extra).st_size, os.stat(extra).st_mtime_ns, os.stat(extra).st_ino, os.stat(extra).st_ctime_ns, true_sha(extra)], files[extra]
             assert not [f for f in os.listdir(os.path.dirname(ns.SHA_CACHE)) if f.endswith(".tmp")]
             # a damaged map, or one that lies about a file, costs a read and never a wrong answer
-            builtins.open(ns.SHA_CACHE, "w").write('{"v": 1, "files": {"' + ps[3].replace("\\", "\\\\")); ns.sha_forget()
+            builtins.open(ns.SHA_CACHE, "w").write('{"v": 2, "files": {"' + ps[3].replace("\\", "\\\\")); ns.sha_forget()
             assert ns.sha1_known(ps[3]) is None and ns.sha1_of(ps[3]) == want[3]
             st = os.stat(ps[3])
-            json.dump({"v": 1, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino + 1, "0" * 40], ps[0]: [1, 2, 3, "not a hash"], ps[1]: "nonsense"}}, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+            json.dump({"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino + 1, st.st_ctime_ns, "0" * 40], ps[0]: [1, 2, 3, 4, "not a hash"], ps[1]: "nonsense"}}, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
             assert ns.sha1_of(ps[3]) == want[3] and ns.sha1_of(ps[0]) == true_sha(ps[0]) and ns.sha1_of(ps[1]) == true_sha(ps[1])
-            for bad in ({"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, "0" * 40]}},                 # another version of the file
-                        {"v": 1, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, "0" * 39]}},                 # not a hash
-                        {"v": 1, "files": {ps[3]: [st.st_size + 1, st.st_mtime_ns, st.st_ino, "0" * 40]}},             # another size
-                        {"v": 1, "files": {ps[3]: [st.st_size, st.st_mtime_ns - 1, st.st_ino, "0" * 40]}},             # another time
-                        {"v": 1, "files": [ps[3]]}, [1, 2], "x"):
+            for bad in ({"v": 3, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, "0" * 40]}},                 # another version of the file
+                        {"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, "0" * 39]}},                 # not a hash
+                        {"v": 2, "files": {ps[3]: [st.st_size + 1, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, "0" * 40]}},             # another size
+                        {"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns - 1, st.st_ino, st.st_ctime_ns, "0" * 40]}},             # another time
+                        {"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns - 1, "0" * 40]}},             # another change time
+                        {"v": 2, "files": [ps[3]]}, [1, 2], "x"):
                 json.dump(bad, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
                 assert ns.sha1_known(ps[3]) is None and ns.sha1_of(ps[3]) == want[3], bad
         finally:
@@ -1090,8 +1118,94 @@ def main():
                 assert r.n == 0, "a search in the PDFs read %d PDFs in full only to name their cache files" % r.n
                 assert all(embed.is_indexed(ns.pdf_path(x["file"])) in (True, False) for x in rows) and r.n == 0, "asking what is still to be indexed read %d PDFs" % r.n
         finally:
-            bl.INDEX = keep; shutil.rmtree(os.path.join(TMP, "index-hash"), ignore_errors=True); shutil.rmtree(HD, ignore_errors=True)
+            bl.INDEX = keep; shutil.rmtree(os.path.join(TMP, "index-hash"), ignore_errors=True)
     check("pdf hash: a second search in the PDFs (and every other pass over the library) opens no PDF", t_sha_library_pass)
+
+    def t_sha_change_time():
+        """A PDF rewritten in place with the same length and given its old modification time back (a sync client, a restore) is read again: its change time tells."""
+        a, b, c = hash_pdfs(3, "ctm")
+        with pdf_reads() as r:
+            assert ns.sha1_of(a) == ns.sha1_of(a) == true_sha(a) and r.n == 1, r.n                 # (remembered)
+        for label, restart in (("while the app runs", False), ("while the app was closed", True)):
+            st = os.stat(a); n = st.st_size
+            if restart:
+                ns.sha_flush(); ns.sha_forget()
+            with builtins.open(a, "r+b") as f:
+                f.write((b"R" if restart else b"Q") * n)
+            os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))
+            assert (os.stat(a).st_ino, os.stat(a).st_size, os.stat(a).st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+            assert ns.sha1_known(a) is None, "rewritten in place with the old size and time (%s): still called known" % label
+            assert ns.sha1_of(a) == true_sha(a), "rewritten in place with the old size and time (%s): the old hash" % label
+        # a file that arrived a moment ago with an old modification time (what a sync client delivers) is as new as one written a moment ago: read each time
+        builtins.open(b, "wb").write(b"%PDF delivered"); settled(b, 86400)
+        with pdf_reads() as r, ns_clock.real():
+            assert ns.sha1_of(b) == ns.sha1_of(b) == true_sha(b) and r.n == 2, "a file that arrived a moment ago was remembered at once (%d reads)" % r.n
+        # a map saved before the change time was kept: its files are hashed again once, and the map is written in the new form
+        keep = ns.SHA_CACHE
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1_v1.json"); os.makedirs(os.path.dirname(ns.SHA_CACHE), exist_ok=True)
+        try:
+            st = os.stat(c)
+            json.dump({"v": 1, "files": {c: [st.st_size, st.st_mtime_ns, st.st_ino, true_sha(c)]}}, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+            with pdf_reads() as r:
+                assert ns.sha1_known(c) is None and ns.sha1_of(c) == true_sha(c) and ns.sha1_of(c) == true_sha(c) and r.n == 1, r.n
+            ns.sha_flush(); d = json.load(builtins.open(ns.SHA_CACHE))
+            assert d["v"] == 2 and d["files"][c] == [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, true_sha(c)], d
+        finally:
+            os.path.exists(ns.SHA_CACHE) and os.remove(ns.SHA_CACHE); ns.SHA_CACHE = keep; ns.sha_forget()
+    check("pdf hash: a PDF rewritten in place with the same length and its old modification time is read again (its change time is part of what is compared, also after a restart), "
+          "a file that arrived a moment ago is not remembered yet, and a map saved without change times is read again once", t_sha_change_time)
+
+    def t_sha_two_processes():
+        """What another process saved after this one started is not put back to what this one read at its start; what this one hashed itself is saved."""
+        keep = ns.SHA_CACHE, ns.SHA_SAVE_S
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1_two.json"); os.makedirs(os.path.dirname(ns.SHA_CACHE), exist_ok=True); ns.SHA_SAVE_S = 3600; ns.sha_forget()
+        entry = lambda p: (lambda st: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, true_sha(p)])(os.stat(p))      # noqa: E731
+        try:
+            p, q, mine, new = hash_pdfs(4, "two")
+            [ns.sha1_of(x) for x in (p, q, mine)]; ns.sha_flush()
+            old = json.load(builtins.open(ns.SHA_CACHE))["files"]
+            ns.sha_forget(); assert ns.sha1_of(p) == true_sha(p)          # "this process started": the map is read; p is asked for once (and fits), q is never asked for
+            # meanwhile both papers are replaced and another process (the weekly check, the MCP server) hashes them and saves the map
+            for x in (p, q):
+                builtins.open(x, "wb").write(b"%PDF replaced " + os.path.basename(x).encode() * 9); settled(x, 600)
+            d = json.load(builtins.open(ns.SHA_CACHE)); d["files"][p], d["files"][q] = entry(p), entry(q)
+            d["files"][mine] = [1, 2, 3, 4, "0" * 40]                    # (and something outdated about a paper this process is about to hash itself)
+            json.dump(d, builtins.open(ns.SHA_CACHE, "w"))
+            assert ns.sha1_of(new) == true_sha(new) and ns.sha1_of(mine) == true_sha(mine); ns.sha_flush()      # this process hashes another paper and saves
+            files = json.load(builtins.open(ns.SHA_CACHE))["files"]
+            assert files[q] == entry(q) != old[q], "a paper this process only knew from the map it read at its start was put back to that: %s" % files[q]
+            assert files[p] == entry(p) != old[p], "a paper this process had confirmed before it was replaced was put back to the old entry: %s" % files[p]
+            assert files[new] == entry(new) and files[mine] == entry(mine), "what this process hashed itself was not saved"
+            ns.sha_forget()
+            with pdf_reads() as r:                                       # so the next start reads no PDF
+                assert [ns.sha1_of(x) for x in (p, q, mine, new)] == [true_sha(x) for x in (p, q, mine, new)] and r.n == 0, r.paths
+        finally:
+            os.path.exists(ns.SHA_CACHE) and os.remove(ns.SHA_CACHE); ns.SHA_CACHE, ns.SHA_SAVE_S = keep; ns.sha_forget()
+    check("pdf hash: saving the map does not put back an entry this process only read at its start over what another process saved since; what this process hashed itself is saved", t_sha_two_processes)
+
+    def t_sha_damaged_map():
+        keep = ns.SHA_CACHE, ns.SHA_SAVE_S
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1_bad.json"); os.makedirs(os.path.dirname(ns.SHA_CACHE), exist_ok=True); ns.SHA_SAVE_S = 3600
+        try:
+            p, q = hash_pdfs(2, "dmg"); st = os.stat(p); fits = "[%d, %d, %d, %d, " % (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns)
+            for label, text in (("a number too large", '{"v": 2, "files": {%s: [Infinity, 1, 2, 3, "%s"]}}' % (json.dumps(p), "a" * 40)),
+                                ("a number too large", '{"v": 2, "files": {%s: [1e999, 1, 2, 3, "%s"]}}' % (json.dumps(p), "a" * 40)),
+                                ("40 characters that are not a hash", '{"v": 2, "files": {%s: %s"%s"]}}' % (json.dumps(p), fits, "z" * 40)),
+                                ("a path in place of a hash", '{"v": 2, "files": {%s: %s"%s"]}}' % (json.dumps(p), fits, "../" * 13 + "x")),
+                                ("a hash in capitals with a line after it", '{"v": 2, "files": {%s: %s"%s\n"]}}' % (json.dumps(p), fits, "A" * 39)),
+                                ("nested too deep", "[" * 100000)):
+                builtins.open(ns.SHA_CACHE, "w").write(text); ns.sha_forget()
+                assert ns._sha_read() == {}, label
+                assert ns.sha1_known(p) is None and ns.sha1_of(p) == true_sha(p), label           # (no error, and never what the file says)
+                builtins.open(q, "wb").write(b"%PDF " + label.encode()); settled(q, 500)
+                assert ns.sha1_of(q) == true_sha(q); ns.sha_flush()                              # the next save puts a good map in its place
+                d = json.load(builtins.open(ns.SHA_CACHE))
+                assert d["v"] == 2 and d["files"][p][-1] == true_sha(p) and d["files"][q][-1] == true_sha(q), (label, d)
+        finally:
+            os.path.exists(ns.SHA_CACHE) and os.remove(ns.SHA_CACHE); ns.SHA_CACHE, ns.SHA_SAVE_S = keep; ns.sha_forget()
+            shutil.rmtree(HD, ignore_errors=True)
+    check("pdf hash: a damaged map is an empty one whatever the damage (a number too large, 40 characters that are not a hash, a file nested too deep): no error, the true hash, and the next save repairs it", t_sha_damaged_map)
+    ns.time = time
 
     print("ai layer")
     write_cfg(CFG)
@@ -2674,8 +2788,16 @@ print("JSON" + json.dumps(out))
         pl_.ROOT = dl.ROOT = root; pl_.PAPERS = dl.PAPERS = os.path.join(root, "Papers")
         fo.DIR, rs_.PATH, ac_.CACHE = os.path.join(pl_.PAPERS, "_folders"), os.path.join(pl_.PAPERS, "_status.json"), os.path.join(root, "authors_cache.json")
         ac_._mem.clear()
+        class Later:                         # pipeline's clock, three seconds ahead: a file made a moment ago counts as old (its change time cannot be set back; see settle)
+            ahead = 3.0
+            def __getattr__(self, name):
+                return getattr(time, name)
+            def time_ns(self):
+                return time.time_ns() + int(self.ahead * 1e9)
+        pl_.time = Later()
         def restore():
             pl_.PAPERS, pl_.ROOT, dl.PAPERS, dl.ROOT, fo.DIR, rs_.PATH, ac_.CACHE = saved
+            pl_.time = time
             ac_._mem.clear(); shutil.rmtree(root, ignore_errors=True)
         P = {}
         for i, (ym, jn, ab) in enumerate([("2024-01", "MIS Quarterly", "MISQ"), ("2024-01", "MIS Quarterly", "MISQ"), ("2024-01", "MIS Quarterly", "MISQ"),
@@ -2721,6 +2843,7 @@ print("JSON" + json.dumps(out))
             def __exit__(self, *a):
                 builtins.open, os.listdir, os.stat = self.keep
         by = lambda rows: {r["file"]: r for r in rows}   # noqa: E731
+        settle.clock = pl_.time
         return root, restore, P, fid, settle, Spy, by
 
 
@@ -2876,6 +2999,101 @@ print("JSON" + json.dumps(out))
         finally:
             restore()
     check("one paper's row is found by its file without building the library (reading progress, notes autosave, opening a paper): the same row, None for anything else, and its changes are seen", t_library_row)
+
+    def t_library_refused():
+        """A file the system will not let be read for a moment (locked, still arriving) gives the answer it always gave, and is asked for again the next time."""
+        import builtins
+        import pipeline as pl_, kinds as kd_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        real_open = builtins.open
+        try:
+            notes, side, book = ns.notes_path(P[0]["pdf"]), P[1]["pdf"][:-4] + ".paper.json", P[5]["pdf"][:-4] + ".book.json"
+            f0, f1, f5 = (P[i]["file"] for i in (0, 1, 5))
+            settle()
+            for path, fn in ((notes, lambda d: d["highlights"].append({"id": "h3"})), (side, lambda d: d.update(kind="preprint")), (book, lambda d: d.update(pages=321))):
+                d = json.load(open(path)); fn(d); json.dump(d, open(path, "w"))
+                t = time.time() - 1800; os.utime(path, (t, t))             # (changed half an hour ago: nothing about its dates says "read me again")
+
+            def refusing(f, *a, **k):
+                if f in (notes, side, book):
+                    raise PermissionError(13, "Permission denied", f)
+                return real_open(f, *a, **k)
+            builtins.open = refusing
+            try:
+                assert ns.counts(P[0]["pdf"]) is None and kd_.read_sidecar(P[1]["pdf"], P[1]["key"]) == {}                 # (what these say to everyone else is unchanged)
+                row0, row1 = pl_.library_row(f0), pl_.library_row(f1)
+                assert row0["notes"] is None and row1["kind"] == "journal", (row0["notes"], row1["kind"])                # the answers during the failure are the ones before this change
+                for ask in (lambda: pl_.library_row(f5), pl_.library):                                                  # (a book file that cannot be read was an error, and is)
+                    try:
+                        ask(); raise AssertionError("no error for a book file that cannot be read")
+                    except PermissionError:
+                        pass
+            finally:
+                builtins.open = real_open
+            for _ in range(2):
+                row0, row1, row5 = pl_.library_row(f0), pl_.library_row(f1), pl_.library_row(f5)
+                assert row0["notes"] == {"highlights": 3, "cards": 0}, "the highlights of a notes file that could not be read for a moment stay hidden: %r" % (row0["notes"],)
+                assert row1["kind"] == "preprint", "the type of a paper whose type file could not be read for a moment stays wrong: %r" % row1["kind"]
+                assert row5["book"]["pages"] == 321, row5["book"]
+            lib = by(pl_.library())
+            assert lib[f0]["notes"] == {"highlights": 3, "cards": 0} and lib[f1]["kind"] == "preprint" and lib[f5]["book"]["pages"] == 321
+            with Spy() as s:                                               # and from here they are kept again
+                pl_.library(); assert s.opened == [], s.opened
+            # a notes file that is damaged (not one that cannot be read) says "no notes" as before, and that is kept until the file changes
+            open(notes, "w").write("{half"); t = time.time() - 900; os.utime(notes, (t, t))
+            assert pl_.library_row(f0)["notes"] is None
+            with Spy() as s:
+                assert pl_.library_row(f0)["notes"] is None and s.opened == [], s.opened
+        finally:
+            builtins.open = real_open; restore()
+    check("the library list does not remember what a file said while it could not be read (notes, a paper's type file, a book's details): the next request reads it again", t_library_refused)
+
+    def t_library_change_time():
+        """A file rewritten in place with the same length and its old modification time (two saves on the other computer within one second, delivered one after the other) is seen."""
+        import pipeline as pl_, readstate as rs_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        try:
+            f0, f2, f4 = (P[i]["file"] for i in (0, 2, 4))
+            def again(path, write):
+                """`write()` the file's next version, of the same length, and give it the dates it had."""
+                st = os.stat(path); write(); os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+                assert (os.stat(path).st_size, os.stat(path).st_mtime_ns, os.stat(path).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino), path
+            def old(path):
+                t = time.time() - 7200; os.utime(path, (t, t))
+            # reading status
+            settle(); json.dump({"papers": {P[0]["key"]: {"page": 5}}}, open(rs_.PATH, "w")); old(rs_.PATH)
+            assert by(pl_.library())[f0]["state"] == {"page": 5} and by(pl_.library())[f0]["state"] == {"page": 5}
+            again(rs_.PATH, lambda: json.dump({"papers": {P[0]["key"]: {"page": 6}}}, open(rs_.PATH, "w")))
+            assert by(pl_.library())[f0]["state"] == {"page": 6}, "the reading status delivered second (same length, same time) was not seen"
+            assert pl_.library_row(f0)["state"] == {"page": 6}
+            # a folder's list
+            fp = os.path.join(fo.DIR, fid + ".json"); d = json.load(open(fp)); d["papers"] = [P[2]["key"]]; json.dump(d, open(fp, "w")); old(fp)
+            assert by(pl_.library())[f2]["folders"] == [fid] and by(pl_.library())[f4]["folders"] == []
+            d["papers"] = [P[4]["key"]]; again(fp, lambda: json.dump(d, open(fp, "w")))
+            rows = by(pl_.library()); assert rows[f4]["folders"] == [fid] and rows[f2]["folders"] == [], "a folder's list delivered second (same length, same time) was not seen"
+            # a paper's notes
+            np_ = ns.notes_path(P[0]["pdf"]); d = json.load(open(np_)); json.dump(d, open(np_, "w")); old(np_)
+            assert pl_.library_row(f0)["notes"] == {"highlights": 2, "cards": 0}
+            d["cards"], d["highlights"] = d["highlights"], []; again(np_, lambda: json.dump(d, open(np_, "w")))
+            assert pl_.library_row(f0)["notes"] == {"highlights": 0, "cards": 2}, "a notes file delivered second (same length, same time) was not seen"
+            # a file that arrived a moment ago with an old modification time is as new as one written a moment ago: read again the next time (by the real clock), kept after that
+            side = P[2]["pdf"][:-4] + ".paper.json"; settle(); json.dump({"kind": "preprint", "for": P[2]["key"]}, open(side, "w")); old(side)
+            settle.clock.ahead = 0.0
+            try:
+                assert pl_.library_row(f2)["kind"] == "preprint"
+                with Spy() as s:
+                    pl_.library_row(f2)
+                assert s.opened == [os.path.relpath(side, root)], "a file that arrived a moment ago was trusted at once: %s" % s.opened
+            finally:
+                settle.clock.ahead = 3.0
+            pl_.library_row(f2)
+            with Spy() as s:
+                pl_.library_row(f2)
+            assert s.opened == [], s.opened
+        finally:
+            restore()
+    check("the library list sees a file rewritten in place with the same length and its old modification time (reading status, a folder's list, notes): the change time is compared too, "
+          "and a file that arrived a moment ago is read again the next time", t_library_change_time)
 
     def t_library_row_server():
         """The requests about one paper (opening it, its reading progress, the notes autosave, a chapter summary, the answer to an import) find its row by
@@ -4270,15 +4488,15 @@ print("OK")
                 seen.append(1)
                 th = threading.Thread(target=lambda: seen.append(ns.sha1_of(fb)), daemon=True); th.start(); th.join(5)
             return f
-        ns.sha_forget(); ns.open = spy
+        ns.sha_forget(); ns.open = spy; ns.time = Later()      # (the two files were made a moment ago, which their change time says whatever their date: see Later)
         try:
             got = ns.sha1_of(fa)
+            assert seen == [1, hb], seen
+            assert got == ha, "paper A was given %s" % ("paper B's hash" if got == hb else got)
+            assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "one file's name is remembered with the other's hash"
+            assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) == ha and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None and ns.sha1_known(None) is None
         finally:
-            del ns.open
-        assert seen == [1, hb], seen
-        assert got == ha, "paper A was given %s" % ("paper B's hash" if got == hb else got)
-        assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "one file's name is remembered with the other's hash"
-        assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) == ha and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None and ns.sha1_known(None) is None
+            del ns.open; ns.time = time
         with open(fa, "ab") as f:
             f.write(b"more")
         assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
@@ -8481,7 +8699,7 @@ print("OK")
                     pl_.fetch_weekly(pl_.Run("weekly", {}), lambda ev, d=None: None, threading.Event())
                 finally:
                     fx_.fetch_journal = real_fj
-                    pl_.FEED_HOST_PAUSE = 1.0
+                    pl_.FEED_HOST_PAUSE = 0.3
                 assert seen_ and "SSRN" not in seen_, seen_
             finally:
                 open(jpath, "w").write(saved) if saved is not None else os.remove(jpath)
@@ -8748,6 +8966,8 @@ print("OK")
         json.dump({"journals": journals_}, open(jpath, "w"))
         json.dump({}, open(seen_p, "w"))
         runs_ = []
+        with pl_._FEEDS:
+            pl_._FEEDS_FREE_AT.clear()       # (the pauses are the process's: a host's pause from the check before is not this fixture's concern)
 
         def go(fetch, stop=None, on_event=None):
             events = []
@@ -9043,6 +9263,101 @@ print("OK")
                 r()
     check("weekly check, read ahead: two feeds of one host are a pause apart while another host is read meanwhile, never more than three feeds are being read (a Crossref journal waits its place), "
           "and a feed on the lookups' own hosts is not read ahead", t_feeds_ahead_pace)
+
+    def t_feeds_ahead_fair():
+        """The pause is short, the journal whose turn it is does not wait behind journals after it, a feed line that is not text fails for its journal only, a check started
+        while a stopped one's feeds are still being read asks no host beside them, and a thread that cannot be started leaves nothing reading on."""
+        import pipeline as pl_, time as _t
+        fixtures = []
+        pause0 = pl_.FEED_HOST_PAUSE
+        try:
+            # 1. the pause between two feeds of one host: 0.3 s after the answer (there was none before feeds were read ahead; a second made a quiet week slower than it was)
+            assert pl_.FEED_HOST_PAUSE == 0.3, pl_.FEED_HOST_PAUSE
+            spans = {}
+
+            def quick(j):
+                t0 = _t.time(); _t.sleep(0.02); spans[j["abbr"]] = (t0, _t.time())
+                return []
+            go, restore = weekly_fixture([WJ(a, "one.example") for a in ("AA", "BB", "CC", "DD")]); fixtures.append(restore)
+            t0 = _t.time(); go(quick); took = _t.time() - t0
+            gaps = [spans[b][0] - spans[a][1] for a, b in (("AA", "BB"), ("BB", "CC"), ("CC", "DD"))]
+            assert min(gaps) >= 0.29 and took < 2.5, "four feeds of one host with nothing new: %.2f s, pauses %s" % (took, ["%.2f" % g for g in gaps])
+            restore(); fixtures.pop()
+            # 2. the journal whose turn it is (here one read through Crossref, first in the list) gets the first place that frees, before the journals after it
+            pl_.FEED_HOST_PAUSE = 0.0
+            order, lock = [], threading.Lock()
+
+            def slowish(j):
+                with lock:
+                    order.append(j["abbr"])
+                _t.sleep(0.3)
+                return feed_items(j)
+            go, restore = weekly_fixture([WJ("X0", None, "crossref")] + [WJ("R%d" % i, "h%d.example" % i) for i in range(7)]); fixtures.append(restore)
+            run, _ = go(slowish)
+            assert order.index("X0") <= 3, "the journal whose turn it was waited behind the feeds of later journals: %s" % order
+            assert sorted(order) == sorted(["X0"] + ["R%d" % i for i in range(7)]) and [run.papers[i]["abbr"] for i in run.order][:2] == ["X0", "X0"] and len(run.order) == 16, (order, run.order)
+            restore(); fixtures.pop()
+            # 3. a feed line that is not text (a journals.json edited by hand): that journal's feed fails, the others are checked
+            for bad in (5, True, ["https://one.example/x.rss"], {"a": 1}):
+                assert pl_.feed_host({"source": "rss", "feed": bad}) is None, bad
+            js = [WJ("AA", "one.example"), dict(WJ("BAD", "two.example"), feed=5), WJ("CC", "three.example")]
+            go, restore = weekly_fixture(js); fixtures.append(restore)
+
+            def picky(j):
+                if not isinstance(j.get("feed"), str):
+                    raise ValueError("unknown url type: %r" % (j.get("feed"),))                    # (what reading such a feed says)
+                return feed_items(j)
+            run, events = go(picky)
+            assert run.errors == ["BAD: unknown url type: 5"] and [run.papers[i]["abbr"] for i in run.order] == ["AA", "AA", "CC", "CC"], (run.errors, run.order)
+            assert [t for t in weekly_tiles(events) if t[1] in ("failed", "fetched")] == [("AA", "fetched"), ("BAD", "failed"), ("CC", "fetched")], weekly_tiles(events)
+            restore(); fixtures.pop()
+            # 4. Stop, and Check again at once: the feeds the stopped check left being read keep their hosts and their places until they have answered
+            names = ["AA", "BB", "CC", "DD", "EE"]
+            go, restore = weekly_fixture([WJ(a, "%s.example" % a.lower()) for a in names]); fixtures.append(restore)
+            active, most, stop, first = {}, {"host": 0, "all": 0}, threading.Event(), [True]
+
+            def counted(j):
+                with lock:
+                    active[j["abbr"]] = active.get(j["abbr"], 0) + 1
+                    most["host"], most["all"] = max(most["host"], active[j["abbr"]]), max(most["all"], sum(active.values()))
+                _t.sleep(0.6 if first[0] and j["abbr"] != "AA" else 0.02)                           # (the stopped check's feeds are slow, AA's apart)
+                with lock:
+                    active[j["abbr"]] -= 1
+                return feed_items(j)
+            run1, _ = go(counted, stop=stop, on_event=lambda ev, d: stop.set() if ev == "journal" and d.get("abbr") == "AA" and d.get("state") == "fetching" else None)
+            assert not run1.order and sum(active.values()) >= 2, (run1.order, active)                # the check has ended; feeds it started are still being read
+            first[0] = False
+            run2, _ = go(counted)
+            assert most["host"] == 1, "a host was asked by the new check while the stopped check was still asking it"
+            assert most["all"] <= 3, "%d feeds were being read at once" % most["all"]
+            assert [run2.papers[i]["abbr"] for i in run2.order] == [a for a in names for _ in (0, 1)], run2.order
+            restore(); fixtures.pop()
+            # 5. the second thread cannot be started: the check fails as it would, and the first thread does not read the feeds on with nobody to take them
+            go, restore = weekly_fixture([WJ(a, "%s.example" % a.lower()) for a in names]); fixtures.append(restore)
+            asked, n_started, real_start = [], [0], threading.Thread.start
+
+            def start(self):
+                if getattr(getattr(self, "_target", None), "__name__", "") == "_work":
+                    n_started[0] += 1
+                    if n_started[0] == 2:
+                        raise RuntimeError("can't start new thread")
+                return real_start(self)
+            threading.Thread.start = start
+            try:
+                try:
+                    go(lambda j: (asked.append(j["abbr"]), _t.sleep(0.05), feed_items(j))[2]); raise AssertionError("no error")
+                except RuntimeError as e:
+                    assert "can't start new thread" in str(e), e
+            finally:
+                threading.Thread.start = real_start
+            _t.sleep(0.5)
+            assert n_started[0] == 2 and len(asked) <= 1, "after the check failed to start, feeds were still read: %s" % asked
+        finally:
+            pl_.FEED_HOST_PAUSE = pause0
+            for r in fixtures:
+                r()
+    check("weekly check, read ahead: 0.3 s between two feeds of one host, the journal whose turn it is gets the next free place, a feed line that is not text fails for that journal only, "
+          "a check started right after a Stop asks no host a stopped check is still asking, and a thread that cannot be started leaves no feed being read", t_feeds_ahead_fair)
 
     def t_screen_errors():
         """A screening that fails says why, in the provider's words; an answer that asking again cannot change (a model without structured output, a refused key) stops the
@@ -9628,7 +9943,13 @@ print("OK")
         out = _lazy_child(code % (gone, False, line)); assert "SAID=1\n" in out and "SDK=0" in out, out        # the package is missing: one line, in the words used for the other AI parts
         out = _lazy_child(code % (gone, True, line)); assert "SAID=0\n" in out, out                            # (the Mac app starts quietly)
         out = _lazy_child(code % ("", False, line)); assert "SAID=0\n" in out and "SDK=0" in out, out          # the package is there: nothing is said, and looking for it did not load it
-    check("starting without the Anthropic SDK says once what to install (not when started quietly, not when the SDK is there), and looking for it does not load it", t_missing_sdk_said_at_start)
+        stand_in = "import types\nsys.modules['anthropic'] = types.SimpleNamespace(Anthropic=object)      # a stand-in that does not say where it came from\n"
+        for quiet in (False, True):                                                                             # the look for the SDK fails on it: the start goes on, and says nothing
+            out = _lazy_child(code % (stand_in, quiet, line)); assert "SAID=0\n" in out and "SDK=1" in out, out
+        out = _lazy_child(code % ("import importlib.util\ndef boom(name): raise RuntimeError('no look today')\nimportlib.util.find_spec = boom\n", False, line))
+        assert "SAID=0\n" in out, out                                                                           # (whatever the look raises)
+    check("starting without the Anthropic SDK says once what to install (not when started quietly, not when the SDK is there), and looking for it does not load it; "
+          "a look for the SDK that fails (a stand-in module) does not stop the start", t_missing_sdk_said_at_start)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")
