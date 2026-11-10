@@ -184,15 +184,18 @@ def sidecar_path(pdf):
     return pdf[:-4] + ".paper.json"
 
 
-def read_sidecar(pdf, key=None):
-    """The sidecar of the PDF at this absolute path ({} when there is none, it cannot be read, or it was written for another paper than `key`)."""
+def read_sidecar(pdf, key=None, refused=None):
+    """The sidecar of the PDF at this absolute path ({} when there is none, it cannot be read, or it was written for another paper than `key`).
+    refused: what to answer instead of {} when the file is there but the system would not let it be read (the library list does not remember such an answer)."""
     p = sidecar_path(pdf) if isinstance(pdf, str) and pdf.lower().endswith(".pdf") else ""
     if not p or not os.path.exists(p):
         return {}
     try:
         with open(p, encoding="utf-8") as f:
             d = json.load(f)
-    except (OSError, ValueError):
+    except OSError:
+        return {} if refused is None else refused
+    except ValueError:
         return {}
     if not isinstance(d, dict) or d.get("kind") not in PAPER_KINDS or (key and d.get("for") and str(d.get("for")).lower() != str(key).lower()):
         return {}

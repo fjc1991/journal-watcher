@@ -511,6 +511,7 @@ def fake_ol(title='', authors=None, isbn='', rows=4):                           
 bks.openlibrary_search = fake_ol
 bks.crossref_books = lambda title, rows=3: []
 fx.fetch_journal = lambda j: []                                                   # the weekly check reads no real feed (only the followed authors bring papers)
+pl.FEED_HOST_PAUSE = 0                                                            # ... and does not wait between two feeds of one host
 """.replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv_log = os.path.join(tempfile.gettempdir(), "jw-ui-server-%d.log" % os.getpid()); srv_err = open(srv_log, "w")     # what the app prints: kept when a check fails
@@ -3572,6 +3573,123 @@ fx.fetch_journal = lambda j: []                                                 
                 os.truncate(led_, led_n_)
             page.evaluate(est_js_)
             page.evaluate("window.Settings && Settings.close()")
+
+            print("a Library list of hundreds of papers is drawn 100 at a time, and a row's menu is built when it is opened")
+            pg_idx_ = os.path.join(TMP, "Papers", "_index.csv"); pg_hdr_ = next(csv.reader(open(pg_idx_, newline=""))); PGN = 320
+            pg_dirs_ = [os.path.join(TMP, "Papers", ym_, "Paging Journal") for ym_ in ("2023-01", "2024-01")]
+            for d_ in pg_dirs_:
+                os.makedirs(d_, exist_ok=True)
+            with open(pg_idx_, "a", newline="") as f_:
+                w_ = csv.DictWriter(f_, pg_hdr_, extrasaction="ignore")
+                for k in range(PGN):                                  # 210 of 2023 and 110 of 2024 (the Year filter narrows the list to 210); every third has a summary
+                    rel_ = "Papers/%s/Paging Journal/paging-%04d.pdf" % ("2023-01" if k < 210 else "2024-01", k)
+                    open(os.path.join(TMP, rel_), "wb").write(b"%PDF-1.4\n")
+                    if k % 3 == 0:
+                        open(os.path.join(TMP, rel_[:-4] + ".md"), "w").write("# Summary\n" + "A finding about paging. " * 20)
+                    w_.writerow({"date_checked": "2026-10-29", "journal": "Paging Journal", "abbr": "PGJ", "title": "Paging paper %04d" % k, "authors": "Jane Doe", "doi": "10.7777/paging.%d" % k, "file": rel_, "status": "ok", "note": ""})
+            pg_fold_ = next(f_ for f_ in api("/api/folders", {"action": "create", "name": "Paging folder"})["folders"] if f_["name"] == "Paging folder")["id"]
+            page.route("**/api/queue*", lambda r_: r_.fulfill(status=200, content_type="application/json", body='{"items": [], "total": 0, "profile": {"ready": false, "pos": 0}}'))     # (Up next over 320 more papers is slow and is not what this block is about)
+            nrows = lambda: page.locator("#lib-results .librow").count()
+            lr_more = lambda: (page.evaluate("document.querySelector('#lr-moremore') && document.querySelector('#lr-moremore').click()"), page.wait_for_timeout(300))     # ('Show more' itself: a click that does not scroll the button into view, where the scroll trigger would draw too)
+            more_text = lambda: page.inner_text("#lr-moremore") if page.locator("#lr-moremore").count() else "(no button)"
+            lr_filled = lambda: page.evaluate("[...document.querySelectorAll('#libview .rowmenu')].filter(m => m.children.length).length")     # (how many rows have a menu with something in it)
+            def lr_pick(sel_, v_):
+                page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.select_option(sel_, v_); page.keyboard.press("Escape")
+            def wait_rows(cond, timeout=8000):
+                try:
+                    page.wait_for_function("(c) => { const n = document.querySelectorAll('#lib-results .librow').length; return eval(c); }", arg=cond, timeout=timeout); return True
+                except Exception:  # noqa: BLE001
+                    return False
+            try:
+                page.goto("about:blank"); page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
+                page.wait_for_function("[...document.querySelectorAll('#lf-journal option')].some(o => o.value === 'PGJ')", timeout=10000)
+                # the answer to a search is held back for a moment, and the box is cleared before it comes
+                page.evaluate("(() => { const f = window.fetch; window.__f = f; window.fetch = (u, ...a) => String(u).includes('/api/library/search') ? new Promise(r => setTimeout(() => r(f(u, ...a)), 900)) : f(u, ...a); })()")
+                page.fill("#lf-q", "Paging paper"); page.wait_for_timeout(400); page.fill("#lf-q", ""); page.wait_for_timeout(1800)
+                check("a search still on its way when the box is cleared does not draw its papers onto the Library's home page when it arrives", nrows() == 0 and page.locator("#lib-results .reshead").count() == 0 and page.locator("#libbrowse").is_visible(), "%d rows" % nrows())
+                page.evaluate("window.fetch = window.__f")
+                if nrows():                                             # (the old fault left the list there: cleared, so the checks below start from the home page either way)
+                    page.fill("#lf-q", "x"); page.wait_for_timeout(600); page.fill("#lf-q", ""); page.wait_for_timeout(600)
+                page.evaluate("(() => { const f = Array.prototype.findIndex; window.__fi = 0; Array.prototype.findIndex = function (...a) { window.__fi++; return f.apply(this, a); }; })()")     # a spy on the linear search
+                lr_pick("#lf-journal", "PGJ"); page.wait_for_selector("#lib-results .reshead"); page.wait_for_timeout(300)
+                check("a list of 320 papers draws the first 100, with 'Show more' below saying how many are left; the count and 'Select all' still say 320",
+                      nrows() == 100 and page.locator("#lr-moremore").is_visible() and "(220 left)" in more_text() and "320 papers" in page.inner_text("#lib-results .reshead").lower() and page.inner_text("#lr-selall").strip() == "Select all 320",
+                      "%d rows, %s, %s" % (nrows(), more_text(), page.inner_text("#lib-results .reshead")[:60]))
+                check("…and no paper is looked up by scanning the whole library (it was two scans per result)", page.evaluate("window.__fi") < 20, str(page.evaluate("window.__fi")))
+                pg_b0_ = lr_filled(); pg_r0_ = page.locator("#lib-results .librow").first
+                pg_r0_.locator("[data-more]").click(); page.wait_for_selector("#lib-results .rowmenu:not(.hide)")
+                check("…a row's ⋯ menu is built when it is opened, not before: status, the PDF, folders, takeaway, type and delete are all there, and no other row has one",
+                      pg_b0_ == 0 and pg_r0_.locator(".rowmenu .stsel").count() == 1 and pg_r0_.locator('.rowmenu a[href*="/files/"]').count() == 1 and pg_r0_.locator(".rowmenu [data-fold]").count() == 1 and pg_r0_.locator(".rowmenu [data-take]").count() == 1
+                      and pg_r0_.locator(".rowmenu [data-setkind]").count() == 1 and pg_r0_.locator(".rowmenu [data-delitem]").count() == 1 and lr_filled() == 1, "%d filled before, %d after" % (pg_b0_, lr_filled()))
+                page.keyboard.press("Escape")
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); wait_rows("n > 100"); page.wait_for_timeout(300)
+                n1 = nrows()
+                check("…scrolling near the end draws the next 100", n1 == 200, str(n1))
+                late_ = "#lib-results .librow >> nth=150"; f150_ = page.locator(late_).get_attribute("data-file")
+                page.locator(late_).locator(".ptitle").click(); page.wait_for_selector("#drawer.on", timeout=5000)
+                check("…a row drawn later opens its own paper", n1 == 200 and page.evaluate("(f) => LIB[+document.querySelector('#lib-results .librow[data-file=\"' + CSS.escape(f) + '\"] [data-read]').dataset.read].file === f", f150_))
+                page.click("#dclose")
+                page.locator(late_).locator("[data-more]").click(); page.locator(late_).locator(".rowmenu .stsel").select_option("toread"); page.wait_for_timeout(600)
+                row150_ = page.locator('#lib-results .librow[data-file="%s"]' % f150_)
+                pg_tag_ = row150_.locator(".tag.stt").count() == 1 and row150_.locator(".tag.stt").inner_text().strip() == "To read"
+                row150_.locator("[data-more]").click(); pg_st_ = row150_.locator(".rowmenu .stsel").input_value()
+                check("…and its ⋯ menu sets its status: the row is drawn again where it was, the list keeps its 200 rows, and the menu opened again shows the new status",
+                      pg_tag_ and pg_st_ == "toread" and page.locator(late_).get_attribute("data-file") == f150_ and nrows() == 200, "%s, %s, %d rows" % (pg_tag_, pg_st_, nrows()))
+                row150_.locator(".rowmenu .stsel").select_option(""); page.wait_for_timeout(400)
+                pg_lr_ = page.evaluate("(() => { const rs = [...document.querySelectorAll('#lib-results .librow')]; const k = rs.findIndex((e, i) => i >= 100 && e.classList.contains('ready')); return k < 0 ? null : [k, rs[k].querySelector('.ptitle').firstChild.textContent]; })()")
+                pg_sum_ = False
+                if pg_lr_ and nrows() == 200:
+                    rr_ = page.locator("#lib-results .librow >> nth=%d" % pg_lr_[0]); rr_.locator("[data-more]").click(); rr_.locator(".rowmenu button[data-i]").click(timeout=3000); page.wait_for_selector("#drawer.on", timeout=5000)
+                    pg_sum_ = page.inner_text("#dtitle").strip() == pg_lr_[1].strip() and lr_filled() <= 3
+                    page.click("#dclose")
+                check("…'Summary' in the menu of a row drawn later opens that paper's summary", pg_sum_, "%s, %d menus filled" % (pg_lr_, lr_filled()))
+                page.evaluate("window.scrollTo(0, 0)"); page.wait_for_timeout(200)
+                page.click("#lr-selall"); page.wait_for_selector("#lib-actionbar:not(.hide)")
+                check("'Select all 320' selects every match, drawn or not", "320 selected" in page.inner_text("#lib-actionbar") and page.locator("#lib-results .rsel:checked").count() == 200 and nrows() == 200,
+                      "%s, %d ticked of %d rows" % (page.inner_text("#lib-actionbar")[:30], page.locator("#lib-results .rsel:checked").count(), nrows()))
+                page.click("#ab-fold"); page.wait_for_selector(".fpop"); page.locator('.fpop input[data-f="%s"]' % pg_fold_).check()
+                page.wait_for_function("(id) => LIB.filter(r => (r.folders || []).includes(id)).length === 320", arg=pg_fold_, timeout=15000); page.wait_for_timeout(700)
+                pg_in_ = len([r_ for r_ in api("/api/library") if pg_fold_ in (r_.get("folders") or [])])
+                check("…'Add to folder' then puts all 320 in the folder, also the papers not drawn, and the list keeps its 200 rows", pg_in_ == PGN and nrows() == 200 and "320 selected" in page.inner_text("#lib-actionbar"), "%d in the folder, %d rows" % (pg_in_, nrows()))
+                page.keyboard.press("Escape"); page.mouse.click(5, 5)
+                lr_more(); n2 = nrows()
+                check("…'Show more' draws exactly 100 more, already ticked", n2 == 300 and page.locator("#lib-results .rsel:checked").count() == 300 and "(20 left)" in more_text(), "%d rows, %s" % (n2, more_text()))
+                lr_more(); n3 = nrows()
+                check("…and once more draws the rest, and the button goes", n3 == PGN and page.locator("#lib-results .rsel:checked").count() == PGN and page.locator("#lr-more").count() == 1 and page.locator("#lr-more").is_hidden(), "%d rows" % n3)
+                page.locator("#lib-results .librow >> nth=%d >> .rsel" % (PGN - 1)).uncheck()
+                check("…unticking one of them counts", "319 selected" in page.inner_text("#lib-actionbar") and page.locator("#lr-more").count() == 1)
+                page.click("#ab-clear")
+                lr_pick("#lf-year", "2023"); page.wait_for_function("(document.querySelector('#lib-results .reshead') || {innerText: ''}).innerText.toLowerCase().startsWith('210 papers')"); page.wait_for_timeout(300)
+                check("another filter starts again with the first 100", nrows() == 100 and "(110 left)" in more_text(), "%d rows, %s" % (nrows(), more_text()))
+                page.evaluate("window.scrollTo(0, 0)"); lr_more(); drawn_ = nrows()
+                page.evaluate("window.LibraryUI.refreshView()"); page.wait_for_timeout(1200)
+                check("the same list drawn again in place (a folder ticked, a type set, a paper deleted) keeps as many rows as were drawn", drawn_ == 200 and nrows() == 200 and "(10 left)" in more_text(), "%d before, %d after" % (drawn_, nrows()))
+                with open(pg_idx_, "a", newline="") as f_:              # one more paper: the library is listed newest first, so every paper's place in it moves by one
+                    csv.DictWriter(f_, pg_hdr_, extrasaction="ignore").writerow({"date_checked": "2026-10-29", "journal": "Paging Journal", "abbr": "PGJ", "title": "Paging paper added while the list was open", "authors": "Jane Doe",
+                                                                                 "doi": "10.7777/paging.new", "file": "Papers/2023-01/Paging Journal/paging-new.pdf", "status": "ok", "note": ""})
+                page.evaluate("window.__fi = 0"); page.evaluate("window.LibraryUI.refreshView()")
+                page.wait_for_function("[...document.querySelectorAll('#lib-results .librow')].some(e => e.dataset.file === 'Papers/2023-01/Paging Journal/paging-new.pdf')", timeout=8000); page.wait_for_timeout(300)
+                own_ = page.evaluate("[...document.querySelectorAll('#lib-results .librow')].every(e => LIB[+e.querySelector('[data-read]').dataset.read].file === e.dataset.file && LIB[+e.querySelector('.ptitle').dataset.i].file === e.dataset.file)")
+                check("after a paper is added every row still opens its own paper (the library's order moved by one), again without scanning", own_ and page.evaluate("window.__fi") < 20, "%s, %d scans" % (own_, page.evaluate("window.__fi")))
+                lr_pick("#lf-year", ""); page.fill("#lf-q", "Paging paper 0007"); page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === 1")
+                check("a search with few matches draws them all and offers nothing more", nrows() == 1 and page.locator("#lr-more").count() == 1 and page.locator("#lr-more").is_hidden())
+                page.fill("#lf-q", "Paging paper"); page.wait_for_timeout(700); page.click("#lf-ft"); page.wait_for_selector("#ft-back, #lib-results .empty", timeout=20000)
+                check("'In the PDFs' replaces the list: nothing more is offered there", page.locator("#lr-more").count() == 1 and page.locator("#lr-more").is_hidden() and nrows() == 0)
+                page.goto("about:blank"); page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#liball"); page.click("#liball"); page.wait_for_selector("#libview .yeargroup .librow"); page.wait_for_timeout(300)
+                pg_jb_ = lr_filled(); pg_jr_ = page.locator("#libview .yeargroup .librow").first
+                pg_jr_.locator("[data-more]").click(); pg_jr_.locator(".rowmenu:not(.hide)").wait_for(timeout=5000)
+                check("the other lists get the same menu (Show all journals): nothing in it until it is opened, then status and delete are there", pg_jb_ == 0 and pg_jr_.locator(".rowmenu .stsel").count() == 1 and pg_jr_.locator(".rowmenu [data-delitem]").count() == 1 and lr_filled() == 1,
+                      "%d filled before, %d after" % (pg_jb_, lr_filled()))
+                page.keyboard.press("Escape")
+            finally:
+                rows_ = [r_ for r_ in csv.DictReader(open(pg_idx_, newline="")) if not r_["doi"].startswith("10.7777/paging.")]
+                with open(pg_idx_, "w", newline="") as f_:
+                    w_ = csv.DictWriter(f_, pg_hdr_); w_.writeheader(); w_.writerows(rows_)
+                for d_ in pg_dirs_:
+                    shutil.rmtree(d_, ignore_errors=True)
+                api("/api/folders", {"action": "delete", "id": pg_fold_})
+                page.unroute("**/api/queue*")
+                page.goto("about:blank"); page.goto(base + "/")      # (a fresh page: the Library's filters start empty again)
 
             print("you can delete what you added")
             import pymupdf as _pmu                                         # (a paper of its own, so the papers later checks use stay)

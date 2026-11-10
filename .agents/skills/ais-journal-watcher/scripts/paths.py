@@ -61,7 +61,7 @@ LOCAL = _local_dir()
 # the entries of state/ that belong to one computer (everything else in state/ is shared with the data folder: run history, what was screened and seen, the AI spending ledger, backups,
 # and the two regenerable folders below)
 LOCAL_ITEMS = ("browser-profile", "session-cookies.json", "signins.json", "update_state.json", "models", "staging", "fetched",
-               "crossref_cache.json", "authors_cache.json", "openalex_cache.json", "cite_cache.json", "personal_vecs.json")
+               "crossref_cache.json", "authors_cache.json", "openalex_cache.json", "cite_cache.json", "personal_vecs.json", "personal_vecs.bin", "pdf_sha1.json")
 # regenerable, but worth sharing between the computers that use the data folder: the search index (a paper is read into it once, on whichever computer sees it first) and the saved AI
 # answers (an answer paid for once is free everywhere). Their files are named by the content of the paper or of the request, so they mean the same on every computer.
 SHARED_CACHES = ("index", "ai_cache")

@@ -884,6 +884,329 @@ def main():
         assert os.path.exists(os.path.join(bl.INDEX, ns.sha1_of(pdf) + ".blocks.json")) and bl.extract(pdf) == bs
     check("reading order, headers dropped, cached", t_blocks)
 
+    print("pdf hash cache")
+    import builtins, hashlib, time  # noqa: E402
+    HD = os.path.join(PAPERS, "2026-06", "HASH"); os.makedirs(HD, exist_ok=True)
+    true_sha = lambda p: hashlib.sha1(builtins.open(p, "rb").read()).hexdigest()  # noqa: E731
+
+    class Later:
+        """A module's clock, `ahead` seconds ahead of the real one. A file changed in the last two seconds is not trusted (on purpose), and "changed" includes the change
+        time, which no test can set back: with this clock a file made a moment ago counts as old. `with clock.real():` gives the real time for what is about new files."""
+        def __init__(self, ahead=3.0):
+            self.ahead = ahead
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def time_ns(self):
+            return time.time_ns() + int(self.ahead * 1e9)
+
+        def real(self):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                was, self.ahead = self.ahead, 0.0
+                try:
+                    yield
+                finally:
+                    self.ahead = was
+            return cm()
+    ns_clock = ns.time = Later()             # (until the end of this section)
+
+    def settled(p, age=3600):
+        """Give the file a modification time in the past: a file changed in the last two seconds is hashed but (on purpose) not remembered."""
+        t = time.time() - age; os.utime(p, (t, t)); return p
+
+    class pdf_reads:
+        """with pdf_reads() as r: ... ; r.n = how many times notes_store opened a PDF to read it (the hashing lives in notes_store)."""
+        def __enter__(self):
+            self.n = 0; self.paths = []
+
+            def spy(path, mode="r", *a, **k):
+                if "b" in mode and str(path).lower().endswith(".pdf"):
+                    self.n += 1; self.paths.append(path)
+                return builtins.open(path, mode, *a, **k)
+            ns.open = spy; return self
+
+        def __exit__(self, *a):
+            del ns.open
+
+    def hash_pdfs(n, tag):
+        out = []
+        for i in range(n):
+            p = os.path.join(HD, "%s%d.pdf" % (tag, i)); builtins.open(p, "wb").write(b"%PDF-1.7 " + (tag + str(i)).encode() * 50); out.append(settled(p))
+        return out
+
+    def t_sha_many():
+        ps = hash_pdfs(5, "many")
+        with pdf_reads() as r:
+            first = [ns.sha1_of(p) for p in ps]
+            assert first == [true_sha(p) for p in ps] and r.n == 5, r.n
+            for _ in range(3):                                         # the passes a library-wide search makes: paper after paper, again and again
+                assert [ns.sha1_of(p) for p in ps] == first
+            assert r.n == 5, "an unchanged PDF was read again: %d reads for 5 files" % r.n
+            assert [ns.sha1_known(p) for p in ps] == first and r.n == 5, "every remembered paper is known without opening it, not only the one hashed last"
+    check("pdf hash: every PDF's hash is remembered, not only the last one (a pass over the library reads no PDF a second time)", t_sha_many)
+
+    def t_sha_changes():
+        a, b = hash_pdfs(2, "chg")
+        ns.sha1_of(a); ns.sha1_of(b); ns.sha1_of(a)
+        # 1. new content, another size
+        builtins.open(a, "wb").write(b"%PDF-1.7 longer " + b"x" * 500); settled(a, 1800)
+        assert ns.sha1_known(a) is None and ns.sha1_of(a) == true_sha(a), "another size"
+        # 2. new content, same size, another modification time
+        n = os.path.getsize(a); builtins.open(a, "wb").write(b"y" * n); settled(a, 900)
+        assert ns.sha1_known(a) is None and ns.sha1_of(a) == true_sha(a), "same size, newer"
+        # 3. replaced by another file of the same size AND the same modification time (a copy that keeps the time, a sync client putting a version back): only the inode tells
+        st = os.stat(a); ns.sha1_of(a)
+        tmp = a + ".new"; builtins.open(tmp, "wb").write(b"z" * n); os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns)); os.replace(tmp, a)
+        assert (os.stat(a).st_size, os.stat(a).st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+        assert ns.sha1_known(a) is None, "replaced by a file with the same size and time: still called known"
+        assert ns.sha1_of(a) == true_sha(a), "replaced by a file with the same size and time"
+        # 4. written again in place within the same instant (same size, same time, same inode: nothing to tell by) just after it was hashed: a file this fresh is not remembered
+        builtins.open(a, "wb").write(b"p" * n); st = os.stat(a)
+        with pdf_reads() as r, ns_clock.real():
+            assert ns.sha1_of(a) == ns.sha1_of(a) == true_sha(a) and r.n == 2, "a file written a moment ago was not read each time: %d" % r.n
+            assert ns.sha1_known(a) == true_sha(a) and r.n == 2          # (the one hashed last is still known to the cost line, which only measures; nothing is opened for it)
+        with builtins.open(a, "r+b") as f:
+            f.write(b"q" * n)
+        os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert (os.stat(a).st_ino, os.stat(a).st_size, os.stat(a).st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+        assert ns.sha1_of(a) == true_sha(a), "rewritten in place inside the file system's time step"
+        # 5. the other paper was not disturbed by any of it, and is still not read again
+        with pdf_reads() as r:
+            assert ns.sha1_of(b) == true_sha(b) and r.n == 0, r.n
+        # 6. a file that changes while it is being read (a sync client writing it) and is then put back exactly as it was: what was read is returned (as before), but it is not remembered
+        c = hash_pdfs(1, "mid")[0]; was = builtins.open(c, "rb").read(); st = os.stat(c)
+
+        def spy(path, mode="r", *a_, **k):
+            if path == c and "b" in mode:
+                builtins.open(c, "ab").write(b"tail")
+            return builtins.open(path, mode, *a_, **k)
+        ns.open = spy
+        try:
+            assert ns.sha1_of(c) == hashlib.sha1(was + b"tail").hexdigest()
+        finally:
+            del ns.open
+        with builtins.open(c, "r+b") as f:
+            f.write(was); f.truncate()
+        os.utime(c, ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert (os.stat(c).st_ino, os.stat(c).st_size, os.stat(c).st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+        with pdf_reads() as r:
+            assert ns.sha1_of(c) == true_sha(c) and r.n == 1, "a hash taken while the file was changing was kept (%d reads)" % r.n
+            assert ns.sha1_of(c) == true_sha(c) and r.n == 1, r.n          # (read in peace this time, so now it is remembered)
+        # 7. gone: an error as before, never an old answer
+        os.remove(b)
+        try:
+            ns.sha1_of(b); raise AssertionError("a hash for a file that is not there")
+        except OSError:
+            pass
+        assert ns.sha1_known(b) is None
+    check("pdf hash: never an old answer: another size, another time, a replacement with the same size and time, a rewrite in the same instant, a file changed while it was read, a deleted file", t_sha_changes)
+
+    def t_sha_restart():
+        assert os.path.realpath(ns.SHA_CACHE).startswith(os.path.realpath(paths.LOCAL) + os.sep), ns.SHA_CACHE          # on this computer…
+        for shared in (PAPERS, bl.INDEX, os.path.join(paths.STATE, "index"), os.path.join(paths.STATE, "ai_cache")):     # …and not where the papers or the shared caches are
+            assert not os.path.realpath(ns.SHA_CACHE).startswith(os.path.realpath(shared) + os.sep)
+        assert os.path.basename(ns.SHA_CACHE) in paths.LOCAL_ITEMS, "the map would travel with the data folder when it is moved"
+        keep = ns.SHA_CACHE, ns.SHA_SAVE_S
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1.json"); ns.sha_forget()
+        try:
+            ps = hash_pdfs(4, "rst"); want = [true_sha(p) for p in ps]
+            assert [ns.sha1_of(p) for p in ps] == want
+            ns.sha_flush(); assert os.path.exists(ns.SHA_CACHE)
+            os.remove(ns.SHA_CACHE)                                    # written rarely: passes that find every hash remembered write nothing
+            assert [ns.sha1_of(p) for p in ps] == want
+            ns.sha_flush(); assert not os.path.exists(ns.SHA_CACHE), "the map was written again although nothing new was hashed"
+            young = os.path.join(HD, "young.pdf"); builtins.open(young, "wb").write(b"%PDF just written")
+            with ns_clock.real():
+                ns.sha1_of(young)
+            ns.sha_flush(); assert not os.path.exists(ns.SHA_CACHE), "a file written a moment ago went into the saved map"
+            ns.sha_forget(); assert [ns.sha1_of(p) for p in ps] == want; ns.sha_flush()
+            assert sorted(json.load(builtins.open(ns.SHA_CACHE))["files"]) == sorted(ps)
+            ns.sha_forget()                                            # "the app was closed and opened again"
+            with pdf_reads() as r:
+                assert [ns.sha1_known(p) for p in ps] == want and [ns.sha1_of(p) for p in ps] == want and r.n == 0, "after a restart %d PDFs were read again" % r.n
+            # while the app was closed: one paper replaced (same size, other time), one replaced keeping size and time, one deleted and one untouched
+            n = os.path.getsize(ps[0]); builtins.open(ps[0], "wb").write(b"A" * n); settled(ps[0], 600)
+            st = os.stat(ps[1]); builtins.open(ps[1] + ".new", "wb").write(b"B" * st.st_size); os.utime(ps[1] + ".new", ns=(st.st_atime_ns, st.st_mtime_ns)); os.replace(ps[1] + ".new", ps[1])
+            os.remove(ps[2])
+            ns.sha_forget()
+            with pdf_reads() as r:
+                assert ns.sha1_of(ps[0]) == true_sha(ps[0]) and ns.sha1_of(ps[1]) == true_sha(ps[1]) and ns.sha1_of(ps[3]) == want[3]
+                assert sorted(r.paths) == sorted(ps[:2]), r.paths      # exactly the two that changed were read
+            ns.sha_flush()
+            # the saved map forgets files that are gone, keeps what another process wrote meanwhile, and is written by itself soon after a new hash
+            other = os.path.join(HD, "other-process.pdf"); builtins.open(other, "wb").write(b"%PDF other"); settled(other)
+            d = json.load(builtins.open(ns.SHA_CACHE)); so = os.stat(other)
+            assert ps[2] not in d["files"], "a deleted file stayed in the saved map"
+            d["files"][other] = [so.st_size, so.st_mtime_ns, so.st_ino, so.st_ctime_ns, true_sha(other)]; d["files"][ps[2]] = [1, 2, 3, 4, "0" * 40]; json.dump(d, builtins.open(ns.SHA_CACHE, "w"))
+            ns.SHA_SAVE_S = 0.05
+            extra = hash_pdfs(1, "late")[0]; ns.sha1_of(extra)
+            t0 = time.time()
+            while time.time() - t0 < 5 and extra not in json.load(builtins.open(ns.SHA_CACHE))["files"]:
+                time.sleep(0.05)
+            files = json.load(builtins.open(ns.SHA_CACHE))["files"]
+            assert extra in files and other in files and ps[2] not in files and ps[0] in files, sorted(files)
+            assert files[extra] == [os.stat(extra).st_size, os.stat(extra).st_mtime_ns, os.stat(extra).st_ino, os.stat(extra).st_ctime_ns, true_sha(extra)], files[extra]
+            assert not [f for f in os.listdir(os.path.dirname(ns.SHA_CACHE)) if f.endswith(".tmp")]
+            # a damaged map, or one that lies about a file, costs a read and never a wrong answer
+            builtins.open(ns.SHA_CACHE, "w").write('{"v": 2, "files": {"' + ps[3].replace("\\", "\\\\")); ns.sha_forget()
+            assert ns.sha1_known(ps[3]) is None and ns.sha1_of(ps[3]) == want[3]
+            st = os.stat(ps[3])
+            json.dump({"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino + 1, st.st_ctime_ns, "0" * 40], ps[0]: [1, 2, 3, 4, "not a hash"], ps[1]: "nonsense"}}, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+            assert ns.sha1_of(ps[3]) == want[3] and ns.sha1_of(ps[0]) == true_sha(ps[0]) and ns.sha1_of(ps[1]) == true_sha(ps[1])
+            for bad in ({"v": 3, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, "0" * 40]}},                 # another version of the file
+                        {"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, "0" * 39]}},                 # not a hash
+                        {"v": 2, "files": {ps[3]: [st.st_size + 1, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, "0" * 40]}},             # another size
+                        {"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns - 1, st.st_ino, st.st_ctime_ns, "0" * 40]}},             # another time
+                        {"v": 2, "files": {ps[3]: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns - 1, "0" * 40]}},             # another change time
+                        {"v": 2, "files": [ps[3]]}, [1, 2], "x"):
+                json.dump(bad, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+                assert ns.sha1_known(ps[3]) is None and ns.sha1_of(ps[3]) == want[3], bad
+        finally:
+            ns.SHA_CACHE, ns.SHA_SAVE_S = keep; ns.sha_forget()
+    check("pdf hash: the map is kept on this computer and survives a restart; it is written only after a new hash; a file that changed while the app was closed is read again, a damaged or lying map is never believed", t_sha_restart)
+
+    def t_sha_threads():
+        ps = hash_pdfs(6, "thr"); want = {p: true_sha(p) for p in ps}; bad = []
+        old = sys.getswitchinterval(); sys.setswitchinterval(1e-6)
+
+        def work(k):
+            for i in range(400):
+                p = ps[(i * (k + 1) + k) % len(ps)]
+                got = ns.sha1_of(p)
+                if got != want[p]:
+                    bad.append((os.path.basename(p), got)); return
+        try:
+            ts = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+            [t.start() for t in ts]; [t.join() for t in ts]
+        finally:
+            sys.setswitchinterval(old)
+        assert not bad, "a request thread was given another paper's hash: %s" % bad[:3]
+        with pdf_reads() as r:
+            [ns.sha1_of(p) for p in ps]; assert r.n == 0, r.n
+        # while one thread reads a large PDF nobody else waits: a second thread gets a remembered hash, and hashes a new file, in the middle of the first one's read
+        big, new = hash_pdfs(2, "slow"); done = []
+
+        def spy(path, mode="r", *a, **k):
+            if path == big and "b" in mode:
+                t = threading.Thread(target=lambda: done.append((ns.sha1_of(ps[0]), ns.sha1_of(new), ns.sha1_known(ps[1]))), daemon=True)
+                t.start(); t.join(5)
+                assert done, "a second thread had to wait for the first one's PDF to be read"
+            return builtins.open(path, mode, *a, **k)
+        ns.open = spy
+        try:
+            assert ns.sha1_of(big) == true_sha(big)
+        finally:
+            del ns.open
+        assert done == [(want[ps[0]], true_sha(new), want[ps[1]])], done
+    check("pdf hash: request threads and the indexer asking at once each get their own paper's hash, and none waits while another reads a PDF", t_sha_threads)
+
+    def t_sha_library_pass():
+        rows = []; keep = bl.INDEX; bl.INDEX = os.path.join(TMP, "index-hash")
+        try:
+            for i in range(4):
+                rel = "Papers/2026-06/HASH/lib%d.pdf" % i; make_pdf(os.path.join(TMP, rel)); settled(os.path.join(TMP, rel))
+                rows.append({"file": rel, "title": "Lib %d" % i, "authors": "Doe, Jane", "year": "2026"})
+            first = list(ft.stream(rows, "governance"))                    # reads each paper into the index once
+            assert first[-1]["type"] == "results" and first[-1]["searched"] == 4, first[-1]
+            with pdf_reads() as r:
+                again = list(ft.stream(rows, "governance"))
+                assert again[-1]["type"] == "results" and again[-1]["n"] == first[-1]["n"] and not any(m["type"] == "status" for m in again)
+                assert r.n == 0, "a search in the PDFs read %d PDFs in full only to name their cache files" % r.n
+                assert all(embed.is_indexed(ns.pdf_path(x["file"])) in (True, False) for x in rows) and r.n == 0, "asking what is still to be indexed read %d PDFs" % r.n
+        finally:
+            bl.INDEX = keep; shutil.rmtree(os.path.join(TMP, "index-hash"), ignore_errors=True)
+    check("pdf hash: a second search in the PDFs (and every other pass over the library) opens no PDF", t_sha_library_pass)
+
+    def t_sha_change_time():
+        """A PDF rewritten in place with the same length and given its old modification time back (a sync client, a restore) is read again: its change time tells."""
+        a, b, c = hash_pdfs(3, "ctm")
+        with pdf_reads() as r:
+            assert ns.sha1_of(a) == ns.sha1_of(a) == true_sha(a) and r.n == 1, r.n                 # (remembered)
+        for label, restart in (("while the app runs", False), ("while the app was closed", True)):
+            st = os.stat(a); n = st.st_size
+            if restart:
+                ns.sha_flush(); ns.sha_forget()
+            with builtins.open(a, "r+b") as f:
+                f.write((b"R" if restart else b"Q") * n)
+            os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))
+            assert (os.stat(a).st_ino, os.stat(a).st_size, os.stat(a).st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+            assert ns.sha1_known(a) is None, "rewritten in place with the old size and time (%s): still called known" % label
+            assert ns.sha1_of(a) == true_sha(a), "rewritten in place with the old size and time (%s): the old hash" % label
+        # a file that arrived a moment ago with an old modification time (what a sync client delivers) is as new as one written a moment ago: read each time
+        builtins.open(b, "wb").write(b"%PDF delivered"); settled(b, 86400)
+        with pdf_reads() as r, ns_clock.real():
+            assert ns.sha1_of(b) == ns.sha1_of(b) == true_sha(b) and r.n == 2, "a file that arrived a moment ago was remembered at once (%d reads)" % r.n
+        # a map saved before the change time was kept: its files are hashed again once, and the map is written in the new form
+        keep = ns.SHA_CACHE
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1_v1.json"); os.makedirs(os.path.dirname(ns.SHA_CACHE), exist_ok=True)
+        try:
+            st = os.stat(c)
+            json.dump({"v": 1, "files": {c: [st.st_size, st.st_mtime_ns, st.st_ino, true_sha(c)]}}, builtins.open(ns.SHA_CACHE, "w")); ns.sha_forget()
+            with pdf_reads() as r:
+                assert ns.sha1_known(c) is None and ns.sha1_of(c) == true_sha(c) and ns.sha1_of(c) == true_sha(c) and r.n == 1, r.n
+            ns.sha_flush(); d = json.load(builtins.open(ns.SHA_CACHE))
+            assert d["v"] == 2 and d["files"][c] == [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, true_sha(c)], d
+        finally:
+            os.path.exists(ns.SHA_CACHE) and os.remove(ns.SHA_CACHE); ns.SHA_CACHE = keep; ns.sha_forget()
+    check("pdf hash: a PDF rewritten in place with the same length and its old modification time is read again (its change time is part of what is compared, also after a restart), "
+          "a file that arrived a moment ago is not remembered yet, and a map saved without change times is read again once", t_sha_change_time)
+
+    def t_sha_two_processes():
+        """What another process saved after this one started is not put back to what this one read at its start; what this one hashed itself is saved."""
+        keep = ns.SHA_CACHE, ns.SHA_SAVE_S
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1_two.json"); os.makedirs(os.path.dirname(ns.SHA_CACHE), exist_ok=True); ns.SHA_SAVE_S = 3600; ns.sha_forget()
+        entry = lambda p: (lambda st: [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, true_sha(p)])(os.stat(p))      # noqa: E731
+        try:
+            p, q, mine, new = hash_pdfs(4, "two")
+            [ns.sha1_of(x) for x in (p, q, mine)]; ns.sha_flush()
+            old = json.load(builtins.open(ns.SHA_CACHE))["files"]
+            ns.sha_forget(); assert ns.sha1_of(p) == true_sha(p)          # "this process started": the map is read; p is asked for once (and fits), q is never asked for
+            # meanwhile both papers are replaced and another process (the weekly check, the MCP server) hashes them and saves the map
+            for x in (p, q):
+                builtins.open(x, "wb").write(b"%PDF replaced " + os.path.basename(x).encode() * 9); settled(x, 600)
+            d = json.load(builtins.open(ns.SHA_CACHE)); d["files"][p], d["files"][q] = entry(p), entry(q)
+            d["files"][mine] = [1, 2, 3, 4, "0" * 40]                    # (and something outdated about a paper this process is about to hash itself)
+            json.dump(d, builtins.open(ns.SHA_CACHE, "w"))
+            assert ns.sha1_of(new) == true_sha(new) and ns.sha1_of(mine) == true_sha(mine); ns.sha_flush()      # this process hashes another paper and saves
+            files = json.load(builtins.open(ns.SHA_CACHE))["files"]
+            assert files[q] == entry(q) != old[q], "a paper this process only knew from the map it read at its start was put back to that: %s" % files[q]
+            assert files[p] == entry(p) != old[p], "a paper this process had confirmed before it was replaced was put back to the old entry: %s" % files[p]
+            assert files[new] == entry(new) and files[mine] == entry(mine), "what this process hashed itself was not saved"
+            ns.sha_forget()
+            with pdf_reads() as r:                                       # so the next start reads no PDF
+                assert [ns.sha1_of(x) for x in (p, q, mine, new)] == [true_sha(x) for x in (p, q, mine, new)] and r.n == 0, r.paths
+        finally:
+            os.path.exists(ns.SHA_CACHE) and os.remove(ns.SHA_CACHE); ns.SHA_CACHE, ns.SHA_SAVE_S = keep; ns.sha_forget()
+    check("pdf hash: saving the map does not put back an entry this process only read at its start over what another process saved since; what this process hashed itself is saved", t_sha_two_processes)
+
+    def t_sha_damaged_map():
+        keep = ns.SHA_CACHE, ns.SHA_SAVE_S
+        ns.SHA_CACHE = os.path.join(TMP, "local", "pdf_sha1_bad.json"); os.makedirs(os.path.dirname(ns.SHA_CACHE), exist_ok=True); ns.SHA_SAVE_S = 3600
+        try:
+            p, q = hash_pdfs(2, "dmg"); st = os.stat(p); fits = "[%d, %d, %d, %d, " % (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns)
+            for label, text in (("a number too large", '{"v": 2, "files": {%s: [Infinity, 1, 2, 3, "%s"]}}' % (json.dumps(p), "a" * 40)),
+                                ("a number too large", '{"v": 2, "files": {%s: [1e999, 1, 2, 3, "%s"]}}' % (json.dumps(p), "a" * 40)),
+                                ("40 characters that are not a hash", '{"v": 2, "files": {%s: %s"%s"]}}' % (json.dumps(p), fits, "z" * 40)),
+                                ("a path in place of a hash", '{"v": 2, "files": {%s: %s"%s"]}}' % (json.dumps(p), fits, "../" * 13 + "x")),
+                                ("a hash in capitals with a line after it", '{"v": 2, "files": {%s: %s"%s\n"]}}' % (json.dumps(p), fits, "A" * 39)),
+                                ("nested too deep", "[" * 100000)):
+                builtins.open(ns.SHA_CACHE, "w").write(text); ns.sha_forget()
+                assert ns._sha_read() == {}, label
+                assert ns.sha1_known(p) is None and ns.sha1_of(p) == true_sha(p), label           # (no error, and never what the file says)
+                builtins.open(q, "wb").write(b"%PDF " + label.encode()); settled(q, 500)
+                assert ns.sha1_of(q) == true_sha(q); ns.sha_flush()                              # the next save puts a good map in its place
+                d = json.load(builtins.open(ns.SHA_CACHE))
+                assert d["v"] == 2 and d["files"][p][-1] == true_sha(p) and d["files"][q][-1] == true_sha(q), (label, d)
+        finally:
+            os.path.exists(ns.SHA_CACHE) and os.remove(ns.SHA_CACHE); ns.SHA_CACHE, ns.SHA_SAVE_S = keep; ns.sha_forget()
+            shutil.rmtree(HD, ignore_errors=True)
+    check("pdf hash: a damaged map is an empty one whatever the damage (a number too large, 40 characters that are not a hash, a file nested too deep): no error, the true hash, and the next save repairs it", t_sha_damaged_map)
+    ns.time = time
+
     print("ai layer")
     write_cfg(CFG)
 
@@ -2000,6 +2323,248 @@ print("JSON" + json.dumps(out))
         assert ls.highlights(rows, q="endogeneity")["n"] == 1 and ls.tag_usage(rows) == {"t1": 1}
     check("search finds titles, summaries AND your own highlights/notes; filters and sorts", t_search)
 
+    # the search keeps what it works out from a summary and a card (lower case, the card's text, the text without markdown) beside the cached file: same results, no repeated work,
+    # and never an answer from a file that has changed since
+    def _plain_scan(rows_, q="", sort=""):
+        """What search() gave before anything was kept: every text lowered for every word. The results must stay exactly these."""
+        def window(text, tok, n=70):
+            text = re.sub(r"(?m)^#+\s*", "", text.replace("**", "").replace("`", ""))
+            i = text.lower().find(tok)
+            if i < 0:
+                return None
+            a, b = max(0, i - n), min(len(text), i + len(tok) + n)
+            return ("…" if a else "") + re.sub(r"\s+", " ", text[a:b]).strip() + ("…" if b < len(text) else "")
+        toks = [t for t in [m[0] or m[1] for m in re.findall(r'"([^"]+)"|(\S+)', q.lower())] if len(t) >= 2]
+        out = []
+        for r in rows_:
+            st = r.get("state") or {}
+            nt = ls.notes_of(r) if toks else None
+            score, snips = 0, []
+            if toks:
+                fields = [("title", 6, r.get("title", "")), ("authors", 4, r.get("authors", "")), ("meta", 2, " ".join([r.get("journal", ""), r.get("abbr", ""), r.get("matched_topics", "")])),
+                          ("takeaway", 3, st.get("takeaway", "")), ("summary", 1, ls.summary_of(r)), ("card", 1, pc.text_of(json.load(open(ns.card_path(os.path.join(TMP, r["file"])), encoding="utf-8"))) if r.get("card") else "")]
+                hl = [("highlight", h.get("text", ""), h) for h in (nt or {}).get("highlights", [])]
+                cm = [("comment", h.get("comment", ""), h) for h in (nt or {}).get("highlights", []) if h.get("comment")]
+                cm += [("comment", (c.get("text", "") if c.get("type") == "note" else c.get("note", "")), c) for c in (nt or {}).get("cards", [])]
+                ok = True
+                for t in toks:
+                    found = False
+                    for name, w, text in fields:
+                        c = text.lower().count(t)
+                        if c:
+                            found = True; score += w * min(c, 3)
+                            if name in ("takeaway", "summary", "card") and len(snips) < 3:
+                                snips.append({"kind": name, "page": None, "text": window(text, t)})
+                    for sk, text, obj in hl + cm:
+                        if t in text.lower():
+                            found = True; score += 3
+                            if len(snips) < 3:
+                                snips.append({"kind": sk, "page": (obj.get("parts") or [{}])[0].get("page") if sk == "highlight" or obj.get("parts") else None, "text": window(text, t)})
+                    ok = ok and found
+                if not ok:
+                    continue
+            out.append({"file": r["file"], "score": score, "snippets": snips, "_r": r})
+        if toks and sort in ("", "relevance"):
+            out.sort(key=lambda x: -x["score"])
+        elif sort == "title":
+            out.sort(key=lambda x: x["_r"].get("title", "").lower())
+        for x in out:
+            x.pop("_r")
+        return out
+
+    class _Spy(str):                                             # a summary that counts how often it is put in lower case
+        lowered = 0
+
+        def lower(self):
+            _Spy.lowered += 1
+            return str.lower(self)
+
+    def _bump(path, by=5):
+        """A file written a moment later can carry the same time on a file system with coarse stamps: make sure this one's differs, as it would in real use."""
+        st_ = os.stat(path); os.utime(path, ns=(st_.st_atime_ns, st_.st_mtime_ns + by * 10 ** 9))
+
+    def _card(*texts):
+        return {"version": 1, "rev": 1, "data": {"kind": "other", "question": {"text": texts[0], "cites": [1]}, "topics": list(texts[1:]), "method": {"design": "", "data": "", "sample": "", "analysis": "", "cites": []}}, "passages": {}}
+
+    _SUMS = ["# Die Straße\n\n**Autoren**: x\n\nDie STRASSE und die Straße, mit ẞ geschrieben: GROẞE Maße. " + "füllwort " * 40 + "Am Ende steht die `Maßnahme`.",
+             "## İstanbul\n\nISTANBUL, İstanbul, istanbul and ıstanbul are four spellings; DİYARBAKIR too. " + "dolgu " * 40 + "The İİİİ shift the window: needle here.",
+             "# ΟΔΟΣ\n\nΟ ΣΟΦΟΣ ΟΔΥΣΣΕΑΣ: the final sigma. ΟΔΟΣ**ab** and ΟΔΟΣ`cd` sit next to markdown. " + "λέξη " * 40 + "ΤΕΛΟΣ.",
+             "Plain ASCII with **bold platform** words, a plat**form** split by markers, `code`, and\n## a heading\nǅungla ﬁnance NAÏVE Ünïcödé — dash.",
+             None, None]
+    _CARDS = [None, _card("Why do PLATFORMS use Fixed Effects?", "platform governance", "Straße", "İstanbul traffic"), _card("ΟΔΟΣ ΣΟΦΟΣ", "**bold** topic", "# not a heading"), None,
+              _card("Only a card here: Zebra CROSSING", "naïve"), None]
+    srows = []
+    os.makedirs(os.path.join(TMP, "search-case"), exist_ok=True)                        # (beside Papers, not in it: no later check that lists the library sees these six)
+    for n_, (summ_, card_) in enumerate(zip(_SUMS, _CARDS)):
+        rel_ = "search-case/c%d.pdf" % n_
+        open(os.path.join(TMP, rel_), "wb").write(b"%PDF-1.4\n")
+        if summ_ is not None:
+            open(os.path.join(TMP, rel_[:-4] + ".md"), "w", encoding="utf-8").write(summ_)
+        if card_:
+            json.dump(card_, open(os.path.join(TMP, rel_[:-4] + ".card.json"), "w", encoding="utf-8"), ensure_ascii=False)
+        srows.append({"file": rel_, "key": "10.1/c%d" % n_, "title": ["Straßenbau", "İSTANBUL Notes", "Οδός", "Platform FORM", "Zebra", "ẞ and SS"][n_], "authors": "Ömer Çelik; Jörg Weiß",
+                      "journal": "Case Studies", "abbr": "CS", "year": "2026", "matched_topics": "Platform Economics", "summary": rel_[:-4] + ".md" if summ_ is not None else None,
+                      "card": bool(card_), "notes": None, "state": {"takeaway": "Maße und Gewichte; İyi"} if n_ == 0 else {}, "folders": []})
+    nn_ = ns.load(os.path.join(TMP, srows[5]["file"]))
+    nn_["highlights"] = [{"id": "h1", "color": "green", "parts": [{"page": 3, "rects": [[0.1, 0.2, 0.5, 0.02]]}], "text": "Die GROẞE Straße nach İstanbul", "comment": "ΣΟΦΟΣ remark", "tags": [], "created": "2026-10-01T10:00:00Z"}]
+    nn_["cards"] = [{"id": "c1", "type": "note", "text": "My NAÏVE note about `platforms`", "tags": [], "x": 0, "y": 0, "w": 280}]
+    ns.save(os.path.join(TMP, srows[5]["file"]), nn_, 0); srows[5]["notes"] = {"highlights": 1, "cards": 1}
+    _QS = ["straße", "STRASSE", "strasse", "Straße", "ẞ", "ss", "große", "GROSSE", "maße", "masse", "maßnahme", "İstanbul", "istanbul", "ISTANBUL", "ıstanbul", "i̇stanbul", "İİ", "diyarbakir", "DİYARBAKIR",
+           "needle", "οδος", "ΟΔΟΣ", "οδοσ", "σοφος", "ΣΟΦΟΣ", "σοφοσ", "οδυσσεασ", "οδυσσεας", "τελος", "οδοσ**ab", "οδος**ab", "οδοσab", "οδοσ`cd", "οδοσcd", "platform", "PLATFORMS", "plat**form", "**",
+           "##", "`code`", "code", "bold platform", '"bold platform"', '"fixed effects"', "fixed effects platform", "ǆungla", "ǅungla", "finance", "ﬁnance", "naïve", "NAÏVE", "naive", "ünïcödé", "—", "zebra crossing",
+           "ömer", "weiß", "WEISS", "case studies", "cs", "a", "", "  ", "heading", "# not", "füllwort", "dolgu λέξη", "x"]
+
+    def t_search_same():
+        ls._cache.clear()
+        for q_ in _QS:
+            for sort_ in ("", "title"):
+                want_ = _plain_scan(srows, q_, sort_)
+                assert ls.search(srows, q_, sort=sort_) == want_, "the first search for %r (sort %r) differs:\n%r\n%r" % (q_, sort_, ls.search(srows, q_, sort=sort_), want_)
+                assert ls.search(srows, q_, sort=sort_) == want_, "the search for %r from what was kept differs from the plain scan" % q_
+        # what lower() does, and the search keeps doing: ß stays ß (so "strasse" is not "straße"), ẞ becomes ß, İ becomes i + a combining dot (two characters), I becomes i, a last Σ becomes ς
+        files_ = lambda q_: sorted(x["file"][-6:] for x in ls.search(srows, q_))
+        assert files_("straße") == ["c0.pdf", "c1.pdf", "c5.pdf"] and files_("strasse") == ["c0.pdf"] and files_("große") == ["c0.pdf", "c5.pdf"] and files_("grosse") == []
+        assert files_("i̇stanbul") == files_("İstanbul") == ["c1.pdf", "c5.pdf"] and files_("istanbul") == ["c1.pdf"] and files_("ıstanbul") == ["c1.pdf"]
+        assert files_("σοφος") == ["c2.pdf", "c5.pdf"] and files_("σοφοσ") == [] and files_("οδος**ab") == ["c2.pdf"] and files_("οδοσ**ab") == []
+        # [fails today] and none of it is worked out twice: a second pass over every query adds nothing
+        made_ = dict(ls.STATS)
+        for q_ in _QS:
+            ls.search(srows, q_)
+        assert ls.STATS == made_, (made_, ls.STATS)
+    check("search: the results (order, scores, snippets) are those of a plain scan for 60+ queries incl. ß/ẞ, İ/ı, final sigma, markdown marks; nothing is worked out twice", t_search_same)
+
+    def t_search_once():
+        keep_ = (ls._text, pc.text_of, ls._plain, ls._lower)
+        calls_, strips_ = [], []
+        try:
+            ls._text = lambda path: _Spy(keep_[0](path))
+            pc.text_of = lambda card: (calls_.append(1), keep_[1](card))[1]
+            ls._plain = lambda text: (strips_.append("plain") if isinstance(text, _Spy) else None, keep_[2](text))[1]          # (the markdown taken out of a summary for a snippet)
+            ls._lower = lambda text: (strips_.append("lower"), keep_[3](text))[1]                                              # (a kept text put in lower case)
+            ls._cache.clear(); _Spy.lowered = 0
+            first_ = ls.search(srows, "straße platform")
+            n_low, n_card = _Spy.lowered, len(calls_)
+            assert n_card == 3 and n_low >= 4, (n_low, n_card)                    # three cards, four summaries
+            for q_ in ("straße platform", "istanbul", "needle zebra", '"fixed effects"', "σοφος"):
+                ls.search(srows, q_)
+            assert ls.search(srows, "straße platform") == first_
+            # [fails today: every search lowers every summary once per word and builds every card's text again]
+            assert (_Spy.lowered, len(calls_)) == (n_low, n_card), "summaries lowered %d times more, card texts built %d times more" % (_Spy.lowered - n_low, len(calls_) - n_card)
+            assert n_low == 4, "each summary is lowered once, not once per word (%d)" % n_low
+            # the text without its markdown is worked out once per file as well, for the first snippet from it, and so is its lower case: the same searches again work out nothing
+            n_strip = len(strips_)
+            assert strips_.count("plain") == 4 and strips_.count("lower") == 4 + 3 + 4 + 1, strips_      # (4 summaries stripped once; 4 summaries, 3 card texts, the 4 stripped summaries and the one stripped card text with ** in it lowered once)
+            for q_ in ("straße platform", "istanbul", "needle zebra", '"fixed effects"', "σοφος"):
+                ls.search(srows, q_)
+            assert len(strips_) == n_strip, "worked out again for a snippet: %r" % strips_[n_strip:]
+            # a summary that changes (this computer's summarizer, or another computer through the shared folder: both just write the file) is read and lowered again, that one only
+            p_ = os.path.join(TMP, srows[3]["summary"])
+            assert [x["file"][-6:] for x in ls.search(srows, "quokka")] == [] and [x["file"][-6:] for x in ls.search(srows, "ǆungla")] == ["c3.pdf"]
+            open(p_, "w", encoding="utf-8").write("Now about a **QUOKKA** colony."); _bump(p_)
+            hit_ = ls.search(srows, "quokka")
+            assert [x["file"][-6:] for x in hit_] == ["c3.pdf"] and hit_[0]["snippets"] == [{"kind": "summary", "page": None, "text": "Now about a QUOKKA colony."}], hit_
+            assert ls.search(srows, "ǆungla") == [] and ls.search(srows, "markers") == [], "the old summary's words are gone at once"
+            assert _Spy.lowered == n_low + 1 and len(calls_) == n_card, (_Spy.lowered, len(calls_))
+            ls.search(srows, "quokka colony"); assert _Spy.lowered == n_low + 1
+            # a summary that is removed: no words, no error; and one that comes back is read again
+            os.remove(p_); assert ls.search(srows, "quokka") == []
+            open(p_, "w", encoding="utf-8").write(_SUMS[3]); _bump(p_, 9); assert [x["file"][-6:] for x in ls.search(srows, "ǆungla")] == ["c3.pdf"]
+        finally:
+            ls._text, pc.text_of, ls._plain, ls._lower = keep_
+            ls._cache.clear()
+    check("search: a summary is put in lower case once and a card's text built once, until the file changes (rewritten, removed, back again): then that one again, and never the old words", t_search_once)
+
+    def t_search_card_changes():
+        keep_ = pc.text_of
+        calls_ = []
+        try:
+            pc.text_of = lambda card: (calls_.append(1), keep_(card))[1]
+            ls._cache.clear()
+            pdf_ = os.path.join(TMP, srows[4]["file"])
+            assert [x["file"][-6:] for x in ls.search(srows, "zebra crossing")] == ["c4.pdf"] and ls.search(srows, "zebra crossing")[0]["snippets"][0] == {"kind": "card", "page": None, "text": "Only a card here: Zebra CROSSING naïve"}
+            n_ = len(calls_)
+            ls.search(srows, "zebra"); ls.search(srows, "naïve crossing")
+            assert len(calls_) == n_, "[fails today] the card's text was built again (%d times)" % (len(calls_) - n_)
+            # saved in this process (papercard writes a new file in its place)
+            pc._write(pdf_, _card("Now it is about WOMBATS", "burrows")); _bump(ns.card_path(pdf_))
+            assert ls.search(srows, "crossing") == [] and [x["file"][-6:] for x in ls.search(srows, "wombats burrows")] == ["c4.pdf"]
+            assert ls.search(srows, "wombats")[0]["snippets"][0]["text"] == "Now it is about WOMBATS burrows" and len(calls_) == n_ + 1, len(calls_)
+            # changed by another computer through the shared folder: the sync client puts a new file there
+            tmp_ = ns.card_path(pdf_) + ".sync"; json.dump(_card("Finally: NUMBATS"), open(tmp_, "w", encoding="utf-8")); os.replace(tmp_, ns.card_path(pdf_)); _bump(ns.card_path(pdf_), 9)
+            assert [x["file"][-6:] for x in ls.search(srows, "numbats")] == ["c4.pdf"] and ls.search(srows, "wombats") == [] and len(calls_) == n_ + 2
+            # a card that cannot be read (half synced) says nothing and breaks nothing; whole again, it is found again
+            open(ns.card_path(pdf_), "w").write('{"data": {"question"'); _bump(ns.card_path(pdf_), 13)
+            assert ls.search(srows, "numbats") == [] and len(calls_) == n_ + 2
+            json.dump(_CARDS[4], open(ns.card_path(pdf_), "w", encoding="utf-8"), ensure_ascii=False); _bump(ns.card_path(pdf_), 17)
+            assert [x["file"][-6:] for x in ls.search(srows, "zebra crossing")] == ["c4.pdf"] and len(calls_) == n_ + 3
+        finally:
+            pc.text_of = keep_
+            ls._cache.clear()
+    check("search: a card's text is built once, and again when the card is saved here, replaced by a sync, or unreadable for a moment", t_search_card_changes)
+
+    def t_search_same_time():
+        ls._cache.clear()
+        p_ = os.path.join(TMP, srows[3]["summary"])
+        try:
+            files_ = lambda q_: [x["file"][-6:] for x in ls.search(srows, q_)]      # noqa: E731
+            assert files_("ǆungla") == ["c3.pdf"] and files_("quokka") == []
+            st_ = os.stat(p_)
+            open(p_, "w", encoding="utf-8").write("Now about a **QUOKKA** colony, with a platform."); os.utime(p_, ns=(st_.st_atime_ns, st_.st_mtime_ns))
+            assert os.stat(p_).st_mtime_ns == st_.st_mtime_ns and os.path.getsize(p_) != st_.st_size
+            assert files_("quokka colony") == ["c3.pdf"] and files_("ǆungla") == [], "a summary of another length with the old modification time: the search still has the old words"
+            assert ls.search(srows, "quokka")[0]["snippets"][0]["text"].startswith("Now about a QUOKKA colony")
+            n_ = dict(ls.STATS)
+            assert files_("quokka") == ["c3.pdf"] and ls.STATS == n_                                   # and it is kept again: nothing is read or worked out twice
+            st_ = os.stat(p_); time.sleep(0.03)
+            open(p_, "w", encoding="utf-8").write("Now about a **WOMBAT** colony, with a platform."); os.utime(p_, ns=(st_.st_atime_ns, st_.st_mtime_ns))
+            assert (os.stat(p_).st_mtime_ns, os.path.getsize(p_)) == (st_.st_mtime_ns, st_.st_size) and os.stat(p_).st_ctime_ns != st_.st_ctime_ns
+            assert files_("wombat") == ["c3.pdf"] and files_("quokka") == [], "a summary of the same length with the old modification time: the search still has the old words"
+        finally:
+            open(p_, "w", encoding="utf-8").write(_SUMS[3]); _bump(p_, 300); ls._cache.clear()
+    check("search: a summary written again with its old modification time (another length, or the same length) is read again, never the old words", t_search_same_time)
+
+    def t_search_standin():                 # (passes today; it is what keeps a kept lower case from ever answering for another text than the one it was made from)
+        keep_ = (ls.summary_of, ls.card_text)
+        try:
+            ls._cache.clear()
+            assert [x["file"][-6:] for x in ls.search(srows, "needle")] == ["c1.pdf"]                 # the real files are read and kept
+            ls.summary_of = lambda r: "A Quagga, not the file" if r["file"].endswith("c1.pdf") else ""
+            ls.card_text = lambda r: "An OKAPI, not the card" if r["file"].endswith("c1.pdf") else ""
+            assert ls.search(srows, "needle") == [] and ls.search(srows, "fixed effects") == []
+            got_ = ls.search(srows, "quagga okapi")
+            assert [x["file"][-6:] for x in got_] == ["c1.pdf"] and [s_["text"] for s_ in got_[0]["snippets"]] == ["A Quagga, not the file", "An OKAPI, not the card"], got_
+        finally:
+            ls.summary_of, ls.card_text = keep_
+            ls._cache.clear()
+    check("search: a text that is not the one kept (another reading of the file, a stand-in) is never answered from what was kept", t_search_standin)
+
+    def t_search_threads():                 # (passes today) several requests at once while a summary keeps changing: every answer is one of the two right ones
+        import threading
+        ls._cache.clear()
+        p_ = os.path.join(TMP, srows[3]["summary"])
+        texts_ = [_SUMS[3], "Now about a **QUOKKA** colony, with a platform."]
+        right_ = []
+        for i_, t_ in enumerate(texts_):
+            open(p_, "w", encoding="utf-8").write(t_); _bump(p_, 20 + i_); right_.append(ls.search(srows, "platform"))
+        assert right_[0] != right_[1]
+        wrong_, stop_ = [], threading.Event()
+
+        def reader():
+            while not stop_.is_set():
+                got_ = ls.search(srows, "platform")
+                if got_ not in right_:
+                    wrong_.append(got_)
+        ths_ = [threading.Thread(target=reader) for _ in range(4)]
+        [t_.start() for t_ in ths_]
+        try:
+            for i_ in range(60):
+                tmp_ = p_ + ".tmp"; open(tmp_, "w", encoding="utf-8").write(texts_[i_ % 2]); os.utime(tmp_, ns=(0, (30 + i_) * 10 ** 9 + 1700000000 * 10 ** 9)); os.replace(tmp_, p_)
+        finally:
+            stop_.set(); [t_.join() for t_ in ths_]
+        open(p_, "w", encoding="utf-8").write(_SUMS[3]); _bump(p_, 200); ls._cache.clear()
+        assert not wrong_, wrong_[:1]
+    check("search: four searches at once while a summary is replaced 60 times never mix the old text with the new", t_search_threads)
+
     importer.crossref_meta = lambda doi: {"title": "A Paper About Test Platforms", "authors": ["Ada Lovelace", "Alan van Turing"], "container": "Test Journal of IS", "issn": ["0000-0000"],
         "doi": doi, "pub_date": "2025-03", "url": "https://doi.org/" + doi, "volume": "12", "issue": "3", "pages": "100-120", "publisher": "P", "type": "journal-article", "abstract": None, "keywords": []}
 
@@ -2234,6 +2799,400 @@ print("JSON" + json.dumps(out))
             else:
                 open(idx_, "w", encoding="utf-8").write(saved_idx)
     check("paper kinds: a paper you add is a journal article, a preprint, a conference paper or other (from Crossref, or from the PDF's stamp or footer; an arXiv stamp beats a published version found by title), filed under its venue with a short abbreviation, kept next to the PDF (not in the index), listed with its type, changed without touching the index; the index writers keep unknown columns", t_kinds)
+
+    def _lib_fixture():
+        """A library of six papers (one a book) in three folders of a scratch data folder; returns (root, restore, rows by name, helpers)."""
+        import builtins, csv, time
+        import pipeline as pl_, readstate as rs_, kinds as kd_, authorcache as ac_
+        root = os.path.realpath(tempfile.mkdtemp(prefix="jw-libcache-"))
+        saved = (pl_.PAPERS, pl_.ROOT, dl.PAPERS, dl.ROOT, fo.DIR, rs_.PATH, ac_.CACHE)
+        pl_.ROOT = dl.ROOT = root; pl_.PAPERS = dl.PAPERS = os.path.join(root, "Papers")
+        fo.DIR, rs_.PATH, ac_.CACHE = os.path.join(pl_.PAPERS, "_folders"), os.path.join(pl_.PAPERS, "_status.json"), os.path.join(root, "authors_cache.json")
+        ac_._mem.clear()
+        class Later:                         # pipeline's clock, three seconds ahead: a file made a moment ago counts as old (its change time cannot be set back; see settle)
+            ahead = 3.0
+            def __getattr__(self, name):
+                return getattr(time, name)
+            def time_ns(self):
+                return time.time_ns() + int(self.ahead * 1e9)
+        pl_.time = Later()
+        def restore():
+            pl_.PAPERS, pl_.ROOT, dl.PAPERS, dl.ROOT, fo.DIR, rs_.PATH, ac_.CACHE = saved
+            pl_.time = time
+            ac_._mem.clear(); shutil.rmtree(root, ignore_errors=True)
+        P = {}
+        for i, (ym, jn, ab) in enumerate([("2024-01", "MIS Quarterly", "MISQ"), ("2024-01", "MIS Quarterly", "MISQ"), ("2024-01", "MIS Quarterly", "MISQ"),
+                                          ("2025-03", "Management Science", "MS"), ("2025-03", "Management Science", "MS"), ("2023-05", "Books", "BOOK")]):
+            p = {"title": "Cache paper %d" % i, "doi": "10.77/c%d" % i, "journal": jn, "abbr": ab, "authors": ["Ann Lee"], "pub_date": ym}
+            path = dl.out_path(p); open(path, "wb").write(b"%PDF-1.4 " + str(i).encode())
+            dl.save_index(p, os.path.relpath(path, root), "ok")
+            P[i] = {"pdf": path, "file": os.path.relpath(path, root), "key": p["doi"]}
+        open(P[0]["pdf"][:-4] + ".md", "w").write("# Summary")
+        n0 = ns.load(P[0]["pdf"]); n0["highlights"] = [{"id": "h1", "text": "x"}, {"id": "h2", "text": "y"}]; ns.save(P[0]["pdf"], n0, 0)
+        kd_.write_sidecar(P[1]["pdf"], "conference", "ICIS 2023", "", P[1]["key"])
+        json.dump({"isbn": "9780000000001", "pages": 200, "chapters": [{"title": "One", "from": 1, "to": 20}]}, open(P[5]["pdf"][:-4] + ".book.json", "w"))
+        rs_.update(P[2]["key"], {"status": "read", "star": True})
+        fid = fo.create("Cache folder")["id"]; fo.add(fid, [P[3]["key"]])
+
+        def settle():
+            """Every file and folder an hour old, and read once: from here the cache trusts what it holds (a file written a moment ago is read again on purpose)."""
+            t = time.time() - 3600
+            for b, ds, fs in os.walk(root):
+                for x in ds + fs:
+                    os.utime(os.path.join(b, x), (t, t))
+            os.utime(pl_.PAPERS, (t, t))
+            return pl_.library()
+
+        class Spy:
+            """What a call reads: the files opened and the folders listed under the data folder, and the number of stat calls."""
+            def __enter__(self):
+                self.opened, self.listed, self.stats = [], [], 0
+                self.keep = (builtins.open, os.listdir, os.stat)
+                def op(f, *a, **k):
+                    if isinstance(f, str) and f.startswith(root):
+                        self.opened.append(os.path.relpath(f, root))
+                    return self.keep[0](f, *a, **k)
+                def ld(d=".", *a):
+                    if isinstance(d, str) and d.startswith(root):
+                        self.listed.append(os.path.relpath(d, root))
+                    return self.keep[1](d, *a)
+                def st(*a, **k):
+                    self.stats += 1
+                    return self.keep[2](*a, **k)
+                builtins.open, os.listdir, os.stat = op, ld, st
+                return self
+            def __exit__(self, *a):
+                builtins.open, os.listdir, os.stat = self.keep
+        by = lambda rows: {r["file"]: r for r in rows}   # noqa: E731
+        settle.clock = pl_.time
+        return root, restore, P, fid, settle, Spy, by
+
+
+    def t_library_cache():
+        import csv
+        import pipeline as pl_, readstate as rs_, kinds as kd_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        try:
+            r1 = settle()
+            assert [r["file"] for r in r1] == [P[i]["file"] for i in (5, 4, 3, 2, 1, 0)], "newest first, as before"
+            b1 = by(r1)
+            assert b1[P[0]["file"]]["summary"] == P[0]["file"][:-4] + ".md" and b1[P[0]["file"]]["notes"] == {"highlights": 2, "cards": 0} and b1[P[1]["file"]]["kind"] == "conference"
+            assert b1[P[2]["file"]]["state"] == {"status": "read", "star": True} and b1[P[3]["file"]]["folders"] == [fid] and b1[P[5]["file"]]["book"]["pages"] == 200 and b1[P[5]["file"]]["kind"] == "book"
+            # nothing changed: nothing is read again (no file is opened), and the answer is the same
+            with Spy() as s:
+                r2 = pl_.library()
+            assert r2 == r1 and s.opened == [], s.opened
+            assert s.stats < 6 * 5, "fewer stat calls than five per paper: %d" % s.stats
+            # the rows are the caller's: changing them changes nothing for the next caller
+            snap = json.loads(json.dumps(r1))            # (what the library said, in objects of its own: r1 itself would change with r2 if the two shared anything)
+            assert snap == r1
+            r2[0]["title"] = "changed"; r2[0]["state"]["star"] = "x"; r2[0]["folders"].append("zz"); r2[-1]["notes"]["highlights"] = 99; r2.pop()
+            r2[0]["book"]["pages"] = 1; r2[0]["book"]["chapters"][0]["title"] = "changed"; r2[0]["book"]["chapters"].append({})
+            r2[3]["state"]["star"] = False; r2[3]["state"]["mine"] = 1; r2[2]["folders"].clear(); r2[2]["state"]["x"] = 1
+            assert pl_.library() == snap, "a caller's change to a row came back"
+
+            def changed(label, change, expect, reads=None):
+                """After `change` (made when the cache trusts everything it holds) the library says `expect`; `reads`: the only files that may be opened for it."""
+                settle(); change()
+                with Spy() as s:
+                    rows = pl_.library()
+                assert expect(by(rows), rows), "stale after: " + label
+                if reads is not None:
+                    assert sorted(s.opened) == sorted(os.path.relpath(p, root) for p in reads), (label, s.opened)
+            f0, f1, f2, f3, f4, f5 = (P[i]["file"] for i in range(6))
+            idx = os.path.join(pl_.PAPERS, "_index.csv")
+            # this app's own saves
+            changed("reading status (readstate.update)", lambda: rs_.update(P[0]["key"], {"status": "toread"}), lambda b, _: b[f0]["state"] == {"status": "toread"})
+            changed("a folder gets a paper (folders.add)", lambda: fo.add(fid, [P[0]["key"]]), lambda b, _: b[f0]["folders"] == [fid])
+            changed("a new folder", lambda: fo.add(fo.create("Second")["id"], [P[0]["key"]]), lambda b, _: b[f0]["folders"] == [fid, "second"])
+            changed("a folder deleted", lambda: fo.delete("second"), lambda b, _: b[f0]["folders"] == [fid])
+            def hl():
+                n = ns.load(P[3]["pdf"]); n["highlights"] = [{"id": "h", "text": "t"}]; ns.save(P[3]["pdf"], n, n["rev"])
+            changed("a first highlight (notes_store.save): only that file is read", hl, lambda b, _: b[f3]["notes"] == {"highlights": 1, "cards": 0}, reads=[ns.notes_path(P[3]["pdf"])])
+            changed("Change type (kinds.write_sidecar)", lambda: kd_.write_sidecar(P[4]["pdf"], "other", "X", "Report", P[4]["key"]), lambda b, _: (b[f4]["kind"], b[f4]["kind_label"]) == ("other", "Report"),
+                    reads=[P[4]["pdf"][:-4] + ".paper.json"])
+            changed("a summary, a card and a skim written", lambda: [open(P[3]["pdf"][:-4] + e, "w").write("{}") for e in (".md", ".card.json", ".skim.json")],
+                    lambda b, _: b[f3]["summary"] and b[f3]["card"] is True and b[f3]["skim"] is True, reads=[])
+            changed("a paper added (download.save_index)", lambda: (open(os.path.join(root, "Papers", "2024-01", "MIS Quarterly", "new.pdf"), "wb").write(b"%PDF"),
+                                                                  dl.save_index({"title": "New", "doi": "10.77/new", "journal": "MIS Quarterly", "abbr": "MISQ"}, "Papers/2024-01/MIS Quarterly/new.pdf", "ok")),
+                    lambda b, rows: rows[0]["key"] == "10.77/new" and len(rows) == 7)
+            # another computer, through Dropbox: files rewritten in place (the folder's own date does not change), replaced, added and removed without this process doing anything
+            def inplace(path, fn):
+                d = json.load(open(path)); fn(d); json.dump(d, open(path, "w"))
+            changed("another computer: reading status", lambda: inplace(rs_.PATH, lambda d: d["papers"].update({P[1]["key"]: {"star": True}})), lambda b, _: b[f1]["state"] == {"star": True})
+            changed("another computer: a folder's list", lambda: inplace(os.path.join(fo.DIR, fid + ".json"), lambda d: d.update(papers=[P[4]["key"]])), lambda b, _: b[f4]["folders"] == [fid] and b[f0]["folders"] == [])
+            changed("another computer: more highlights", lambda: inplace(ns.notes_path(P[0]["pdf"]), lambda d: d["highlights"].append({"id": "h3"})), lambda b, _: b[f0]["notes"]["highlights"] == 3)
+            changed("another computer: the type of a paper", lambda: inplace(P[1]["pdf"][:-4] + ".paper.json", lambda d: d.update(kind="preprint")), lambda b, _: b[f1]["kind"] == "preprint")
+            changed("another computer: a book's details", lambda: inplace(P[5]["pdf"][:-4] + ".book.json", lambda d: d.update(pages=321)), lambda b, _: b[f5]["book"]["pages"] == 321)
+            changed("another computer: notes deleted", lambda: os.remove(ns.notes_path(P[0]["pdf"])), lambda b, _: b[f0]["notes"] is None)
+            changed("another computer: a summary deleted", lambda: os.remove(P[0]["pdf"][:-4] + ".md"), lambda b, _: b[f0]["summary"] is None)
+            changed("another computer: a type file deleted", lambda: os.remove(P[1]["pdf"][:-4] + ".paper.json"), lambda b, _: b[f1]["kind"] == "journal")
+            def drop():
+                rr = list(csv.DictReader(open(idx, newline="")))
+                with open(idx + ".x", "w", newline="") as f:
+                    w = csv.DictWriter(f, dl.INDEX_COLS); w.writeheader(); w.writerows([r for r in rr if r["doi"] != "10.77/new"])
+                os.replace(idx + ".x", idx)
+            changed("another computer: the index without a paper", drop, lambda b, rows: len(rows) == 6 and "Papers/2024-01/MIS Quarterly/new.pdf" not in b)
+            # a second write a moment after the first, with the same size and the same date (a clock that counts in seconds, or two saves within one tick): still seen
+            side = P[2]["pdf"][:-4] + ".paper.json"
+            settle(); json.dump({"kind": "preprint", "for": P[2]["key"]}, open(side, "w")); st = os.stat(side)
+            assert by(pl_.library())[f2]["kind"] == "preprint"
+            txt = json.dumps({"kind": "other", "for": P[2]["key"]}); open(side, "w").write(txt + " " * (st.st_size - len(txt))); os.utime(side, ns=(st.st_atime_ns, st.st_mtime_ns))
+            assert (os.stat(side).st_size, os.stat(side).st_mtime_ns, os.stat(side).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino)
+            assert by(pl_.library())[f2]["kind"] == "other", "a file written a moment ago was trusted"
+            fp = os.path.join(fo.DIR, fid + ".json")       # (the same for a folder's list: P[4] is in it; then P[5] in its place, same length, same date)
+            settle(); d = json.load(open(fp)); assert d["papers"] == [P[4]["key"]], d
+            json.dump(d, open(fp, "w")); st = os.stat(fp); assert by(pl_.library())[f4]["folders"] == [fid]
+            d["papers"] = [P[5]["key"]]; json.dump(d, open(fp, "w")); os.utime(fp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            assert (os.stat(fp).st_size, os.stat(fp).st_mtime_ns, os.stat(fp).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino)
+            rows = by(pl_.library()); assert rows[f5]["folders"] == [fid] and rows[f4]["folders"] == [], "a folder file written a moment ago was trusted"
+            # a PDF whose name on disk is not exactly the index's (another case on a Mac): its summary is still found
+            settle(); os.rename(P[4]["pdf"], P[4]["pdf"][:-4] + ".PDF"); open(P[4]["pdf"][:-4] + ".md", "w").write("# s")
+            assert by(pl_.library())[f4]["summary"] == f4[:-4] + ".md"
+            # a disk that lists its names in another form than the index has them (accents on a Mac): every file is asked for by name, as before
+            want = settle(); real_ld = os.listdir
+            assert by(want)[f3]["summary"] and by(want)[f3]["card"] is True and by(want)[f3]["skim"] is True and by(want)[f3]["notes"] == {"highlights": 1, "cards": 0} and by(want)[f1]["kind"] == "journal"
+            try:
+                os.listdir = lambda d=".": [x if os.path.basename(str(d)) == "_folders" else x.upper() for x in real_ld(d)]
+                got = pl_.library()
+            finally:
+                os.listdir = real_ld
+            assert got == want, "a paper's files were not found when the folder lists them under another form of their names"
+            # another data folder (the tests, a moved home): never the other one's rows
+            other = tempfile.mkdtemp(prefix="jw-libcache2-"); keep = (pl_.PAPERS, pl_.ROOT)
+            try:
+                pl_.PAPERS, pl_.ROOT = os.path.join(other, "Papers"), other
+                assert pl_.library() == []
+            finally:
+                pl_.PAPERS, pl_.ROOT = keep; shutil.rmtree(other, ignore_errors=True)
+            assert len(pl_.library()) == 6
+            # two threads at once, while a third keeps saving: every answer is a whole library
+            import threading
+            errs, stop = [], threading.Event()
+            def reader():
+                try:
+                    for _ in range(40):
+                        rows = pl_.library(); assert len(rows) == 6 and all(r["key"] for r in rows)
+                except Exception as e:  # noqa: BLE001
+                    errs.append(repr(e))
+            def writer():
+                n = 0
+                while not stop.is_set():
+                    n += 1; rs_.update(P[0]["key"], {"page": n}); fo.add(fid, [P[n % 6]["key"]])
+            ths = [threading.Thread(target=reader) for _ in range(4)]; w = threading.Thread(target=writer); w.start()
+            [t.start() for t in ths]; [t.join() for t in ths]; stop.set(); w.join()
+            assert not errs, errs[:2]
+        finally:
+            restore()
+    check("the library list is kept in memory and checked against the disk on every call: nothing is read again when nothing changed, a caller cannot change it, and every kind of change "
+          "(a save here; a file rewritten, added or removed by another computer; two writes in the same second) is seen at once", t_library_cache)
+
+
+    def t_library_row():
+        import pipeline as pl_, readstate as rs_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        try:
+            rows = settle()
+            for r in rows:
+                assert pl_.library_row(r["file"]) == r, r["file"]
+            rows = json.loads(json.dumps(rows))          # (in objects of their own: nothing below can change them by changing a row it was given)
+            assert pl_.library_row("Papers/2024-01/MIS Quarterly/nope.pdf") is None and pl_.library_row("") is None and pl_.library_row(None) is None and pl_.library_row(["x"]) is None and pl_.library_row({"a": 1}) is None
+            with Spy() as s:                                   # one paper: its own folder and files, not the library's
+                row = pl_.library_row(P[0]["file"])
+            assert row["notes"] == {"highlights": 2, "cards": 0} and s.opened == [] and s.stats <= 12 and set(s.listed) <= {os.path.join("Papers", "_folders"), os.path.dirname(P[0]["file"])}, (s.opened, s.listed, s.stats)
+            row["state"]["x"] = 1; row["title"] = "mine"; row["notes"]["cards"] = 7; row["folders"].append("zz")
+            assert pl_.library_row(P[0]["file"]) == by(rows)[P[0]["file"]]
+            bk = pl_.library_row(P[5]["file"]); bk["book"]["chapters"][0]["title"] = "mine"; bk["book"]["pages"] = 1          # (a book's details too)
+            assert pl_.library_row(P[5]["file"]) == by(rows)[P[5]["file"]] and by(pl_.library())[P[5]["file"]] == by(rows)[P[5]["file"]]
+            settle(); rs_.update(P[0]["key"], {"page": 4}); assert pl_.library_row(P[0]["file"])["state"]["page"] == 4            # (what the reader posts every few seconds)
+            settle(); os.remove(ns.notes_path(P[0]["pdf"])); assert pl_.library_row(P[0]["file"])["notes"] is None
+            # two rows for one file (an index joined from two computers): the one the library lists first
+            settle(); dl.save_index({"title": "Same file again", "doi": "10.77/again", "journal": "MIS Quarterly", "abbr": "MISQ"}, P[1]["file"], "ok")
+            assert pl_.library_row(P[1]["file"])["key"] == "10.77/again" == next(r for r in pl_.library() if r["file"] == P[1]["file"])["key"]
+            both = [r for r in pl_.library() if r["file"] == P[1]["file"]]           # (the type file beside the PDF was written for the first of the two: the second is not given it)
+            assert [(r["key"], r["kind"]) for r in both] == [("10.77/again", "journal"), ("10.77/c1", "conference")] and pl_.library_row(P[1]["file"])["kind"] == "journal", both
+            # a line of the index with more fields than columns (csv keeps the rest as a list): that list is the caller's too
+            import csv
+            with open(os.path.join(pl_.PAPERS, "_index.csv"), "a", newline="") as f:
+                csv.writer(f).writerow(["2026-01-01", "MIS Quarterly", "MISQ", "A long line", "Ann Lee", "10.77/long", "", "", "", P[2]["file"], "ok", "", "one more"])
+            settle(); row = pl_.library_row(P[2]["file"]); assert row["key"] == "10.77/long" and row[None] == ["one more"], row
+            row[None].append("mine"); assert pl_.library_row(P[2]["file"])[None] == ["one more"] and pl_.library()[0][None] == ["one more"]
+        finally:
+            restore()
+    check("one paper's row is found by its file without building the library (reading progress, notes autosave, opening a paper): the same row, None for anything else, and its changes are seen", t_library_row)
+
+    def t_library_refused():
+        """A file the system will not let be read for a moment (locked, still arriving) gives the answer it always gave, and is asked for again the next time."""
+        import builtins
+        import pipeline as pl_, kinds as kd_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        real_open = builtins.open
+        try:
+            notes, side, book = ns.notes_path(P[0]["pdf"]), P[1]["pdf"][:-4] + ".paper.json", P[5]["pdf"][:-4] + ".book.json"
+            f0, f1, f5 = (P[i]["file"] for i in (0, 1, 5))
+            settle()
+            for path, fn in ((notes, lambda d: d["highlights"].append({"id": "h3"})), (side, lambda d: d.update(kind="preprint")), (book, lambda d: d.update(pages=321))):
+                d = json.load(open(path)); fn(d); json.dump(d, open(path, "w"))
+                t = time.time() - 1800; os.utime(path, (t, t))             # (changed half an hour ago: nothing about its dates says "read me again")
+
+            def refusing(f, *a, **k):
+                if f in (notes, side, book):
+                    raise PermissionError(13, "Permission denied", f)
+                return real_open(f, *a, **k)
+            builtins.open = refusing
+            try:
+                assert ns.counts(P[0]["pdf"]) is None and kd_.read_sidecar(P[1]["pdf"], P[1]["key"]) == {}                 # (what these say to everyone else is unchanged)
+                row0, row1 = pl_.library_row(f0), pl_.library_row(f1)
+                assert row0["notes"] is None and row1["kind"] == "journal", (row0["notes"], row1["kind"])                # the answers during the failure are the ones before this change
+                for ask in (lambda: pl_.library_row(f5), pl_.library):                                                  # (a book file that cannot be read was an error, and is)
+                    try:
+                        ask(); raise AssertionError("no error for a book file that cannot be read")
+                    except PermissionError:
+                        pass
+            finally:
+                builtins.open = real_open
+            for _ in range(2):
+                row0, row1, row5 = pl_.library_row(f0), pl_.library_row(f1), pl_.library_row(f5)
+                assert row0["notes"] == {"highlights": 3, "cards": 0}, "the highlights of a notes file that could not be read for a moment stay hidden: %r" % (row0["notes"],)
+                assert row1["kind"] == "preprint", "the type of a paper whose type file could not be read for a moment stays wrong: %r" % row1["kind"]
+                assert row5["book"]["pages"] == 321, row5["book"]
+            lib = by(pl_.library())
+            assert lib[f0]["notes"] == {"highlights": 3, "cards": 0} and lib[f1]["kind"] == "preprint" and lib[f5]["book"]["pages"] == 321
+            with Spy() as s:                                               # and from here they are kept again
+                pl_.library(); assert s.opened == [], s.opened
+            # a notes file that is damaged (not one that cannot be read) says "no notes" as before, and that is kept until the file changes
+            open(notes, "w").write("{half"); t = time.time() - 900; os.utime(notes, (t, t))
+            assert pl_.library_row(f0)["notes"] is None
+            with Spy() as s:
+                assert pl_.library_row(f0)["notes"] is None and s.opened == [], s.opened
+        finally:
+            builtins.open = real_open; restore()
+    check("the library list does not remember what a file said while it could not be read (notes, a paper's type file, a book's details): the next request reads it again", t_library_refused)
+
+    def t_library_change_time():
+        """A file rewritten in place with the same length and its old modification time (two saves on the other computer within one second, delivered one after the other) is seen."""
+        import pipeline as pl_, readstate as rs_
+        root, restore, P, fid, settle, Spy, by = _lib_fixture()
+        try:
+            f0, f2, f4 = (P[i]["file"] for i in (0, 2, 4))
+            def again(path, write):
+                """`write()` the file's next version, of the same length, and give it the dates it had."""
+                st = os.stat(path); write(); os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+                assert (os.stat(path).st_size, os.stat(path).st_mtime_ns, os.stat(path).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino), path
+            def old(path):
+                t = time.time() - 7200; os.utime(path, (t, t))
+            # reading status
+            settle(); json.dump({"papers": {P[0]["key"]: {"page": 5}}}, open(rs_.PATH, "w")); old(rs_.PATH)
+            assert by(pl_.library())[f0]["state"] == {"page": 5} and by(pl_.library())[f0]["state"] == {"page": 5}
+            again(rs_.PATH, lambda: json.dump({"papers": {P[0]["key"]: {"page": 6}}}, open(rs_.PATH, "w")))
+            assert by(pl_.library())[f0]["state"] == {"page": 6}, "the reading status delivered second (same length, same time) was not seen"
+            assert pl_.library_row(f0)["state"] == {"page": 6}
+            # a folder's list
+            fp = os.path.join(fo.DIR, fid + ".json"); d = json.load(open(fp)); d["papers"] = [P[2]["key"]]; json.dump(d, open(fp, "w")); old(fp)
+            assert by(pl_.library())[f2]["folders"] == [fid] and by(pl_.library())[f4]["folders"] == []
+            d["papers"] = [P[4]["key"]]; again(fp, lambda: json.dump(d, open(fp, "w")))
+            rows = by(pl_.library()); assert rows[f4]["folders"] == [fid] and rows[f2]["folders"] == [], "a folder's list delivered second (same length, same time) was not seen"
+            # a paper's notes
+            np_ = ns.notes_path(P[0]["pdf"]); d = json.load(open(np_)); json.dump(d, open(np_, "w")); old(np_)
+            assert pl_.library_row(f0)["notes"] == {"highlights": 2, "cards": 0}
+            d["cards"], d["highlights"] = d["highlights"], []; again(np_, lambda: json.dump(d, open(np_, "w")))
+            assert pl_.library_row(f0)["notes"] == {"highlights": 0, "cards": 2}, "a notes file delivered second (same length, same time) was not seen"
+            # a file that arrived a moment ago with an old modification time is as new as one written a moment ago: read again the next time (by the real clock), kept after that
+            side = P[2]["pdf"][:-4] + ".paper.json"; settle(); json.dump({"kind": "preprint", "for": P[2]["key"]}, open(side, "w")); old(side)
+            settle.clock.ahead = 0.0
+            try:
+                assert pl_.library_row(f2)["kind"] == "preprint"
+                with Spy() as s:
+                    pl_.library_row(f2)
+                assert s.opened == [os.path.relpath(side, root)], "a file that arrived a moment ago was trusted at once: %s" % s.opened
+            finally:
+                settle.clock.ahead = 3.0
+            pl_.library_row(f2)
+            with Spy() as s:
+                pl_.library_row(f2)
+            assert s.opened == [], s.opened
+        finally:
+            restore()
+    check("the library list sees a file rewritten in place with the same length and its old modification time (reading status, a folder's list, notes): the change time is compared too, "
+          "and a file that arrived a moment ago is read again the next time", t_library_change_time)
+
+    def t_library_row_server():
+        """The requests about one paper (opening it, its reading progress, the notes autosave, a chapter summary, the answer to an import) find its row by
+        its file: the whole library is not built for them. A real server on a scratch data folder; no AI is called."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        child = r'''
+import importlib.util, json, os, sys, threading, urllib.request, urllib.error, urllib.parse
+from http.server import ThreadingHTTPServer
+sys.path.insert(0, %r)
+import paths; paths.seed_home()
+import download as dl, notes_store as ns, pipeline as pl, readstate as rs
+spec = importlib.util.spec_from_file_location("jw_server", os.path.join(paths.DASHBOARD, "server.py")); sv = importlib.util.module_from_spec(spec); spec.loader.exec_module(sv)
+P = []
+for i in range(3):
+    p = {"title": "Row paper %%d" %% i, "doi": "10.88/r%%d" %% i, "journal": "MIS Quarterly", "abbr": "MISQ", "authors": ["Ann Lee"], "pub_date": "2024-02"}
+    path = dl.out_path(p); open(path, "wb").write(b"%%PDF-1.4 " + str(i).encode()); rel = os.path.relpath(path, paths.ROOT)
+    dl.save_index(p, rel, "ok"); P.append(rel)
+whole = {r["file"]: r for r in pl.library()}
+assert sorted(whole) == sorted(P)
+calls, real = [], pl.library
+def counted():
+    calls.append(1); return real()
+pl.library = counted
+srv = ThreadingHTTPServer(("127.0.0.1", 0), sv.Handler); threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = "http://127.0.0.1:%%d" %% srv.server_address[1]
+def call(path, body=None):
+    req = urllib.request.Request(base + path, None if body is None else json.dumps(body).encode(), {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+J = lambda r: (r[0], json.loads(r[1] or b"{}"))
+# opening a paper: its row, the same as the library's
+c, d = J(call("/api/doc?file=" + urllib.parse.quote(P[1])))
+assert c == 200 and d["meta"] == whole[P[1]] and d["meta"]["title"] == "Row paper 1", d
+# reading progress (posted every few seconds while you read), a star, and opening
+c, d = J(call("/api/paper/state", {"file": P[1], "page": 3, "total": 12}))
+assert c == 200 and rs.load()["10.88/r1"]["page"] == 3 and rs.load()["10.88/r1"]["progress"] == 0.25, (c, d, rs.load())
+c, d = J(call("/api/paper/state", {"file": P[2], "star": True}))
+assert c == 200 and rs.load()["10.88/r2"] == {"star": True}, (c, d)
+c, d = J(call("/api/paper/state", {"file": P[0], "opened": True, "page": 2, "total": 4}))
+assert c == 200 and rs.load()["10.88/r0"]["status"] == "reading", (c, d)
+for bad in ("Papers/2024-02/MIS Quarterly/nope.pdf", "", None, ["x"], {"a": 1}, 7):
+    c, d = J(call("/api/paper/state", {"file": bad, "star": True}))
+    assert c == 404 and d == {"error": "no such paper"}, (bad, c, d)
+# the notes autosave: saved with the paper's identity from its row
+c, d = J(call("/api/doc/notes", {"file": P[1], "rev": 0, "notes": {"highlights": [{"id": "h1", "text": "x"}], "cards": [], "bookmarks": []}}))
+assert c == 200, (c, d)
+saved = json.load(open(ns.notes_path(os.path.join(paths.ROOT, P[1]))))
+assert saved["doc"]["doi"] == "10.88/r1" and saved["doc"]["title"] == "Row paper 1" and len(saved["highlights"]) == 1, saved
+# a chapter summary of a file that is not a book: an error line, no AI call
+c, raw = call("/api/ai/chapter", {"file": P[1], "chapter": 0})
+assert c == 200 and b'"error"' in raw, (c, raw[:300])
+c, raw = call("/api/ai/chapter", {"file": ["x"], "chapter": 0})
+assert c == 200 and b'"error"' in raw, (c, raw[:300])
+# the answer to an import carries the paper's row
+class H:
+    def send_json(self, d, code=200):
+        return d
+out = sv.Handler.finish_import(H(), {"file": P[2], "existing": True, "title": "Row paper 2"}, False)
+assert out["row"]["key"] == "10.88/r2" and out["row"]["state"] == {"star": True} and out["row"]["file"] == P[2], out
+assert sv.Handler.finish_import(H(), {"file": "Papers/x/nope.pdf", "existing": True, "title": "x"}, False)["row"] == {}
+assert calls == [], "the whole library was built %%d times for requests about one paper" %% len(calls)
+# the library list still is the library (and sees what those requests saved)
+c, d = J(call("/api/library"))
+assert c == 200 and len(calls) == 1 and {r["file"]: r for r in d}[P[1]]["notes"] == {"highlights": 1, "cards": 0} and {r["file"]: r for r in d}[P[1]]["state"]["page"] == 3, d
+srv.shutdown()
+print("OK")
+''' % HERE
+        try:
+            env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=180)
+            assert r.returncode == 0 and r.stdout.strip().endswith("OK"), (r.stdout + r.stderr)[-1500:]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("one paper's requests do not build the library: opening a paper, its reading progress, the notes autosave, a chapter summary and the answer to an import find the row by its file", t_library_row_server)
     def t_refextract():
         """References in a document you have (Word, PowerPoint, PDF, text): found by their shape (no AI, nothing sent), each looked up on Crossref and CHECKED against
         what the document prints; a record that only resembles it is 'unsure', a book is not downloaded, a sentence that is not a reference is dropped, an answer
@@ -2557,10 +3516,10 @@ for n, body in (("browser-profile/Default/x", "p"), ("index/a.json", "{}"), ("ai
 for n, body in (("index/b.json", "{}"), ("ai_cache/d.json", "2"), ("ai_cache/c.json", "1")):          # (an earlier development version kept the index and the saved answers here: they belong in state/, shared)
     os.makedirs(os.path.dirname(os.path.join(paths.LOCAL, n)), exist_ok=True); open(os.path.join(paths.LOCAL, n), "w").write(body)
 moved = paths.migrate_local(); again = paths.migrate_local()
-import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard
+import ai, blocks, browser, signins, updater, importer, exports, authorcache, related, personal, pipeline, identity, papercard, notes_store
 out = {"local": paths.LOCAL, "state": paths.STATE, "moved": moved, "again": again,
        "where": {"models": ai.MODELS, "profile": browser.PROFILE, "cookies": browser.SESSION_COOKIES, "signins": signins.STATUS_FILE, "update": updater.STATE_FILE,
-                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "fetched": pipeline.FETCHED},
+                 "staging": importer.STAGING, "crossref": exports.CACHE, "authors": authorcache.CACHE, "openalex": related.CACHE, "personal": personal.CACHE, "personal_old": personal.OLD, "fetched": pipeline.FETCHED, "hashes": notes_store.SHA_CACHE},
        "shared": {"ai_cache": ai.CACHE, "index": blocks.INDEX, "ledger": ai.LEDGER, "verdicts": pipeline.VERDICTS, "runs": pipeline.RUNS, "kept": identity.KEPT, "cards": papercard.BACKUPS},
        "left_in_state": sorted(os.listdir(st)), "in_local": sorted(os.listdir(paths.LOCAL)),
        "index_files": sorted(os.listdir(os.path.join(st, "index"))), "cache_files": sorted(os.listdir(os.path.join(st, "ai_cache")))}
@@ -3539,36 +4498,30 @@ print("OK")
                 f.write(data)
         ha, hb = hashlib.sha1(b"paper A" * 100).hexdigest(), hashlib.sha1(b"paper B" * 100).hexdigest()
 
-        class Racy(dict):
-            """The memo, with "another thread" (hashing B) running right after the n-th store of this thread."""
-            def __init__(self, at):
-                super().__init__(); self.at, self.n, self.busy = at, 0, False
+        t = time.time() - 3600
+        os.utime(fa, (t, t)); os.utime(fb, (t, t))             # (an hour old, like a paper in the library: a file written in the last two seconds is hashed every time and not remembered)
+        import builtins
+        seen = []
 
-            def __setitem__(self, k, v):
-                super().__setitem__(k, v)
-                if not self.busy:
-                    self.n += 1
-                    if self.n == self.at:
-                        self.busy = True
-                        try:
-                            assert ns.sha1_of(fb) == hb
-                        finally:
-                            self.busy = False
-        real = ns._sha
+        def spy(path, mode="r", *a, **k):                      # "another thread" hashes B at the worst moment: after this thread has looked A up and before it has read and stored it
+            f = builtins.open(path, mode, *a, **k)
+            if path == fa and "b" in mode and not seen:
+                seen.append(1)
+                th = threading.Thread(target=lambda: seen.append(ns.sha1_of(fb)), daemon=True); th.start(); th.join(5)
+            return f
+        ns.sha_forget(); ns.open = spy; ns.time = Later()      # (the two files were made a moment ago, which their change time says whatever their date: see Later)
         try:
-            for at in (1, 2):
-                ns._sha = Racy(at)
-                got = ns.sha1_of(fa)
-                assert got == ha, "store %d: paper A was given %s" % (at, "paper B's hash" if got == hb else got)
-                assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "store %d: the memo holds one file's name with the other's hash" % at
-                assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) is None and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None
-            ns._sha = {}
-            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == ha and ns.sha1_known(fa) == ha
-            with open(fa, "ab") as f:
-                f.write(b"more")
-            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
+            got = ns.sha1_of(fa)
+            assert seen == [1, hb], seen
+            assert got == ha, "paper A was given %s" % ("paper B's hash" if got == hb else got)
+            assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "one file's name is remembered with the other's hash"
+            assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) == ha and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None and ns.sha1_known(None) is None
         finally:
-            ns._sha = real
+            del ns.open; ns.time = time
+        with open(fa, "ab") as f:
+            f.write(b"more")
+        assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
+        assert ns.sha1_known(fa) == ns.sha1_of(fa) and ns.sha1_known(fb) == hb                                           # (the one hashed last is known even when it was written a moment ago)
     check("the remembered PDF hash is safe with several threads: another file hashed at the same moment never gives a paper the other's hash", t_sha_memo_threads)
 
     def t_scan_parsed_once():
@@ -4793,7 +5746,7 @@ print("OK")
     check("saved searches: names and filters are cleaned, repeats refused, an empty list leaves no file", t_smart)
 
     def t_personal():
-        pe.CACHE = os.path.join(TMP, "personal_vecs.json"); pe._mem.clear()
+        pe.CACHE, pe.OLD = os.path.join(TMP, "personal_vecs.bin"), os.path.join(TMP, "personal_vecs.json"); pe._mem.clear()
         A = ["Platform governance and transparency rules for complementors", "Transparency of platform rules and complementor entry", "Governance of digital platforms: rules and complementors", "Complementors respond to platform governance rules"]
         B = ["Protein folding with deep neural networks", "Neural networks for protein structure prediction"]
         mk = lambda i, t, st=None, **kw: {"file": "Papers/x%d.pdf" % i, "title": t, "matched_topics": "", "state": st or {}, "folders": [], "notes": None, "score": 5, "date_checked": "2020-01-01", **kw}   # noqa: E731
@@ -4811,6 +5764,388 @@ print("OK")
         assert set(f) == {"n1", "n2"} and f["n1"]["score"] > f["n2"]["score"] and f["n1"]["band"] == "high", f
         assert pe.fits([{"id": "n1", "title": "Anything"}], few) == {}                                                                                                     # not enough to learn from: no fits, no guesses
     check("reading queue: your list first, read/skipped/opened papers left out, fit learned from what you read, nothing guessed from too little", t_personal)
+
+    def up_next_fixture():
+        """A fresh vector store, and a library of 24 papers about three subjects (platforms, proteins, auctions); two folders with three papers each."""
+        pe.CACHE, pe.OLD = os.path.join(TMP, "upnext", "personal_vecs.bin"), os.path.join(TMP, "upnext", "personal_vecs.json"); pe._mem.clear()
+        shutil.rmtree(os.path.join(TMP, "upnext"), ignore_errors=True)
+        words = {"plat": "platform governance rules complementors transparency entry ecosystems developers", "prot": "protein folding neural networks structure prediction residues sequences",
+                 "auct": "auction bidding reserve prices sellers revenue mechanisms bidders"}
+        mk = lambda i, subj, st=None, fl=(), **kw: {"file": "Papers/u%02d.pdf" % i, "title": " ".join((words[subj].split() * 2)[i % 5:i % 5 + 5]) + " study%d" % i, "matched_topics": "", "state": st or {}, "folders": list(fl), "notes": None, "score": 5,   # noqa: E731
+                                                    "date_checked": "2020-01-01", **kw}
+        rows = []
+        for i in range(24):
+            subj = ("plat", "prot", "auct")[i % 3]
+            st = {"status": "read"} if i in (0, 3, 6) else {"star": True} if i == 9 else {"skip": True} if i in (1, 4) else {"status": "toread"} if i == 20 else {}
+            rows.append(mk(i, subj, st, ("pin-platforms",) if i in (0, 3, 12) else ("pin-auctions",) if i in (2, 5, 8) else ()))
+        return rows
+
+    def spy_embed():
+        """Counts the texts handed to the embedding model: with spy_embed() as texts: …; len(texts)."""
+        class Spy:
+            def __enter__(self):
+                self.orig, self.texts = ai.embed, []
+                ai.embed = lambda t, **kw: (self.texts.extend(t), self.orig(t, **kw))[1]
+                return self.texts
+
+            def __exit__(self, *a):
+                ai.embed = self.orig
+        return Spy()
+
+    def with_folders(fn):
+        made = [fo.create(n)["id"] for n in ("Pin platforms", "Pin auctions")]
+        try:
+            assert made == ["pin-platforms", "pin-auctions"], made
+            fn()
+        finally:
+            for f in made:
+                fo.delete(f)
+            write_cfg(CFG)
+
+    # (Eight of these papers are exactly as close to what was read as each other. Which two of them are the last "high" ones used to be left to the sort, and
+    # macOS and Linux chose differently: papers that are equal now keep the library's order, so u02 and u05. Everything else is as the version before gave it.)
+    PIN = [("u20", "medium", "", 0), ("u09", "high", "", 0), ("u02", "high", "", 0), ("u05", "high", "", 0), ("u12", "high", "", 0), ("u15", "high", "", 0), ("u18", "high", "pin-platforms", 1.9),
+           ("u21", "high", "pin-platforms", 1.9), ("u08", "medium", "", 0), ("u11", "medium", "pin-auctions", 1.9), ("u14", "medium", "", 0), ("u17", "medium", "pin-auctions", 2.1), ("u23", "medium", "pin-auctions", 1.9),
+           ("u07", "lower", "", 0), ("u10", "lower", "", 0), ("u13", "lower", "", 0), ("u16", "lower", "", 0), ("u19", "lower", "", 0), ("u22", "lower", "", 0)]
+    shape = lambda q: [(i["file"][7:10], i["fit"], (i["folder"] or {}).get("id", ""), (i["folder"] or {}).get("z", 0)) for i in q["items"]]   # noqa: E731
+    REC = 22 + 4 * 512                                                      # one record of the vector file with the fake model's 512 numbers: key, day, vector
+
+    def t_upnext_pinned():
+        rows = up_next_fixture()
+        q = pe.queue(rows, 30)
+        assert shape(q) == PIN, shape(q)                                    # order, fit and suggested folder of every candidate
+        # equally close papers keep the order they came in, whatever the last digits say (they differ from one computer to the next)
+        assert pe._bands([0.5, 0.0, 1e-13, -1e-13, 0.0, -0.3]) == ["high", "high", "medium", "medium", "lower", "lower"], pe._bands([0.5, 0.0, 1e-13, -1e-13, 0.0, -0.3])
+        assert pe._bands([0.0, -1e-13, 1e-13, 0.0, 0.0, 0.0]) == ["high", "high", "medium", "medium", "lower", "lower"] and pe._bands([]) == []
+        assert q["total"] == 19 and q["profile"] == {"pos": 4, "neg": 2, "ready": True}, q
+        pe._mem.clear()                                                      # the same from the file alone (a restart)
+        assert shape(pe.queue(rows, 30)) == PIN
+        assert pe.queue([]) == {"items": [], "profile": {"pos": 0, "neg": 0, "ready": False}} and pe.vectors([]).shape == (0, 1)
+
+    def t_upnext_no_repeat():
+        rows = up_next_fixture()
+        with spy_embed() as texts:
+            pe.queue(rows, 30)
+            first = len(texts)
+            assert first == len({pe.row_text(r) for r in rows}) == 24, first                     # every text once
+            ino, size = os.stat(pe.CACHE).st_ino, os.path.getsize(pe.CACHE)
+            assert size == 256 + 24 * REC, size
+            calls, orig = [], pe.vectors
+            pe.vectors = lambda t: (calls.append(len(t)), orig(t))[1]
+            try:
+                pe.queue(rows, 30); pe._mem.clear(); pe.queue(rows, 30)
+            finally:
+                pe.vectors = orig
+            assert len(texts) == first, "nothing changed, yet %d texts were embedded again" % (len(texts) - first)
+            assert len(calls) <= 8 and max(calls) == 24, calls                                        # the library is looked up as a whole, not once per candidate (two calls of queue: at most 4 look-ups each)
+            assert (os.stat(pe.CACHE).st_ino, os.path.getsize(pe.CACHE)) == (ino, size), "an unchanged library wrote the file again"
+            rows[10]["state"]["takeaway"] = "Reserve prices change what sellers earn"
+            a = pe.queue(rows, 30)
+            assert texts[first:] == [pe.row_text(rows[10])], texts[first:]                             # one changed text: one text embedded…
+            assert os.stat(pe.CACHE).st_ino == ino and os.path.getsize(pe.CACHE) - size == REC, (os.path.getsize(pe.CACHE) - size)   # …and one record appended: the file is not written again as a whole
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == a and len(texts) == first + 1                                 # and it is there after a restart
+            v = pe.vectors([pe.row_text(rows[0])]); v[:] = 9
+            assert float(abs(pe.vectors([pe.row_text(rows[0])])).max()) <= 1.0, "a caller could change the kept vectors"
+
+    def t_upnext_model_change():
+        import numpy as np
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        with spy_embed() as texts:
+            write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-2"}})
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)                           # another embedding model in Settings: no vector of the old one is used, all are made again
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)               # (the file starts again: the other model's vectors are not kept beside the new ones)
+            del texts[:]
+            pe.queue(rows, 30); pe._mem.clear(); pe.queue(rows, 30)
+            assert not texts, len(texts)                                                                # once
+            orig = ai.embed
+            ai.embed = lambda t, **kw: (lambda a: a / np.maximum(np.linalg.norm(a, axis=1, keepdims=True), 1e-9))(orig(t, **kw)[:, :256] + 1e-3)
+            try:
+                write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-short"}})          # a model with vectors of another length: no crash, no mixing
+                q = pe.queue(rows, 30)
+                assert q["total"] == 19 and pe.vectors([pe.row_text(rows[0])]).shape == (1, 256), q["total"]
+                pe._mem.clear(); texts.clear()
+                assert pe.queue(rows, 30) == q and not texts
+                write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-short-2"}})        # the same model name with another length (the store in memory and the file say 512): what is kept is dropped, all made again
+                pe.vectors(["one text of the short model"])
+                ai.embed = orig
+                del texts[:]
+                assert pe.queue(rows, 30)["total"] == 19 and len(texts) == 24 and pe.vectors(["one text of the short model"]).shape == (1, 512), len(texts)
+            finally:
+                ai.embed = orig
+
+    def t_upnext_other_writer():
+        import subprocess
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        probe = ("import os, sys; sys.path.insert(0, %r)\nimport numpy as np, ai, personal as pe\n"
+                 "ai.CONFIG, pe.CACHE, pe.OLD = %r, %r, %r\n"
+                 "def emb(t, **kw):\n    a = np.zeros((len(t), 512), dtype='float32'); a[:, 7] = 1.0; return a\n"
+                 "ai.embed = emb\npe.vectors(['written by another process'])\n") % (HERE, ai.CONFIG, pe.CACHE, pe.OLD)
+        r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, env={**os.environ, "JW_NO_KEYCHAIN": "1"})
+        assert r.returncode == 0, r.stderr[-600:]
+        with spy_embed() as texts:
+            v = pe.vectors(["written by another process"])
+            assert not texts and v[0, 7] == 1.0, (texts, v[0, :9])                                      # what another process added is found, not made again…
+            assert pe.queue(rows, 30) == ref and not texts                                              # …and it did not cost this process's vectors
+            pe.vectors(["one more text here"]); pe._mem.clear(); del texts[:]
+            assert pe.vectors(["written by another process"])[0, 7] == 1.0 and pe.queue(rows, 30) == ref and not texts, texts      # nor did this process's next write lose the other's
+            os.remove(pe.CACHE)                                                                         # the file deleted while the app runs: nothing is embedded again, and the next new text writes all of it back
+            assert pe.queue(rows, 30) == ref and not texts
+            pe.vectors(["a text after the file went"]); pe._mem.clear(); del texts[:]
+            assert pe.queue(rows, 30) == ref and not texts, len(texts)
+
+    def t_upnext_torn_file():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        good = os.path.getsize(pe.CACHE)
+        with spy_embed() as texts:
+            with open(pe.CACHE, "ab") as f:
+                f.write(b"\x01" * 700)                                                                  # a record cut short (the app was killed while appending)
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == ref and not texts, len(texts)
+            pe.vectors(["a text added after the crash"])
+            assert os.path.getsize(pe.CACHE) == good + REC, os.path.getsize(pe.CACHE)
+            pe._mem.clear(); del texts[:]
+            pe.vectors(["a text added after the crash"])
+            assert pe.queue(rows, 30) == ref and not texts
+            with open(pe.CACHE, "wb") as f:
+                f.write(b"not a vector file")                                                           # unreadable: made again, no error
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)
+
+    def t_upnext_old_file():
+        import hashlib
+        import numpy as np
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        key = lambda t: hashlib.sha1(t.encode()).hexdigest()[:20]     # noqa: E731
+        old = {key(t): [round(float(x), 4) for x in v] for t, v in ((pe.row_text(r), ai.embed([pe.row_text(r)])[0]) for r in rows)}   # what earlier versions kept: {key: [numbers rounded to 4 places]}
+        old["0" * 20] = [0.5] * 384                                                                     # (one of another length, from another model: not carried over)
+
+        def start_with(d):
+            if os.path.exists(pe.CACHE):
+                os.remove(pe.CACHE)
+            with open(pe.OLD, "w") as f:
+                f.write(d if isinstance(d, str) else json.dumps(d))
+            pe._mem.clear()
+            return open(pe.OLD, "rb").read()
+        with spy_embed() as texts:
+            raw = start_with(old)
+            assert pe.queue(rows, 30) == ref and texts == [pe.row_text(rows[0])], texts                 # carried over: one text is embedded to see that the file is by the model in Settings, no other
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)
+            assert open(pe.OLD, "rb").read() == raw                                                     # the old file is left as it was
+            pe._mem.clear(); del texts[:]
+            assert pe.queue(rows, 30) == ref and not texts                                              # after a restart the new file answers; the old one is not looked at again
+            orig = ai.embed
+            ai.embed = lambda t, **kw: np.roll(orig(t, **kw), 1, axis=1)                                # a model that gives other vectors of the same length
+            try:
+                write_cfg({**CFG, "embeddings": {"provider": "fake", "model": "emb-rolled"}})
+                start_with(old); del texts[:]                                                           # (the new file is gone, the old one is still there)
+                assert pe.queue(rows, 30)["total"] == 19 and len(texts) == 25, len(texts)               # the old file's vectors are not this model's: none is used, all are made again (1 to see it + 24)
+                v, was = pe.vectors([pe.row_text(rows[5])])[0], np.array(old[key(pe.row_text(rows[5]))], dtype="float32")
+                assert np.allclose(v, np.roll(was, 1), atol=1e-3) and not np.allclose(v, was, atol=1e-3)
+            finally:
+                ai.embed = orig
+                write_cfg(CFG)
+            start_with({"f" * 20: old[key(pe.row_text(rows[0]))]}); del texts[:]
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)                           # none of its texts is asked for, so it cannot be checked: not carried over
+            assert os.path.getsize(pe.CACHE) == 256 + 24 * REC, os.path.getsize(pe.CACHE)
+            start_with("not json at all {"); del texts[:]
+            assert pe.queue(rows, 30) == ref and len(texts) == 24, len(texts)                           # an old file that cannot be read does no harm
+
+    def t_upnext_prune():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        lib = os.path.getsize(pe.CACHE)
+        cands = [{"id": "c%d" % i, "title": "Candidate number%d about auctions" % i} for i in range(60)]
+        f1 = pe.fits(cands, rows)
+        assert os.path.getsize(pe.CACHE) == lib + 60 * REC
+        pe._mem.clear()
+        assert pe.queue(rows, 30) == ref and os.path.getsize(pe.CACHE) == lib + 60 * REC               # young vectors stay, used or not (the Watch page will ask for them again), also when they are not in the library
+        real = pe._today
+        pe._today = lambda: real() + pe.KEEP_DAYS
+        try:
+            pe._mem.clear()
+            assert pe.queue(rows, 30) == ref and os.path.getsize(pe.CACHE) == lib + 60 * REC           # exactly KEEP_DAYS old: still kept
+            pe._today = lambda: real() + pe.KEEP_DAYS + 1
+            with spy_embed() as texts:
+                pe.fits(cands[:5], rows)                                                                # five of them are asked for in this session
+                assert pe.queue(rows, 30) == ref and not texts                                          # the library's own vectors are in use: kept however old
+                assert os.path.getsize(pe.CACHE) == lib + 5 * REC, (os.path.getsize(pe.CACHE), lib)     # the 55 that nothing asked for since the start, older than KEEP_DAYS, are gone from the file
+                pe._mem.clear()
+                assert pe.queue(rows, 30) == ref and not texts
+                assert pe.fits(cands, rows) == f1 and len(texts) == 55, len(texts)                      # asked for again, they are made again (the five that were kept are not)
+        finally:
+            pe._today = real
+
+    def t_upnext_threads():
+        import numpy as np
+        rows = up_next_fixture()
+        texts = ["thread text number%d platform" % i for i in range(40)]
+        errs, out = [], {}
+        with spy_embed() as seen:
+            def work(k):
+                try:
+                    out[k] = pe.vectors(texts[k % 3::2] + [pe.row_text(r) for r in rows[k:k + 6]])
+                except Exception as e:  # noqa: BLE001
+                    errs.append(e)
+            ts = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+            [t.start() for t in ts]; [t.join() for t in ts]
+            assert not errs, errs
+            assert len(seen) == len(set(seen)), "a text was embedded twice"
+        pe._mem.clear()
+        for k in range(8):
+            assert np.array_equal(out[k], pe.vectors(texts[k % 3::2] + [pe.row_text(r) for r in rows[k:k + 6]]))
+
+    def other_process(texts):
+        """What another process running this app does to the vector file: its own store (nothing of this one's memory) asks for these texts and appends what it has to make."""
+        mine = pe._mem
+        pe._mem = pe._Store()
+        try:
+            pe.vectors(texts)
+        finally:
+            pe._mem = mine
+
+    def records():
+        return (os.path.getsize(pe.CACHE) - 256) // REC
+
+    def t_upnext_probe_fails():
+        import hashlib
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        key = lambda t: hashlib.sha1(t.encode()).hexdigest()[:20]     # noqa: E731
+        old = {key(t): [round(float(x), 4) for x in v] for t, v in ((pe.row_text(r), ai.embed([pe.row_text(r)])[0]) for r in rows)}
+        orig = ai.embed
+        for err in (TimeoutError("timed out"), ConnectionResetError("reset"), ValueError("not JSON"), TypeError("not a list of vectors")):
+            os.remove(pe.CACHE) if os.path.exists(pe.CACHE) else None
+            with open(pe.OLD, "w") as f:
+                json.dump(old, f)
+            pe._mem.clear()
+            made, fails = [], [err]
+
+            def emb(t, **kw):
+                if fails:
+                    raise fails.pop()
+                made.extend(t)
+                return orig(t, **kw)
+            ai.embed = emb
+            try:
+                try:
+                    pe.queue(rows, 30)                                                                   # the model does not answer the one text that is asked to check the old file
+                except type(err):
+                    pass
+                assert pe.queue(rows, 30) == ref                                                        # it answers again
+                assert made == [pe.row_text(rows[0])], "%s: the old file was given up, %d texts were embedded" % (type(err).__name__, len(made))
+                assert records() == 24
+            finally:
+                ai.embed = orig
+
+    def t_upnext_meanwhile():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        cands = [{"id": "c%d" % i, "title": "Candidate number%d about auctions" % i} for i in range(60)]
+        pe.fits(cands, rows)
+        real, orig = pe._today, ai.embed
+        pe._today = lambda: real() + pe.KEEP_DAYS + 1
+        try:
+            pe._mem.clear()                                                                             # a start, 61 days later: the 60 candidates are old and nothing has asked for them
+            pe.vectors([pe.row_text(r) for r in rows])
+            busy = []
+
+            def emb(t, **kw):
+                if not busy:
+                    busy.append(1)
+                    other_process(["written meanwhile, one", "written meanwhile, two"])                 # another process adds two while this one waits for the model
+                return orig(t, **kw)
+            ai.embed = emb
+            pe.vectors(["this process's own new text"])
+            ai.embed = orig
+            assert records() == 24 + 60 + 3, records()
+            with pe._lock:
+                pe._mem.prune()                                                                         # (what the end of every Up next does)
+            with spy_embed() as texts:
+                pe.vectors(["written meanwhile, two", "written meanwhile, one", "this process's own new text"])
+                assert not texts, "what another process appended while this one was embedding was not seen: %r embedded again" % texts
+                pe._mem.clear()
+                pe.vectors(["written meanwhile, two", "written meanwhile, one", "this process's own new text"])
+                assert not texts, "this process's prune dropped what the other process had appended: %r" % texts
+                assert pe.queue(rows, 30) == ref and not texts
+                assert records() == 24 + 3, records()                                                   # once it has read them, the old candidates go as they should, and nothing else
+        finally:
+            pe._today, ai.embed = real, orig
+
+    def t_upnext_asked_marks():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        cands = [{"id": "c%d" % i, "title": "Candidate number%d about auctions" % i} for i in range(60)]
+        f1 = pe.fits(cands, rows)
+        real = pe._today
+        pe._today = lambda: real() + pe.KEEP_DAYS + 1
+        try:
+            pe._mem.clear()                                                                             # a start, 61 days later
+            assert pe.fits(cands, rows) == f1                                                           # the Watch page asks for all 60: they are in use
+            other_process(["the weekly check adds one"])
+            with spy_embed() as texts:
+                assert pe.queue(rows, 30) == ref and not texts                                          # the file is read again, and Up next asks for the library's texts only
+                assert records() == 24 + 60 + 1, "the candidates this process asked for since it started were dropped after another process wrote the file (%d records left)" % records()
+                assert pe.fits(cands, rows) == f1 and not texts, len(texts)
+            pe._mem.clear()                                                                             # (a real restart does forget who asked)
+            assert pe.queue(rows, 30) == ref and records() == 24 + 1, records()
+        finally:
+            pe._today = real
+
+    def t_upnext_replaced_while_read():
+        rows = up_next_fixture()
+        ref = pe.queue(rows, 30)
+        whole = open(pe.CACHE, "rb").read()
+        assert len(whole) == 256 + 24 * REC
+        real = pe._sig
+        # (the file at the start, the look at it after which another process puts a file in its place, that file, how many of the library's 24 vectors it lacks)
+        for before, at, after, cut in ((whole, 1, whole[:256 + 14 * REC], 10),                        # it pruned: a shorter file, right after this process looked and before it read
+                                       (whole, 1, whole + whole[256:256 + 3 * REC], 0),               # a longer one
+                                       (b"not a vector file", 2, whole, 0)):                          # a damaged file is put right while this process finds that it cannot read it
+            with open(pe.CACHE, "wb") as f:
+                f.write(before)
+            pe._mem.clear()
+            looks = []
+
+            def sig():
+                s = real()
+                looks.append(1)
+                if len(looks) == at:
+                    with open(pe.CACHE + ".other", "wb") as f:
+                        f.write(after)
+                    os.replace(pe.CACHE + ".other", pe.CACHE)
+                    return s if at == 1 else real()
+                return s
+            pe._sig = sig
+            try:
+                with spy_embed() as texts:
+                    pe.vectors(["a brand new text"])
+                    assert texts == ["a brand new text"], texts
+                    assert records() == (len(after) - 256) // REC + 1, "a file replaced between the look at it and the reading of it was taken for a damaged one: %d records left" % records()
+                    pe._sig = real
+                    assert pe._mem.sig == real(), "the store does not know which file it read"
+                    del texts[:]
+                    assert pe.queue(rows, 30) == ref and len(texts) == cut, len(texts)                  # only what the other process had dropped is made again
+            finally:
+                pe._sig = real
+
+    check("Up next is the same on every computer and as before the matrix store: order, fit and suggested folder of every candidate; equally close papers keep their order", lambda: with_folders(t_upnext_pinned))
+    check("Up next embeds a text once, looks the library up as a whole, and one changed text appends one record instead of writing the file again", lambda: with_folders(t_upnext_no_repeat))
+    check("another embedding model in Settings: every vector is made again, none of the old model is used, another vector length does not break Up next", lambda: with_folders(t_upnext_model_change))
+    check("vectors written by another process are found and not lost; a deleted vector file is written back", lambda: with_folders(t_upnext_other_writer))
+    check("a vector record cut short and an unreadable vector file do no harm", lambda: with_folders(t_upnext_torn_file))
+    check("the vector file of earlier versions is carried over once when it is by the model in Settings, and left as it was; one by another model is not used", lambda: with_folders(t_upnext_old_file))
+    check("vectors nothing asks for any more are forgotten after KEEP_DAYS; the library's own and the young ones never are", lambda: with_folders(t_upnext_prune))
+    check("eight threads at once ask for vectors: no text embedded twice, the same vectors after a restart", lambda: with_folders(t_upnext_threads))
+    check("the model failing to answer the check of the earlier versions' vector file (a time-out, a reset, a bad answer) does not give that file up: it is carried over at the next call", lambda: with_folders(t_upnext_probe_fails))
+    check("vectors another process appends while this one waits for the model are seen afterwards, not made again and not dropped by this one's prune", lambda: with_folders(t_upnext_meanwhile))
+    check("the vectors this process asked for since it started stay marked when another process writes the file: its prune does not drop them", lambda: with_folders(t_upnext_asked_marks))
+    check("a vector file replaced by another process between the look at it and the reading of it is read as it is, never taken for a damaged one and emptied", lambda: with_folders(t_upnext_replaced_while_read))
 
     def t_mcp_protocol():
         r = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
@@ -7524,9 +8859,11 @@ print("OK")
                 real_fj = fx_.fetch_journal
                 fx_.fetch_journal = lambda j: (seen_.append(j["abbr"]) or [])
                 try:
+                    pl_.FEED_HOST_PAUSE = 0                                                                                          # (no waiting between two feeds of one host here)
                     pl_.fetch_weekly(pl_.Run("weekly", {}), lambda ev, d=None: None, threading.Event())
                 finally:
                     fx_.fetch_journal = real_fj
+                    pl_.FEED_HOST_PAUSE = 0.3
                 assert seen_ and "SSRN" not in seen_, seen_
             finally:
                 open(jpath, "w").write(saved) if saved is not None else os.remove(jpath)
@@ -7574,10 +8911,617 @@ print("OK")
 
     check("browser: on a paywalled landing page only THIS article's PDF link is followed (its own link wherever the page puts it: aside, tab strip, 'footer'-named wrapper, other host, citation_pdf_url; not another site, a reference list, the footer, a banner PDF, another article or one whose DOI merely starts with ours)", t_link_follow)
     check("search memory: a verdict is reused for the same question and the same paper text (never another question, another text, an error, or one older than the number of days you set), a journal's year range is kept for a while, and the same search is the same saved run", t_search_memory)
+
+    def run_listing_checks():
+        """-> [(name, fn)]. Each check works in its own empty runs folder (pl_.RUNS is pointed at it and put back), counts the files the listing reads through pl_.load_json, and
+        shortens the 'just written' window so that it need not wait three seconds."""
+        import contextlib, time, pipeline as pl_
+
+        REAL_WINDOW = [None]
+
+        @contextlib.contextmanager
+        def runs_folder(window=0.25):
+            real = (pl_.RUNS, pl_.load_json, getattr(pl_, "_RUN_FRESH_NS", None))
+            REAL_WINDOW[0] = real[2]
+            d = tempfile.mkdtemp(prefix="jw-runs-"); reads = []
+            def spy(path, default):
+                reads.append(os.path.basename(path)); return real[1](path, default)
+            pl_.RUNS, pl_.load_json, pl_._RUN_FRESH_NS = d, spy, int(window * 1e9)
+            try:
+                yield d, reads
+            finally:
+                pl_.RUNS, pl_.load_json = real[0], real[1]
+                if real[2] is None:
+                    del pl_._RUN_FRESH_NS
+                else:
+                    pl_._RUN_FRESH_NS = real[2]
+                shutil.rmtree(d, ignore_errors=True)
+
+        def mk(kind="search", q="q", n=3, rid=None, **kw):
+            r = pl_.Run(kind, {"year_from": 2024, "year_to": 2024, "journals": ["A"], "topics": ["t"], "methods": [], "query": q} if kind == "search" else {"topics": ["t"], "query": ""}, rid)
+            for k in range(n):
+                r.add_paper({"id": "%s-p%d" % (q, k), "title": "Paper %d" % k, "abbr": "A", "verdict": "download" if k == 0 else "skip"})
+            r.status, r.stage = "done", "ready"
+            r.jstate = {"A": {"state": "done", "label": "3 new", "done": 3, "total": 3}}
+            for k, v in kw.items():
+                setattr(r, k, v)
+            r.save(force=True)
+            return r
+
+        def history():
+            return [mk(q="one"), mk(q="two", n=5), mk("weekly", rid="2026-W10_weekly", created="2026-03-03T10:00:00+00:00", week="2026-W10", checks=["2026-03-03T10:00:00+00:00"]),
+                    mk("weekly", rid="2026-W11_weekly", created="2026-03-10T10:00:00+00:00", week="2026-W11", checks=["2026-03-10T10:00:00+00:00"])]
+
+        def warm(reads, window=0.25):
+            """The files are no longer 'just written'; one listing reads them, and the next one must read NO file and say the same (this is what fails without the change)."""
+            time.sleep(window + 0.06)
+            first = pl_.list_runs(); del reads[:]
+            again = pl_.list_runs()
+            assert not reads, "nothing changed, and the listing read %d run file(s) again: %s" % (len(reads), reads)
+            assert again == first and not any("papers" in d for d in again), "the listing from memory differs from the one read from the files"
+            return again
+
+        def by_id(rid):
+            return next((d for d in pl_.list_runs() if d["id"] == rid), None)
+
+        def fn_of(r):
+            return r.id + ".json"
+
+        def t_unchanged():
+            with runs_folder() as (d, reads):
+                rs = history()
+                got = warm(reads)
+                assert [x["id"] for x in got] == [rs[3].id, rs[2].id] + [x["id"] for x in got[2:]] and {x["id"] for x in got[2:]} == {rs[0].id, rs[1].id}, [x["id"] for x in got]      # weekly newest week first, then the searches
+                a = next(x for x in got if x["id"] == rs[1].id)
+                assert a["n_papers"] == 5 and a["n_download"] == 1 and a["search_key"] == pl_.search_key(rs[1].params) and a["title"] == rs[1].title() and a["jstate"] == rs[1].jstate, a
+                assert got[0]["title"] == pl_.week_label("2026-W11") and got[0]["checks"] == ["2026-03-10T10:00:00+00:00"], got[0]
+                for _ in range(5):
+                    pl_.list_runs(); pl_.find_search(rs[0].params)
+                assert not reads, reads
+                assert pl_.find_search(rs[0].params)["id"] == rs[0].id and pl_.find_search(dict(rs[0].params, query="never ran")) is None and not reads
+
+        def t_copies():
+            with runs_folder() as (d, reads):
+                rs = history()
+                pristine = json.loads(json.dumps(warm(reads)))
+                for x in pl_.list_runs() + [pl_.find_search(rs[0].params)]:              # what a caller may do with what it was given
+                    x["title"] = "changed"; x["status"] = "changed"; x["params"]["query"] = "changed"; x["params"]["topics"].append("ZZ"); x.setdefault("mine", 1)
+                    x["checks"].append("zz"); x["jstate"].clear(); x["usage"]["in"] = 99; x.pop("search_key", None); x.pop("week", None)
+                assert pl_.list_runs() == pristine, "a caller that changed what the listing gave it changed the next listing"
+                assert pl_.find_search(rs[0].params)["id"] == rs[0].id and not reads
+                a, b = pl_.list_runs(), pl_.list_runs()
+                assert all(x is not y and x["params"] is not y["params"] and x["jstate"] is not y["jstate"] for x, y in zip(a, b)), "two listings share an object"
+
+        def t_saved_here():
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); r = rs[0]
+                r.status = "stopped"; r.add_paper({"id": "late", "title": "Late", "verdict": "download"}); r.checks = ["2026-05-01T09:00:00+00:00"]; r.save(force=True)
+                x = by_id(r.id)
+                assert x["status"] == "stopped" and x["n_papers"] == 4 and x["n_download"] == 2 and x["updated"] == "2026-05-01T09:00:00+00:00", x
+                assert reads == [fn_of(r)], "one run was saved; the listing read %s" % reads
+                pl_.list_runs()                                                       # a file written a moment ago is read each time: two saves inside one tick of the file system's clock
+                assert reads == [fn_of(r)] * 2, reads                                 # can leave the same size and times, so such a file is not trusted yet
+                assert REAL_WINDOW[0] is not None and REAL_WINDOW[0] >= 2 * 10**9, "the 'just written' window must cover a file system that keeps times to two seconds"
+                new = mk(q="brand new"); del reads[:]
+                assert pl_.find_search(new.params)["id"] == new.id and reads == [fn_of(r), fn_of(new)] or sorted(reads) == sorted([fn_of(r), fn_of(new)]), reads   # (r is still 'just written')
+                for k in range(6):                                                    # several saves in a row, the same length each time: each one is seen
+                    r.status = "st%02d" % k; r.save(force=True)
+                    assert by_id(r.id)["status"] == "st%02d" % k, k
+
+        def t_other_writer():
+            """Another process, or Dropbox bringing the other computer's copy: the file is replaced by one of the same length with the same modification time."""
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); r = rs[1]; p = os.path.join(d, fn_of(r))
+                st = os.stat(p); doc = json.load(open(p)); assert doc["status"] == "done"
+                doc["status"] = "oops"
+                tmp = p + ".dropbox.tmp"; open(tmp, "w").write(json.dumps(doc, ensure_ascii=False))
+                assert os.path.getsize(tmp) == st.st_size, (os.path.getsize(tmp), st.st_size)
+                os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns)); os.replace(tmp, p)
+                assert (os.stat(p).st_size, os.stat(p).st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+                assert by_id(r.id)["status"] == "oops", "a run file replaced by one of the same size and time is listed as it was before"
+                assert reads == [fn_of(r)], reads
+                warm(reads)
+                time.sleep(0.03); st = os.stat(p)                                      # rewritten in place (the same file, the same length), its time put back
+                with open(p, "r+") as f:
+                    f.write(json.dumps(dict(doc, status="new1"), ensure_ascii=False))
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+                assert (os.stat(p).st_size, os.stat(p).st_mtime_ns, os.stat(p).st_ino) == (st.st_size, st.st_mtime_ns, st.st_ino)
+                assert by_id(r.id)["status"] == "new1", "a run file rewritten in place is listed as it was before"
+                warm(reads)
+                json.dump({"id": "20260101-000000_search_x", "kind": "search", "params": {"year_from": 1, "year_to": 2}, "title": "from the other computer", "created": "2026-01-01T00:00:00+00:00",
+                           "stage": "ready", "status": "done", "n_papers": 1, "papers": [{"id": "x"}]}, open(os.path.join(d, "20260101-000000_search_x.json"), "w"))
+                x = by_id("20260101-000000_search_x")
+                assert x and x["title"] == "from the other computer" and x["search_key"] == pl_.search_key({"year_from": 1, "year_to": 2}) and "papers" not in x, x
+
+        def t_each_stat_field():
+            """A change in the size, the modification time, the change time or the file's number, each alone, makes the file be read again (the file system is asked through os.stat)."""
+            import types
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); p = os.path.join(d, fn_of(rs[0]))
+                real_stat = os.stat
+                for field in ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino"):
+                    def fake(path, *a, _f=field, **k):
+                        st = real_stat(path, *a, **k)
+                        if os.fspath(path) != p:
+                            return st
+                        ns_ = types.SimpleNamespace(**{n: getattr(st, n) for n in dir(st) if n.startswith("st_")})
+                        setattr(ns_, _f, getattr(st, _f) + 1)
+                        return ns_
+                    del reads[:]; os.stat = fake
+                    try:
+                        pl_.list_runs()
+                    finally:
+                        os.stat = real_stat
+                    assert reads == [fn_of(rs[0])], "%s changed and the file was not read again (%s)" % (field, reads)
+                    warm(reads)
+
+        def t_deleted():
+            import deletion
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads)
+                assert deletion.delete_run(rs[0].id) == rs[0].title(); del reads[:]
+                assert by_id(rs[0].id) is None and pl_.find_search(rs[0].params) is None and len(pl_.list_runs()) == 3 and not reads, reads
+                os.remove(os.path.join(d, fn_of(rs[2])))
+                assert by_id(rs[2].id) is None and len(pl_.list_runs()) == 2
+                assert len(pl_._RUN_HEADS) == 2, "a deleted run stays in memory: %s" % list(pl_._RUN_HEADS)
+                again = mk(q="one")                                                       # the same search run again later: a new file (perhaps of the same name)
+                assert pl_.find_search(again.params)["id"] == again.id
+                shutil.rmtree(d); assert pl_.list_runs() == []                            # (no runs folder at all)
+                os.makedirs(d)
+
+        def t_broken_file():
+            """A file that cannot be read (half-synced) is an error each time, as before, never remembered as 'no run'; once whole it is listed."""
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); p = os.path.join(d, fn_of(rs[0])); whole = open(p).read()
+                open(p, "w").write(whole[:200])
+                time.sleep(0.31)
+                for _ in range(2):
+                    try:
+                        pl_.list_runs(); raise AssertionError("a broken run file was listed")
+                    except ValueError:
+                        pass
+                open(p, "w").write(whole)
+                assert by_id(rs[0].id)["n_papers"] == 3
+                open(os.path.join(d, "empty.json"), "w").write("{}")                     # an empty record is no run (and costs no read once it is known)
+                warm(reads); assert len(pl_.list_runs()) == 4
+
+        def t_threads():
+            with runs_folder() as (d, reads):
+                rs = history(); warm(reads); r = rs[0]; errs = []; stop = threading.Event()
+                def lister():
+                    try:
+                        while not stop.is_set():
+                            got = pl_.list_runs()
+                            assert len(got) == 4 and not any("papers" in x for x in got) and all(x["title"] for x in got)
+                            got[0]["title"] = ""; got[0]["params"].clear()
+                    except Exception:  # noqa: BLE001
+                        errs.append(traceback.format_exc())
+                ts = [threading.Thread(target=lister) for _ in range(6)]
+                [t.start() for t in ts]
+                for k in range(40):
+                    r.status = "s%03d" % k; r.save(force=True)
+                stop.set(); [t.join() for t in ts]
+                assert not errs, errs[0]
+                assert by_id(r.id)["status"] == "s039"
+
+        return [("run listing: with nothing changed no run file is read again, and the listing and find_search say the same as from the files", t_unchanged),
+                ("run listing: what a caller does to the runs it was given never shows in the next listing", t_copies),
+                ("run listing: a run saved by this process is listed at once, only its file is read again, and a file written a moment ago is read each time", t_saved_here),
+                ("run listing: a run file replaced or rewritten by someone else (the same size and time), and a new one, are listed at once", t_other_writer),
+                ("run listing: a change of size, time, change time or file number each makes the file be read again", t_each_stat_field),
+                ("run listing: a deleted run is gone at once and is forgotten", t_deleted),
+                ("run listing: a broken run file is an error each time, never remembered", t_broken_file),
+                ("run listing: listings and saves from several threads at once", t_threads)]
+
+    for _name, _fn in run_listing_checks():
+        check(_name, _fn)
     check("screening goes through the AI layer: its own model setting (not Ask), stopped by the monthly budget with the papers left unscreened, local-only mode applies, in the usage ledger and the run's cost (a billed refusal too), a refusal is not asked again, four batches at once work", t_screen_ai)
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
     check("SSRN: searched by words through Crossref (prefix 10.2139: only SSRN's own, capped), a pseudo-journal that is never read weekly and not added twice, the papers marked as SSRN's, a saved copy per phrase, the paper's own page, and its download link followed only when it is that paper's", t_ssrn)
+
+    def weekly_fixture(journals_):
+        """A weekly check over `journals_` with stand-in feeds: -> (go, restore). go(fetch, stop=None, on_event=None) runs pl_.fetch_weekly with fx_.fetch_journal = fetch
+        and returns (run, events). journals.json, seen.json, new_papers.json and the runs' files are put back by restore()."""
+        import pipeline as pl_, fetch_new as fx_
+        jpath, seen_p, new_p = os.path.join(pl_.BASE, "journals.json"), os.path.join(pl_.STATE, "seen.json"), os.path.join(pl_.STATE, "new_papers.json")
+        saved = {p_: (open(p_, encoding="utf-8").read() if os.path.exists(p_) else None) for p_ in (jpath, seen_p, new_p)}
+        os.makedirs(pl_.STATE, exist_ok=True)
+        json.dump({"journals": journals_}, open(jpath, "w"))
+        json.dump({}, open(seen_p, "w"))
+        runs_ = []
+        with pl_._FEEDS:
+            pl_._FEEDS_FREE_AT.clear()       # (the pauses are the process's: a host's pause from the check before is not this fixture's concern)
+
+        def go(fetch, stop=None, on_event=None):
+            events = []
+
+            def emit(ev, d=None):
+                events.append((ev, dict(d or {})))
+                on_event and on_event(ev, d or {})
+            run = pl_.Run("weekly", {"topics": [], "query": ""}, "2031-W%02d_weekly" % (10 + len(runs_)))
+            runs_.append(run)
+            real = fx_.fetch_journal
+            fx_.fetch_journal = fetch
+            try:
+                pl_.fetch_weekly(run, emit, stop or threading.Event())
+            finally:
+                fx_.fetch_journal = real
+            return run, events
+
+        def restore():
+            for p_, txt in saved.items():
+                if txt is None:
+                    os.path.exists(p_) and os.remove(p_)
+                else:
+                    open(p_, "w", encoding="utf-8").write(txt)
+            for r in runs_:
+                f = os.path.join(pl_.RUNS, r.id + ".json")
+                os.path.exists(f) and os.remove(f)
+        return go, restore
+
+    def feed_items(j, n=2):
+        """What fx.fetch_journal returns for a feed whose papers need no lookup (a DOI, a long abstract, a date, authors: enrich asks nobody and sleeps for nothing)."""
+        import fetch_new as fx_
+        out = []
+        for i in range(n):
+            p = {"journal": j["name"], "abbr": j["abbr"], "publisher": j["publisher"], "title": "%s paper %d" % (j["abbr"], i), "url": "https://example.invalid/%s/%d" % (j["abbr"], i),
+                 "doi": "10.5555/%s.%d" % (j["abbr"].lower(), i), "abstract": "An abstract that is long enough to count. " * 6, "keywords": None, "pub_date": "2031-03", "source": "rss",
+                 "authors": ["A. Author"], "issn": None, "doi_prefix": None}
+            p["id"] = fx_.key_for(p["doi"], p["journal"], p["title"])
+            out.append(p)
+        return out
+
+    WJ = lambda abbr, host, source="rss": {"name": abbr + " Journal", "abbr": abbr, "publisher": "test", "source": source, "issn": "1234-5678",      # noqa: E731
+                                            "feed": ("https://%s/%s.rss" % (host, abbr.lower())) if source == "rss" else None}
+    SIX = [WJ("AA", "one.example"), WJ("BB", "two.example"), WJ("CC", "one.example"), WJ("DD", None, "crossref"), WJ("EE", "three.example"), WJ("FF", "four.example")]
+    SIX_NAMES = "AA BB CC DD EE FF".split()
+
+    def weekly_tiles(events):
+        """The tiles' states in the order the page gets them (a repeat of the same state, e.g. the count of lookups going up, is one)."""
+        tiles = [(d["abbr"], d["state"]) for ev, d in events if ev == "journal" and d.get("state")]
+        return [t for k, t in enumerate(tiles) if k == 0 or tiles[k - 1] != t]
+
+    def t_feeds_ahead():
+        """Feeds of different hosts are read while an earlier journal is still being dealt with; one host is never asked twice at once; a journal read through Crossref
+        is read in its own turn; and everything the check shows, saves and remembers comes one journal at a time, in the journals' order."""
+        import pipeline as pl_
+        go, restore = weekly_fixture(SIX)
+        seen_p = os.path.join(pl_.STATE, "seen.json")
+        lock = threading.Lock()
+        started, active, at_once, same_host_twice, threads = [], {}, [0], [], {}
+        two_at_once, shown = threading.Event(), []
+        pause0 = getattr(pl_, "FEED_HOST_PAUSE", None)
+        try:
+            pl_.FEED_HOST_PAUSE = 0.0                            # (the pause between two feeds of one host has its own check)
+
+            def fetch(j):
+                host = j["feed"].split("/")[2] if j.get("feed") else "api.crossref.org"
+                with lock:
+                    started.append(j["abbr"])
+                    threads[j["abbr"]] = threading.current_thread()
+                    if active.get(host):
+                        same_host_twice.append(j["abbr"])
+                    active[host] = active.get(host, 0) + 1
+                    at_once[0] = max(at_once[0], sum(active.values()))
+                    if sum(active.values()) >= 2:
+                        two_at_once.set()
+                    if j["abbr"] == "DD":                        # the Crossref journal: by now every journal before it must be finished on the page
+                        shown.append([d["abbr"] for ev, d in events_now if ev == "journal" and d.get("state") in ("fetched", "failed")])
+                if j["abbr"] == "AA":
+                    two_at_once.wait(3)                          # AA's answer takes until another host's feed is being read (or 3 s: one feed at a time)
+                with lock:
+                    active[host] -= 1
+                if j["abbr"] == "EE":
+                    raise RuntimeError("EE is down")
+                return feed_items(j)
+
+            events_now, checkpoints = [], []
+
+            def on_event(ev, d):
+                events_now.append((ev, d))
+                if ev == "journal" and d.get("state") == "fetching":      # a journal's turn starts: what is remembered on disk, and what the run holds, is exactly the journals before it
+                    checkpoints.append((d["abbr"], sorted({v["journal"][:2] for v in json.load(open(seen_p)).values()}), len(run_now[0].order)))
+            run_now = []
+            real_run = pl_.Run
+
+            class SpyRun(real_run):
+                def __init__(self, *a, **k):
+                    real_run.__init__(self, *a, **k)
+                    run_now[:] = [self]
+            pl_.Run = SpyRun
+            try:
+                run, events = go(fetch, on_event=on_event)
+            finally:
+                pl_.Run = real_run
+            # what the page shows, what is saved and what is remembered: one journal at a time and in the journals' order, exactly as with one feed at a time
+            want = [(a, "queued") for a in SIX_NAMES]
+            for a in SIX_NAMES:
+                want += [(a, "fetching")] + ([(a, "failed")] if a == "EE" else [(a, "enriching"), (a, "fetched")])
+            assert weekly_tiles(events) == want, weekly_tiles(events)
+            assert [(d["label"], d["done"], d["total"]) for ev, d in events if ev == "progress"] == [("Fetching %s" % a, k, 6) for k, a in enumerate(SIX_NAMES)] + [("Fetched", 6, 6)]
+            assert [d["msg"] for ev, d in events if ev == "log"] == ["AA: 2 items, 2 new", "BB: 2 items, 2 new", "CC: 2 items, 2 new", "DD: 2 items, 2 new", "EE feed failed: EE is down", "FF: 2 items, 2 new"]
+            assert run.errors == ["EE: EE is down"], run.errors
+            assert [run.papers[i]["abbr"] for i in run.order] == ["AA", "AA", "BB", "BB", "CC", "CC", "DD", "DD", "FF", "FF"], run.order      # the papers in the journals' order
+            assert [d["abbr"] for ev, d in events if ev == "paper"] == [run.papers[i]["abbr"] for i in run.order]
+            assert checkpoints == [("AA", [], 0), ("BB", ["AA"], 2), ("CC", ["AA", "BB"], 4), ("DD", ["AA", "BB", "CC"], 6), ("EE", ["AA", "BB", "CC", "DD"], 8), ("FF", ["AA", "BB", "CC", "DD"], 8)], checkpoints
+            assert len(json.load(open(seen_p))) == 10 and len(json.load(open(os.path.join(pl_.STATE, "new_papers.json")))) == 10
+            assert sorted(started) == SIX_NAMES and started.index("AA") < started.index("CC"), started          # each feed once, a host's feeds in order
+            assert not same_host_twice, same_host_twice                                                         # AA and CC share a host: never at once
+            assert threads["DD"] is threading.current_thread() and shown == [["AA", "BB", "CC"]], (threads["DD"], shown)       # Crossref: in its turn, in the check's own thread
+            # ... and yet feeds of different hosts were read at once (this is what one feed at a time fails), never more than three
+            assert two_at_once.is_set() and 2 <= at_once[0] <= 3 == pl_.FEEDS_AT_ONCE, at_once
+            assert threads["BB"] is not threading.current_thread()
+            # a second check: every feed is read once again, and only the papers of the feed that failed before are new
+            started.clear()
+            run2, events2 = go(lambda j: (started.append(j["abbr"]), feed_items(j))[1])
+            assert sorted(started) == SIX_NAMES and [run2.papers[i]["abbr"] for i in run2.order] == ["EE", "EE"] and len(json.load(open(seen_p))) == 12, (started, run2.order)
+            # a feed that fails with the same words for two journals of one host is each journal's own failure, at its own turn
+            json.dump({}, open(seen_p, "w"))
+            run3, events3 = go(lambda j: (_ for _ in ()).throw(ValueError(j["abbr"] + " broke")) if j["abbr"] in ("AA", "CC", "DD") else feed_items(j))
+            assert run3.errors == ["AA: AA broke", "CC: CC broke", "DD: DD broke"] and [run3.papers[i]["abbr"] for i in run3.order] == ["BB", "BB", "EE", "EE", "FF", "FF"], (run3.errors, run3.order)
+            assert [t for t in weekly_tiles(events3) if t[1] == "failed"] == [("AA", "failed"), ("CC", "failed"), ("DD", "failed")]
+        finally:
+            if pause0 is None:
+                del pl_.FEED_HOST_PAUSE
+            else:
+                pl_.FEED_HOST_PAUSE = pause0
+            restore()
+    check("weekly check: feeds of different hosts are read ahead (never two of one host at once, a host's feeds in order, a Crossref journal only in its turn), and the tiles, the progress line, "
+          "the log, a failed feed, the papers' order and what is remembered after each journal are as with one feed at a time", t_feeds_ahead)
+
+    def t_feeds_ahead_stop():
+        """Stop is what it was: pressed while a feed is being read, that feed is finished and the check ends at that journal's lookups with nothing remembered; pressed between two
+        journals, the check ends before the next. No feed is asked after it (one being read ahead is finished and dropped), and the next check does not use what a stopped one read."""
+        import pipeline as pl_, time as _t
+        go, restore = weekly_fixture(SIX)
+        seen_p = os.path.join(pl_.STATE, "seen.json")
+        pause0 = getattr(pl_, "FEED_HOST_PAUSE", None)
+        try:
+            pl_.FEED_HOST_PAUSE = 0.0
+            stop, lock, started, ahead_of_aa, release, aa_turn = threading.Event(), threading.Lock(), [], threading.Event(), threading.Event(), threading.Event()
+
+            def fetch(j):
+                with lock:
+                    started.append(j["abbr"])
+                    if j["abbr"] != "AA":
+                        ahead_of_aa.set()
+                if j["abbr"] == "AA":
+                    ahead_of_aa.wait(3)                          # AA answers once another feed is being read ahead (or after 3 s)
+                    aa_turn.wait(3)                              # ... and its turn has come (its tile says "Reading feed")
+                    stop.set()                                   # ... and Stop is pressed while AA is still being read
+                else:
+                    release.wait(3)                              # the feeds read ahead answer only after the check has returned
+                return feed_items(j)
+            run, events = go(fetch, stop=stop, on_event=lambda ev, d: aa_turn.set() if ev == "journal" and d.get("abbr") == "AA" and d.get("state") == "fetching" else None)
+            n_at_stop = len(started)
+            # as with one feed at a time: AA's feed is finished, its papers are counted, and the check ends at the first lookup: nothing added, nothing remembered, no other tile touched
+            assert weekly_tiles(events) == [(a, "queued") for a in SIX_NAMES] + [("AA", "fetching"), ("AA", "enriching")], weekly_tiles(events)
+            assert [d["msg"] for ev, d in events if ev == "log"] == ["AA: 2 items, 2 new"] and [d["label"] for ev, d in events if ev == "progress"] == ["Fetching AA"], events
+            assert not run.order and not run.errors and json.load(open(seen_p)) == {}, (run.order, json.load(open(seen_p)))
+            assert "CC" not in started and "DD" not in started, started                                          # (CC: AA's host; DD: Crossref, only in its turn)
+            release.set(); _t.sleep(0.5)
+            assert len(started) == n_at_stop, started                                                            # nothing was asked after the stop, nor after the check returned
+            assert ahead_of_aa.is_set() and 2 <= n_at_stop <= 3, started                                         # (feeds were read ahead: this is what one feed at a time fails)
+            # the next check starts afresh: every feed is asked again (what the stopped check read ahead is not used)
+            again = []
+            run2, _ = go(lambda j: (again.append(j["abbr"]), feed_items(j))[1])
+            assert sorted(again) == SIX_NAMES and len(run2.order) == 12, (again, run2.order)
+            # Stop pressed between two journals (when BB is shown as fetched): the check ends before CC, AA and BB are remembered, and the Crossref journal was never asked
+            json.dump({}, open(seen_p, "w"))
+            stop2, asked = threading.Event(), []
+            run3, events3 = go(lambda j: (asked.append(j["abbr"]), feed_items(j))[1], stop=stop2,
+                               on_event=lambda ev, d: stop2.set() if ev == "journal" and d.get("abbr") == "BB" and d.get("state") == "fetched" else None)
+            assert weekly_tiles(events3) == [(a, "queued") for a in SIX_NAMES] + [("AA", "fetching"), ("AA", "enriching"), ("AA", "fetched"), ("BB", "fetching"), ("BB", "enriching"), ("BB", "fetched")], weekly_tiles(events3)
+            assert [run3.papers[i]["abbr"] for i in run3.order] == ["AA", "AA", "BB", "BB"] and sorted({v["journal"][:2] for v in json.load(open(seen_p)).values()}) == ["AA", "BB"]
+            n3 = len(asked); _t.sleep(0.3)
+            assert "DD" not in asked and len(asked) == n3 and len(set(asked)) == n3, asked
+            # a check that ends on an error (here the page's connection breaks at BB's turn) reads nothing more either: the feeds being read ahead are finished, FF is never asked
+            json.dump({}, open(seen_p, "w"))
+            asked4, let_go, broke = [], threading.Event(), []
+
+            def slow(j):
+                asked4.append(j["abbr"])
+                j["abbr"] != "AA" and let_go.wait(3)
+                return feed_items(j)
+
+            def breaks(ev, d):
+                if ev == "journal" and d.get("abbr") == "BB" and d.get("state") == "fetching":
+                    t_end = _t.time() + 2
+                    while len(asked4) < 4 and _t.time() < t_end:           # (AA is done; BB, EE and CC are being read: the three places are taken)
+                        _t.sleep(0.01)
+                    raise OSError("the page went away")
+            try:
+                go(slow, on_event=breaks)
+            except OSError as e:
+                broke.append(str(e))
+            n4 = len(asked4); let_go.set(); _t.sleep(0.4)
+            assert broke == ["the page went away"] and len(asked4) == n4 and "FF" not in asked4, (broke, asked4)
+            # Stop pressed in a journal's turn while its feed still waits for its host's pause: the turn has begun, so the feed is read and the check ends at its lookups, as before
+            json.dump({}, open(seen_p, "w"))
+            pl_.FEED_HOST_PAUSE = 0.5
+            go5, restore5 = weekly_fixture([WJ("AA", "one.example"), WJ("CC", "one.example")])
+            try:
+                stop5, asked5, out5 = threading.Event(), [], []
+                th = threading.Thread(target=lambda: out5.append(go5(lambda j: (asked5.append(j["abbr"]), feed_items(j))[1], stop=stop5,
+                                      on_event=lambda ev, d: stop5.set() if ev == "journal" and d.get("abbr") == "CC" and d.get("state") == "fetching" else None)), daemon=True)
+                th.start(); th.join(8)
+                assert not th.is_alive() and out5, "the check did not end"
+                run5, events5 = out5[0]
+                assert asked5 == ["AA", "CC"] and weekly_tiles(events5)[2:] == [("AA", "fetching"), ("AA", "enriching"), ("AA", "fetched"), ("CC", "fetching"), ("CC", "enriching")], (asked5, weekly_tiles(events5))
+                assert [d["msg"] for ev, d in events5 if ev == "log"] == ["AA: 2 items, 2 new", "CC: 2 items, 2 new"] and [run5.papers[i]["abbr"] for i in run5.order] == ["AA", "AA"]
+            finally:
+                restore5()
+        finally:
+            if pause0 is None:
+                del pl_.FEED_HOST_PAUSE
+            else:
+                pl_.FEED_HOST_PAUSE = pause0
+            restore()
+    check("weekly check, read ahead: Stop while a feed is being read ends the check at that journal as before (nothing added or remembered), Stop between two journals ends it before the next, "
+          "no feed is asked after it, and a stopped check's feeds are not used by the next one", t_feeds_ahead_stop)
+
+    def t_feeds_ahead_pace():
+        """No host is asked faster than before and never more than three feeds are being read: two feeds of one host are a pause apart (whoever reads the second), another host
+        is read meanwhile, a journal read through Crossref waits for a free place of the three, and a feed served by the lookups' own hosts is not read ahead."""
+        import pipeline as pl_, time as _t
+        pause0 = getattr(pl_, "FEED_HOST_PAUSE", None)
+        fixtures = []
+        try:
+            pl_.FEED_HOST_PAUSE = 0.4
+            spans = {}
+
+            def timed(secs):
+                def f(j):
+                    t0 = _t.time(); _t.sleep(secs.get(j["abbr"], 0.1)); spans[j["abbr"]] = (t0, _t.time())
+                    return feed_items(j)
+                return f
+            # AA and CC share a host, BB is slow: CC is read ahead while the check waits for BB, but only a pause after AA's answer
+            go, restore = weekly_fixture([WJ("AA", "one.example"), WJ("BB", "two.example"), WJ("CC", "ONE.example")]); fixtures.append(restore)
+            go(timed({"BB": 1.0}))
+            assert spans["CC"][0] - spans["AA"][1] >= 0.39, spans                                                # same host (however it is capitalised): the pause
+            assert spans["BB"][0] < spans["AA"][1] and spans["CC"][0] < spans["BB"][1], spans                    # another host: meanwhile (this is what one feed at a time fails)
+            restore(); fixtures.pop()
+            # two journals of one host and nothing else: the second one's turn comes at once, and it still waits out the pause
+            spans.clear()
+            go, restore = weekly_fixture([WJ("AA", "one.example"), WJ("CC", "one.example")]); fixtures.append(restore)
+            run, _ = go(timed({}))
+            assert spans["CC"][0] - spans["AA"][1] >= 0.39 and len(run.order) == 4, spans
+            restore(); fixtures.pop()
+            # never more than three feeds at once, the check's own reading of a Crossref journal included: with three feeds being read ahead when DD's turn comes, DD waits for one to answer
+            pl_.FEED_HOST_PAUSE = 0.0
+            lock, active, most, dd_started, with_dd = threading.Lock(), [0], [0], threading.Event(), []
+            go, restore = weekly_fixture([WJ("AA", "one.example"), WJ("DD", None, "crossref"), WJ("BB", "two.example"), WJ("CC", "three.example"), WJ("EE", "four.example")]); fixtures.append(restore)
+
+            def fetch(j):
+                with lock:
+                    active[0] += 1
+                    most[0] = max(most[0], active[0])
+                    if j["abbr"] == "DD":
+                        with_dd.append(active[0]); dd_started.set()
+                if j["abbr"] in ("BB", "CC", "EE"):
+                    dd_started.wait(0.7)                         # these answer once DD is being read (or after 0.7 s)
+                with lock:
+                    active[0] -= 1
+                return feed_items(j)
+
+            def on_event(ev, d):                                 # DD's turn starts only once three feeds are being read ahead (BB, CC, EE)
+                if ev == "journal" and d.get("abbr") == "DD" and d.get("state") == "fetching":
+                    t_end = _t.time() + 2
+                    while active[0] < 3 and _t.time() < t_end:
+                        _t.sleep(0.01)
+            run, events = go(fetch, on_event=on_event)
+            assert most[0] == 3 and len(with_dd) == 1 and with_dd[0] <= 3, (most, with_dd)                       # (DD was one of three at most, not a fourth)
+            assert [run.papers[i]["abbr"] for i in run.order] == ["AA", "AA", "DD", "DD", "BB", "BB", "CC", "CC", "EE", "EE"], run.order
+            # which journals are read ahead at all
+            assert pl_.feed_host(WJ("AA", "One.Example")) == "one.example" and pl_.feed_host(WJ("DD", None, "crossref")) is None
+            assert pl_.feed_host({"source": "crossref", "feed": "https://one.example/left-over.rss"}) is None                # (read through Crossref whatever its feed line says)
+            assert pl_.feed_host({"source": "rss", "feed": "https://api.crossref.org/journals/1234-5678/works"}) is None and pl_.feed_host({"source": "rss", "feed": "https://api.openalex.org/works"}) is None
+            assert pl_.feed_host({"source": "rss", "feed": ""}) is None and pl_.feed_host({"source": "rss"}) is None and pl_.feed_host({"source": "rss", "feed": "http://[bad"}) is None
+        finally:
+            if pause0 is None:
+                del pl_.FEED_HOST_PAUSE
+            else:
+                pl_.FEED_HOST_PAUSE = pause0
+            for r in fixtures:
+                r()
+    check("weekly check, read ahead: two feeds of one host are a pause apart while another host is read meanwhile, never more than three feeds are being read (a Crossref journal waits its place), "
+          "and a feed on the lookups' own hosts is not read ahead", t_feeds_ahead_pace)
+
+    def t_feeds_ahead_fair():
+        """The pause is short, the journal whose turn it is does not wait behind journals after it, a feed line that is not text fails for its journal only, a check started
+        while a stopped one's feeds are still being read asks no host beside them, and a thread that cannot be started leaves nothing reading on."""
+        import pipeline as pl_, time as _t
+        fixtures = []
+        pause0 = pl_.FEED_HOST_PAUSE
+        try:
+            # 1. the pause between two feeds of one host: 0.3 s after the answer (there was none before feeds were read ahead; a second made a quiet week slower than it was)
+            assert pl_.FEED_HOST_PAUSE == 0.3, pl_.FEED_HOST_PAUSE
+            spans = {}
+
+            def quick(j):
+                t0 = _t.time(); _t.sleep(0.02); spans[j["abbr"]] = (t0, _t.time())
+                return []
+            go, restore = weekly_fixture([WJ(a, "one.example") for a in ("AA", "BB", "CC", "DD")]); fixtures.append(restore)
+            t0 = _t.time(); go(quick); took = _t.time() - t0
+            gaps = [spans[b][0] - spans[a][1] for a, b in (("AA", "BB"), ("BB", "CC"), ("CC", "DD"))]
+            assert min(gaps) >= 0.29 and took < 2.5, "four feeds of one host with nothing new: %.2f s, pauses %s" % (took, ["%.2f" % g for g in gaps])
+            restore(); fixtures.pop()
+            # 2. the journal whose turn it is (here one read through Crossref, first in the list) gets the first place that frees, before the journals after it
+            pl_.FEED_HOST_PAUSE = 0.0
+            order, lock = [], threading.Lock()
+
+            def slowish(j):
+                with lock:
+                    order.append(j["abbr"])
+                _t.sleep(0.3)
+                return feed_items(j)
+            go, restore = weekly_fixture([WJ("X0", None, "crossref")] + [WJ("R%d" % i, "h%d.example" % i) for i in range(7)]); fixtures.append(restore)
+            run, _ = go(slowish)
+            assert order.index("X0") <= 3, "the journal whose turn it was waited behind the feeds of later journals: %s" % order
+            assert sorted(order) == sorted(["X0"] + ["R%d" % i for i in range(7)]) and [run.papers[i]["abbr"] for i in run.order][:2] == ["X0", "X0"] and len(run.order) == 16, (order, run.order)
+            restore(); fixtures.pop()
+            # 3. a feed line that is not text (a journals.json edited by hand): that journal's feed fails, the others are checked
+            for bad in (5, True, ["https://one.example/x.rss"], {"a": 1}):
+                assert pl_.feed_host({"source": "rss", "feed": bad}) is None, bad
+            js = [WJ("AA", "one.example"), dict(WJ("BAD", "two.example"), feed=5), WJ("CC", "three.example")]
+            go, restore = weekly_fixture(js); fixtures.append(restore)
+
+            def picky(j):
+                if not isinstance(j.get("feed"), str):
+                    raise ValueError("unknown url type: %r" % (j.get("feed"),))                    # (what reading such a feed says)
+                return feed_items(j)
+            run, events = go(picky)
+            assert run.errors == ["BAD: unknown url type: 5"] and [run.papers[i]["abbr"] for i in run.order] == ["AA", "AA", "CC", "CC"], (run.errors, run.order)
+            assert [t for t in weekly_tiles(events) if t[1] in ("failed", "fetched")] == [("AA", "fetched"), ("BAD", "failed"), ("CC", "fetched")], weekly_tiles(events)
+            restore(); fixtures.pop()
+            # 4. Stop, and Check again at once: the feeds the stopped check left being read keep their hosts and their places until they have answered
+            names = ["AA", "BB", "CC", "DD", "EE"]
+            go, restore = weekly_fixture([WJ(a, "%s.example" % a.lower()) for a in names]); fixtures.append(restore)
+            active, most, stop, first = {}, {"host": 0, "all": 0}, threading.Event(), [True]
+
+            def counted(j):
+                with lock:
+                    active[j["abbr"]] = active.get(j["abbr"], 0) + 1
+                    most["host"], most["all"] = max(most["host"], active[j["abbr"]]), max(most["all"], sum(active.values()))
+                _t.sleep(0.6 if first[0] and j["abbr"] != "AA" else 0.02)                           # (the stopped check's feeds are slow, AA's apart)
+                with lock:
+                    active[j["abbr"]] -= 1
+                return feed_items(j)
+            run1, _ = go(counted, stop=stop, on_event=lambda ev, d: stop.set() if ev == "journal" and d.get("abbr") == "AA" and d.get("state") == "fetching" else None)
+            assert not run1.order and sum(active.values()) >= 2, (run1.order, active)                # the check has ended; feeds it started are still being read
+            first[0] = False
+            run2, _ = go(counted)
+            assert most["host"] == 1, "a host was asked by the new check while the stopped check was still asking it"
+            assert most["all"] <= 3, "%d feeds were being read at once" % most["all"]
+            assert [run2.papers[i]["abbr"] for i in run2.order] == [a for a in names for _ in (0, 1)], run2.order
+            restore(); fixtures.pop()
+            # 5. the second thread cannot be started: the check fails as it would, and the first thread does not read the feeds on with nobody to take them
+            go, restore = weekly_fixture([WJ(a, "%s.example" % a.lower()) for a in names]); fixtures.append(restore)
+            asked, n_started, real_start = [], [0], threading.Thread.start
+
+            def start(self):
+                if getattr(getattr(self, "_target", None), "__name__", "") == "_work":
+                    n_started[0] += 1
+                    if n_started[0] == 2:
+                        raise RuntimeError("can't start new thread")
+                return real_start(self)
+            threading.Thread.start = start
+            try:
+                try:
+                    go(lambda j: (asked.append(j["abbr"]), _t.sleep(0.05), feed_items(j))[2]); raise AssertionError("no error")
+                except RuntimeError as e:
+                    assert "can't start new thread" in str(e), e
+            finally:
+                threading.Thread.start = real_start
+            _t.sleep(0.5)
+            assert n_started[0] == 2 and len(asked) <= 1, "after the check failed to start, feeds were still read: %s" % asked
+        finally:
+            pl_.FEED_HOST_PAUSE = pause0
+            for r in fixtures:
+                r()
+    check("weekly check, read ahead: 0.3 s between two feeds of one host, the journal whose turn it is gets the next free place, a feed line that is not text fails for that journal only, "
+          "a check started right after a Stop asks no host a stopped check is still asking, and a thread that cannot be started leaves no feed being read", t_feeds_ahead_fair)
 
     def t_screen_errors():
         """A screening that fails says why, in the provider's words; an answer that asking again cannot change (a model without structured output, a refused key) stops the
@@ -7895,7 +9839,7 @@ print("OK")
                     assert want > 2 * t3[1] or forget, (want, t3)
                     bl_.extract(long_pdf)
                     if forget:
-                        ns_._sha.clear()
+                        os.utime(long_pdf, (1.6e9, 1.6e9))       # (the file is not the one that was hashed: nothing remembered fits it)
                     job = act_.start("summary", "cancel test")
                     try:
                         try:
@@ -7904,7 +9848,7 @@ print("OK")
                             pass
                         row = ai.usage_log(1)[0]
                         assert row.get("cancelled") and row["provider"] == "anth" and row["chars"] == want + len("Summarise.") and row["in"] == int(row["chars"] / 3.3), (forget, want, row)
-                        assert not forget or not ns_._sha, "the PDF was read again to be measured"
+                        assert not forget or ns_.sha1_known(long_pdf) is None, "the PDF was read again to be measured"
                     finally:
                         job.finish("cancelled")
             finally:
@@ -8096,6 +10040,80 @@ print("OK")
                 open(ai.CONFIG, "w").write(saved[1])
     check("the screening estimate: from what earlier screenings with the same model cost per paper (the ledger rows that say how many papers, the last 200 calls, once 50 papers are on record), else the price; a Test, another model, a saved or unpriced call never counts; a screening call records its number of papers", t_screen_estimate)
     check("summarise the papers without a summary: only downloaded papers (no book, missing PDF or failed download), a cost guess that says what it rests on, one background job in the tray, a summary beside each PDF, skipped if written meanwhile, stopped by a refused key, the budget or three failures in a row, never an empty summary", t_summaries_job)
+
+    def _lazy_child(code, **more):         # (a new process each time: what is loaded cannot be told inside this long-lived one)
+        import subprocess
+        home = tempfile.mkdtemp(prefix="jw-lazy-home-"); loc = tempfile.mkdtemp(prefix="jw-lazy-local-")
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        env.update(JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1", JW_NO_UPDATE_CHECK="1", **more)
+        try:
+            r = subprocess.run([sys.executable, "-c", "import sys\nsys.path.insert(0, %r); sys.path.insert(0, %r)\n" % (HERE, paths.DASHBOARD) + code], env=env, capture_output=True, text=True, timeout=120)
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+        assert r.returncode == 0, r.stdout[-600:] + r.stderr[-1200:]
+        return r.stdout
+
+    def t_start_loads_no_sdk():
+        heavy = ("anthropic", "pydantic", "httpx", "pymupdf", "fitz", "fastembed", "onnxruntime", "numpy", "playwright", "docx")
+        for mod in ("server", "pipeline", "mcp_server"):
+            out = _lazy_child("import %s\nprint('LOADED=' + ','.join(m for m in %r if m in sys.modules))" % (mod, heavy))
+            assert "LOADED=\n" in out, "import %s loaded: %s" % (mod, out.split("LOADED=")[1].strip())
+    check("starting the dashboard, the engine or the MCP server loads neither the Anthropic SDK nor PyMuPDF, fastembed, numpy, Playwright or python-docx", t_start_loads_no_sdk)
+
+    def t_client_on_demand():
+        out = _lazy_child(
+            "import types\nimport pipeline as pl\n"
+            "made = []\n"
+            "class Fake:\n    def __init__(self, *a, **k): made.append(self)\n"
+            "sys.modules['anthropic'] = types.SimpleNamespace(Anthropic=Fake)      # put in place AFTER pipeline was imported: only a look-up at call time finds it\n"
+            "assert made == []\n"
+            "c = pl.client(); assert isinstance(c, Fake) and pl.client() is c and len(made) == 1, (c, made)\n"
+            "print('OK')", ANTHROPIC_API_KEY="not-a-key")
+        assert "OK" in out, out
+    check("the direct summary path looks the Anthropic SDK up when its client is first needed, and makes one client", t_client_on_demand)
+
+    def t_missing_sdk():
+        out = _lazy_child(
+            "sys.modules['anthropic'] = None                 # what a missing package looks like to `import anthropic`\n"
+            "import json, types\nimport server\nimport paths, ai, prefs\nimport pipeline as pl\npaths.seed_home()\n"
+            "assert server.ai is ai, 'the AI features were switched off'\n"
+            "open(ai.CONFIG, 'w').write(json.dumps({'providers': {'anth': {'type': 'anthropic', 'key_env': 'FAKE_KEY', 'models': ['m1']}}, 'features': {'ask': {'provider': 'anth', 'model': 'm1'}}}))\n"
+            "try:\n    ai.chat('ask', [{'role': 'user', 'content': 'x'}]); raise AssertionError('answered without the SDK')\n"
+            "except ai.AIError as e:\n    assert str(e).startswith('Claude can’t be used') and 'anthropic' in str(e) and str(e).endswith('run: pip install -r requirements.txt'), str(e)\n"
+            "assert ai.usage_log(10) == [], 'nothing was sent, so nothing is in the usage record'\n"
+            "prefs.summary_prompt = lambda *a, **k: ''        # no summary template: the direct path\n"
+            "pdf = paths.ROOT + '/Papers/x.pdf'; open(pdf, 'wb').write(b'%PDF-1.4')\n"
+            "p = {'id': 'x', 'title': 'T', 'file': 'Papers/x.pdf'}\n"
+            "pl._summarize_one(types.SimpleNamespace(usage=pl.Usage(), save=lambda: None), p, lambda *a: None)\n"
+            "assert p['dl_status'] == 'ok' and p['dl_note'].startswith('summary failed: Claude can’t be used') and 'anthropic' in p['dl_note'] and 'pip install' in p['dl_note'] and 'summary' not in p, p\n"
+            "import os\nassert not os.path.exists(pdf[:-4] + '.md')\n"
+            "print('OK')", FAKE_KEY="good")
+        assert "OK" in out, out
+    check("without the Anthropic SDK the dashboard still loads: a Claude call is refused with what to install (nothing in the usage record), and the direct summary path notes the same on the paper", t_missing_sdk)
+
+    def t_missing_sdk_said_at_start():
+        line = "AI features unavailable (No module named 'anthropic') — run: pip install -r requirements.txt"
+        code = ("%s"
+                "import io, contextlib\nimport server\n"
+                "server.ac.backfill = lambda *a, **k: None; server._daily_snapshot = lambda: None        # (nothing in the background: only what starting prints is looked at)\n"
+                "if server.ai:\n    server.ai.pricing.refresh_soon = lambda: None\n"
+                "if server.indexer:\n    server.indexer.kick = lambda *a, **k: False\n"
+                "buf = io.StringIO()\n"
+                "with contextlib.redirect_stdout(buf):\n    srv, url = server.start(18990, quiet=%r)\n"
+                "assert srv is not None, url\nsrv.server_close()\n"
+                "print('SAID=%%d' %% buf.getvalue().count(%r)); print('SDK=%%d' %% ('anthropic' in sys.modules and sys.modules['anthropic'] is not None))\n"
+                "sys.stdout.flush(); import os; os._exit(0)")
+        gone = "sys.modules['anthropic'] = None\n"
+        out = _lazy_child(code % (gone, False, line)); assert "SAID=1\n" in out and "SDK=0" in out, out        # the package is missing: one line, in the words used for the other AI parts
+        out = _lazy_child(code % (gone, True, line)); assert "SAID=0\n" in out, out                            # (the Mac app starts quietly)
+        out = _lazy_child(code % ("", False, line)); assert "SAID=0\n" in out and "SDK=0" in out, out          # the package is there: nothing is said, and looking for it did not load it
+        stand_in = "import types\nsys.modules['anthropic'] = types.SimpleNamespace(Anthropic=object)      # a stand-in that does not say where it came from\n"
+        for quiet in (False, True):                                                                             # the look for the SDK fails on it: the start goes on, and says nothing
+            out = _lazy_child(code % (stand_in, quiet, line)); assert "SAID=0\n" in out and "SDK=1" in out, out
+        out = _lazy_child(code % ("import importlib.util\ndef boom(name): raise RuntimeError('no look today')\nimportlib.util.find_spec = boom\n", False, line))
+        assert "SAID=0\n" in out, out                                                                           # (whatever the look raises)
+    check("starting without the Anthropic SDK says once what to install (not when started quietly, not when the SDK is there), and looking for it does not load it; "
+          "a look for the SDK that fails (a stand-in module) does not stop the start", t_missing_sdk_said_at_start)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")

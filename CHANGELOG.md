@@ -2,7 +2,17 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
-## 1.2.13
+## 1.3.0
+
+Everything since 1.2.9, in one release.
+
+Faster with a large library:
+
+- **The Library opens and searches faster.** A long list draws its first 100 papers at once and the rest as you scroll (or press "Show more"); "Select all" and the bulk actions still cover every match. A search with words in it is about three times faster once the library has been read. The list of your papers is no longer rebuilt from every file on every click: at 3,000 papers it takes about a third of the time, and saving a highlight or your place in a paper no longer rebuilds it at all.
+- **The app starts sooner**, and library-wide tools (search in the PDFs, a question to the whole library, indexing) no longer read every PDF from start to end just to recognise it; that is remembered on this computer, also after a restart.
+- **Up next and the fit marks on the Watch page** answer about three times faster, and their file is half the size. Changing the embedding model in Settings no longer breaks Up next.
+- **The weekly check reads the journals' feeds ahead**, three publishers at a time and never one publisher twice at once. What you see, the order, Stop and what is saved after each journal are unchanged.
+- The list of past runs is not read from every file again each time it is shown.
 
 What the AI costs, and whether you can trust what it wrote:
 
@@ -15,8 +25,6 @@ What the AI costs, and whether you can trust what it wrote:
 - **The same paper on your second computer finds its saved answers**: they are known by the PDF's content, not by where the file is.
 - To know: answers saved before this version for a PDF (summaries) and for whole-paper follow-up questions no longer match, so the first repeat of each is asked, and paid for, once more. Answers that were cut off and saved before this version cannot all be recognised; press "ask again" on one that ends mid-sentence.
 
-## 1.2.12
-
 Safer and sturdier:
 
 - **Only this computer can read your library through the app.** The app has no password because it only answers on your own computer. Saving and spending were already refused for anything else; now reading is too: a web page that pretends to be the app's address, or another site's page asking the app for your papers, gets nothing.
@@ -26,8 +34,6 @@ Safer and sturdier:
 - **Costs are written one way.** An estimate reads "about $0.12" or "under 1 cent" everywhere; an amount on record reads "$0.12" (and up to four decimals below a cent).
 - For releases: the offline checks run before a release is built, and a release is refused if the one before it was signed and the signing key has gone missing from the project.
 
-## 1.2.11
-
 Keeping your work safe:
 
 - **A daily snapshot of everything that is yours.** Once a day, when the app starts, your notes, highlights, folders, tags, reading status, library index and settings (not the PDFs) are copied to this computer, outside the synced folder; the last 14 are kept. **Settings → AI files & backup → Daily snapshots** lists them, and **Restore** puts them back as they were (what you have now is kept first, so a restore can be undone).
@@ -36,7 +42,7 @@ Keeping your work safe:
 - **Two computers: more than the library list can be joined.** When Dropbox keeps two copies of a paper's notes, your reading status, a folder, your tags or the AI spending record, **Join the two copies** (Settings → Computers & sync) keeps what is in either.
 - **Downloads fail more clearly and more safely.** A PDF is written whole or not at all. One paper that cannot be saved no longer stops the batch; a full disk stops it and says so. If the sign-in browser cannot start, the run says that once, instead of every paper ending as "blocked". If the app is quit during a download, the run offers **Go on with the download that was cut off**.
 
-## 1.2.10
+A new way to add papers:
 
 - **Import the references of a document.** "Import references" (Library → Add a paper, or the command palette) now takes a document that cites papers, not only a .ris or .bib file: **Word**, **PowerPoint**, **PDF**, a text file or a list you paste (a syllabus, a reading list, a paper's bibliography). The references are found by how they are written, with no AI and nothing sent anywhere, then each is looked up on Crossref and checked against what your document prints: the title, and the author or the year. You see which ones you already have. A record that only resembles a reference is listed unticked ("not sure it is this one"), a whole book is not downloaded, and a reference Crossref does not know is listed for you to decide.
 - **You choose where they go**: the library only, one of your folders, or a new folder named after the document. The papers you already have go into the folder at once, the others when they arrive. They are downloaded by the usual routes: free copies first, then your publisher sign-ins and your university library.

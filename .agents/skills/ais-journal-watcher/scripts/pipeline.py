@@ -8,6 +8,7 @@ Run kinds:
             never touches seen.json
 """
 import base64
+import copy
 import csv
 import hashlib
 import unicodedata
@@ -21,8 +22,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 import shutil
-
-import anthropic
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS)
@@ -97,6 +96,10 @@ _client = None
 def client():
     global _client
     if _client is None:
+        try:
+            import anthropic          # here and not at the top: loading the SDK is most of what starting the app costs, and most starts never come here
+        except ImportError as e:
+            raise RuntimeError("Claude can’t be used: %s — run: pip install -r requirements.txt" % e)
         _client = anthropic.Anthropic()
     return _client
 
@@ -210,31 +213,162 @@ def paper_key(p):
     return dl.index_key({"doi": p.get("doi"), "title": p.get("title")})
 
 
-def library():
+# ---------------------------------------------------------------- the library list
+# Nothing here is trusted without asking the disk: every call stats the files it depends on, and only what changed is read again. Another process, or another computer
+# through Dropbox, changes these files without telling this one.
+
+_LIB_LOCK = threading.RLock()      # one thread at a time checks the disk and builds rows (no other lock is taken while it is held)
+_LIB_FILES = {}                    # (path, tag) -> (signature, settled, value): what a file said when it had these times, this size and this inode
+_LIB_UNREAD = object()             # a loader's answer for a file that is there but that the system would not let it read (locked, still syncing): never kept
+LIB_RACY_NS = 2_000_000_000        # a file changed less than this long before it was read is read again next time: a second write within the timestamp's resolution
+                                   # (1 s on HFS+, 2 s on exFAT, a few ms on ext4) with the same size would otherwise look unchanged. "Changed" is the later of
+                                   # the modification time and the change time: a sync client sets the first to the other computer's time of saving, this
+                                   # computer sets the second itself when the file arrives
+LIB_STATS = {"reads": 0}           # how often a file was parsed (the tests look at it)
+
+
+def _lib_sig(path):
+    """(the later of mtime and ctime, mtime, ctime, all in ns, size, inode) of a file or folder, None when it is not there. The change time is in it because a
+    file rewritten in place with the same length can be given its old modification time back (a sync client, a restore), but never its old change time."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (max(st.st_mtime_ns, st.st_ctime_ns), st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+
+
+def _lib_file(path, load, default=None, tag=None):
+    """load(path), read again only when the file's signature changed (or it was too new to trust: LIB_RACY_NS); `default` when the file is not there.
+    What load raises is raised (and nothing is kept), as before. A load that answers _LIB_UNREAD could not read the file: `default` is returned and nothing is kept
+    either, so the next call asks again."""
+    k = (path, tag)
+    sig = _lib_sig(path)
+    if sig is None:
+        _LIB_FILES.pop(k, None)
+        return default
+    hit = _LIB_FILES.get(k)
+    if hit and hit[0] == sig and hit[1]:
+        return hit[2]
+    now = time.time_ns()
+    LIB_STATS["reads"] += 1
+    val = load(path)
+    if val is _LIB_UNREAD:
+        _LIB_FILES.pop(k, None)
+        return default
+    _LIB_FILES[k] = (sig, sig[0] < now - LIB_RACY_NS, val)
+    return val
+
+
+def _lib_names(d):
+    """The names in a folder (nothing is kept: a folder's own date is not trusted to say that a file was added or removed in it)."""
+    try:
+        return frozenset(os.listdir(d))
+    except OSError:
+        return frozenset()
+
+
+def _lib_read_index(idx):
+    """The library's rows of Papers/_index.csv as (rows, by_file): each row is (the row as read, with the plain journal and title; its key; its year; the folder
+    the PDF is in; the PDF's name; the PDF's full path). by_file: Papers/… path -> the last such row (the one library() lists first)."""
+    out, by_file = [], {}
+    with open(idx, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["status"] != "ok" or not r["file"]:
+                continue
+            key = dl.index_key(r)                # (from the title as stored: folders, reading status and runs know a paper without a DOI by it)
+            r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (shown with "&" for "&amp;"; the key above is unchanged)
+            m = re.match(r"Papers/(\d{4})-\d{2}/", r["file"])          # Papers/YYYY-MM/<Journal>/... -> publication year for grouping
+            pdf = os.path.join(ROOT, r["file"])
+            b = (r, key, m.group(1) if m else "", os.path.dirname(pdf), os.path.basename(pdf), pdf)
+            out.append(b)
+            by_file[r["file"]] = b
+    return out, by_file
+
+
+def _lib_member():
+    """folders.membership(), read again only when a folder file was added, removed or changed."""
+    try:
+        sig = tuple(sorted((fn,) + (_lib_sig(os.path.join(fo.DIR, fn)) or ()) for fn in os.listdir(fo.DIR) if fn.endswith(".json") and "." not in fn[:-5]))
+    except OSError:
+        sig = ()
+    hit = _LIB_FILES.get((fo.DIR, "member"))
+    if hit and hit[0] == sig and hit[1]:
+        return hit[2]
+    now = time.time_ns()
+    LIB_STATS["reads"] += 1
+    val = fo.membership()
+    _LIB_FILES[(fo.DIR, "member")] = (sig, all(len(s) == 6 and s[1] < now - LIB_RACY_NS for s in sig), val)
+    return val
+
+
+def _lib_notes(path):
+    return ns.counts(path[:-len(".notes.json")] + ".pdf", _LIB_UNREAD)
+
+
+def _lib_own(v):
+    """A copy the caller may change: what is kept is never handed out."""
+    return dict(v) if type(v) is dict and not any(type(x) in (dict, list) for x in v.values()) else copy.deepcopy(v)
+
+
+def _lib_row(b, state, member, dirs):
+    """One library row, new every time: the caller may change it, and whatever is in it (reading status, folders, notes counts, a book's details), without changing
+    what the next caller gets. dirs: the folders already listed for this call ({} to start with)."""
+    base, key, year, d, name, pdf = b
+    names, stem = dirs.get(d), pdf[:-4]
+    if names is None:
+        names = dirs[d] = _lib_names(d)
+    if name in names:                   # the folder's list answers "is there a summary, notes, a card…" for every paper in it at once
+        has = lambda ext: name[:-4] + ext in names    # noqa: E731
+    else:                                        # the PDF is not there under exactly this name (another case or accent form on a Mac, or gone): ask the disk, as before
+        has = lambda ext: os.path.exists(stem + ext)    # noqa: E731
+    r = dict(base)
+    if None in r:                                # (a line of the index with more fields than columns: csv keeps the rest as a list)
+        r[None] = list(r[None])
+    md = r["file"][:-4] + ".md"
+    r["summary"] = md if has(".md") else None
+    n = _lib_file(stem + ".notes.json", _lib_notes) if has(".notes.json") else None     # reader highlights/cards, None if none
+    r["notes"] = dict(n) if n else None
+    r["card"] = has(".card.json")                # paper card (papercard.py)
+    r["skim"] = has(".skim.json")                # skim layer (skim.py)
+    st = state.get(key)
+    r["key"], r["state"], r["folders"] = key, _lib_own(st) if st else {}, list(member.get(key, []))
+    if r.get("journal") == "Books":              # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
+        r["book"] = copy.deepcopy(_lib_file(stem + ".book.json", lambda p: dl.load_json(p, {}), {})) if has(".book.json") else {}
+    side = _lib_file(stem + ".paper.json", lambda p: kinds.read_sidecar(pdf, key, _LIB_UNREAD), {}, key) if has(".paper.json") else {}
+    r["kind"], r["kind_label"] = kinds.of_row(r, side)     # journal article, preprint, conference paper, other (kinds.py)
+    r["year"] = year
+    return r
+
+
+def _lib_parts():
     idx = os.path.join(PAPERS, "_index.csv")
-    rows = []
-    state, member = rs.load(), fo.membership()   # reading status (Papers/_status.json) and virtual folders (Papers/_folders/)
-    if os.path.exists(idx):
-        with open(idx, newline="") as f:
-            for r in csv.DictReader(f):
-                if r["status"] != "ok" or not r["file"]:
-                    continue
-                key = dl.index_key(r)                # (from the title as stored: folders, reading status and runs know a paper without a DOI by it)
-                r["journal"], r["title"] = dl.plain(r.get("journal")), dl.plain(r.get("title"))      # (shown with "&" for "&amp;"; the key above is unchanged)
-                md = r["file"][:-4] + ".md"
-                r["summary"] = md if os.path.exists(os.path.join(ROOT, md)) else None
-                r["notes"] = ns.counts(os.path.join(ROOT, r["file"]))  # reader highlights/cards, None if none
-                r["card"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".card.json"))   # paper card (papercard.py)
-                r["skim"] = os.path.exists(os.path.join(ROOT, r["file"][:-4] + ".skim.json"))   # skim layer (skim.py)
-                r["key"], r["state"], r["folders"] = key, state.get(key) or {}, member.get(key, [])
-                if r.get("journal") == "Books":      # a book: its ISBN, publisher, pages and chapters are in the file beside it (books.py)
-                    r["book"] = dl.load_json(os.path.join(ROOT, r["file"][:-4] + ".book.json"), {})
-                r["kind"], r["kind_label"] = kinds.of_row(r, kinds.read_sidecar(os.path.join(ROOT, r["file"]), key))     # journal article, preprint, conference paper, other (kinds.py)
-                # Papers/YYYY-MM/<Journal>/... -> publication year for grouping
-                m = re.match(r"Papers/(\d{4})-\d{2}/", r["file"])
-                r["year"] = m.group(1) if m else ""
-                rows.append(r)
-    return ac.apply(rows)[::-1]        # authors the index lacks come from the Crossref cache (authorcache.py)
+    rows, by_file = _lib_file(idx, _lib_read_index, ([], {}), ROOT)
+    if len(_LIB_FILES) > 4 * len(rows) + 2000:       # (papers deleted or moved leave entries behind: start again rather than grow)
+        _LIB_FILES.clear()
+        rows, by_file = _lib_file(idx, _lib_read_index, ([], {}), ROOT)
+    return rows, by_file, _lib_file(rs.PATH, lambda p: rs.load(), {}), _lib_member()   # reading status (Papers/_status.json) and virtual folders (Papers/_folders/)
+
+
+def library():
+    with _LIB_LOCK:
+        rows, _, state, member = _lib_parts()
+        dirs = {}
+        out = [_lib_row(b, state, member, dirs) for b in rows]
+    return ac.apply(out)[::-1]         # authors the index lacks come from the Crossref cache (authorcache.py)
+
+
+def library_row(file):
+    """The library row of one paper by its Papers/… path, None when it is not in the library: what next(r for r in library() if r["file"] == file) gives,
+    without building the other rows."""
+    if not isinstance(file, str):
+        return None
+    with _LIB_LOCK:
+        _, by_file, state, member = _lib_parts()
+        b = by_file.get(file)
+        if b is None:
+            return None
+        row = _lib_row(b, state, member, {})
+    return ac.apply([row])[0]
 
 
 # ---------------------------------------------------------------- runs
@@ -491,15 +625,44 @@ def migrate_weekly():
     return merged
 
 
+_RUN_HEADS = {}                         # path of a run file -> (what the file system said of it, the run without its papers as JSON text; "" for a file that holds no run)
+_RUN_HEADS_LOCK = threading.Lock()      # (changing the table; reading one entry needs none)
+_RUN_FRESH_NS = 3 * 10**9               # a file written less than this long ago is not kept: two saves inside one tick of the file system's clock can leave the same size and times
+
+
+def _run_head(path):
+    """The run saved in `path` without its papers, or None (no file, an empty record). The file is parsed in full only when its size, modification time, change time or file number
+    differ from the last time (a save here, another process, Dropbox bringing the other computer's copy: each of them changes at least one); otherwise the copy kept in memory answers.
+    What is returned is always a new object: a caller may change it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None                     # (deleted between the listing of the folder and now)
+    sig = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+    hit = _RUN_HEADS.get(path)
+    if hit and hit[0] == sig:
+        return json.loads(hit[1]) if hit[1] else None
+    d = load_json(path, None)           # (a file that is not JSON raises here, as before, and is not kept)
+    if d:
+        d.pop("papers", None)
+    with _RUN_HEADS_LOCK:
+        if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) > _RUN_FRESH_NS:
+            _RUN_HEADS[path] = (sig, json.dumps(d, ensure_ascii=False) if d else "")
+        else:
+            _RUN_HEADS.pop(path, None)
+    return d
+
+
 def list_runs():
-    """Weekly runs newest week first, then archive searches newest first."""
-    out = []
+    """Weekly runs newest week first, then archive searches newest first. Each run file is read once and again only when it changed (_run_head)."""
+    out, seen = [], set()
     if os.path.isdir(RUNS):
         for fn in os.listdir(RUNS):
             if fn.endswith(".json"):
-                d = load_json(os.path.join(RUNS, fn), None)
+                path = os.path.join(RUNS, fn)
+                seen.add(path)
+                d = _run_head(path)
                 if d:
-                    d.pop("papers", None)
                     if d["kind"] == "search" and not d.get("search_key"):
                         d["search_key"] = search_key(d.get("params") or {})
                     if d["kind"] == "weekly":
@@ -507,6 +670,10 @@ def list_runs():
                         d["title"] = week_label(d["week"])
                         d.setdefault("checks", [d["created"]])
                     out.append(d)
+    if len(_RUN_HEADS) > len(seen):                      # runs that were deleted (or another folder's): forget them
+        with _RUN_HEADS_LOCK:
+            for k in [k for k in _RUN_HEADS if k not in seen]:
+                del _RUN_HEADS[k]
     out.sort(key=lambda d: d.get("week") or "", reverse=True)
     out.sort(key=lambda d: d["created"] if d["kind"] != "weekly" else "", reverse=True)
     out.sort(key=lambda d: d["kind"] != "weekly")
@@ -554,10 +721,148 @@ def set_j(run, emit, abbr, **kw):
     emit("journal", dict(st))
 
 
+FEEDS_AT_ONCE = 3                                        # feeds being read at once, the one of the journal whose turn it is included (always of different hosts)
+FEED_HOST_PAUSE = 0.3                                    # seconds between one host's answer and the next feed asked of it (one after the other, never at once)
+NOT_AHEAD = ("api.crossref.org", "api.openalex.org")     # never read ahead: the lookups of the journal whose turn it is ask these hosts
+
+
+def feed_host(j):
+    """The host a journal's feed is read from, or None for a journal that is not read ahead: one read through Crossref (source "crossref"), or a feed without a host."""
+    feed = j.get("feed")
+    if j.get("source") != "rss" or not isinstance(feed, str):           # (a feed line that is not text is not read ahead: reading it in its turn fails for that journal only)
+        return None
+    try:
+        host = urllib.parse.urlsplit(feed).hostname                     # (in small letters)
+    except ValueError:
+        return None
+    return host if host and host not in NOT_AHEAD else None
+
+
+_FEEDS = threading.Condition()                           # guards the three below. They are the process's, not one check's: a feed that a stopped check left
+_FEEDS_FLYING = [0]                                      # being read still has its place and its host, so the next check waits for it instead of asking beside it
+_FEEDS_BUSY = set()                                      # hosts being asked now
+_FEEDS_FREE_AT = {}                                      # host -> when it may be asked again (FEED_HOST_PAUSE after its last answer)
+
+
+class _FeedsAhead:
+    """The weekly check's feeds, read ahead of the journal whose turn it is: while the check looks one journal's new papers up, up to FEEDS_AT_ONCE threads read the
+    feeds of the journals after it. Only reading is done here (fx.fetch_journal: one request and its parsing, no state): the check itself takes the answers one
+    journal at a time and in the journals' order through get(), so what is shown, saved and remembered, and in which order, is as with one feed at a time.
+    One host is asked by one thread at a time, its journals in their order and FEED_HOST_PAUSE apart, so no host gets two requests at once or more requests than
+    before; this holds across checks too (see _FEEDS). The journal whose turn it is gets the next free place before any journal after it. A journal read through Crossref is not read ahead: get() reads it in its turn, in the caller's thread, and so it does a feed that nobody has started
+    when its turn comes (so a turn that has begun always gets its feed, Stop or not, as before). After close(), or once `stop` is set, nothing more is read ahead
+    (a feed being read is finished and dropped). The threads are daemons: quitting does not wait for a feed. Nothing is read before start()."""
+
+    def __init__(self, js, stop):
+        self.fetch = fx.fetch_journal                    # (taken once: a thread that outlives the check never calls whatever the name means later)
+        self.js, self.stop = list(js), stop
+        self.cond = _FEEDS
+        self.closed = False
+        self.turn = None                                 # the journal whose turn it is while it waits in get() for its host or a place (else None)
+        self.hosts = [feed_host(j) for j in self.js]
+        self.todo = [n for n, host in enumerate(self.hosts) if host]      # journals nobody has started reading, in their order
+        self.box = [{"done": threading.Event(), "items": None, "error": None} for _ in self.js]
+
+    def start(self):
+        """Start reading ahead. Called where close() is certain to follow (a thread that cannot be started must not leave the others reading on)."""
+        for _ in range(min(FEEDS_AT_ONCE, len(set(self.hosts) - {None}))):
+            threading.Thread(target=self._work, daemon=True).start()
+
+    def _host_free(self, n):
+        host = self.hosts[n]
+        return not host or (host not in _FEEDS_BUSY and time.monotonic() >= _FEEDS_FREE_AT.get(host, 0))
+
+    def _free(self, n, ahead=False):
+        """Whether journal n's feed may be asked now (call with self.cond held): a place of the FEEDS_AT_ONCE is free, and its host is not being asked and has had its pause.
+        ahead: asked by a thread that reads ahead. While the journal whose turn it is waits, such a thread starts nothing if that journal only lacks a place (the next
+        one that frees is its), and leaves one place for it if it waits for its host."""
+        places = FEEDS_AT_ONCE
+        if ahead and self.turn is not None:
+            if self._host_free(self.turn):
+                return False
+            places -= 1
+        return _FEEDS_FLYING[0] < places and self._host_free(n)
+
+    def _take(self, n):
+        """Journal n is being read from now on (call with self.cond held, after _free(n))."""
+        if n in self.todo:
+            self.todo.remove(n)
+        _FEEDS_FLYING[0] += 1
+        if self.hosts[n]:
+            _FEEDS_BUSY.add(self.hosts[n])
+
+    def _read(self, n):
+        b, host = self.box[n], self.hosts[n]
+        try:
+            b["items"] = self.fetch(self.js[n])
+        except BaseException as e:  # noqa: BLE001      (raised again by get(), in the journal's turn)
+            b["error"] = e
+        finally:
+            with self.cond:
+                _FEEDS_FLYING[0] -= 1
+                if host:
+                    _FEEDS_BUSY.discard(host)
+                    _FEEDS_FREE_AT[host] = time.monotonic() + FEED_HOST_PAUSE
+                self.cond.notify_all()
+            b["done"].set()
+
+    def _work(self):
+        """One of the threads that read ahead: the first journal not started whose feed may be asked, again and again, until none is left, Stop or close()."""
+        while True:
+            with self.cond:
+                while True:
+                    if self.closed or self.stop.is_set() or not self.todo:
+                        return
+                    n = next((k for k in self.todo if self._free(k, True)), None)
+                    if n is not None:
+                        break
+                    self.cond.wait(0.1)
+                self._take(n)
+            self._read(n)
+
+    def get(self, n):
+        """The items of journal number n (what fx.fetch_journal returns), or its error raised. Called in the journal's turn: a feed read ahead is waited for,
+        one nobody has started (a Crossref journal, or a feed whose host was busy or pausing) is read here, once its host and a place are free."""
+        with self.cond:
+            mine = self.hosts[n] is None or n in self.todo
+            if mine:
+                if n in self.todo:
+                    self.todo.remove(n)                  # (from now on no other thread starts it)
+                self.turn = n
+                try:
+                    while not self._free(n):
+                        self.cond.wait(0.1)
+                    self._take(n)
+                finally:
+                    self.turn = None
+                    self.cond.notify_all()
+        if mine:
+            self._read(n)
+        b = self.box[n]
+        b["done"].wait()
+        if b["error"] is not None:
+            raise b["error"]
+        return b["items"]
+
+    def close(self):
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+
+
 def fetch_weekly(run, emit, stop):
+    js = [j for j in journals() if j.get("weekly", True)]
+    ahead = _FeedsAhead(js, stop)
+    try:
+        ahead.start()
+        _fetch_weekly(run, emit, stop, js, ahead)
+    finally:
+        ahead.close()
+
+
+def _fetch_weekly(run, emit, stop, js, ahead):
     seen_path = os.path.join(STATE, "seen.json")
     seen = load_json(seen_path, {})
-    js = [j for j in journals() if j.get("weekly", True)]
     fresh_all = []
     for j in js:
         set_j(run, emit, j["abbr"], state="queued", label="Waiting", done=0, total=0)
@@ -567,7 +872,7 @@ def fetch_weekly(run, emit, stop):
         emit("progress", {"stage": "fetching", "label": "Fetching %s" % j["abbr"], "done": n - 1, "total": len(js)})
         set_j(run, emit, j["abbr"], state="fetching", label="Reading feed")
         try:
-            items = fx.fetch_journal(j)
+            items = ahead.get(n - 1)                    # (its feed: read ahead meanwhile, or read now)
         except Exception as e:
             run.errors.append("%s: %s" % (j["abbr"], str(e)[:120]))
             emit("log", {"msg": "%s feed failed: %s" % (j["abbr"], str(e)[:120]), "level": "warn"})
