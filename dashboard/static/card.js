@@ -2,7 +2,7 @@
 // limitations, future research. Every statement shows the pages it rests on (click to jump there). Click any text to edit it; your edits are saved
 // next to the paper (<name>.card.json) and marked. The same cards feed the folder's Evidence view and the Research Ideas Lab.
 // The server streams newline-delimited JSON from POST /api/ai/card: {type:"status"|"progress"|"card"|"done"|"error"}.
-import {errBox, notifyError, S, $, esc, ico, toast, on, debounce, api, progress} from "./state.js";
+import {errBox, notifyError, S, $, esc, ico, toast, on, debounce, api, progress, aboutCost} from "./state.js";
 import * as N from "./notes.js";
 import * as C from "./canvas.js";
 import {jumpCite} from "./cite.js";
@@ -13,7 +13,7 @@ const VERDICT = {"supported": "ok", "partly supported": "mid", "not supported": 
 const KINDS = ["empirical (quantitative)", "empirical (qualitative)", "mixed methods", "design science", "conceptual / theory", "literature review", "other"];
 const ROLES = ["uses", "extends", "tests", "challenges", "develops"];
 const VERDICTS = Object.keys(VERDICT);
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + c.toFixed(2);
+const money = aboutCost;
 
 export function mount(el) {
   panel = el;

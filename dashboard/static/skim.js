@@ -3,13 +3,13 @@
 // highlights it (or dismisses it), "Highlight all shown" accepts what you see. Accepted ones become real highlights, coloured by lens and tagged
 // "lens: finding" etc., so they show up in the Highlights tab, the Library's highlights hub and exports like any other.
 // Server: GET /api/doc/skim (saved proposals, lenses, cost), POST /api/ai/skim (stream: status | progress | skim | done | error), POST /api/doc/skim (dismissed ids).
-import {notifyError, S, $, $$, esc, toast, on, api, colorOf, clamp, debounce} from "./state.js";
+import {notifyError, S, $, $$, esc, toast, on, api, colorOf, clamp, debounce, aboutCost} from "./state.js";
 import * as N from "./notes.js";
 import * as T from "./text.js";
 import {frame, wire as wireOut} from "./output.js";
 
 const DENS = ["Key points", "More", "Everything"];
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + c.toFixed(2);
+const money = aboutCost;
 const K = {on: null, loaded: null, data: null, lenses: [], est: null, dens: 2, off: new Set(), dismissed: new Set(), cur: -1, busy: false, status: ""};
 let bar, pop, root;
 const ls = {get: (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } }};

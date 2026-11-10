@@ -4,12 +4,12 @@
 // reference), and a check lists citations that did not exist, sentences with no source and papers that were never cited. Edit the text, switch between
 // author-year and numbered citations, copy it, or export it as Word or Markdown. Saved as Papers/_folders/<id>.draft.json.
 // Server: GET /api/folder/draft, POST /api/ai/draft[/estimate] (stream: status | progress | draft | done | error), POST /api/folder/draft (edits, citation style).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, md, debounce, progress} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, md, debounce, progress, aboutCost} from "./state.js";
 import {frame, mdParts, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
 const D = {fid: null, el: null, data: null, edit: false, busy: false, sel: new Set(), form: {topic: "", themes: "", words: 600, style: "author-year", pages: false}};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const ID = "P\\d+(?:-\\d+)?";
 const RE = new RegExp("\\[\\s*(" + ID + "(?:\\s*[,;]\\s*" + ID + ")*)\\s*\\]|\\{\\s*(" + ID + ")\\s*\\}", "g");
 

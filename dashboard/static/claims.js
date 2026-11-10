@@ -3,12 +3,12 @@
 // supported / partly / contradicted / not found in your papers, with the passages it rests on (click one: the paper opens at that page); when a claim names a paper
 // ("Singhal et al., 2026") it says whether that paper's own passages really say it. The model may only point at passages it was given; anything else is dropped on the server.
 // Saved as Papers/_folders/<id>.claims.json. Server: GET /api/folder/claims, POST /api/ai/claims[/estimate] (stream: status | progress | claims | done | error), POST /api/folder/claims (tick off).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress, aboutCost} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
 const C = {fid: null, el: null, data: null, text: "", scope: "folder", split: [], sel: new Set(), est: null, busy: false};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const VERDICT = {supported: ["Supported", "check"], partly: ["Partly supported", "info"], contradicted: ["Contradicted", "warn"], not_found: ["Not found in your papers", "search"], unchecked: ["Not checked", "info"]};
 
 export async function mount(el, fid) {

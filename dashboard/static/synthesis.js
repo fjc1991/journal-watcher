@@ -2,12 +2,12 @@
 // speak to with each paper's position (the map: themes down, papers across, a cell per paper that has something to say) and what is still open (gaps). Every cell and gap points at
 // the notes it rests on (click: the paper opens at that page); the server drops anything that points at a note it was not given, and marks a gap with no note behind it as "not grounded".
 // Saved as Papers/_folders/<id>.synthesis.json. Server: GET /api/folder/synthesis, POST /api/ai/synthesis[/estimate] (stream: status | progress | synthesis | done | error).
-import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress} from "./state.js";
+import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress, aboutCost} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
 const Y = {fid: null, el: null, data: null, busy: false, sel: new Set(), focus: ""};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const CONS = {agree: "They agree", mixed: "Mixed", contested: "Contested", single: "One paper only"};
 const STANCE = {supports: "supports", qualifies: "qualifies", opposes: "opposes", neutral: "neutral"};
 

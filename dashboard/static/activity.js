@@ -3,12 +3,12 @@
 // them with progress, cost and a Cancel button (the work stops at the next piece of the answer; what was already generated is still billed). Finished jobs stay in the
 // list for a while with a link to where the result is. The panel also holds the background-indexing switch ("Index now", on/off): reading the library into the
 // index for Ask happens by itself with the local model, so the first question over a folder or the whole library does not wait for it.
-import {notifyError, $, $$, esc, api, ico, toast} from "./state.js";
+import {notifyError, $, $$, esc, api, ico, toast, exactCost} from "./state.js";
 
 let ctx = null, btn = null, panel = null, jobs = new Map(), idx = {enabled: true, local: true, running: false, pending: null}, usage = null, tick = 0;
 const TOOL = {card: "card", cards: "card", skim: "skim", ask: "ask", askmany: "ask", explain: "explain", summary: "sum", matrix: "matrix", ideas: "ideas", draft: "draft", claims: "claims", synthesis: "synthesis", flashcards: "review", audio: "explain", review: "claims", index: "library"};
 const ICON = {card: "card", cards: "card", skim: "skim", ask: "ask", askmany: "ask", explain: "sparkle", summary: "sum", matrix: "matrix", ideas: "ideas", draft: "draft", claims: "claims", synthesis: "synthesis", flashcards: "review", audio: "sparkle", review: "claims", index: "library"};
-const money = c => c == null ? "" : c < 0.001 ? "$0.00" : c < 0.1 ? "$" + c.toFixed(3) : "$" + c.toFixed(2);
+const money = c => exactCost(c);
 const running = () => [...jobs.values()].filter(j => !j.ended);
 const ago = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : Math.round(s / 3600) + " h ago"; };
 const dur = j => { const s = Math.round((j.ended || Date.now() / 1000) - j.started); return s < 60 ? s + " s" : Math.floor(s / 60) + " min " + (s % 60) + " s"; };

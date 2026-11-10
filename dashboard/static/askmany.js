@@ -2,14 +2,14 @@
 // Answers cite numbered passages from different papers; each number opens that paper at that place. Two ways to read: the closest passages
 // (deeper) or the papers' cards (cheaper, every paper that has one). The conversation is saved (folder: Papers/_folders/<id>.ask.json).
 // POST /api/ai/askmany streams {type: status|scope|passages|text|done|error}.
-import {$, $$, esc, api, toast, debounce, md} from "./state.js";
+import {$, $$, esc, api, toast, debounce, md, aboutCost} from "./state.js";
 import {wire as wireOut} from "./output.js";
 import {turnHtml as askTurn, actionButtons} from "./askview.js";
 
 let ctx = null;
 const STARTERS = ["What do these papers conclude, and where do they disagree?", "Which theories and methods do they use?", "What limitations do the authors name, and what future research do they suggest?",
   "Which findings seem to contradict each other, and why might that be?"];
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 
 function openAt(file, page, quote) {
   const row = ctx.getLib().find(r => r.file === file);

@@ -10,6 +10,16 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <script src="/static/vendor/marked.min.js"></script>
+<script>
+// Markdown that is shown on the page comes from an AI model reading a PDF, or from files in the synced folder: neither is the page's own text. A link in it
+// may only lead to a web address, an e-mail address or a place in this app (never "javascript:" or "data:", which would run with everything the page can do),
+// and a picture is only loaded from this app (a picture from elsewhere tells that site what you are reading). The words of a refused link or picture stay.
+window.safeHref = h => /^(https?:\/\/|mailto:|#|\/(?!\/))/i.test(String(h == null ? "" : h).trim());
+if (window.marked) marked.use({renderer: {
+  link(href, title, text) { return window.safeHref(href) ? false : text; },
+  image(href, title, text) { return /^\/(?!\/)/.test(String(href == null ? "" : href).trim()) ? false : String(text || "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])); },
+}});
+</script>
 <script src="/static/appbridge.js"></script>
 <link rel="stylesheet" href="/static/reader.css">
 <link rel="stylesheet" href="/static/library.css">

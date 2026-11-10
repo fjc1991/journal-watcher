@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, exactCost} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -136,7 +136,7 @@ function top(el, opts) {
 // The job runs in the background (the AI activity tray shows it and can cancel it); the button follows it through the cheap ?status=1, and the Library is read
 // again when it ends.
 let SUM = null, SUM_ST = {}, SUM_OPEN = false, sumTimer = 0, SUM_WATCHED = false, SUM_SEEN = null, SUM_DONE = null;
-const usd = c => c == null ? "unknown" : c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "$" + c.toFixed(2);
+const usd = c => exactCost(c, "unknown");
 const sumCount = () => lib().filter(r => r.file && !r.summary && r.journal !== "Books" && !r.book).length;      // (as summaries.pending: a downloaded paper, not a book, no summary beside it)
 function sumPaint() {
   const b = $("#lf-sum"); if (!b) return;
@@ -217,7 +217,7 @@ function tabs(el, opts) {
   else if (F.tab === "discover" && window.DiscoverUI) { const box = $("#lib-discover", el); if (!box.dataset.mounted) { window.DiscoverUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
   else if (F.tab === "ask" && window.AskUI) { const box = $("#lib-ask", el); if (!box.dataset.mounted) { window.AskUI.init(ctx); window.AskUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
 }
-const money = c => c == null ? "unknown (its price is not in Settings → AI)" : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
+const money = c => aboutCost(c, "unknown (its price is not in Settings → AI)");
 const sumHtml = s => `<div class="of-md">${md(s.text)}</div><small class="pmeta">Written by ${esc(s.model || "the AI")}${s.cost ? " · " + esc(money(s.cost)) : ""}${s.left_out ? " · the middle of this long chapter was left out" : ""} · <button class="linkbtn" data-chap-redo>Write it again</button></small>`;
 async function lines(url, body, onMsg) {                 // a streamed answer: one JSON object per line
   const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});

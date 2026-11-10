@@ -4,11 +4,11 @@
 //   Ideas Lab: your brief -> current events from a web search (you untick or add) -> ideas generated from the evidence, scored by a tough
 //             "editor" and checked against OpenAlex -> a board you star, shortlist, annotate, develop into an outline and export.
 // Server streams are newline-delimited JSON ({type: status|progress|events|ideas|text|paper|done|error}).
-import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress} from "./state.js";
+import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost} from "./state.js";
 import {frame, kv, callout, mdParts, sectionsHtml, wire as wireOut} from "./output.js";
 
 let ctx = null;
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const lib = () => (ctx ? ctx.getLib() : []);
 const L = {fid: null, doc: null, cards: null, est: null, filter: "all", sort: "score", busy: false, itab: {}, showRejected: false};
 

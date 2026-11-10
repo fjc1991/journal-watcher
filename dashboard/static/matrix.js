@@ -2,11 +2,11 @@
 // Built-in columns come from the paper cards (edit them in the reader's Card tab). Your own columns ("Sample size?", "Which industry?") are filled
 // by the model from each paper's closest passages, one call per paper; "Not reported" is a valid answer; click a cell to write your own.
 // The matrix is saved in Papers/_folders/<id>.matrix.json. Export: CSV, Word, LaTeX (with \citet keys), Markdown.
-import {notifyError, $, $$, esc, ico, api, toast} from "./state.js";
+import {notifyError, $, $$, esc, ico, api, toast, aboutCost} from "./state.js";
 
 let ctx = null;
 const M = {fid: null, t: null, busy: false};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const dl = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 function openAt(file, page, quote) {
   const row = ctx.getLib().find(r => r.file === file);
