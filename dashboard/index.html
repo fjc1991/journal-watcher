@@ -77,6 +77,17 @@ select, input[type=text], input[type=search] { background: var(--panel-2); borde
 .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
 .chip.off { opacity: .4; cursor: not-allowed; }
 .est { font-size: 12px; color: var(--ink-3); margin: 10px 0; }
+.chips .chipgroup { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; margin-bottom: 6px; }
+.chips .chiphead { width: 100%; font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tiles-none { grid-column: 1 / -1; font-size: 13px; color: var(--ink-3); padding: 6px 2px; line-height: 1.7; }
+.keys-dlg { border: 1px solid var(--line); border-radius: 12px; padding: 0; background: var(--panel); color: var(--ink); max-width: min(640px, 92vw); }
+.keys-dlg::backdrop { background: rgba(0, 0, 0, .35); }
+.keys-in { padding: 18px 20px; } .keys-in h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); margin: 14px 0 4px; }
+.keys-in table { width: 100%; border-collapse: collapse; } .keys-in td { padding: 4px 6px; vertical-align: top; font-size: 13px; } .keys-in td:first-child { white-space: nowrap; width: 1%; }
+.keys-in kbd { font: 12px var(--mono, ui-monospace, monospace); background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+.toast.stay { padding-right: 38px; max-width: min(640px, 90vw); }
+.toast-x { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: 0; color: inherit; font-size: 18px; cursor: pointer; line-height: 1; padding: 4px 6px; }
 .full { width: 100%; margin-top: 8px; justify-content: center; }
 .list-h { padding: 12px 16px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); font-weight: 600; }
 .runs { padding: 0 8px 8px; }
@@ -293,9 +304,10 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <button data-tab="authors">Authors</button>
       </div>
       <div class="pane on" id="pane-weekly">
-        <p>Fetch the newest papers from every journal, skip anything seen before, and let the AI screen them against all your interests (Sonnet 5.5 unless you chose another model in Settings → AI).
+        <p>Fetch the newest papers from every journal, skip anything seen before, and let the AI screen them against all your interests (with <span id="weekmodel">the model chosen for screening in Settings → AI</span>).
           Every check this week is added to <b id="weekname">this week</b>.</p>
         <button class="btn primary full" id="weeklybtn">Check for new papers</button>
+        <div class="est" id="weekest"></div>
       </div>
       <div class="pane" id="pane-search">
         <p>Every article of the chosen journals in a year range, screened for the topics and/or main method you pick.</p>
@@ -451,7 +463,8 @@ const fileUrl = p => "/files/" + p.split("/").map(encodeURIComponent).join("/");
 const JCOL = {SSRN: "#7a4a1d", MISQ: "#2f5d8a", ISR: "#17808f", JAIS: "#6b4f9e", JMIS: "#b0602a", ISJ: "#2e7d4f", DSS: "#b3413a",
   MS: "#44516a", MSOM: "#0f6e6e", ORSC: "#7a4b2a", CACM: "#1f5fa8", SCI: "#a3202f", PNAS: "#2b5a8c", NBER: "#5a6b2e", HBR: "#a3192b"};
 const PUB = {aisel: "AIS eLibrary", informs: "INFORMS", wiley: "Wiley", tandfonline: "Taylor & Francis", elsevier: "Elsevier",
-  acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences", nber: "NBER", hbr: "Harvard Business Publishing"};
+  acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences", nber: "NBER", hbr: "Harvard Business Publishing", ssrn: "SSRN",
+  sage: "SAGE", oup: "Oxford University Press", aaa: "American Accounting Association", aom: "Academy of Management", springer: "Springer"};
 const authorsText = a => Array.isArray(a) ? a.join(", ") : String(a || "").replace(/;\s*/g, ", ");
 
 let CFG = null, RUN = null, BUSY = false, JOBKIND = null;
@@ -469,13 +482,28 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 4000); }
+function toast(msg, stay) {
+  const t = $("#toast"); t.textContent = msg; t.style.display = "block"; t.classList.toggle("stay", !!stay); clearTimeout(t._h);
+  if (stay) { const x = document.createElement("button"); x.className = "toast-x"; x.textContent = "×"; x.title = "Close this message"; x.setAttribute("aria-label", "Close this message"); x.onclick = () => { t.style.display = "none"; }; t.append(x); }
+  else t._h = setTimeout(() => t.style.display = "none", 4000);
+}
+// Something went wrong: the message stays on screen until you close it (a four-second note is gone before it is read).
+const fail = e => toast(String((e && e.message) || e || "Something went wrong."), true);
 function log(msg, level = "") {
   const d = document.createElement("div"); d.className = level;
   d.textContent = new Date().toLocaleTimeString() + "  " + msg; $("#log").prepend(d);
 }
 const jinfo = abbr => CFG.journals.find(x => x.abbr === abbr) || {abbr, name: abbr};
-const mono = (abbr, cls = "") => `<div class="mono ${cls}" style="--jc:${JCOL[abbr] || "var(--accent)"}">${esc(abbr)}</div>`;
+// A journal's colour: its own (journals.json "color"), one of the fourteen the app began with, or one worked out from its short name: always the same for
+// that journal, and dark enough for white letters in both themes.
+function jcol(abbr) {
+  const j = CFG && CFG.journals.find(x => x.abbr === abbr);
+  if (j && /^#[0-9a-f]{6}$/i.test(j.color || "")) return j.color;
+  if (JCOL[abbr]) return JCOL[abbr];
+  let h = 0; for (const ch of String(abbr)) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 45% 34%)`;
+}
+const mono = (abbr, cls = "") => `<div class="mono ${cls}" style="--jc:${jcol(abbr)}">${esc(abbr)}</div>`;
 
 // ---------- theme (set before the first paint by the script in <head>): light first; the button switches between light and dark
 window.setTheme = pref => {         // pref: "light" | "dark" | "auto" (follow the computer)
@@ -494,7 +522,7 @@ function go(nav, push = true) {
   render();
 }
 // ---------- routes: #/watch · #/library[/<tab>] · #/folders · #/folder/<id>[/<tab>]  (so reload and Back land where you were)
-const LIBTABS = ["papers", "ask", "discover", "hl", "review", "tags"];
+const LIBTABS = ["papers", "books", "ask", "discover", "hl", "review", "tags"];
 function routeOf(n) {
   if (n.view !== "lib") return "#/watch";
   if (typeof n.j === "string" && n.j[0] === "@") { const t = n.ftab || (window.LibraryUI && LibraryUI.folderTabName()); return "#/folder/" + encodeURIComponent(n.j.slice(1)) + (t && t !== "papers" ? "/" + t : ""); }
@@ -525,7 +553,7 @@ function syncNav() {                // sidebar: which page you are on, the count
   renderSideFolders();
   const deep = typeof NAV.j === "string" && NAV.j[0] === "@" && window.LibraryUI ? LibraryUI.folderName(NAV.j.slice(1)) : "";
   $("#tbtitle").innerHTML = layer ? `<b>${NAVNAME[layer]}</b>` : deep ? `<a id="tbroot">Folders</a><span>›</span><b>${esc(deep)}</b>` : `<b>${NAVNAME[a]}</b>`;
-  const tr = $("#tbroot"); if (tr) tr.onclick = () => { leaveSettings(); go({view: "lib", j: null, tab: "folders"}); };
+  const tr = $("#tbroot"); if (tr) tr.onclick = () => { if (!leaveSettings()) return; go({view: "lib", j: null, tab: "folders"}); };
   const r = routeOf(NAV); if (BOOTED && location.hash !== r && !/^#read=/.test(location.hash) && !document.body.classList.contains("reading")) history.replaceState(history.state, "", r);
 }
 new MutationObserver(syncNav).observe(document.body, {attributes: true, attributeFilter: ["class"]});
@@ -552,15 +580,15 @@ function readPaper(m, opts) {
 function goBack() { if (history.state && history.length > 1) history.back(); else go({j: null}); }
 $("#backbtn").onclick = goBack;
 document.addEventListener("keydown", e => {
-  if (e.key !== "Escape" || document.body.classList.contains("reading")) return;   // the reader handles its own Esc
+  if (e.key !== "Escape" || document.body.classList.contains("reading") || document.querySelector("dialog[open]")) return;   // the reader handles its own Esc, and so does an open dialog
   if ($("#drawer").classList.contains("on")) closeDrawer(); else if (NAV.j !== null) goBack();
 });
-const leaveSettings = () => { if (window.Settings) Settings.close(); if (window.About) About.close(); };      // Settings and About are layers over the page; going anywhere else closes them
-$("#brand").onclick = $("#watchitem").onclick = () => { leaveSettings(); go({view: "run", j: null}); };
-$("#folditem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "folders"}); };
-$("#reviewitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: "review"}); };
-$("#sbfolders").onclick = e => { const b = e.target.closest("[data-fid]"); if (b) { leaveSettings(); closeSidebarIfNarrow(); go({view: "lib", j: "@" + b.dataset.fid, tab: "folders", ftab: "papers"}); } };
-$("#sbnewfolder").onclick = async () => { leaveSettings(); await go({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = document.querySelector('[data-fp="new"]'); b && b.click(); }, 250); };
+const leaveSettings = () => { if (window.Settings && Settings.close() === false) return false; if (window.About) About.close(); return true; };      // Settings and About are layers over the page; going anywhere else closes them
+$("#brand").onclick = $("#watchitem").onclick = () => { if (!leaveSettings()) return; go({view: "run", j: null}); };
+$("#folditem").onclick = () => { if (!leaveSettings()) return; loadLibrary(); go({view: "lib", j: null, tab: "folders"}); };
+$("#reviewitem").onclick = () => { if (!leaveSettings()) return; loadLibrary(); go({view: "lib", j: null, tab: "review"}); };
+$("#sbfolders").onclick = e => { const b = e.target.closest("[data-fid]"); if (b) { if (!leaveSettings()) return; closeSidebarIfNarrow(); go({view: "lib", j: "@" + b.dataset.fid, tab: "folders", ftab: "papers"}); } };
+$("#sbnewfolder").onclick = async () => { if (!leaveSettings()) return; await go({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = document.querySelector('[data-fp="new"]'); b && b.click(); }, 250); };
 // the sidebar: always there on a wide window; a drawer on a narrow one; you can fold it away
 const narrow = () => matchMedia("(max-width: 900px)").matches || document.body.classList.contains("reading");   // a drawer instead of a fixed column
 function closeSidebarIfNarrow() { if (narrow()) document.body.classList.remove("sb-open"); }
@@ -615,8 +643,67 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
 });
 function chip(label, on, cb) {
   const c = document.createElement("span"); c.className = "chip" + (on ? " on" : ""); c.textContent = label;
-  c.onclick = () => { if (c.classList.contains("off")) return; c.classList.toggle("on"); cb && cb(); }; return c;
+  c.tabIndex = 0; c.setAttribute("role", "checkbox"); c.setAttribute("aria-checked", on ? "true" : "false");      // (a chip is a tick box: Tab reaches it, Space or Enter flips it)
+  c.onclick = () => { if (c.classList.contains("off")) return; c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on") ? "true" : "false"); cb && cb(); };
+  c.onkeydown = e => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); c.click(); } }; return c;
 }
+// Your topics and methods as chips, and in the list's topic filter (drawn at the start, and again when you changed them in Settings).
+function drawInterests() {
+  $("#topicchips").innerHTML = ""; $("#methodchips").innerHTML = "";
+  CFG.topics.forEach(t => $("#topicchips").append(chip(t, false, updateEst)));
+  (CFG.methods || []).forEach(m => { const c = chip(m.label, false, updateEst); c.title = m.description || ""; $("#methodchips").append(c); });
+  const cur = $("#tfilter").value;
+  $("#tfilter").innerHTML = `<option value="">All topics</option>` + CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
+  if (CFG.topics.includes(cur)) $("#tfilter").value = cur;
+}
+// Journals or topics were changed in Settings: the form is drawn again from them. A journal you had ticked stays ticked; the run you are looking at, the papers
+// you ticked and what you typed stay as they are.
+window.addEventListener("jw-watch-changed", async () => {
+  try { CFG = await api("/api/config"); } catch (e) { return; }
+  const kept = box => new Set([...document.querySelectorAll(box + " .chip.on")].map(c => c.dataset.abbr || c.textContent));
+  const again = (box, on) => document.querySelectorAll(box + " .chip").forEach(c => { if (on.has(c.dataset.abbr || c.textContent) && !c.classList.contains("off")) { c.classList.add("on"); c.setAttribute("aria-checked", "true"); } });
+  const t = kept("#topicchips"), m = kept("#methodchips"), j = kept("#journalchips"), tj = kept("#tjournalchips");
+  drawInterests(); again("#topicchips", t); again("#methodchips", m);
+  journalChips("#journalchips", updateEst, x => (x.per_year || 0) < 1000, x => x.needs_query ? ` — searched by words: needs a focus phrase; only the ${x.limit || 200} best matches are looked at` : ""); again("#journalchips", j);
+  journalChips("#tjournalchips", updateTermsEst, () => true, x => x.needs_query ? ` — searched by words: only the ${x.limit || 200} best matches of your terms are looked at` : ""); again("#tjournalchips", tj);
+  updateEst(); updateTermsEst(); updateWeekEst(); if (RUN) render();
+});
+// The journals to tick for a search, under the name of the list they belong to (AIS basket, UTD 24, other), each list with its own all / none.
+// A journal that is in two lists is shown once, under the first. `small` says which start ticked; a journal that is off in Settings never starts ticked.
+function journalGroups() {
+  const seen = new Set(), out = [];
+  for (const [k, name] of [...Object.entries(CFG.sets || {}), ["", "Other"]]) {
+    const js = CFG.journals.filter(j => !seen.has(j.abbr) && (k ? (j.sets || []).includes(k) : true));
+    js.forEach(j => seen.add(j.abbr));
+    if (js.length) out.push([name, js]);
+  }
+  return out.length > 1 ? out : [["", CFG.journals]];
+}
+function journalChips(box, cb, small, more) {
+  const el = $(box); el.innerHTML = "";
+  for (const [name, js] of journalGroups()) {
+    const g = document.createElement("div"); g.className = "chipgroup";
+    if (name) { const h = document.createElement("div"); h.className = "chiphead"; h.innerHTML = `${esc(name)} <span>(<a href="#" data-g="1">all</a> · <a href="#" data-g="0">none</a>)</span>`;
+      h.onclick = e => { const a = e.target.closest("[data-g]"); if (!a) return; e.preventDefault(); g.querySelectorAll(a.dataset.g === "1" ? ".chip:not(.off):not([data-words])" : ".chip").forEach(c => { c.classList.toggle("on", a.dataset.g === "1"); c.setAttribute("aria-checked", a.dataset.g === "1" ? "true" : "false"); }); cb(); };
+      g.append(h); }
+    js.forEach(j => {
+      const can = j.archive !== false;
+      const c = chip(j.abbr, can && small(j) && !j.default_off, cb);
+      c.dataset.abbr = j.abbr; c.setAttribute("aria-label", j.name);
+      c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + more(j) + (j.archive_note ? " — " + j.archive_note : "");
+      if (j.default_off) c.dataset.optin = "1";               // never switched on by the "all" above every list (a journal you have off in Settings, HBR, SSRN)
+      if (j.needs_query) c.dataset.words = "1";               // …and SSRN not by its own list's "all" either: it needs your words
+      if (!can) c.classList.add("off");
+      g.append(c);
+    });
+    el.append(g);
+  }
+}
+// Journals that come without an abstract (JMIS, DSS, NBER: their feeds carry none), and journals that may (read through Crossref, which has an abstract for
+// some papers and not for others). A paper without one is screened by its title unless OpenAlex is asked for it, which needs its free key.
+const noAbstract = abbrs => abbrs.filter(a => ["JMIS", "DSS", "NBER"].includes(a));
+const maybeNoAbstract = abbrs => abbrs.filter(a => !["JMIS", "DSS", "NBER"].includes(a) && jinfo(a).source === "crossref");
+const someOf = (xs, n = 5) => xs.slice(0, n).join(", ") + (xs.length > n ? ` and ${xs.length - n} more` : "");
 function selectedJournals() { return [...document.querySelectorAll("#journalchips .chip.on")].map(c => c.dataset.abbr); }
 // the same string pipeline.search_key works out: two searches with this key are the same search (the server continues the saved one instead of starting a copy)
 function searchKey() {
@@ -633,6 +720,21 @@ function fillSearch(p) {
   const tab = document.querySelector('.tabs button[data-tab="search"]'); if (tab) tab.click();
   $("#pane-search").scrollIntoView({block: "nearest"});
 }
+// Under "Check for new papers": how much there may be to screen and what that costs at most. The journals' yearly counts give a week's worth; papers seen
+// before are skipped, so the real figure is usually lower: hence "up to about".
+let WEEK_COST = null;
+function updateWeekEst() {
+  const el = $("#weekest"); if (!el || !CFG) return;
+  const js = CFG.journals.filter(j => j.weekly !== false);
+  const n = Math.round(js.reduce((a, j) => a + (j.per_year || 80), 0) / 52), per = CFG.est_cost_per_paper;
+  WEEK_COST = per == null ? null : n * per;
+  if ($("#weekmodel")) $("#weekmodel").textContent = CFG.screen_model || "the model chosen for screening";
+  el.innerHTML = `${js.length} journal${js.length === 1 ? "" : "s"} · up to about ${n.toLocaleString()} new papers a week to screen · ` +
+    (per == null ? `cost not known: no price for ${esc(CFG.screen_model || "the screening model")} (Settings → AI → Prices)` : `at most about <b>$${WEEK_COST.toFixed(2)}</b>` + (CFG.est_cost_basis === "history" ? " (from what your earlier screenings cost)" : "")) +
+    `<br><span id="weekspend"></span> <a href="#" id="weekjournals">Choose journals and topics</a>`;
+  $("#weekjournals").onclick = e => { e.preventDefault(); window.Settings && Settings.open("watch"); };
+  api("/api/ai/budget").then(b => { const w = $("#weekspend"); if (w && b && b.spent != null) w.textContent = b.budget != null ? `This month: $${b.spent.toFixed(2)} of your $${b.budget.toFixed(2)} budget spent.` : `This month: $${b.spent.toFixed(2)} spent (no budget set).`; }).catch(() => {});
+}
 let EST_COST = null;      // the estimate under the search form, in dollars (null: no price), asked against the monthly budget before the search starts
 function updateEst() {
   const y0 = +$("#y0").value, y1 = +$("#y1").value, yrs = Math.abs(y1 - y0) + 1;
@@ -643,7 +745,8 @@ function updateEst() {
   $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · ` + (cost == null ? `cost not known: no price for ${esc(CFG.screen_model || "the screening model")} (Settings → AI → Prices)` : `est. <b>$${cost.toFixed(2)}</b>` + (CFG.est_cost_basis === "history" ? " (from what your earlier screenings cost)" : "")) +
     (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
     (js.some(j => jinfo(j).needs_query) ? `<br>SSRN is searched by words: only the ${jinfo("SSRN").limit || 200} best matches of your focus phrase are looked at${$("#focus").value.trim() ? "" : " — <b>type a focus phrase</b> to use it"}.` : "") +
-    (CFG.openalex_key ? "" : `<br>JMIS/DSS/NBER abstracts need a free OpenAlex key; otherwise screened by title.`);
+    (CFG.openalex_key || !noAbstract(js).length ? "" : `<br>The abstracts of ${esc(someOf(noAbstract(js)))} need a free OpenAlex key (Settings → Paper sources); otherwise ${noAbstract(js).length === 1 ? "it is" : "they are"} screened by title.`) +
+    (CFG.openalex_key || !maybeNoAbstract(js).length ? "" : `<br>Some papers of ${esc(someOf(maybeNoAbstract(js)))} come without an abstract; with a free OpenAlex key it is looked up, otherwise those papers are screened by title.`);
   const key = searchKey(), known = RUNS.find(r => r.search_key === key);
   if (known) $("#est").innerHTML += `<br><b>You already ran this search</b> (${known.n_papers} papers, ${esc(fmtWhen(known.updated || known.created))}). Pressing Search continues it: its papers, verdicts and downloads stay, and only papers without a verdict are paid for.`;
 }
@@ -655,31 +758,15 @@ async function init() {
     $(id).onchange = updateEst;
   }
   $("#y0").value = $("#y1").value = String(CFG.years[0] - 1);
-  CFG.topics.forEach(t => $("#topicchips").append(chip(t, false)));
-  (CFG.methods || []).forEach(m => { const c = chip(m.label, false); c.title = m.description || ""; $("#methodchips").append(c); });
-  CFG.journals.forEach(j => {
-    const can = j.archive !== false;
-    const c = chip(j.abbr, can && (j.per_year || 0) < 1000 && !j.default_off, updateEst);
-    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: needs a focus phrase; only the ${j.limit || 200} best matches are looked at` : "") + (j.archive_note ? " — " + j.archive_note : "");
-    if (j.default_off) c.dataset.optin = "1";               // never switched on by "all"
-    if (!can) c.classList.add("off");
-    $("#journalchips").append(c);
-  });
+  drawInterests();
+  journalChips("#journalchips", updateEst, j => (j.per_year || 0) < 1000, j => j.needs_query ? ` — searched by words: needs a focus phrase; only the ${j.limit || 200} best matches are looked at` : "");
   $("#focus").oninput = updateEst;                      // (the note about SSRN needing words, and the "already ran" note, follow what you type)
   $("#jall").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip:not(.off):not([data-optin])").forEach(c => c.classList.add("on")); updateEst(); };
   $("#jnone").onclick = e => { e.preventDefault(); document.querySelectorAll("#journalchips .chip").forEach(c => c.classList.remove("on")); updateEst(); };
-  $("#tfilter").innerHTML += CFG.topics.map(t => `<option>${esc(t)}</option>`).join("");
-  updateEst();
+  updateEst(); updateWeekEst();
   for (const id of ["#ty0", "#ty1"]) { $(id).innerHTML = CFG.years.map(y => `<option>${y}</option>`).join(""); $(id).onchange = updateTermsEst; }
   $("#ty0").value = String(CFG.years[0] - 1); $("#ty1").value = String(CFG.years[0]);
-  CFG.journals.forEach(j => {
-    const can = j.archive !== false;
-    const c = chip(j.abbr, can && !j.default_off, updateTermsEst);
-    c.dataset.abbr = j.abbr; c.title = j.name + (can ? "" : " — not searchable by year (weekly checks only)") + (j.needs_query ? ` — searched by words: only the ${j.limit || 200} best matches of your terms are looked at` : "") + (j.archive_note ? " — " + j.archive_note : "");
-    if (j.default_off) c.dataset.optin = "1";
-    if (!can) c.classList.add("off");
-    $("#tjournalchips").append(c);
-  });
+  journalChips("#tjournalchips", updateTermsEst, () => true, j => j.needs_query ? ` — searched by words: only the ${j.limit || 200} best matches of your terms are looked at` : "");
   $("#terms").oninput = updateTermsEst;
   $("#terms").onkeydown = e => { if (e.key === "Enter") $("#termsbtn").click(); };
   $("#tjall").onclick = e => { e.preventDefault(); document.querySelectorAll("#tjournalchips .chip:not(.off):not([data-optin])").forEach(c => c.classList.add("on")); updateTermsEst(); };
@@ -728,10 +815,11 @@ function updateTermsEst() {
 $("#termsbtn").onclick = async () => {
   const ts = parseTerms($("#terms").value);
   if (!ts.length) { toast("Type at least one term, for example: difference-in-differences, DiD"); $("#terms").focus(); return; }
-  try { const r = await api("/api/run/terms", {terms: ts, year_from: +$("#ty0").value, year_to: +$("#ty1").value, journals: selectedTermJournals()}); startedRun(r.run); } catch (e) { toast(e.message); }
+  try { const r = await api("/api/run/terms", {terms: ts, year_from: +$("#ty0").value, year_to: +$("#ty1").value, journals: selectedTermJournals()}); startedRun(r.run); } catch (e) { fail(e); }
 };
 $("#weeklybtn").onclick = async () => {
-  try { const r = await api("/api/run/weekly", {}); startedRun(r.run); } catch (e) { toast(e.message); }
+  if (window.budgetOk && !(await window.budgetOk(WEEK_COST))) return;      // (more than what is left of the month's budget: you are asked first)
+  try { const r = await api("/api/run/weekly", {}); startedRun(r.run); } catch (e) { fail(e); }
 };
 $("#searchbtn").onclick = async () => {
   const body = {
@@ -741,7 +829,7 @@ $("#searchbtn").onclick = async () => {
     journals: selectedJournals(),
   };
   if (window.budgetOk && !(await window.budgetOk(EST_COST))) return;
-  try { const r = await api("/api/run/search", body); startedRun(r.run); } catch (e) { toast(e.message); }
+  try { const r = await api("/api/run/search", body); startedRun(r.run); } catch (e) { fail(e); }
 };
 // ---------- Authors: an author's works (OpenAlex) into a folder named after them (authors.py)
 let AUTH = [], AUTHSEQ = 0;
@@ -831,9 +919,9 @@ function updateScreenBtn() {
 }
 $("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.params && RUN.params.terms), {n} = screenPending();
   if (window.budgetOk && !(await window.budgetOk(CFG.est_cost_per_paper == null ? null : n * CFG.est_cost_per_paper))) return;
-  try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { toast(e.message); } };
+  try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { fail(e); } };
 window.addEventListener("jw-settings-changed", async () => {      // a model changed in Settings: the page's estimates and the backup note follow it
-  try { CFG = await api("/api/config"); if (RUN) render(); } catch (e) {}
+  try { CFG = await api("/api/config"); if (RUN) render(); updateEst(); updateWeekEst(); } catch (e) {}      // (the weekly estimate names the model and uses its price)
 });
 $("#makebackup").onclick = async e => {          // the backup that screened this run becomes the screening model (Settings → AI → Screening new papers)
   const b = e.currentTarget;
@@ -841,7 +929,7 @@ $("#makebackup").onclick = async e => {          // the backup that screened thi
     await api("/api/ai/config", {features: {screen: {provider: b.dataset.provider, model: b.dataset.model}}});
     window.dispatchEvent(new Event("jw-settings-changed"));
     toast(`${b.textContent.replace(/^Make | the screening model$/g, "")} now screens your papers.`);
-  } catch (er) { toast(er.message); }
+  } catch (er) { fail(er); }
 };
 $("#stopbtn").onclick = () => api("/api/stop", {}).then(() => toast("Stopping after the current step…"));
 // Sign-ins: one row per kind, each with what state it is in (signed in and how long ago, waiting for you, expired). The server remembers the results (state/signins.json).
@@ -861,8 +949,9 @@ function paintSignins() {
   };
   const libTitle = L.signs_in ? (L.name || "My university library") : "My university library";
   const libDesc = L.signs_in ? "Wiley, Elsevier, Taylor & Francis and what your library holds" : L.configured ? (L.mode === "vpn" ? "You use the university VPN: nothing to sign in" : "Uses each publisher’s “sign in through your institution” page") : "Not set up yet: choose your university";
-  menu.innerHTML = row("informs", "INFORMS member account", "ISR, Management Science, MSOM, Organization Science")
-    + row("ais", "AIS member account", "MIS Quarterly, JAIS")
+  const ofPub = (pub, fallback) => { const js = (CFG ? CFG.journals : []).filter(j => j.publisher === pub).map(j => j.abbr); return js.length ? js.slice(0, 6).join(", ") + (js.length > 6 ? ` and ${js.length - 6} more` : "") : fallback; };      // (the journals of your own list that the sign-in is for)
+  menu.innerHTML = row("informs", "INFORMS member account", ofPub("informs", "ISR, Management Science, MSOM, Organization Science"))
+    + row("ais", "AIS member account", ofPub("aisel", "MIS Quarterly, JAIS"))
     + (L.signs_in ? row("library", libTitle, libDesc) : `<button role="menuitem" data-which="setup"><b>${esc(libTitle)}</b><span>${esc(libDesc)}</span><span class="si-st">${L.configured ? "Library access settings…" : "Set up…"}</span></button>`)
     + row("publishers", "Other publisher sites", "Opens one tab per publisher; choose your university when asked")
     + `<button role="menuitem" data-which="setup" class="si-more"><span>Library access settings…</span></button>`;
@@ -899,7 +988,7 @@ function signIn(which) {
     ais: "An AIS eLibrary sign-in window is opening: log in with your member account; it closes by itself.",
     publishers: "A browser window is opening with one tab per publisher — sign in, then close it."}[which === "nova" ? "library" : which];
   const site = which === "nova" ? "library" : which, before = sikey(site), t0 = Date.now();
-  return api("/api/login", {which}).then(() => { if (!(DONE_AT[site] > t0)) toast(msg); loadSignins(); watchSignin(site, before); }).catch(e => { toast(e.message); if (/library first/i.test(e.message)) Settings.open("library"); });
+  return api("/api/login", {which}).then(() => { if (!(DONE_AT[site] > t0)) toast(msg); loadSignins(); watchSignin(site, before); }).catch(e => { fail(e); if (/library first/i.test(e.message)) Settings.open("library"); });
 }
 $("#signinbtn").onclick = e => { e.stopPropagation(); loadSignins(); $("#signinmenu").classList.toggle("hide"); };
 $("#signinmenu").onclick = e => { const b = e.target.closest("[data-which]"); if (b) signIn(b.dataset.which); };
@@ -942,7 +1031,7 @@ async function deleteRun(r) {
     await api("/api/runs/delete", {id: r.id});
     if (RUN && RUN.id === r.id) { RUN = null; go({view: "home"}); }
     toast(`Deleted “${r.title}”.`); loadRuns();
-  } catch (e) { toast(e.message); }
+  } catch (e) { fail(e); }
 }
 function drawRuns() {
   const weekly = RUNS.filter(r => r.kind === "weekly"), search = RUNS.filter(r => r.kind !== "weekly");
@@ -962,6 +1051,8 @@ function drawRuns() {
       <span>${got} · ${r.n_papers} papers · ${r.n_download} to download · $${(r.cost || 0).toFixed(2)}</span>
       <button class="rundel" data-rundel="${esc(r.id)}" aria-label="Delete the run ${esc(r.title)}" title="Delete this ${runWord(r)} (its papers stay in your library)">×</button>`;
     d.onclick = e => { if (e.target.closest("[data-rundel]")) { e.stopPropagation(); deleteRun(r); return; } openRun(r); };
+    d.tabIndex = 0; d.setAttribute("role", "button");                 // (a run can be opened from the keyboard: Tab to it, Enter)
+    d.onkeydown = e => { if ((e.key === "Enter" || e.key === " ") && e.target === d) { e.preventDefault(); openRun(r); } };
     $("#runs").append(d);
   });
   document.querySelectorAll("#runs .runitem").forEach(x => x.classList.toggle("on", NAV.view === "run" && RUN && x.dataset.id === RUN.id));
@@ -1185,7 +1276,7 @@ function card(p) {
       ${p.dl_status === "not_yet" && SIGNIN_FOR[p.publisher] ? `<button class="btn small" data-act="login">Use my ${SIGNIN_FOR[p.publisher].toUpperCase()} membership</button>` : ""}
       ${["failed", "needs_check", "wrong_paper"].includes(p.dl_status) && p.manual_url ? `<a class="btn small" target="_blank" href="${esc(p.manual_url)}">Open in my browser</a>` : ""}
       ${DL_FAILED.includes(p.dl_status) ? `<button class="btn small" data-act="attach" title="Downloaded it in your own browser? Choose that PDF, or drop it on this card: it is added to this paper.">Add the PDF I downloaded…</button>` : ""}
-      ${p.dl_status === "ok" && p.file ? `<a class="btn small" target="_blank" href="${fileUrl(p.file)}">PDF</a>` : ""}
+      ${p.dl_status === "ok" && p.file ? `<button class="btn primary small" data-act="read" title="Open it in the app's reader: highlight, take notes, ask questions">Read</button> <a class="btn small" target="_blank" href="${fileUrl(p.file)}" title="The PDF file itself, in a new window">PDF</a>` : ""}
       ${p.summary ? `<button class="btn small" data-act="sum">Summary</button>` : ""}
       ${p.dl_status === "ok" && !p.summary && !p.summary_by_hand ? `<button class="btn small" data-act="resum" title="${esc(p.dl_note || "")}">Retry summary</button>` : ""}
       ${v === "borderline" ? `<button class="btn primary small" data-act="queue">→ Move to download queue</button>` : ""}
@@ -1197,8 +1288,9 @@ function card(p) {
   const lb = el.querySelector('[data-act="login"]'); if (lb) lb.onclick = () => signIn(SIGNIN_FOR[p.publisher] || "publishers");
   const nb = el.querySelector('[data-act="nova"]'); if (nb) nb.onclick = () => signIn("library");
   const sb = el.querySelector('[data-act="sum"]'); if (sb) sb.onclick = () => openPaper(p.id);
+  const rdb = el.querySelector('[data-act="read"]'); if (rdb) rdb.onclick = () => readPaper({file: p.file, title: p.title, authors: p.authors, abbr: p.abbr, journal: p.journal});
   const rb = el.querySelector('[data-act="resum"]'); if (rb) rb.onclick = () =>
-    api("/api/download", {ids: [p.id]}).then(() => toast("Writing the summary…")).catch(e => toast(e.message));
+    api("/api/download", {ids: [p.id]}).then(() => toast("Writing the summary…")).catch(fail);
   const qb = el.querySelector('[data-act="queue"]'); if (qb) qb.onclick = () => setVerdict([p.id], "download");
   const kb = el.querySelector('[data-act="skipv"]'); if (kb) kb.onclick = () => setVerdict([p.id], "skip");
   const ub = el.querySelector('[data-act="unqueue"]'); if (ub) ub.onclick = () =>
@@ -1276,7 +1368,7 @@ function updateSel() {
   if (cut.length) $("#resumebtn").textContent = `Go on with the download that was cut off (${cut.length} left)`;
 }
 const cutOff = () => [...papers.values()].filter(p => p.dl_queued && !(p.dl_status === "ok" && p.file) && p.dl_status !== "deleted").map(p => p.id);
-$("#resumebtn").onclick = async () => { const ids = cutOff(); if (!ids.length) return; try { await api("/api/download", {ids}); toast(`Downloading the ${ids.length} that were left.`); } catch (e) { toast(e.message); } };
+$("#resumebtn").onclick = async () => { const ids = cutOff(); if (!ids.length) return; try { await api("/api/download", {ids}); toast(`Downloading the ${ids.length} that were left.`); } catch (e) { fail(e); } };
 document.querySelectorAll("#vfilter button").forEach(b => b.onclick = () => {
   FILTER = b.dataset.v; document.querySelectorAll("#vfilter button").forEach(x => x.classList.toggle("on", x === b)); renderList(); renderMeta();
 });
@@ -1286,7 +1378,7 @@ $("#selrec").onclick = () => { const terms = RUN && RUN.params && RUN.params.ter
 $("#selnone").onclick = () => { SEL.clear(); if (NAV.j !== null) renderList({keep: true}); updateSel(); };
 $("#dlbtn").onclick = async () => {
   try { await api("/api/download", {ids: [...SEL]}); toast(`Downloading ${SEL.size} papers in the background.`); }
-  catch (e) { toast(e.message); }
+  catch (e) { fail(e); }
 };
 $("#allpapers").onclick = e => { e.preventDefault(); go({j: "*"}); };
 document.querySelectorAll("#viewtabs button").forEach(b => b.onclick = () => go({j: b.dataset.vt || null}));
@@ -1296,11 +1388,11 @@ function queueNeeds(p) { return p.verdict === "download" && (p.dl_status !== "ok
 $("#qbtn").onclick = async () => {
   const ids = [...papers.values()].filter(queueNeeds).map(p => p.id);
   try { await api("/api/download", {ids}); toast(`Downloading ${ids.length} queued papers in the background.`); }
-  catch (e) { toast(e.message); }
+  catch (e) { fail(e); }
 };
 async function setVerdict(ids, verdict, undo = true) {
   const before = ids.map(i => [i, papers.get(i).verdict]);
-  try { await api("/api/verdict", {run_id: RUN.id, ids, verdict}); } catch (e) { return toast(e.message); }
+  try { await api("/api/verdict", {run_id: RUN.id, ids, verdict}); } catch (e) { return fail(e); }
   ids.forEach(i => {
     const p = papers.get(i);
     if (!p.ai_verdict) p.ai_verdict = p.verdict;
@@ -1342,7 +1434,7 @@ function tileState(j) {
 function tile(j, inner, onopen) {
   const el = document.createElement("div");
   el.className = "card tile"; el.tabIndex = 0; el.setAttribute("role", "button");
-  el.style.setProperty("--jc", JCOL[j.abbr] || "var(--accent)");
+  el.style.setProperty("--jc", jcol(j.abbr));
   el.innerHTML = `<div class="trow">${mono(j.abbr)}<div><div class="tname">${esc(j.name)}</div><div class="tpub">${esc(PUB[j.publisher] || j.publisher || "")}</div></div></div>` + inner;
   el.onclick = onopen;
   el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onopen(); } };
@@ -1351,8 +1443,11 @@ function tile(j, inner, onopen) {
 function renderTiles() {
   if (!RUN || !CFG) return;
   const box = $("#tiles"); box.innerHTML = "";
-  runJournals().forEach(j => {
-    const s = tileState(j), c = v => s.ps.filter(p => p.verdict === v).length;
+  const all = runJournals().map(j => [j, tileState(j)]);
+  const empty = RUN.kind === "weekly" ? all.filter(([, s]) => s.label === "No new papers") : [];       // (only a journal that was read and had nothing: one that waits, is being read or failed keeps its tile)
+  const shown = all.filter(x => !empty.includes(x)).sort((a, b) => (b[1].found > 0) - (a[1].found > 0));
+  shown.forEach(([j, s]) => {
+    const c = v => s.ps.filter(p => p.verdict === v).length;
     const got = s.ps.filter(p => p.dl_status === "ok").length;
     box.append(tile(j, `
       <div>
@@ -1367,6 +1462,8 @@ function renderTiles() {
       </div>
       <div class="open">Open list →</div>`, () => go({j: j.abbr})));
   });
+  if (empty.length) { const d = document.createElement("div"); d.className = "tiles-none"; d.id = "tiles-none";
+    d.innerHTML = `<b>No new papers</b> in ${empty.length} journal${empty.length === 1 ? "" : "s"}: ${empty.map(([j]) => `<span title="${esc(j.name)}">${esc(j.abbr)}</span>`).join(", ")}`; box.append(d); }
 }
 let tT = null; function renderTilesSoon() { clearTimeout(tT); tT = setTimeout(() => { if (NAV.view === "run") renderTiles(); }, 200); }
 
@@ -1378,7 +1475,7 @@ async function loadLibrary() {
 }
 async function reloadLib() { LIB = await api("/api/library"); $("#libcount").textContent = LIB.length; }
 $("#skipnav").onclick = () => { const m = $("#main-content"); m.focus(); m.scrollIntoView(); };
-$("#libitem").onclick = () => { leaveSettings(); loadLibrary(); go({view: "lib", j: null, tab: LibraryUI.state.tab === "folders" ? "papers" : LibraryUI.state.tab}); };
+$("#libitem").onclick = () => { if (!leaveSettings()) return; loadLibrary(); go({view: "lib", j: null, tab: LibraryUI.state.tab === "folders" ? "papers" : LibraryUI.state.tab}); };
 function libRow(r, i) { return window.LibraryUI ? LibraryUI.row(r, i) : ""; }
 function renderLibrary() {
   const box = $("#libview");
@@ -1517,7 +1614,7 @@ $("#banner").addEventListener("click", async e => {
   CHECKNOTE = "Opening as soon as the paper being downloaded is done: a Chromium window will show the check. Tick the box there yourself.";
   paintChecks();
   try { await api("/api/check", {host: h}); }
-  catch (er) { CHECKNOTE = ""; paintChecks(); toast(er.message); }       // (the button is not put back: the server's list is what waits; a reload shows it)
+  catch (er) { CHECKNOTE = ""; paintChecks(); fail(er); }       // (the button is not put back: the server's list is what waits; a reload shows it)
 });
 function setBusy(busy, kind) {
   BUSY = busy; JOBKIND = kind;

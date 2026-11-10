@@ -15,8 +15,8 @@ async function closeReader() {
   const gone = new Promise(r => { addEventListener("popstate", r, {once: true}); setTimeout(r, 450); });
   await window.Reader.close(); await gone;
 }
-async function nav(n) { if (window.Settings) window.Settings.close(); await closeReader(); ctx.go(n); }
-const readPaper = (row, opts) => { if (window.Settings) window.Settings.close(); ctx.readPaper(row, opts); };
+async function nav(n) { if (window.Settings && window.Settings.close() === false) return false; await closeReader(); ctx.go(n); return true; }      // (false: Settings stays open, you chose to keep what you typed)
+const readPaper = (row, opts) => { if (window.Settings && window.Settings.close() === false) return; ctx.readPaper(row, opts); };
 
 // ---------------------------------------------------------------- what can be found
 function build() {
@@ -24,11 +24,16 @@ function build() {
   const add = (g, title, icon, tool, run, o = {}) => out.push({g, title, icon, tool, run, sub: o.sub || "", hint: o.hint || "", hay: (title + " " + (o.hay || "") + " " + (o.sub || "")).toLowerCase(), boost: o.boost || 0, card: o.card, quick: !!o.quick});
   add("go", "Watch", "watch", "watch", () => nav({view: "run", j: null}), {hint: "page", quick: true, hay: "check for new papers weekly archive search runs journals", sub: "check journals for new papers; your past runs"});
   add("go", "Library", "library", "library", () => nav({view: "lib", j: null, tab: "papers"}), {hint: "page", quick: true, hay: "papers search browse journals", sub: "every paper you have downloaded"});
+  add("go", "Library › Books", "library", "library", () => nav({view: "lib", j: null, tab: "books"}), {hint: "page", hay: "library books chapters epub book"});
   [["ask", "Ask the whole library", "ask"], ["discover", "Discover papers you don’t have", "discover"], ["hl", "Highlights hub", "hl"], ["review", "Review flashcards", "review"], ["tags", "Tags", "tags"]].forEach(([t, name, ic]) =>
     add("go", "Library › " + name, ic, t, () => nav({view: "lib", j: null, tab: t}), {hint: "tool", quick: t === "ask", hay: "library " + t}));
   add("go", "Folders", "folders", "folders", () => nav({view: "lib", j: null, tab: "folders"}), {hint: "page", quick: true, hay: "folder tiles projects", sub: "your folders of papers"});
-  [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"], ["reader", "Reader & summaries"], ["look", "Appearance"]].forEach(([t, name]) =>
-    add("go", "Settings › " + name, "settings", "settings", async () => { await closeReader(); window.Settings && window.Settings.open(t); }, {hint: "settings", quick: t === "ai", hay: "settings preferences models keys budget cost " + t}));
+  [["ai", "AI & privacy", "models keys budget cost provider local only"], ["usage", "Usage & cost", "budget spent spending cost month"], ["prompts", "Prompts", "prompt template"],
+   ["watch", "Journals & interests", "journals topics interests terms methods weekly check utd ais basket watch list add journal"], ["reader", "Reader & summaries", "summary template export folder legend colours reading speed"],
+   ["files", "AI files & backup", "backup snapshot restore deleted undo trash zip saved answers cache"], ["library", "Library access", "university library proxy ezproxy openathens ebsco institution interlibrary"],
+   ["sources", "Paper sources", "openalex unpaywall elsevier key email crossref semantic scholar"], ["look", "Appearance", "theme colours subtle bold size"],
+   ["sync", "Computers & sync", "dropbox second computer conflict copies join data folder move"], ["about", "About & updates", "update version new release check for updates"]].forEach(([t, name, hay]) =>
+    add("go", "Settings › " + name, "settings", "settings", async () => { await closeReader(); window.Settings && window.Settings.open(t); }, {hint: "settings", quick: t === "ai", hay: "settings preferences " + t + " " + hay}));
   add("go", "About Journal Watcher", "heart", "about", async () => { await closeReader(); window.About && window.About.open(); }, {hint: "page", hay: "about author made by support coffee tip donate ko-fi licence version", sub: "who makes it, and how to support it"});
   F.forEach(f => {
     add("folder", f.name, "folders", "folders", () => nav({view: "lib", j: "@" + f.id, tab: "folders"}), {hint: "folder", sub: (f.count || 0) + " paper" + (f.count === 1 ? "" : "s"), boost: 2});
@@ -40,7 +45,11 @@ function build() {
   add("act", "Look: Subtle or Bold…", "sparkle", "settings", async () => { await closeReader(); window.Settings && window.Settings.open("look"); }, {hint: "action", hay: "appearance colours subtle bold tint"});
   add("act", "Add a paper (PDF or DOI)", "add", "library", () => window.LibraryUI && window.LibraryUI.addDialog(), {hint: "action", hay: "import upload drop pdf doi new paper"});
   add("act", "Import references (Word, PDF, .ris / .bib…)", "add", "library", () => window.BibImport && window.BibImport.open(), {hint: "action", hay: "endnote mendeley zotero reference list references import bibtex ris overleaf bibliography word docx pdf powerpoint pptx syllabus reading list citations document"});
-  add("act", "New folder", "plus", "folders", async () => { await nav({view: "lib", j: null, tab: "folders"}); setTimeout(() => { const b = $('[data-fp="new"]'); b && b.click(); }, 250); }, {hint: "action", hay: "create folder project"});
+  add("act", "Check for new papers", "watch", "watch", async () => { if (await nav({view: "run", j: null}) === false) return; setTimeout(() => { const b = $("#weeklybtn"); if (b) { b.scrollIntoView({block: "center"}); b.focus(); } }, 250); }, {hint: "action", hay: "weekly check new papers journals fetch this week"});
+  add("act", "Sign in to publishers and my library…", "key", "watch", async () => { if (await nav({view: "run", j: null}) === false) return; setTimeout(() => { const b = $("#signinbtn"); b && b.click(); }, 250); }, {hint: "action", hay: "sign in login publisher informs ais university library membership"});
+  add("act", "Welcome guide", "sparkle", "about", async () => { await closeReader(); window.Welcome && window.Welcome.open(); }, {hint: "action", hay: "welcome guide first steps set up help introduction tour"});
+  add("act", "Keyboard shortcuts", "settings", "settings", shortcuts, {hint: "action", hay: "keyboard shortcuts keys help hotkeys"});
+  add("act", "New folder", "plus", "folders", async () => { if (await nav({view: "lib", j: null, tab: "folders"}) === false) return; setTimeout(() => { const b = $('[data-fp="new"]'); b && b.click(); }, 250); }, {hint: "action", hay: "create folder project"});
   return out;
 }
 
@@ -138,6 +147,25 @@ async function run(i, alt) {
   try { if (alt && it.g !== "act" && it.card && it.card.file) readPaper(it.card, {tab: "card"}); else await it.run(); } catch (e) { console.error(e); }
 }
 
+// ---------------------------------------------------------------- the keyboard shortcuts, on one sheet (from Search, and with ? when you are not typing)
+const KEYS = [["Anywhere", [[MOD + " K", "Search: any paper, folder, tool, setting or action"], ["?", "This list"], ["Esc", "Close what is open (a dialog, Settings, the reader)"]]],
+  ["In Search", [["↑ ↓ or Tab", "Move through the results"], ["Enter", "Open"], [(MAC ? "⌥" : "Alt") + " Enter", "Open a paper at its card"]]],
+  ["In the reader", [["Any letter or number", "Go to: type a page number, a heading or a word"], ["1 to 8", "Highlight the selected text in that colour"], [MOD + " F", "Search this paper"],
+    [MOD + " +  /  " + MOD + " −", "Zoom in / out"], [MOD + " 0", "Fit to width"], [MOD + " Z  /  " + MOD + " Shift Z", "Undo / redo a highlight or note"],
+    ["Backspace or " + (MAC ? "⌥" : "Alt") + " ←", "Back to where you were before a jump"], ["Enter in the search box", "Next match (Shift Enter: the one before)"]]],
+  ["On the Watch page", [["Tab, then Space", "Tick or untick a journal, topic or method"], ["Enter on a journal's tile", "Open its list"]]]];
+function shortcuts() {
+  let d = document.getElementById("keys-dlg");
+  if (!d) { d = document.createElement("dialog"); d.id = "keys-dlg"; d.className = "keys-dlg"; document.body.append(d); d.addEventListener("click", e => { if (e.target === d || e.target.closest("[data-x]")) d.close(); }); }
+  d.innerHTML = `<div class="keys-in"><div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Keyboard shortcuts</h2><button class="btn small" data-x aria-label="Close">Close</button></div>
+    ${KEYS.map(([g, ks]) => `<h3>${esc(g)}</h3><table>${ks.map(([k, what]) => `<tr><td><kbd>${esc(k)}</kbd></td><td>${esc(what)}</td></tr>`).join("")}</table>`).join("")}</div>`;
+  if (!d.open) d.showModal();
+}
+window.addEventListener("keydown", e => {      // "?" opens the list, unless you are typing somewhere or reading (in the reader a key starts "Go to")
+  if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey || document.body.classList.contains("reading") || e.target.closest("input, textarea, select, [contenteditable]")) return;
+  e.preventDefault(); shortcuts();
+});
+
 // the keyboard: Ctrl/Cmd+K anywhere (also while typing in a box, and inside the reader)
 window.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
@@ -147,4 +175,4 @@ window.addEventListener("keydown", e => {
 }, true);
 document.addEventListener("click", e => { if (e.target.closest("#palettebtn")) open(); });
 
-window.Palette = {init(c) { ctx = c; const b = $("#palettebtn"); if (b) { b.removeAttribute("disabled"); $(".pk", b).textContent = MOD + " K"; } }, open, close};
+window.Palette = {shortcuts, init(c) { ctx = c; const b = $("#palettebtn"); if (b) { b.removeAttribute("disabled"); $(".pk", b).textContent = MOD + " K"; } }, open, close};

@@ -661,6 +661,8 @@ def main():
 
     new_papers = []
     for j in journals:
+        if not j.get("weekly", True) or j.get("needs_query"):      # switched off for the weekly check (Settings → Journals & interests), or only searched by words
+            continue
         try:
             items = fetch_journal(j)
             new_papers.extend(items)

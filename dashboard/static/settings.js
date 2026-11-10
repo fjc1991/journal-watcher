@@ -11,10 +11,14 @@ const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's 
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
   ["skim", "Skim layer", "Finds the key sentences of a paper by lens (question, finding, limitation…)"]];
 const money = v => exactCost(v, "—");
-const TABS = [["ai", "AI"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["sync", "Computers & sync"], ["about", "About & updates"]];
+const TABS = [["ai", "AI"], ["watch", "Journals & interests"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["sync", "Computers & sync"], ["about", "About & updates"]];
 const AI_SUBS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"]];      // three pages under the one main tab "AI" (their keys are unchanged: Settings.open("usage") still opens Usage & cost)
 const groupOf = t => AI_SUBS.some(([k]) => k === t) ? "ai" : t;
 let lastAI = "ai";      // the AI page you were on, for when you come back to the AI tab
+let dirty = false;      // something on this page was changed and not saved (pages with a Save button; a control that saves at once carries data-now)
+let watchChanged = false;      // journals or topics were changed: the Watch page is drawn from them once, so it is loaded again when Settings closes
+const SAVES = "#st-save, #la-save, #ps-save, #sy-save, #ab-feedsave";      // the Save buttons of the pages whose fields are not saved as you type
+const leaveOk = () => !dirty || confirm("You have changes on this page that are not saved.\n\nLeave without saving them?");
 
 function build() {
   if (root) return;
@@ -22,13 +26,27 @@ function build() {
   root.innerHTML = `<div class="st-head"><button class="btn back" id="st-back">← Back</button><h1>Settings</h1><div class="st-tabs">${TABS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div></div><div class="st-sub hide" id="st-sub" aria-label="AI settings">${AI_SUBS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div><div class="st-body" id="st-body"></div>`;
   document.body.append(root);
   $("#st-back", root).onclick = close;
-  $$(".st-tabs button", root).forEach(b => b.onclick = () => { tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
-  $$(".st-sub button", root).forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
-  document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select")) close(); });
+  $$(".st-tabs button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
+  $$(".st-sub button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t; render(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select") && !document.querySelector("dialog[open]")) close(); });      // (an open dialog, such as the list of shortcuts, takes its own Esc)
+  const touched = e => { if ($(SAVES, root) && !e.target.closest("[data-now]") && e.target.closest("#st-body")) dirty = true; };      // (a page with a Save button: what you type is not kept until you press it)
+  root.addEventListener("input", touched); root.addEventListener("change", touched);
+  addEventListener("beforeunload", e => { if (dirty && root && !root.classList.contains("hide")) { e.preventDefault(); e.returnValue = ""; } });
 }
-export function close() { root?.classList.add("hide"); document.body.classList.remove("settings-open"); }
+export function close() {      // false: you chose to stay (something typed was not saved), and whoever asked should not go on
+  if (!root || root.classList.contains("hide")) return true;
+  if (!leaveOk()) return false;
+  dirty = false; root.classList.add("hide"); document.body.classList.remove("settings-open");
+  if (watchChanged) { watchChanged = false; window.dispatchEvent(new Event("jw-watch-changed")); }      // (the Watch page draws its journals and topics again; nothing else on it is touched)
+  return true;
+}
 export async function open(t) {
-  build(); if (t) tab = t;
+  build();
+  if (!root.classList.contains("hide") && dirty) {      // already open, with something typed and not saved
+    if (!t || t === tab) return;                         // the page you are on was asked for: it stays as it is, with what you typed
+    if (!leaveOk()) return;                              // another page: ask first
+  }
+  if (t) tab = t;
   if (window.About) About.close();
   root.classList.remove("hide"); document.body.classList.add("settings-open");
   try { D = await api("/api/settings"); } catch (e) { toast(e.message); return; }
@@ -36,15 +54,84 @@ export async function open(t) {
 }
 function render() {
   if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
+  dirty = false;
   if (groupOf(tab) === "ai") lastAI = tab;
   $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === groupOf(tab)));
   $("#st-sub", root).classList.toggle("hide", groupOf(tab) !== "ai");
   $$(".st-sub button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   const on = $(".st-tabs button.on", root); if (on && on.scrollIntoView) on.scrollIntoView({block: "nearest", inline: "nearest"});      // a narrow window scrolls the row: keep the open tab in view
   const body = $("#st-body", root);
-  ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, sync: renderSync, about: renderAbout})[tab](body);
+  ({ai: renderAI, watch: renderWatch, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, sync: renderSync, about: renderAbout})[tab](body);
 }
-const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); };
+const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); if (!bad && el.id === "st-msg") dirty = false; };      // (a page's "Saved": nothing is unsaved any more)
+
+// ---------------------------------------------------------------- Journals & interests
+// Your topics (what papers are screened against), the methods, and the journals: which are read by the weekly check and which are ticked for a search by year.
+// Topics are saved with the button (they are checked first); a journal's switch is saved as you flip it.
+const PUBNAME = {aisel: "AIS eLibrary", informs: "INFORMS", wiley: "Wiley", tandfonline: "Taylor & Francis", elsevier: "Elsevier", acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences",
+  nber: "NBER", hbr: "Harvard Business Publishing", ssrn: "SSRN", sage: "SAGE", oup: "Oxford University Press", aaa: "American Accounting Association", aom: "Academy of Management", springer: "Springer"};
+const topicRow = (t, kind) => `<div class="wl-topic" data-kind="${kind}" data-name="${esc(t.name || "")}">
+    <div class="row" style="gap:8px"><input type="text" class="wl-label" value="${esc(t.label || "")}" placeholder="${kind === "topic" ? "Name of the topic, e.g. Platform economics" : "Name of the method, e.g. Field experiments"}" aria-label="Name" style="flex:1">
+      <button class="btn small" data-wlrm title="Remove this ${kind}">Remove</button></div>
+    ${kind === "method" ? `<input type="text" class="wl-desc" value="${esc(t.description || "")}" placeholder="One sentence the model reads to recognise it" aria-label="Description" style="width:100%;margin-top:6px">` : ""}
+    <textarea class="wl-terms" rows="3" aria-label="Words and phrases" placeholder="Words and phrases to look for, separated by commas or new lines">${esc((t.terms || []).join(", "))}</textarea></div>`;
+function journalRows(W) {
+  // each journal once: under the first list it belongs to (MISQ and ISR are in both lists); a list's heading still counts all of its journals
+  const seen = new Set(), groups = [...Object.entries(W.sets).map(([k, name]) => [k, name, W.journals.filter(j => j.sets.includes(k))]), ["", "Other journals", W.journals.filter(j => !j.sets.length)]].filter(g => g[2].length);
+  return groups.map(([k, name, all]) => { const js = all.filter(j => !seen.has(j.abbr)); js.forEach(j => seen.add(j.abbr)); const above = all.length - js.length;
+    return `<tr class="wl-group"><th colspan="2">${esc(name)} <small>${all.filter(j => j.weekly).length} of ${all.length} in the weekly check${above ? ` · ${above} of them listed above` : ""}</small></th>
+      <th colspan="2"><button class="linkbtn" data-wlall="${esc(k)}" data-on="1">weekly check: all on</button> · <button class="linkbtn" data-wlall="${esc(k)}" data-on="0">all off</button></th></tr>` +
+    js.map(j => `<tr data-j="${esc(j.abbr)}"><td><b>${esc(j.name)}</b> <small>${esc(j.abbr)}${j.sets.length > 1 && k ? " · also in the " + esc(j.sets.filter(s => s !== k).map(s => W.sets[s]).join(", ")) : ""}</small></td>
+      <td><small>${esc(PUBNAME[j.publisher] || j.publisher)}</small></td>
+      <td><label class="chk"><input type="checkbox" data-now data-wlsw="weekly"${j.weekly ? " checked" : ""}${j.abbr === "SSRN" ? " disabled" : ""}> weekly check</label></td>
+      <td><label class="chk"><input type="checkbox" data-now data-wlsw="search"${j.search ? " checked" : ""}${j.can_search ? "" : " disabled"}> ticked for a search</label></td></tr>`).join(""); }).join("");
+}
+async function renderWatch(body) {
+  body.innerHTML = `<div class="card st-card"><p class="pmeta">Loading…</p></div>`;
+  let W, I;
+  try { [W, I] = await Promise.all([api("/api/journals"), api("/api/interests")]); } catch (e) { body.innerHTML = `<div class="card st-card">${errInline(e)}</div>`; return; }
+  if (tab !== "watch") return;
+  const journalCard = () => `<h2>Your journals <small>${W.journals.filter(j => j.weekly).length} are read by the weekly check</small></h2>
+      <p class="pmeta">“Weekly check” decides whether <b>Check for new papers</b> reads a journal. “Ticked for a search” decides whether it starts ticked when you search by year (you can still tick any journal there). A switch is saved as you flip it. More journals in the weekly check means more papers to screen each week.</p>
+      ${W.missing.length ? `<div id="wl-missing"><b>${W.missing.length} journal${W.missing.length === 1 ? "" : "s"} of the AIS basket and the UTD 24 ${W.missing.length === 1 ? "is" : "are"} not in your list</b> <small>(${esc(W.missing.slice(0, 6).map(j => j.abbr).join(", "))}${W.missing.length > 6 ? ", …" : ""})</small>.
+        <button class="btn small primary" id="wl-add">Add ${W.missing.length === 1 ? "it" : "them"}, switched off</button> <small>None of your own entries is changed; you switch on the ones you want below.</small></div>` : ""}
+      <table class="st-table" id="wl-journals">${journalRows(W)}</table><span class="st-msg" id="wl-jmsg"></span>`;
+  const draw = () => {
+    body.innerHTML = `<div class="card st-card"><h2>Your topics <small>what every new paper is compared with</small></h2>
+      <p class="pmeta">A paper is kept when its title, keywords or abstract contain enough of a topic's words (a word in the title counts 3, in the keywords 2, in the abstract 1), and the AI then judges it against the same topics. The three topics the app starts with are only examples: replace them with your own.</p>
+      <div id="wl-topics">${I.topics.map(t => topicRow(t, "topic")).join("")}</div>
+      <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="wl-addt">＋ Add a topic</button>
+        <label class="chk">A paper needs a score of <input type="number" id="wl-min" min="1" max="20" value="${esc(I.min_score)}" style="width:4.5em"> <small>lower lets more papers through to the AI (and costs more)</small></label></div>
+      <h2 style="margin-top:18px">Methods <small>optional: a paper can also be marked by how it was done</small></h2>
+      <div id="wl-methods">${I.methods.map(t => topicRow(t, "method")).join("")}</div>
+      <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="wl-addm">＋ Add a method</button></div>
+      <div class="st-actions"><button class="btn primary" id="st-save">Save topics and methods</button> <span id="st-msg" class="st-msg"></span></div></div>
+    <div class="card st-card" id="wl-jcard">${journalCard()}</div>`;
+  };
+  draw();
+  const collect = (box, kind) => $$(`#${box} .wl-topic`, body).map(d => ({name: d.dataset.name, label: $(".wl-label", d).value, terms: $(".wl-terms", d).value, ...(kind === "method" ? {description: $(".wl-desc", d).value} : {})}));
+  const done = r => { W = {journals: r.journals, missing: r.missing, sets: r.sets}; watchChanged = true; $("#wl-jcard", body).innerHTML = journalCard(); };      // (only the journals are drawn again: what you typed in a topic and have not saved stays)
+  body.onclick = async e => {
+    if (e.target.closest("#wl-addt")) { $("#wl-topics", body).insertAdjacentHTML("beforeend", topicRow({}, "topic")); dirty = true; $("#wl-topics .wl-topic:last-child .wl-label", body).focus(); return; }
+    if (e.target.closest("#wl-addm")) { $("#wl-methods", body).insertAdjacentHTML("beforeend", topicRow({}, "method")); dirty = true; $("#wl-methods .wl-topic:last-child .wl-label", body).focus(); return; }
+    const rm = e.target.closest("[data-wlrm]"); if (rm) { rm.closest(".wl-topic").remove(); dirty = true; return; }
+    if (e.target.closest("#st-save")) {
+      const msg = $("#st-msg", body);
+      try { const r = await api("/api/interests", {topics: collect("wl-topics", "topic"), methods: collect("wl-methods", "method"), min_score: $("#wl-min", body).value});
+        I = r; dirty = false; watchChanged = true; draw(); note($("#st-msg", body), "Saved. The next check and search use them."); }
+      catch (er) { msg.innerHTML = errInline(er); }
+      return;
+    }
+    if (e.target.closest("#wl-add")) { try { const r = await api("/api/journals", {action: "add_missing"}); done(r); toast(`${r.added.length} journal${r.added.length === 1 ? "" : "s"} added, switched off.`); } catch (er) { $("#wl-jmsg", body).innerHTML = errInline(er); } return; }
+    const all = e.target.closest("[data-wlall]");
+    if (all) { const k = all.dataset.wlall, abbrs = W.journals.filter(j => (k ? j.sets.includes(k) : !j.sets.length) && j.abbr !== "SSRN").map(j => j.abbr);
+      try { done(await api("/api/journals", {action: "switch", abbrs, weekly: all.dataset.on === "1"})); } catch (er) { $("#wl-jmsg", body).innerHTML = errInline(er); } }
+  };
+  body.onchange = async e => {
+    const sw = e.target.closest("[data-wlsw]"); if (!sw) return;
+    try { done(await api("/api/journals", {action: "switch", abbrs: [sw.closest("tr").dataset.j], [sw.dataset.wlsw]: sw.checked})); } catch (er) { sw.checked = !sw.checked; $("#wl-jmsg", body).innerHTML = errInline(er); }
+  };
+}
 
 // ---------------------------------------------------------------- AI & privacy
 function srcText(au) {               // where an automatic price comes from, in words
@@ -112,6 +199,7 @@ function renderAI(body) {
   $("#mn-test", body).onclick = e => { if (!mm.value.trim()) return note(mnote, "Type a model first.", true); test(e.currentTarget, mp.value, mm.value.trim(), null, true); };
   $("#mn-apply", body).onclick = () => {
     const p = mp.value, m = mm.value.trim(); if (!m) return note(mnote, "Type a model first.", true);
+    dirty = true;                                  // (the rows below are changed here, not by typing: they still need Save)
     let n = 0; const left = [];
     $$("tr[data-f]", body).forEach(tr => { const k = tr.dataset.f; if (k === "emb") return;
       if (WEB_ONLY.includes(k) && !(A.providers[p] || {}).web_search) { left.push($("b", tr).textContent); return; }
@@ -121,12 +209,12 @@ function renderAI(body) {
   $$("[data-keyremove]", body).forEach(b => b.onclick = async () => {
     const n = b.dataset.keyremove;
     if (!confirm(`Remove the ${n} API key from this computer?\n\nIt is deleted from this Mac's Keychain and from the .env file of your data folder. Features that use ${n} stop working until you paste a key again.`)) return;
-    try { D.ai = await api("/api/ai/key", {provider: n, remove: true}); window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast(D.ai.key_note || "Key removed."); }
+    try { D.ai = await api("/api/ai/key", {provider: n, remove: true}); window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); dirty = false; toast(D.ai.key_note || "Key removed."); }
     catch (e) { notifyError(e); }
   });
   $$("[data-keychange]", body).forEach(b => b.onclick = () => { const f = $(".keyform", b.closest("td")); f.classList.remove("hide"); $("input", f).focus(); b.classList.add("hide"); const ok = $(".keyok", b.closest("td")); if (ok) ok.classList.add("hide"); const rm = $("[data-keyremove]", b.closest("td")); if (rm) rm.classList.add("hide"); });
   $$("[data-savekey]", body).forEach(b => b.onclick = async () => { const td = b.closest("td"), inp = $("input", td), out = $(".keymsg", td); if (!inp.value.trim()) return;
-    try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); toast(D.ai.key_note ? "Key saved. " + D.ai.key_note : "Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
+    try { D.ai = await api("/api/ai/key", {provider: b.dataset.savekey, key: inp.value}); inp.value = ""; window.dispatchEvent(new Event("jw-settings-changed")); renderAI(body); dirty = false; toast(D.ai.key_note ? "Key saved. " + D.ai.key_note : "Key saved in the .env file of your data folder."); } catch (e) { note(out, e.message, true); } });
   $$("[data-test]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"), first = $(".pm", tr).value.split(",")[0].trim(); const m = first || prompt("Model name to test on " + b.dataset.test + ":"); if (m) test(b, b.dataset.test, m); });
   $$("[data-testf]", body).forEach(b => b.onclick = () => { const tr = b.closest("tr"); test(b, $(".fp", tr).value, $(".fm", tr).value.trim(), tr.dataset.f === "screen" ? "screen" : null); });
   $("#st-save", body).onclick = async () => {
@@ -335,7 +423,7 @@ async function renderSync(body) {
   body.onclick = async e => {
     const msg = $("#sy-msg", body), b = e.target.closest("button"); if (!b) return;
     try {
-      if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); draw(); toast("Name saved."); }
+      if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); dirty = false; draw(); toast("Name saved."); }
       else if (b.dataset.merge) { const r = await api("/api/sync", {action: "merge", path: b.dataset.merge}); R = r; draw(); toast(`${r.said} The copy was set aside.`); window.dispatchEvent(new Event("jw-library-changed")); }
       else if (b.dataset.aside) { if (!confirm("Set this copy aside?\n\n" + b.dataset.aside + "\n\nIt moves to Papers/_conflicts/ and is not deleted.")) return; R = await api("/api/sync", {action: "set_aside", path: b.dataset.aside}); draw(); toast("Set aside."); }
       else if (b.id === "sy-keys") { const r = await api("/api/ai/keys/move", {}); D.ai = r.config; AI = r.config; inEnv = inEnvN(AI); R = await api("/api/sync"); draw(); toast(r.moved.length ? `Moved ${r.moved.length} key${r.moved.length === 1 ? "" : "s"} to the Keychain.` : "Nothing was moved."); if (Object.keys(r.kept).length) { const m = $("#sy-kmsg", body); if (m) m.textContent = "Not moved: " + Object.entries(r.kept).map(([k, v]) => k + " (" + v + ")").join("; "); } }
@@ -361,6 +449,7 @@ function updBlock(U) {
 }
 document.addEventListener("jw:update", e => { const b = document.querySelector("#st-body"); if (b && b._abPaint) b._abPaint(e.detail); });      // update.js: a look at the feed has ended
 async function renderAbout(body) {
+  dirty = false;      // (the page is drawn from what is saved: after a save, or when you come to it)
   let U, C = null; try { [U, C] = await Promise.all([api("/api/update"), api("/api/config").catch(() => null)]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   if (tab !== "about") return;                       // (the person went to another tab while this was loading)
   const canMove = !!(window.pywebview && window.pywebview.api && window.pywebview.api.change_home);          // the Mac app (app/jw_app.py): the same as its Data → Change data folder… menu
@@ -373,7 +462,7 @@ async function renderAbout(body) {
       <div id="ab-updblock">${updBlock(U)}</div>
       <p class="hint" id="ab-sig">${U.signed ? `Updates are checked against the author’s digital signature before anything is installed (${U.keys} signing key${U.keys === 1 ? "" : "s"} built into this app): a feed without a good signature is ignored.` : `This copy does not check an update’s digital signature (no signing key is built into it); it checks the download against the feed’s checksum only.`}</p>
       <div class="st-actions" style="margin:8px 0"><button class="btn${U.available ? " primary" : ""}" id="ab-go">${U.available ? "Update now…" : "Check for updates"}</button></div>
-      <label class="chk"><input type="checkbox" id="ab-auto"${U.auto ? " checked" : ""}> Look for updates by itself (a little after start-up and every six hours); a button appears in the top bar when one is ready</label>
+      <label class="chk"><input type="checkbox" id="ab-auto" data-now${U.auto ? " checked" : ""}> Look for updates by itself (a little after start-up and every six hours); a button appears in the top bar when one is ready</label>
       <details style="margin-top:10px"><summary class="hint" style="cursor:pointer">Update address</summary><label class="chk" style="margin-top:6px">Feed <input type="text" id="ab-feed" value="${esc(U.feed_url || "")}" placeholder="https://… /appcast.json" style="flex:1"> <button class="btn small" id="ab-feedsave">Save</button></label>
       <p class="hint">Where the app asks for news of new versions: a small <code>appcast.json</code> that <code>app/release.sh</code> writes. Leave it as it is unless you moved it.</p></details>
       <div class="st-msg" id="ab-msg"></div></div>`;
@@ -412,6 +501,7 @@ function detectResult(r) {
 }
 function renderLibraryAccessSigned(body, r) { const s = $("#la-signed", body); if (s) { s.textContent = "✓ Signed in · just now"; } else { const x = document.createElement("p"); x.className = "hint ok"; x.id = "la-signed"; x.textContent = "✓ Signed in · just now"; $(".st-actions", body).after(x); } }
 async function renderLibraryAccess(body, flash) {
+  dirty = false;      // (the page is drawn from what is saved: after a save, or when you come to it)
   let P, S; try { [P, S] = await Promise.all([api("/api/library/access"), api("/api/signins")]); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   const modes = [["openathens", "My library uses OpenAthens", "Works on and off campus: on campus your network address usually gives access already, off campus Journal Watcher goes through your library’s OpenAthens sign-in. Its domain looks like myuni.ac.uk (you can also paste any go.openathens.net link from your library’s site)."],
     ["ezproxy", "My library gives me an EZproxy link", "Works on and off campus, like OpenAthens. A web address that begins your library’s sign-in, for example https://ezproxy.myuni.edu/login?url= (you can paste a whole proxied link: the part after url= is cut off)."],
@@ -421,7 +511,7 @@ async function renderLibraryAccess(body, flash) {
   const e = S.library || {}, st = e.signs_in && S.library.signed_in !== undefined ? S.library : null;
   body.innerHTML = `<div class="card st-card"><h2>Find my library’s settings</h2>
     <p class="hint">Paste your library’s web address (or any link to a database copied from its site). Journal Watcher reads a few of its pages, finds how it lets you in (OpenAthens, EZproxy, an EBSCO start page) and checks an OpenAthens domain with OpenAthens itself. Nothing is sent anywhere else.</p>
-    <div class="st-actions" style="margin-top:6px"><input type="text" id="la-find" value="${esc(P.home)}" placeholder="e.g. library.myuni.edu" style="flex:1;min-width:240px" aria-label="Your library's web address"><button class="btn primary" id="la-findgo">Find</button></div>
+    <div class="st-actions" style="margin-top:6px"><input type="text" id="la-find" data-now value="${esc(P.home)}" placeholder="e.g. library.myuni.edu" style="flex:1;min-width:240px" aria-label="Your library's web address"><button class="btn primary" id="la-findgo">Find</button></div>
     <div id="la-found" role="status" aria-live="polite"></div></div>
   <div class="card st-card"><h2>Your university library</h2>
     <p class="hint">Many journals are free to you through your university. Tell Journal Watcher how your library lets you in and it will use that to download papers. This is stored in <code>library.json</code> in your data folder; nothing is sent anywhere.</p>
@@ -481,6 +571,7 @@ async function renderLibraryAccess(body, flash) {
 }
 // Settings → Paper sources: the free keys and the address that let Journal Watcher find abstracts and open-access copies (saved in .env; keys never shown again)
 async function renderSources(body, flash) {
+  dirty = false;      // (the page is drawn from what is saved: after a save, or when you come to it)
   let S; try { S = await api("/api/sources"); } catch (e) { body.innerHTML = `<div class="card st-card">${esc(e.message)}</div>`; return; }
   const set = on => on ? `<span class="hint ok" style="margin:0">✓ saved</span>` : `<span class="hint" style="margin:0">not set</span>`;
   body.innerHTML = `<div class="card st-card"><h2>OpenAlex</h2>

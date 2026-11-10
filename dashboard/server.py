@@ -56,6 +56,7 @@ import deletion  # noqa: E402
 import support  # noqa: E402
 import syncinfo  # noqa: E402
 import uiprefs  # noqa: E402
+import watchlist  # noqa: E402
 import updater  # noqa: E402
 import keychain  # noqa: E402
 import smart  # noqa: E402
@@ -475,8 +476,10 @@ def config():
     y = datetime.date.today().year
     return {
         "journals": [{"abbr": j["abbr"], "name": j["name"], "publisher": j["publisher"],
-                      "per_year": j.get("per_year"), "archive": j.get("archive", True), "needs_query": bool(j.get("needs_query")), "default_off": bool(j.get("default_off")), "limit": j.get("limit"), "weekly": bool(j.get("weekly", True)), "archive_note": j.get("archive_note") or ""}
-                     for j in pl.journals()],
+                      "per_year": j.get("per_year"), "archive": j.get("archive", True), "needs_query": bool(j.get("needs_query")), "default_off": bool(j.get("default_off")), "limit": j.get("limit"), "weekly": bool(j.get("weekly", True)), "archive_note": j.get("archive_note") or "",
+                      "sets": watchlist.sets_of(j, _dj), "source": j.get("source") or "", "color": j.get("color") or ""}
+                     for _dj in [watchlist._defaults()] for j in pl.journals()],
+        "sets": watchlist.SETS,
         "topics": pl.topic_labels(),
         "methods": [{"label": m.get("label", m["name"]), "description": m.get("description", "")}
                     for m in pl.methods()],
@@ -1181,6 +1184,13 @@ class Handler(BaseHTTPRequestHandler):
                                    "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
         if path == "/api/library/deleted":   # what you deleted in the last 30 days and can put back
             return self.send_json({"kept": deletion.recently_deleted(), "days": deletion.KEEP_DAYS})
+        if path == "/api/journals":     # Settings → Journals & interests: your journals with their two switches, and the shipped ones your list does not have
+            try:
+                return self.send_json(watchlist.journals())
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/interests":    # your topics, their words, the methods, and the score a paper needs
+            return self.send_json(watchlist.interests())
         if path == "/api/snapshots":    # the daily snapshots of your own files on this computer
             return self.send_json({"snapshots": aifiles.snapshots(), "keep": aifiles.KEEP_SNAPSHOTS})
         if path == "/api/backup":       # ?pdfs=1: a zip of your own data (notes, cards, folders, tags, settings…), optionally with the PDFs
@@ -1341,6 +1351,26 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             return self.finish_import(res, bool(b.get("summarize")))
+        if path == "/api/journals":     # {action: "add_missing"} | {action: "switch", abbrs: [...], weekly?: bool, search?: bool}
+            if JOBS.busy():
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            try:
+                if b.get("action") == "add_missing":
+                    added = watchlist.add_missing()
+                    return self.send_json({"ok": True, "added": added, **watchlist.journals(), "config": config()})
+                if b.get("action") == "switch" and isinstance(b.get("abbrs"), list):
+                    n = watchlist.switch(b["abbrs"], b.get("weekly") if isinstance(b.get("weekly"), bool) else None, b.get("search") if isinstance(b.get("search"), bool) else None)
+                    return self.send_json({"ok": True, "changed": n, **watchlist.journals(), "config": config()})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"error": "what should change?"}, 400)
+        if path == "/api/interests":    # {topics?: [{name?, label, terms}], methods?: [{name?, label, description, terms}], min_score?}
+            if JOBS.busy():
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            try:
+                return self.send_json({"ok": True, **watchlist.save_interests(b), "config": config()})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         if path == "/api/settings":     # {prefs?: {legend, summary_template, export_dir, wpm}, prompts?: [...], summaries?: [...]}
             try:
                 if "prefs" in b:

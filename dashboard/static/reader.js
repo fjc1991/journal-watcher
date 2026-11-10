@@ -7,6 +7,7 @@ import {errBox, notifyError, ico, S, $, $$, esc, fileUrl, clamp, debounce, toast
 import {frame, mdParts, chipList, callout, wire as wireOut} from "./output.js";
 import * as N from "./notes.js";
 import * as T from "./text.js";
+const MODK = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";      // the key the tooltips name: ⌘ on a Mac, Ctrl elsewhere
 
 pdfjs.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.mjs";
 const V = "/static/vendor/pdfjs/";
@@ -28,12 +29,12 @@ async function build() {
       <button class="rd-btn" data-a="prev" title="Previous page">‹</button>
       <input class="rd-num" id="rd-num" value="1" aria-label="Page number"><span id="rd-of"></span><span id="rd-left" class="rd-left" title="Estimated from the words left and your reading speed (Settings)"></span>
       <button class="rd-btn" data-a="next" title="Next page">›</button><span class="sep"></span>
-      <button class="rd-btn" data-a="zout" title="Zoom out (Ctrl −)">−</button><span id="rd-zoom" style="min-width:42px;text-align:center"></span>
-      <button class="rd-btn" data-a="zin" title="Zoom in (Ctrl +)">+</button><button class="rd-btn" data-a="fit" id="rd-fit" title="Fit to width — the page keeps filling the space when you resize the notes (Ctrl 0)">Fit</button><button class="rd-btn" data-a="fitpage" id="rd-fitpage" title="Fit the whole page on screen (Ctrl Shift 0)">Page</button><span class="sep"></span>
-      <button class="rd-btn" data-a="find" title="Search this paper (Ctrl F)">🔍 Search</button>
+      <button class="rd-btn" data-a="zout" title="Zoom out (${MODK} −)">−</button><span id="rd-zoom" style="min-width:42px;text-align:center"></span>
+      <button class="rd-btn" data-a="zin" title="Zoom in (${MODK} +)">+</button><button class="rd-btn" data-a="fit" id="rd-fit" title="Fit to width — the page keeps filling the space when you resize the notes (${MODK} 0)">Fit</button><button class="rd-btn" data-a="fitpage" id="rd-fitpage" title="Fit the whole page on screen (${MODK} Shift 0)">Page</button><span class="sep"></span>
+      <button class="rd-btn" data-a="find" title="Search this paper (${MODK} F)">🔍 Search</button>
       <button class="rd-btn" data-a="collapse" id="rd-collapse" title="Collapse the paper around search results or highlights">⇕ Collapse</button>
       <button class="rd-btn" data-a="skim" id="rd-skimbtn" title="Skim: mark the sentences that matter by lens (question, finding, limitation…), then highlight the ones you want">⚡ Skim</button>
-      <span class="sep"></span><button class="rd-btn" data-a="undo" id="rd-undo" title="Undo (Ctrl Z)" disabled>↶</button><button class="rd-btn" data-a="redo" id="rd-redo" title="Redo (Ctrl Shift Z)" disabled>↷</button>
+      <span class="sep"></span><button class="rd-btn" data-a="undo" id="rd-undo" title="Undo (${MODK} Z)" disabled>↶</button><button class="rd-btn" data-a="redo" id="rd-redo" title="Redo (${MODK} Shift Z)" disabled>↷</button>
       <button class="rd-btn" data-a="tool-note" id="rd-t-note" title="Sticky note: then click on the page to drop a note">📝</button>
       <button class="rd-btn" data-a="tool-area" id="rd-t-area" title="Box a figure or table: copy it to your notes, highlight it, or ask AI about it">▭ Area</button><span class="sep"></span>
       <button class="rd-btn" data-a="dark" title="Dark pages">◐</button>

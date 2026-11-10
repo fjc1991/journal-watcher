@@ -311,6 +311,7 @@ def build(fake_url):
     shutil.copytree(os.path.join(SKILL, "scripts"), os.path.join(sk, "scripts"), ignore=shutil.ignore_patterns("__pycache__"))
     for f in ("journals.json", "interests.json", "library.json", "prompts.json"):
         shutil.copy(os.path.join(SKILL, "defaults", f), sk)
+    shutil.copytree(os.path.join(SKILL, "defaults"), os.path.join(sk, "defaults"))      # (what the app ships: Settings → Journals & interests compares your list with it)
     fake = {"type": "openai_compat", "base_url": fake_url, "key_env": "FAKE_KEY", "models": ["m1", "m2"]}
     feat = lambda: {"provider": "fake", "model": "m1"}  # noqa: E731
     web = {**fake, "web_body": {"plugins": [{"id": "web"}]}}
@@ -1127,7 +1128,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("…and even then the 'Models you use' box keeps room for a model name (the table scrolls before it collapses)", pm_w >= 140, str(pm_w))
             page.set_viewport_size({"width": 1400, "height": 950})
             check("settings: 'Screening new papers' has its own model row (the budget and the usage page now cover it), pointing at a provider that exists", page.locator("tr[data-f='screen']").count() == 1 and page.input_value("tr[data-f='screen'] .fm") != "" and page.input_value("tr[data-f='screen'] .fp") in api("/api/ai/config")["providers"] and "screen" in api("/api/ai/config")["features"])
-            check("Settings has ONE 'AI' tab with three pages under it (AI & privacy, Usage & cost, Prompts); they are not tabs of their own", page.locator(".st-tabs button").count() == 8 and [b.inner_text() for b in page.locator(".st-sub button").all()] == ["AI & privacy", "Usage & cost", "Prompts"] and page.inner_text(".st-tabs .on").strip() == "AI" and page.locator(".st-tabs button[data-t='usage']").count() == 0)
+            check("Settings has ONE 'AI' tab with three pages under it (AI & privacy, Usage & cost, Prompts); they are not tabs of their own", page.locator(".st-tabs button").count() == 9 and [b.inner_text() for b in page.locator(".st-sub button").all()] == ["AI & privacy", "Usage & cost", "Prompts"] and page.inner_text(".st-tabs .on").strip() == "AI" and page.locator(".st-tabs button[data-t='usage']").count() == 0)
             page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat"); page.click('.st-tabs button[data-t="reader"]'); page.wait_for_selector(".legend")
             check("the pages under AI show only on the AI tab", page.locator("#st-sub:not(.hide)").count() == 0)
             page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector(".st-stat")
@@ -2283,7 +2284,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.goto(base + "/"); page.wait_for_selector("#syncpill:not(.hide)", timeout=10000)
             check("the top bar says so, in words: 'Also open on Work Mac · 1 conflicting copy'", "Also open on Work Mac" in page.inner_text("#syncpill") and "1 conflicting copy" in page.inner_text("#syncpill"), page.inner_text("#syncpill"))
             page.click("#syncpill"); page.wait_for_selector("#sy-comps", timeout=10000)
-            check("pressing it opens Settings → Computers & sync", page.inner_text(".st-tabs .on").strip() == "Computers & sync" and page.locator(".st-tabs button").count() == 8)
+            check("pressing it opens Settings → Computers & sync", page.inner_text(".st-tabs .on").strip() == "Computers & sync" and page.locator(".st-tabs button").count() == 9)
             check("…which lists the other computers (open now / last seen), warns that both open at once can collide, and says what stays on this computer", "open now" in page.inner_text("#sy-comps") and "Old desk" in page.inner_text("#sy-comps") and "3 days ago" in page.inner_text("#sy-comps") and "Work Mac right now" in page.inner_text("#st-body") and "Kept on this computer only" in page.inner_text("#st-body"))
             check("…and shows the conflicted copy with what it is a copy of", "_index (Work Mac" in page.inner_text("#sy-conf") and "Papers/_index.csv" in page.inner_text("#sy-conf") and page.locator("[data-merge]").count() == 1)
             page.fill("#sy-name", "Home laptop"); page.click("#sy-save"); page.wait_for_function("document.querySelector('#toast') && document.querySelector('#toast').textContent === 'Name saved.'", timeout=10000)          # (the page's own confirmation: the input already held the new name after fill(), so waiting on its value never waited for the save)
@@ -2593,7 +2594,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             for w_ in (1000, 1200, 1500, 2000):
                 page.set_viewport_size({"width": w_, "height": 900}); page.wait_for_timeout(150); rows_[w_] = page.evaluate(JS_TABROW)
             page.set_viewport_size({"width": 1400, "height": 950})
-            check("the eight Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 8 and r == 1 for n, r in rows_.values()), str(rows_))
+            check("the nine Settings tabs are always in one row, aligned (a window too narrow for them scrolls the row; no tab sits alone on a second line)", all(n == 9 and r == 1 for n, r in rows_.values()), str(rows_))
             page.keyboard.press("Control+k"); page.wait_for_selector("#pal:not(.hide)"); page.keyboard.press("Escape")
             check("Esc closes the palette", page.locator("#pal.hide").count() == 1)
             page.click("#settingsbtn"); page.wait_for_selector("#settings.hide", state="attached")
@@ -2751,7 +2752,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             except Exception:  # noqa: BLE001
                 print("DEBUG welcome:", page.evaluate("JSON.stringify({seen: localStorage.getItem('jw-welcome'), wl: sessionStorage.getItem('jw-wl-test'), ready: document.readyState, open: [...document.querySelectorAll('dialog[open]')].map(d => d.className), welcome: typeof window.Welcome})"), "|", errors[:3]); raise
             check("on a first start the guide opens by itself at Welcome, and says where your data lives and that nothing goes to a server of ours", "Welcome to Journal Watcher" in page.inner_text("dialog.wl h2") and TMP in page.inner_text("dialog.wl") and "no server" not in page.inner_text("dialog.wl").lower() and "there is none" in page.inner_text("dialog.wl"))
-            check("it shows five steps", page.locator("dialog.wl .wl-dots li").count() == 5)
+            check("it shows six steps", page.locator("dialog.wl .wl-dots li").count() == 6)
             page.click('dialog.wl [data-wl="next"]')
             t_ = page.inner_text("dialog.wl")
             check("step 2 explains what an API key is, what it costs, and how to get one", "API key" in t_ and "secret code" in t_ and "You pay the service directly" in t_ and "Create key" in t_)
@@ -2772,12 +2773,17 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("step 3 explains the publisher sign-ins: you type your password into their page, the app never sees it, the session stays on this Mac, any university works, and a green tick shows when it worked", "never sees or stores your password" in t_ and "on this Mac" in t_ and "150 MB" in t_ and "Any" in t_ and "green tick" in t_ and "Example University" not in page.inner_text("dialog.wl .wl-two > div:first-child"))
             check("…with a button each for your library, INFORMS, AIS and other publishers (not pressed here: they open a real browser), and no university built in", page.locator("dialog.wl [data-si]").count() == 4 and {b.get_attribute("data-si") for b in page.locator("dialog.wl [data-si]").all()} == {"library", "informs", "ais", "publishers"})
             page.click('dialog.wl [data-wl="next"]')
-            check("step 4 is a map: Watch, Library, Folders, Review, Settings and Search", all(x in page.inner_text("dialog.wl") for x in ("Watch", "Library", "Folders", "Review", "Settings", "Search")))
+            t4_ = page.inner_text("dialog.wl")
+            check("step 4 is about your interests: the topics the app looks for now (the three examples until you change them), how many journals the weekly check reads and how many more are in your list switched off, and one button to Settings → Journals & interests",
+                  "Your interests" in page.inner_text("dialog.wl h2") and all(x in t_4 for t_4 in [t4_] for x in ("GenAI", "Platform Economics", "Decision Support Systems", "14 journals are read by the weekly check", "24 more are in your list, switched off", "AIS basket of eleven", "UTD 24"))
+                  and page.locator('dialog.wl [data-si="interests"]').count() == 1, t4_[:600])
+            page.click('dialog.wl [data-wl="next"]')
+            check("step 5 is a map: Watch, Library, Folders, Review, Settings and Search", all(x in page.inner_text("dialog.wl") for x in ("Watch", "Library", "Folders", "Review", "Settings", "Search")))
             page.click('dialog.wl [data-wl="next"]')
             check("the last step lists what is set up (the key just saved) and what is not", "REEF" not in page.inner_text("dialog.wl") and "AI key:" in page.inner_text("dialog.wl") and "saved for" in page.inner_text("dialog.wl") and "Sign-ins:" in page.inner_text("dialog.wl"))
             page.click('dialog.wl [data-wl="back"]'); page.click('dialog.wl [data-go="0"]')
             check("Back and the step names move around freely", "Welcome to Journal Watcher" in page.inner_text("dialog.wl h2"))
-            page.click('dialog.wl [data-go="4"]'); page.click('dialog.wl [data-wl="finish"]'); page.wait_for_selector("dialog.wl:not([open])", state="attached")
+            page.click('dialog.wl [data-go="5"]'); page.click('dialog.wl [data-wl="finish"]'); page.wait_for_selector("dialog.wl:not([open])", state="attached")
             check("finishing remembers it", page.evaluate("localStorage.getItem('jw-welcome')") == "done")
             page.reload(); page.wait_for_selector("#lf-q, #libitem", state="attached"); page.wait_for_timeout(2200)
             check("…so the guide does not open by itself again", page.locator("dialog.wl[open]").count() == 0)
@@ -3097,7 +3103,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             tiles_w = page.evaluate("(() => { const old = RUN; RUN = {kind: 'weekly', params: {}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
             tiles_s = page.evaluate("(() => { const old = RUN; RUN = {kind: 'search', params: {journals: ['SSRN']}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
             check("a weekly check shows no SSRN tile (it is never read there, so it would claim 'No new papers'), while an archive search that chose SSRN still shows it",
-                  [j for j in cfg_s if j["abbr"] == "SSRN"][0]["weekly"] is False and all(j["weekly"] is True for j in cfg_s if j["abbr"] != "SSRN") and "SSRN" not in tiles_w and len(tiles_w) == len(cfg_s) - 1 and tiles_s == ["SSRN"], str((tiles_w, tiles_s)))
+                  [j for j in cfg_s if j["abbr"] == "SSRN"][0]["weekly"] is False and all(j["weekly"] is True for j in cfg_s[:14]) and "SSRN" not in tiles_w and tiles_w == [j["abbr"] for j in cfg_s if j["weekly"]] and len(tiles_w) == 14 and tiles_s == ["SSRN"], str((tiles_w, tiles_s)))
 
             print("Check my PDFs: a PDF that is not the paper it is filed under can be found, kept or taken out")
             import pymupdf as _pmu
@@ -3726,6 +3732,114 @@ pl.FEED_HOST_PAUSE = 0                                                          
             has_rm = page.locator('tr[data-p="fake"] [data-keyremove]').count() == 1
             check("a provider with a saved key has 'Remove' next to 'Change'", has_rm)
             page.evaluate("window.Settings && Settings.close()")
+
+            print("journals and interests: the Watch page for many journals, the Settings page, unsaved changes, search and shortcuts")
+            jfile = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "journals.json")
+            jall_ = json.load(open(jfile)); json.dump(dict(jall_, journals=jall_["journals"][:14]), open(jfile, "w"))          # a list from before the two lists were shipped: the fourteen
+            page.goto("about:blank"); page.goto(base + "/#/watch"); page.wait_for_selector("#weeklybtn", state="attached"); page.click('.tabs button[data-tab="weekly"]')
+            page.wait_for_function("document.querySelector('#weekspend') && document.querySelector('#weekspend').textContent.includes('This month')", timeout=10000)
+            we_ = page.inner_text("#weekest"); cfg_ = api("/api/config")
+            check("under 'Check for new papers': how many journals, about how many new papers a week, what screening them costs at most, and this month's spending (the model named is the one chosen for screening)",
+                  "14 journals" in we_ and "up to about" in we_ and "new papers a week" in we_ and ("at most about $" in we_ or "cost not known" in we_) and "This month: $" in we_
+                  and page.inner_text("#weekmodel") == cfg_["screen_model"] and "Sonnet 5.5" not in page.inner_text("#pane-weekly").replace(cfg_["screen_model"], ""), we_)
+            page.click("#weekjournals"); page.wait_for_selector("#wl-journals tr[data-j]", timeout=10000)
+            check("its link opens Settings → Journals & interests, which is the ninth tab", page.inner_text(".st-tabs .on").strip() == "Journals & interests" and page.locator("#wl-journals tr[data-j]").count() == 14, str((page.inner_text(".st-tabs .on"), page.locator("#wl-journals tr[data-j]").count())))
+            check("the page says which journals of the AIS basket and the UTD 24 your list lacks, and offers to add them switched off", "24 journals of the AIS basket and the UTD 24 are not in your list" in page.inner_text("#wl-missing") and page.locator("#wl-add").count() == 1, page.inner_text("#wl-missing"))
+            mine_ = json.load(open(jfile))["journals"]
+            page.click("#wl-add"); page.wait_for_function("document.querySelectorAll('#wl-journals tr[data-j]').length === 38", timeout=10000)
+            now_ = json.load(open(jfile))["journals"]
+            check("adding them changes none of your entries and adds the 24 switched off (no weekly check, not ticked for a search)", now_[:14] == mine_ and len(now_) == 38 and all(j["weekly"] is False and j["default_off"] is True for j in now_[14:])
+                  and page.locator("#wl-missing").count() == 0 and not page.is_checked('#wl-journals tr[data-j="JF"] [data-wlsw="weekly"]') and page.is_checked('#wl-journals tr[data-j="MISQ"] [data-wlsw="weekly"]'))
+            heads_ = [h.inner_text() for h in page.locator("#wl-journals .wl-group th:first-child").all()]
+            check("the journals are listed under their list: AIS basket of eleven, UTD 24, other", len(heads_) == 3 and heads_[0].startswith("AIS basket of eleven") and "6 of 11 in the weekly check" in heads_[0] and heads_[1].startswith("UTD 24") and "5 of 24 in the weekly check · 2 of them listed above" in heads_[1] and heads_[2].startswith("Other journals"), str(heads_))
+            page.check('#wl-journals tr[data-j="JF"] [data-wlsw="weekly"]'); page.wait_for_function("document.querySelector('#wl-journals tr[data-j=\"JF\"] [data-wlsw=weekly]').checked && /15 are read/.test(document.querySelector('#st-body').textContent)", timeout=10000)
+            jf_ = next(j for j in json.load(open(jfile))["journals"] if j["abbr"] == "JF")
+            check("a journal's switch is saved as you flip it (only that switch)", "weekly" not in jf_ and jf_["default_off"] is True and [j for j in json.load(open(jfile))["journals"] if j["abbr"] != "JF"] == [j for j in now_ if j["abbr"] != "JF"])
+            n_dlg = len(dialogs)
+            page.click('.st-tabs button[data-t="look"]'); page.wait_for_timeout(300)
+            check("leaving a page where nothing was typed asks nothing (a switch that saved itself is not an unsaved change)", len(dialogs) == n_dlg and page.inner_text(".st-tabs .on").strip() == "Appearance")
+            page.click('.st-tabs button[data-t="watch"]'); page.wait_for_selector("#wl-topics .wl-topic")
+            page.fill("#wl-topics .wl-topic >> nth=0 >> .wl-label", "Generative AI at work")
+            page.click('.st-tabs button[data-t="look"]'); page.wait_for_timeout(300)
+            check("leaving a page with something typed and not saved asks first", len(dialogs) == n_dlg + 1 and "not saved" in dialogs[-1], str(dialogs[-2:]))
+            page.click('.st-tabs button[data-t="watch"]'); page.wait_for_selector("#wl-topics .wl-topic")
+            page.fill("#wl-topics .wl-topic >> nth=0 >> .wl-label", "Typed, not saved yet")
+            page.check('#wl-journals tr[data-j="RFS"] [data-wlsw="search"]'); page.wait_for_function("document.querySelector('#wl-journals tr[data-j=\"RFS\"] [data-wlsw=search]').checked", timeout=10000); page.wait_for_timeout(400)
+            check("flipping a journal's switch does not throw away what you typed in a topic and have not saved", page.input_value("#wl-topics .wl-topic >> nth=0 >> .wl-label") == "Typed, not saved yet")
+            page.fill("#wl-topics .wl-topic >> nth=0 >> .wl-label", ""); page.click("#st-save"); page.wait_for_selector("#st-msg .err-inline, #st-msg:not(:empty)", timeout=10000)
+            check("a topic without a name is refused in words, and nothing is written", "no name" in page.inner_text("#st-msg") and cfg_["topics"] == api("/api/config")["topics"], page.inner_text("#st-msg"))
+            page.fill("#wl-topics .wl-topic >> nth=0 >> .wl-label", "Generative AI at work")
+            page.click("#wl-addt"); page.fill("#wl-topics .wl-topic >> nth=-1 >> .wl-label", "Auction design"); page.fill("#wl-topics .wl-topic >> nth=-1 >> .wl-terms", "auction, reserve price\nbidding")
+            page.click("#st-save"); page.wait_for_function("/Saved/.test(document.querySelector('#st-msg').textContent)", timeout=10000)
+            it_ = json.load(open(os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "interests.json")))
+            check("your topics are saved: a renamed topic keeps its inner name (saved verdicts know it by that), a new one gets its words", it_["topics"][0] == dict(it_["topics"][0], name="genai", label="Generative AI at work")
+                  and it_["topics"][-1] == {"name": "auction_design", "label": "Auction design", "terms": ["auction", "reserve price", "bidding"]} and api("/api/config")["topics"][-1] == "Auction design", str(it_["topics"][-1]))
+            n_dlg = len(dialogs)
+            page.evaluate("window.__sameDocument = true")
+            page.click("#st-back"); page.wait_for_selector("#weeklybtn", state="attached"); page.wait_for_function("document.querySelectorAll('#journalchips .chip').length > 30", timeout=15000)
+            check("after a save nothing is asked on leaving, and the Watch page draws its journals and topics again without loading the page anew", len(dialogs) == n_dlg and page.evaluate("window.__sameDocument === true") and "Auction design" in page.inner_text("#topicchips") and page.locator("#journalchips .chip").count() == 39)
+            g_ = page.evaluate("""[...document.querySelectorAll('#journalchips .chipgroup')].map(g => [g.querySelector('.chiphead') ? g.querySelector('.chiphead').textContent.split(' (')[0] : '', g.querySelectorAll('.chip').length, g.querySelectorAll('.chip.on').length])""")
+            check("the journals to search are grouped by list, each with its own all / none; a journal that is off in Settings does not start ticked", [x[0] for x in g_] == ["AIS basket of eleven", "UTD 24", "Other"] and g_[0][1] == 11 and g_[1][1] == 22 and g_[0][2] == 6 and sum(x[1] for x in g_) == 39, str(g_))
+            page.click('.tabs button[data-tab="search"]'); page.wait_for_selector("#jall", state="visible")
+            page.click("#jall"); on1_ = page.locator("#journalchips .chip.on").count()
+            page.click('#journalchips .chipgroup >> nth=1 >> .chiphead a[data-g="1"]'); on2_ = page.locator("#journalchips .chipgroup >> nth=1 >> .chip.on").count()
+            check("'all' above the lists ticks only the journals you have on; a list's own 'all' ticks every journal of that list", on1_ < 20 and on2_ == 22 and "on" in page.get_attribute('#journalchips .chip[data-abbr="JFE"]', "class"), str((on1_, on2_)))
+            page.focus('#journalchips .chip[data-abbr="JFE"]'); page.keyboard.press("Space")
+            check("a journal chip works from the keyboard: Tab reaches it, Space flips it, and it says what it is", "on" not in page.get_attribute('#journalchips .chip[data-abbr="JFE"]', "class").split() and page.get_attribute('#journalchips .chip[data-abbr="JFE"]', "aria-checked") == "false"
+                  and page.get_attribute('#journalchips .chip[data-abbr="JFE"]', "role") == "checkbox" and page.get_attribute('#journalchips .chip[data-abbr="JFE"]', "aria-label") == "Journal of Financial Economics")
+            col_ = page.evaluate("""[...document.querySelectorAll('#journalchips .chip')].length && (() => { const a = jcol('JFE'), b = jcol('JFE'), c = jcol('RFS'), m = jcol('MISQ'); return [a === b, a !== c, a.startsWith('hsl('), m]; })()""")
+            check("a journal without a colour of its own gets one worked out from its name, always the same; the first fourteen keep theirs", col_ == [True, True, True, "#2f5d8a"], str(col_))
+            page.evaluate("fail(new Error('The download could not start: the disk is full.'))"); page.wait_for_timeout(4600)
+            check("an error stays on screen until you close it (it used to be gone after four seconds)", page.is_visible("#toast") and "the disk is full" in page.inner_text("#toast") and page.locator("#toast .toast-x").count() == 1)
+            page.click("#toast .toast-x")
+            check("…and its × closes it; an ordinary note still goes by itself", not page.is_visible("#toast") and page.evaluate("(toast('Saved.'), !document.querySelector('#toast .toast-x') && !document.querySelector('#toast').classList.contains('stay'))"))
+            page.click("body"); page.keyboard.press("?"); page.wait_for_selector("#keys-dlg[open]", timeout=5000)
+            check("? opens the list of keyboard shortcuts (search, the reader's keys, the Watch page's)", all(x.lower() in page.inner_text("#keys-dlg").lower() for x in ("Keyboard shortcuts", "In the reader", "Highlight the selected text", "Tick or untick a journal")), page.inner_text("#keys-dlg")[:300])
+            page.click("#keys-dlg [data-x]"); page.wait_for_selector("#keys-dlg:not([open])", state="attached")
+            found_ = {}
+            for q_ in ("backup", "university", "update", "books", "shortcuts", "interests", "check for new"):
+                page.keyboard.press("Control+k"); page.keyboard.type(q_); page.wait_for_timeout(350); found_[q_] = page.inner_text("#pal .pal-it >> nth=0").replace("\n", " ") + " | " + " ".join(x.inner_text().replace("\n", " ") for x in page.locator("#pal .pal-it").all()[:6]); page.keyboard.press("Escape")
+            check("Search finds the Settings pages it used to miss, Library › Books, the shortcuts and the weekly check", "AI files & backup" in found_["backup"] and "Library access" in found_["university"] and "About & updates" in found_["update"] and "Books" in found_["books"]
+                  and "Keyboard shortcuts" in found_["shortcuts"] and "Journals & interests" in found_["interests"] and "Check for new papers" in found_["check for new"], str(found_))
+            page.goto(base + "/#/library/books"); page.wait_for_timeout(600); page.reload(); page.wait_for_selector(".libtabs button", timeout=10000); page.wait_for_timeout(400)
+            check("reloading on Library › Books stays on Books", "books" in (page.get_attribute(".libtabs button.on", "data-tab") or ""), page.get_attribute(".libtabs button.on", "data-tab"))
+            # unsaved changes on the other pages with a Save button, and the ways out of Settings that used to skip the question
+            st_on = lambda: page.inner_text(".st-tabs .on").strip()          # noqa: E731
+            page.evaluate("Settings.open('library')"); page.wait_for_selector("#la-name", timeout=10000)
+            page.fill("#la-find", "library.example.edu"); n_dlg = len(dialogs)
+            page.click('.st-tabs button[data-t="look"]'); page.wait_for_timeout(300)
+            check("the box that only looks your library up is not an unsaved change", len(dialogs) == n_dlg and st_on() == "Appearance", str(dialogs[n_dlg:]))
+            page.click('.st-tabs button[data-t="library"]'); page.wait_for_selector("#la-name", timeout=10000)
+            page.fill("#la-name", "Typed library name"); n_dlg = len(dialogs); refuse.append(1)
+            page.click('.st-tabs button[data-t="look"]'); page.wait_for_timeout(300)
+            check("Library access (its own Save button): leaving with something typed asks first, and Cancel keeps the page and what you typed",
+                  len(dialogs) == n_dlg + 1 and "not saved" in dialogs[-1] and st_on() == "Library access" and page.input_value("#la-name") == "Typed library name", str((dialogs[n_dlg:], st_on())))
+            n_dlg = len(dialogs); page.evaluate("Settings.open('library')"); page.wait_for_timeout(500)
+            check("asking for the Settings page you are already on does not draw it again over what you typed (and asks nothing)", len(dialogs) == n_dlg and page.input_value("#la-name") == "Typed library name", str(dialogs[n_dlg:]))
+            refuse.append(1); page.keyboard.press("Control+k"); page.keyboard.type("books"); page.wait_for_timeout(350); pal0_ = page.inner_text("#pal .pal-it >> nth=0"); page.keyboard.press("Enter"); page.wait_for_timeout(700)
+            check("going somewhere else from Search asks too, and Cancel stays in Settings with what you typed", "Books" in pal0_ and len(dialogs) == n_dlg + 1 and "not saved" in dialogs[-1] and page.is_visible("#la-name")
+                  and page.input_value("#la-name") == "Typed library name" and page.is_visible("#st-body") and st_on() == "Library access", str((pal0_, dialogs[n_dlg:], st_on())))
+            page.click('.st-tabs button[data-t="sources"]'); page.wait_for_selector("#ps-up", timeout=10000)          # (the question is answered with OK: the typed name is given up)
+            page.fill("#ps-up", "typed@example.edu"); n_dlg = len(dialogs)
+            page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector("#mn-m", timeout=10000)
+            check("Paper sources asks as well", len(dialogs) == n_dlg + 1 and "not saved" in dialogs[-1], str(dialogs[n_dlg:]))
+            page.fill("#mn-m", "a-model-typed-and-not-applied"); n_dlg = len(dialogs)
+            page.click('.st-tabs button[data-t="look"]'); page.wait_for_timeout(300)
+            check("a model typed under 'Use one for everything' and not saved is asked about (it used to be dropped without a word)", len(dialogs) == n_dlg + 1 and "not saved" in dialogs[-1], str(dialogs[n_dlg:]))
+            page.click('.st-tabs button[data-t="about"]'); page.wait_for_selector("#ab-auto", timeout=10000)
+            auto_ = page.is_checked("#ab-auto"); page.click("#ab-auto"); page.wait_for_function("/Saved/.test(document.querySelector('#ab-msg').textContent)", timeout=10000); n_dlg = len(dialogs)
+            page.click('.st-tabs button[data-t="look"]'); page.wait_for_timeout(300)
+            check("a box that saves itself (look for updates by itself) is not an unsaved change", len(dialogs) == n_dlg and st_on() == "Appearance", str(dialogs[n_dlg:]))
+            page.click('.st-tabs button[data-t="about"]'); page.wait_for_selector("#ab-auto", timeout=10000)
+            if page.is_checked("#ab-auto") != auto_:
+                page.click("#ab-auto"); page.wait_for_function("/Saved/.test(document.querySelector('#ab-msg').textContent)", timeout=10000)
+            page.click("#st-back"); page.wait_for_selector("#weeklybtn", state="attached")
+            abs_ = page.evaluate("[noAbstract(['JMIS', 'JFE', 'MISQ', 'NBER']), maybeNoAbstract(['JMIS', 'JFE', 'MISQ', 'NBER', 'RFS'])]")
+            page.evaluate("(() => { window.__key = CFG.openalex_key; CFG.openalex_key = ''; document.querySelectorAll('#journalchips .chip').forEach(c => c.classList.toggle('on', ['JMIS', 'JFE'].includes(c.dataset.abbr))); updateEst(); CFG.openalex_key = window.__key; })()")
+            est_ = page.inner_text("#est")
+            check("only the journals whose feed has no abstracts are said to need the OpenAlex key; of a journal read through Crossref it is said that some papers come without one",
+                  abs_ == [["JMIS", "NBER"], ["JFE", "RFS"]] and "The abstracts of JMIS need a free OpenAlex key" in est_ and "Some papers of JFE come without an abstract" in est_, str((abs_, est_)))
+            json.dump(jall_, open(jfile, "w"))          # (the later sections see the shipped list)
 
             print("exports and the library layout")
             bib = urllib.request.urlopen(base + "/api/export/bib?file=" + urllib.request.quote(rows[0][3])).read().decode()
