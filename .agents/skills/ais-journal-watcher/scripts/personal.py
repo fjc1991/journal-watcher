@@ -204,7 +204,9 @@ def _rounded(arr):
 
 
 def vectors(texts):
-    """float32 (n, d) array of normalised vectors (a copy: the caller may change it), with the cache doing most of the work."""
+    """(n, d) array of normalised vectors (a copy: the caller may change it), with the cache doing most of the work. They are kept as float32 and handed out
+    as float64: sums and products of float32 come out a hair differently on different computers (each has its own fast arithmetic library), enough to move a
+    rounded fit or a suggested folder at a threshold; in float64 the difference is far below anything that is rounded."""
     import numpy as np
     with _lock:
         st = _mem.ready()
@@ -221,7 +223,7 @@ def vectors(texts):
             return np.zeros((0, 1), dtype="float32")
         idx = [st.pos[k] for k in keys]
         st.hit[idx] = True
-        return st.mat[idx]
+        return st.mat[idx].astype("float64")
 
 
 def row_text(r):
