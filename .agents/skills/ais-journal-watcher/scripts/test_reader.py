@@ -688,8 +688,9 @@ c, raw = get("/api/config"); sv.config = keep_cfg
 assert c == 500 and "did not answer" in json.loads(raw)["error"], (c, raw)
 # the export folder is worked out in one place: "~" is the home folder, a path that does not start at the root is taken from the home folder
 keep_gs, keep_home = sv.prefs.get_settings, os.environ.get("HOME")
-import tempfile as _tf
+import tempfile as _tf, shutil as _sh
 home_ = _tf.mkdtemp(prefix="jw-home-"); os.environ["HOME"] = home_
+had_tilde_ = os.path.exists("~")                    # (a folder literally named "~" where the suite was started: what the old code made)
 try:
     for typed, want in (("~/JW out", os.path.join(home_, "JW out")), ("Documents/x", os.path.join(home_, "Documents", "x")), ("", ""), ("  /tmp/abs/ ", "/tmp/abs")):
         sv.prefs.get_settings = lambda t=typed: {"export_dir": t}
@@ -703,6 +704,9 @@ finally:
         os.environ.pop("HOME", None)
     else:
         os.environ["HOME"] = keep_home
+    _sh.rmtree(home_, ignore_errors=True)
+    if not had_tilde_:                              # (a failing run leaves nothing behind in the folder it was started from)
+        _sh.rmtree("~", ignore_errors=True)
 srv.shutdown()
 print("ALL OK")
 '''
