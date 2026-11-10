@@ -106,7 +106,7 @@ class Fake(BaseHTTPRequestHandler):
                     if len(w) > 3:
                         v[zlib.crc32(w.encode()) % 512] += 1
                 rows.append({"index": i, "embedding": v})
-            data = json.dumps({"data": rows}).encode()
+            data = json.dumps({"data": rows, **({"usage": {"prompt_tokens": Fake.embed_tokens, "total_tokens": Fake.embed_tokens}} if getattr(Fake, "embed_tokens", None) else {})}).encode()     # (most providers say how many tokens an embedding call read; a test sets Fake.embed_tokens for that)
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         fail = getattr(Fake, "http_error", None)
         hit = fail(body) if fail else None           # (status, message): the provider refuses the request, as OpenRouter does for a model without the parameters asked for
@@ -126,6 +126,10 @@ class Fake(BaseHTTPRequestHandler):
             if k == 0 and getattr(Fake, "web_urls", None):      # web-search citations, as OpenRouter / OpenAI send them
                 delta["annotations"] = [{"url_citation": {"url": u, "title": "page"}} for u in Fake.web_urls]
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": delta}]}) + "\n\n").encode())
+        fin = getattr(Fake, "ending", None)           # how the answer ended, in a last piece with an empty delta ("length": it hit the length limit); a function of the request, or the word itself
+        fin = fin(body) if callable(fin) else fin
+        if fin:
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": fin}]}) + "\n\n").encode())
         if "stream_options" in body:
             self.wfile.write(("data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 50,
                               "prompt_tokens_details": {"cached_tokens": 200}}}) + "\n\n").encode())
@@ -965,7 +969,7 @@ def main():
                 def get_final_message(self): return _M()
             ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _S())))
             real_to = ai._to_anthropic
-            ai._to_anthropic = lambda m: (ai._clients.clear(), real_to(m))[1]                                                           # the cache is cleared while the request is being prepared
+            ai._to_anthropic = lambda m, *a: (ai._clients.clear(), real_to(m, *a))[1]                                                           # the cache is cleared while the request is being prepared
             c2 = json.loads(json.dumps(c)); c2["providers"]["anth"] = {"type": "anthropic", "key_env": "OR_TEST_KEY", "models": ["m1"]}; write_cfg(c2)
             try:
                 assert ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "anth", "model": "m1"}).text == "ok"
@@ -1023,6 +1027,110 @@ def main():
         full = list(ask.stream(pdf, "Summarise.", "full")); sent = SEEN[-1][1]["messages"][-1]["content"]
         assert sent.count("[") >= len(bs) and full[-1]["type"] == "done"        # every passage is sent in whole-paper mode
     check("ask pipeline: passages numbered, cited, streamed", t_ask)
+
+    def t_ask_estimate():
+        """What the next question costs is known before it is asked, in both modes; it follows the chapter and the conversation, and sends nothing."""
+        old_rows = ai._rows; ai._rows = lambda: iter(())            # (the usage record as it is on a new computer)
+        try:
+            n0 = len(SEEN)
+            e = ask.estimate(pdf)
+            kept = [b for b in bs if b.get("kind", "body") != "ref"]; body = [b for b in kept if b.get("kind", "body") == "body"]
+            assert e["provider"] == "fake" and e["model"] == "m1" and e["out_tokens"] == ask.EST_OUT_TOKENS == 700 and e["out_basis"] == "default", e
+            assert e["rag"]["passages"] == min(12, len(body)) and e["full"]["passages"] == len(kept) and "fallback" not in e["full"] and "next" not in e["full"] and "next" not in e["rag"], e
+            assert e["full"]["chars"] > e["rag"]["chars"] and e["full"]["cost"] > e["rag"]["cost"] > 0, e
+            assert e["rag"]["cost"] == ai.estimate("ask", e["rag"]["chars"], 700) and e["full"]["cost"] == ai.estimate("ask", e["full"]["chars"], 700)
+            # one chapter is less than the whole; the conversation adds its length, up to what the server lets through
+            c = ask.estimate(pdf, pages=(2, 3))
+            assert c["full"]["passages"] == len([b for b in kept if 1 <= b["page"] <= 2]) < e["full"]["passages"] and c["full"]["cost"] < e["full"]["cost"], c
+            h = ask.estimate(pdf, history_chars=9000)
+            assert h["rag"]["chars"] == e["rag"]["chars"] + 9000 and h["full"]["chars"] == e["full"]["chars"] + 9000 and h["rag"]["cost"] > e["rag"]["cost"], h
+            assert ask.estimate(pdf, history_chars=10 ** 9)["rag"]["chars"] == e["rag"]["chars"] + ask.HISTORY_MAX == e["rag"]["chars"] + 36000
+            assert ask.estimate(pdf, history_chars=-5)["rag"]["chars"] == e["rag"]["chars"]
+            # a paper too long to read whole: the estimate is for the 40 closest passages, and says so
+            lim = ask.FULL_LIMIT; ask.FULL_LIMIT = 100
+            try:
+                f = ask.estimate(pdf)["full"]; assert f.get("fallback") is True and f["passages"] == min(40, len(body)) and f["cost"] > 0, f
+            finally:
+                ask.FULL_LIMIT = lim
+            # pages with nothing on them: nothing to read, so no figure (never "free")
+            z = ask.estimate(pdf, pages=(40, 41)); assert z["full"]["passages"] == 0 and z["full"]["cost"] is None and z["rag"]["cost"] is None, z
+            assert len(SEEN) == n0, "an estimate asks no provider anything (no chat, no embedding)"
+            # the whole-paper figure is what is really sent, within the allowance for the question
+            list(ask.stream(pdf, "Summarise.", "full", fresh=True)); sent = sum(len(x["content"]) for x in SEEN[-1][1]["messages"])
+            assert sent <= e["full"]["chars"] <= sent + ask.EST_QUESTION + 2 * len(kept), (sent, e["full"]["chars"])
+            # the length of an answer: 700 tokens until five answers are on record, then their mean (saved answers shown again, cancelled ones and other features left out)
+            row = lambda out, **kw: {"feature": "ask", "provider": "fake", "model": "m1", "in": 1000, "out": out, "cost": 0.01, **kw}  # noqa: E731
+            four = [row(100), row(200), row(300), row(400), row(5000, cached=True), row(5000, cancelled=True), row(5000, feature="explain"), row(0)]
+            ai._rows = lambda: iter(four)
+            assert ask.estimate(pdf)["out_basis"] == "default" and ask.estimate(pdf)["rag"]["cost"] == e["rag"]["cost"]
+            ai._rows = lambda: iter(four + [row(1000)])
+            m = ask.estimate(pdf)
+            assert m["out_tokens"] == 400 and m["out_basis"] == "history" and m["rag"]["cost"] == ai.estimate("ask", e["rag"]["chars"], 400) < e["rag"]["cost"], m
+            ai._rows = lambda: iter(())
+            # a model without a price: no figure, never 0
+            write_cfg({**CFG, "prices": {}})
+            assert ask.estimate(pdf)["rag"]["cost"] is None and ask.estimate(pdf)["full"]["cost"] is None
+            # "keep the paper ready" with Claude: the first whole-paper question pays for keeping the paper, a further one for reading it back
+            claude = {**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["mA"]}}, "features": {"ask": {"provider": "anth", "model": "mA"}},
+                      "prices": {"mA": {"in": 3.0, "out": 15.0, "cache_write": 3.75, "cache_read": 0.3}}}
+            write_cfg({**claude, "ask": {"keep_paper": False}})
+            off = ask.estimate(pdf, history_chars=660)
+            assert "next" not in off["full"] and "next" not in off["rag"], off
+            write_cfg({**claude, "ask": {"keep_paper": True}})
+            short = ask.estimate(pdf, history_chars=660)
+            assert ask.KEEP_MIN_TOKENS == 4096 and int((short["full"]["chars"] - 960) / 3.3) < 4096, short
+            assert "next" not in short["full"] and short["full"]["cost"] == off["full"]["cost"], "a text too short to be kept ready has one figure: every question pays it at the input price"
+            keep_min = ask.KEEP_MIN_TOKENS; ask.KEEP_MIN_TOKENS = int((short["full"]["chars"] - 960) / 3.3)      # (exactly long enough)
+            on = ask.estimate(pdf, history_chars=660)
+            ask.KEEP_MIN_TOKENS += 1
+            assert "next" not in ask.estimate(pdf, history_chars=660)["full"], "one token short of the limit"
+            ask.KEEP_MIN_TOKENS -= 1
+            paper, rest = on["full"]["chars"] - 300 - 660, 300 + 660
+            assert abs(on["full"]["cost"] - (int(paper / 3.3) * 3.75 + int(rest / 3.3) * 3.0 + 700 * 15.0) / 1e6) < 1e-12, on
+            assert abs(on["full"]["next"] - (int(paper / 3.3) * 0.3 + int(rest / 3.3) * 3.0 + 700 * 15.0) / 1e6) < 1e-12, on
+            assert on["full"]["cost"] > off["full"]["cost"] > on["full"]["next"] > 0 and "next" not in on["rag"] and on["rag"]["cost"] == off["rag"]["cost"], (on, off)
+            ask.FULL_LIMIT = 100
+            try:
+                assert "next" not in ask.estimate(pdf)["full"], "a paper too long to read whole is not kept ready"
+            finally:
+                ask.FULL_LIMIT = lim
+            write_cfg({**claude, "ask": {"keep_paper": True}, "prices": {"mA": {"in": 3.0, "out": 15.0}}})      # a price you typed without the two columns: a quarter more, and a tenth
+            g = ask.estimate(pdf, history_chars=660)["full"]
+            assert abs(g["cost"] - on["full"]["cost"]) < 1e-12 and abs(g["next"] - on["full"]["next"]) < 1e-12, g
+            write_cfg({**CFG, "ask": {"keep_paper": True}})
+            assert "next" not in ask.estimate(pdf)["full"], "only Claude is asked to keep the paper"
+        finally:
+            ai._rows = old_rows; write_cfg(CFG); ask.KEEP_MIN_TOKENS = 4096
+    check("ask estimate: both modes priced before asking, chapter and conversation counted, answer length from the usage record, kept-ready paper as two figures, nothing sent", t_ask_estimate)
+
+    def t_summary_estimate():
+        """The reader's Generate button has its price first: the paper as the provider will read it, and free when the answer is already saved."""
+        import prefs as prefs_
+        tids = [t["id"] for t in prefs_.get_prompts()["summaries"]][:2]; meta = {"title": "T", "journal": "J", "doi": ""}
+        try:
+            n0 = len(SEEN)
+            e = ask.summary_estimate(pdf, meta, tids[0])
+            prompt = ask._summary_messages(pdf, meta, tids[0])[0]["content"][1]["text"]
+            assert len(SEEN) == n0 and e["provider"] == "fake" and e["model"] == "m1" and e["saved"] is False, e
+            assert e["chars"] == len(ai._pdf_text(pdf)) + len(prompt) and len(prompt) > 100 and e["cost"] == ai.estimate("summarize", e["chars"], 1500) > 0, e
+            # once it has been generated, the same paper, template and model is a saved answer: Generate is free, and the estimate knows (another template is not)
+            assert list(ask.summary_stream(pdf, meta, tids[0]))[-1]["type"] == "done"
+            n1 = len(SEEN)
+            assert ask.summary_estimate(pdf, meta, tids[0])["saved"] is True and ask.summary_estimate(pdf, meta, tids[1])["saved"] is False and len(SEEN) == n1
+            assert ask.summary_estimate(pdf, {**meta, "title": "Another"}, tids[0])["saved"] is False
+            # Claude is sent the PDF itself: the text of every page and each page as an image (this paper's own pages, from the index)
+            write_cfg({**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["mA"]}}, "features": {"ask": {"provider": "anth", "model": "mA"}},
+                       "prices": {"mA": {"in": 3.0, "out": 15.0}}})
+            a = ask.summary_estimate(pdf, meta, tids[0])
+            pages = max(b["page"] for b in bs) + 1
+            assert a["provider"] == "anth" and a["chars"] == sum(len(b["text"]) for b in bs) + pages * ai.PDF_PAGE_IMAGE + len(prompt) > e["chars"] and a["saved"] is False, (a, pages)
+            assert a["cost"] == ai.estimate("summarize", a["chars"], 1500) > 0
+            # no price for the model: no figure, never 0; no model at all: the same, and no error
+            write_cfg({**CFG, "prices": {}}); u = ask.summary_estimate(pdf, meta, tids[0]); assert u["cost"] is None and u["saved"] is True, u
+            write_cfg({**CFG, "features": {}}); u = ask.summary_estimate(pdf, meta, tids[0]); assert u["cost"] is None and u["model"] is None and u["saved"] is False, u
+        finally:
+            write_cfg(CFG)
+    check("summary estimate in the reader: the paper as the provider reads it (text, or the PDF's pages for Claude), a saved answer is known, nothing sent", t_summary_estimate)
 
     def t_ask_err():
         write_cfg({**CFG, "features": {"ask": {"provider": "nokey", "model": "m"}}})
@@ -1094,6 +1202,22 @@ def main():
             assert len(SEEN) == n1 and again2[-1]["cached"] is True and next(m for m in again2 if m["type"] == "final")["text"] == final
             list(bk.summary_stream(brel, 1, "A Test Book", fresh=True))
             assert len(SEEN) == n1 + 1, "a fresh summary really asks"
+            assert SEEN[-1][1]["max_tokens"] == 2400, SEEN[-1][1]["max_tokens"]          # (room for a model that counts its thinking in the limit)
+            # --- an answer that stopped at the length limit: shown, said, not saved in place of the complete one, and not cached
+            Fake.ending = "length"
+            try:
+                Fake.pieces = ["**Argument.** Half of it (p. 3"]
+                cut = list(bk.summary_stream(brel, 1, "A Test Book", fresh=True))
+                assert [m["type"] for m in cut][-2:] == ["final", "done"] and cut[-1]["cut_off"] is True and cut[-1]["saved"] is False and cut[-1]["cached"] is False, cut[-2:]
+                assert cut[-2]["text"].startswith("**Argument.** Half of it") and bk.info_at(bpdf)["summaries"]["3-4"]["text"] == final, "the complete summary is not replaced by half of one"
+                i0 = bk.info_at(bpdf); del i0["summaries"]["3-4"]; bk._write_info(bpdf, i0); ai.cache_clear()       # (no saved summary and no saved answer: the next two really ask)
+                n2 = len(SEEN); cut = list(bk.summary_stream(brel, 1, "A Test Book")); cut = list(bk.summary_stream(brel, 1, "A Test Book"))
+                assert len(SEEN) == n2 + 2 and cut[-1]["cut_off"] is True and "3-4" not in bk.info_at(bpdf)["summaries"] and bk.summary_estimate(brel, 1)["saved"] is False, (len(SEEN) - n2, cut[-1])
+            finally:
+                Fake.ending = None
+            Fake.pieces = ["**Argument.** It argues something. ", "**Key points.**\n- A claim (p. 3).\n- Another (pp. 3-4).\n"]
+            whole = list(bk.summary_stream(brel, 1, "A Test Book"))
+            assert whole[-1]["saved"] is True and not whole[-1].get("cut_off") and bk.info_at(bpdf)["summaries"]["3-4"]["text"] == final, whole[-1]
             # --- the offset can still be changed afterwards, and the summary stays
             bk.set_offset(brel, 2)
             ki = bk.info_at(bpdf)
@@ -1226,6 +1350,34 @@ def main():
             reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""]); n1 = len(mine())
             assert bj.start(brel) is True; st = wait()
             assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and st["made"] == 0 and "empty" in st["failed"][0]["error"] and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            # --- three parts in a row stopped at the length limit: the same (half a summary is never saved as done, nor cached), and the reason is said
+            reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: ["Half a summ"]); n1 = len(mine()); Fake.ending = "length"
+            try:
+                assert bj.start(brel) is True; st = wait()
+            finally:
+                Fake.ending = None
+            assert len(mine()) - n1 == 3 and "3 parts in a row failed" in st["stopped"] and "cut off at the model’s length limit" in st["stopped"] and st["made"] == 0, st
+            assert all("cut off" in f["error"] for f in st["failed"]) and len(st["failed"]) == 3 and not bk.info_at(bpdf).get("summaries") and "overview" not in bk.info_at(bpdf), st
+            paid = sum(x["cost"] for x in ai.usage_log(3))                                                                 # (nothing was saved, but the three answers were paid for: the job says so)
+            assert paid > 0 and abs(st["cost"] - paid) < 1e-12, ("a cut-off part is missing from what the job says it cost", st["cost"], paid)
+            # --- the overview stopped at the length limit: the parts are kept, no overview is saved, and pressing again asks for it again (it was not cached)
+            reset(t=[[1, "A1", 1], [1, "B2", 2]], sums={}); answers(overview=lambda b: ["Half an over"]); n1 = len(mine())
+            Fake.ending = lambda body: "length" if sysof(body).startswith("You write an OVERVIEW") else None
+            try:
+                assert bj.start(brel) is True; st = wait()
+                assert st["made"] == 2 and not st["failed"] and st["overview"] is False and "The overview could not be written" in st["stopped"] and "cut off at the model’s length limit" in st["stopped"], st
+                assert "overview" not in bk.info_at(bpdf) and len(bk.info_at(bpdf)["summaries"]) == 2 and len(mine()) - n1 == 3 and mine()[-1]["max_tokens"] == 4000, (len(mine()) - n1, mine()[-1]["max_tokens"])
+                paid = sum(x["cost"] for x in ai.usage_log(3)); parts_ = sum(v["cost"] for v in bk.info_at(bpdf)["summaries"].values())
+                assert paid > parts_ > 0 and abs(st["cost"] - paid) < 1e-12, ("the cut-off overview is missing from what the job says it cost", st["cost"], paid, parts_)
+                try:
+                    bk.write_overview(brel); raise AssertionError("a cut-off overview was saved")
+                except ai.AIError as ex:
+                    assert "cut off" in str(ex) and "not saved" in str(ex), str(ex)
+                    assert isinstance(ex, ai.CutOff) and ex.result.cost > 0 and ex.text == "Half an over", (type(ex).__name__, getattr(ex, "text", None))
+                assert len(mine()) - n1 == 4 and "overview" not in bk.info_at(bpdf)
+            finally:
+                Fake.ending = None
+            answers(); assert bk.write_overview(brel)["text"] == "OV (p. 2)." and len(mine()) - n1 == 5
             # --- one part fails, the others are made: the job goes on, but no overview is written while a part is missing; pressing again does only that part, then the overview
             reset(t=[[1, "A1", 1], [1, "B2", 2], [1, "C3", 3], [1, "D4", 4]], sums={}); answers(chapter=lambda b: [""] if chap(b) == "B2" else ["S-%s (p. 3)." % chap(b)])
             assert bj.start(brel) is True; st = wait()
@@ -2243,6 +2395,20 @@ print("JSON" + json.dumps(out))
             ai_.chat = lambda feature, messages, **kw: R2()
             a2 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
             assert a2["short"] is True and len(a2["entries"]) == 1 and a2["entries"][0]["doi"] == "10.1287/mnsc.2021.4209" and "printed" not in a2["entries"][0]["why"], a2
+            # the same through the real AI layer and an OpenAI-style provider: an answer that ended with "length" says so, even when what arrived happens to be whole
+            ai_.chat = keep[-1]; pieces_ = getattr(Fake, "pieces", None); Fake.pieces = [R.text]; Fake.ending = "length"
+            try:
+                a3 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
+                assert a3["type"] == "done" and a3["short"] is True and len(a3["entries"]) == 2, a3
+                Fake.ending = None
+                a4 = list(rx.ai_stream(("Reading list.\n\n" + APA).encode(), "list.txt"))[-1]
+                assert a4["type"] == "done" and a4["short"] is False, a4
+            finally:
+                Fake.ending = None
+                if pieces_ is None:
+                    del Fake.pieces
+                else:
+                    Fake.pieces = pieces_
             def boom(*a, **k):
                 raise ai_.AIError("This month's AI budget is used up.")
             ai_.chat = boom
@@ -2529,6 +2695,25 @@ assert r["added"] == 1 and [_j.loads(x)["cost"] for x in lines_] == [0.1, 0.2, 0
 cpu2, fu2_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-03T10:00:00", "co', '{"ts": "2026-11-02T10:00:00", "cost": 0.2}\n', text=True)
 r = sy.merge(cpu2); lines_ = open(fu2_).read().splitlines()                    # (a line cut off mid-way, as a quit leaves it: the join still works and keeps it)
 assert r["added"] == 1 and '{"ts": "2026-11-03T10:00:00", "co' in lines_ and any('"cost": 0.2' in x for x in lines_) and len(lines_) == 3, lines_
+# a call that ends while the two copies are being joined: its row waits for the join (the AI layer's lock) and lands in the joined file, and the month's spend has it
+import ai, threading
+assert os.path.realpath(ai.LEDGER) == os.path.realpath(fu_), ai.LEDGER
+ym_ = iso(now)[:7]
+cpu3, fu3_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "' + ym_ + '-01T10:00:00", "cost": 1.0}\n', '{"ts": "' + ym_ + '-02T10:00:00", "cost": 2.0}\n', text=True)
+assert abs(ai.month_spend() - 1.0) < 1e-9
+real_replace_, late_ = os.replace, []
+def replace_(a_, b_):
+    if os.path.basename(b_) == "ai_usage.jsonl" and not late_:                                 # the moment between reading the record and replacing it
+        t_ = threading.Thread(target=ai._append, args=({"ts": iso(now), "feature": "ask", "provider": "p", "model": "m", "cost": 5.0},)); late_.append(t_); t_.start(); t_.join(0.5)
+    return real_replace_(a_, b_)
+os.replace = replace_
+try:
+    r = sy.merge(cpu3)
+finally:
+    os.replace = real_replace_
+late_[0].join(10); costs_ = sorted(_j.loads(x)["cost"] for x in open(fu3_).read().splitlines())
+assert r["added"] == 1 and len(late_) == 1 and costs_ == [1.0, 2.0, 5.0], "a row written during the join was lost: " + str(costs_)
+assert abs(ai.month_spend() - 8.0) < 1e-9, ai.month_spend()
 # a copy that cannot be read changes nothing; a file of another kind is not joined
 cpb, fb_ = two("Papers/2024-05/Journal/other.notes.json", {"version": 1, "rev": 1, "highlights": [{"id": "k"}]}, {"version": 1}); open(os.path.join(paths.ROOT, cpb), "w").write('{"version": 1, "high')
 before_ = open(fb_).read()
@@ -3133,6 +3318,302 @@ print("OK")
         ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
     check("local-only mode blocks remote providers; the monthly budget stops calls", t_privacy_budget)
 
+    def t_embed_ledger():
+        """A paid (remote) embedding call is in the ledger with its cost, and the budget stops it."""
+        write_cfg({**CFG, "prices": {**CFG["prices"], "emb": {"in": 0.5, "out": 0, "cache_write": 0, "cache_read": 0}}})
+        try:
+            n0, spent0, emb0 = len(ai.usage_log(100000)), ai.month_spend(), ai.usage_summary()["by_feature"].get("embed", {"calls": 0})["calls"]
+            v = ai.embed(["alpha beta gamma delta " * 40, "epsilon zeta"]); assert v.shape[0] == 2
+            rows = ai.usage_log(100000)[:len(ai.usage_log(100000)) - n0]
+            assert len(rows) == 1 and rows[0]["feature"] == "embed" and (rows[0]["provider"], rows[0]["model"]) == ("fake", "emb"), rows
+            assert rows[0]["in"] == int(932 / 3.3) and rows[0].get("estimated") is True and rows[0]["chars"] == 932 and not rows[0].get("preview"), rows     # (the fake said no usage: an estimate from the characters; the passages are not stored)
+            assert abs(rows[0]["cost"] - 282 * 0.5 / 1e6) < 1e-12 and abs(ai.month_spend() - spent0 - rows[0]["cost"]) < 1e-12 and ai.usage_summary()["by_feature"]["embed"]["calls"] == emb0 + 1, rows
+            Fake.embed_tokens = 123
+            try:
+                ai.embed(["a b c"] * 70)                                           # two requests (64 passages at a time), one row
+            finally:
+                Fake.embed_tokens = None
+            row = ai.usage_log(1)[0]
+            assert len(ai.usage_log(100000)) == n0 + 2 and row["feature"] == "embed" and row["in"] == 246 and "estimated" not in row and row["chars"] == 350, row     # (what the provider counted, not an estimate)
+            ai.save_config({"budget": {"monthly_usd": 0.0000001}}); n1, rows1 = len(SEEN), len(ai.usage_log(100000))
+            try:
+                ai.embed(["x"]); raise AssertionError("the budget must stop a paid embedding call")
+            except ai.Blocked as e:
+                assert "budget" in str(e) and "Settings → AI," in str(e), str(e)
+            assert len(SEEN) == n1 and len(ai.usage_log(100000)) == rows1, "nothing was sent and nothing was written"
+        finally:
+            ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("a paid embedding call is in the usage ledger with its cost (the provider's token count, else an estimate), and the monthly budget stops it", t_embed_ledger)
+
+    def t_unknown_spend():
+        """Calls without a known price are said, not counted as $0 silently."""
+        from datetime import datetime, timezone
+        saved, now = ai.LEDGER, datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ai.LEDGER = os.path.join(TMP, "ledger_unknown.jsonl")
+        try:
+            with open(ai.LEDGER, "w") as f:
+                for c, ts in ((0.5, now), (None, now), (None, now), (None, "2001-01-05T10:00:00+00:00")):
+                    f.write(json.dumps({"ts": ts, "feature": "ask", "provider": "fake", "model": "m1" if c else "nopr", "in": 10, "out": 1, "cost": c}) + "\n")
+            ai.save_config({"budget": {"monthly_usd": 10}})
+            u = ai.usage_summary()
+            assert u["month"]["unpriced"] == 2 and u["unpriced"] == 3 and not u["warn"] and abs(u["left"] - 9.5) < 1e-9, u
+            b = ai.budget_check(1.0); assert b["unpriced"] == 2 and not b["over"] and abs(b["spent"] - 0.5) < 1e-9 and b["note"] == "2 calls this month had no known price, so the real total is higher", b
+            ai.save_config({"budget": {"monthly_usd": 0.5}})
+            try:
+                ai.chat("ask", [{"role": "user", "content": "x"}]); raise AssertionError("the budget must stop the call")
+            except ai.Blocked as e:
+                assert "budget ($0.50) is used up (2 calls this month had no known price, so the real total is higher). Raise it in Settings → AI," in str(e), str(e)
+            with open(ai.LEDGER, "w") as f:
+                f.write(json.dumps({"ts": now, "feature": "ask", "provider": "fake", "model": "m1", "cost": 0.5}) + "\n" + json.dumps({"ts": now, "feature": "ask", "provider": "fake", "model": "nopr", "cost": None}) + "\n")
+            try:
+                ai.chat("ask", [{"role": "user", "content": "x"}]); raise AssertionError("the budget must stop the call")
+            except ai.Blocked as e:
+                assert "used up (1 call this month had no known price, so the real total is higher). Raise" in str(e), str(e)
+            with open(ai.LEDGER, "w") as f:
+                f.write(json.dumps({"ts": now, "feature": "ask", "provider": "fake", "model": "m1", "cost": 0.75}) + "\n")
+            try:
+                ai.chat("ask", [{"role": "user", "content": "x"}]); raise AssertionError("the budget must stop the call")
+            except ai.Blocked as e:
+                assert "budget ($0.50) is used up. Raise it in Settings → AI," in str(e), str(e)                   # (every call had a price: nothing to add)
+            ai.save_config({"budget": {"monthly_usd": None}}); u = ai.usage_summary(); assert u["left"] is None and u["month"]["unpriced"] == 0 and ai.budget_check(1.0)["note"] == "", u
+        finally:
+            ai.LEDGER = saved; ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("calls without a known price are counted and said in the budget figures and in the refusal, which points to Settings → AI", t_unknown_spend)
+
+    def t_cache_and_free_before_budget():
+        """An answer already paid for, and a model on this computer that needs no key, still work when the budget is used up."""
+        ai.cache_clear(); msgs = [{"role": "user", "content": "paid for once"}]
+        r1 = ai.chat("ask", msgs, system="s", cache=True); assert not r1.cached
+        c = json.loads(json.dumps(ai.config_data())); c["providers"]["ollama"] = {"type": "openai_compat", "base_url": URL, "key_env": ""}; c["budget"] = {"monthly_usd": 0.0000001}; write_cfg(c)
+        try:
+            n0 = len(SEEN)
+            r2 = ai.chat("ask", msgs, system="s", cache=True)
+            assert r2.cached and r2.text == r1.text and r2.cost == 0.0 and len(SEEN) == n0, "the saved answer is given although the budget is used up"
+            for kw, m in (({"fresh": True}, msgs), ({}, [{"role": "user", "content": "never asked before"}]), ({"override": {"provider": "fake", "model": "no-price"}}, msgs)):
+                try:
+                    ai.chat("ask", m, system="s", cache=True, **kw); raise AssertionError("a new paid call must be stopped")
+                except ai.Blocked as e:
+                    assert "budget" in str(e)
+            assert len(SEEN) == n0
+            assert ai.is_free("ollama", "llama3") and not ai.is_free("fake", "m1") and not ai.is_free("fake", "no-price")      # (127.0.0.1 with a key may be a proxy to a paid service; no price is not a price of nothing)
+            r3 = ai.chat("ask", [{"role": "user", "content": "free"}], override={"provider": "ollama", "model": "llama3"})
+            assert r3.text and r3.cost == 0.0 and len(SEEN) == n0 + 1, "a free model on this computer is not stopped by the budget"
+            c["embeddings"] = {"provider": "ollama", "model": "nomic"}; write_cfg(c)
+            assert ai.embed(["x y"]).shape[0] == 1 and len(SEEN) == n0 + 2 and ai.usage_log(1)[0]["feature"] == "embed" and ai.usage_log(1)[0]["cost"] == 0.0
+        finally:
+            write_cfg(CFG); ai.cache_clear()
+    check("with the budget used up, saved answers and free models on this computer still work; new paid calls are refused", t_cache_and_free_before_budget)
+
+    def t_month_total_in_memory():
+        """The month's total is not read from the ledger on every call, and still follows what another process or computer appends."""
+        from datetime import datetime, timezone
+        saved, real_rows, reads = ai.LEDGER, ai._rows, []
+        ai.LEDGER = os.path.join(TMP, "ledger_month.jsonl")
+        ai._rows = lambda: (reads.append(1), real_rows())[1]
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        row = lambda c, ts=now: json.dumps({"ts": ts, "feature": "ask", "provider": "fake", "model": "m1", "cost": c}) + "\n"   # noqa: E731
+        try:
+            with open(ai.LEDGER, "w") as f:
+                f.write(row(0.25) + row(7.0, "2001-01-05T10:00:00+00:00"))
+            assert abs(ai.month_spend() - 0.25) < 1e-9; n = len(reads)
+            for _ in range(50):
+                ai.month_spend()
+            assert len(reads) == n, "an unchanged ledger is not read again"
+            r = ai.chat("ask", [{"role": "user", "content": "x"}]); spent = ai.month_spend()
+            assert r.cost > 0 and abs(spent - 0.25 - r.cost) < 1e-12 and len(reads) == n, "this process's own calls are added in memory"
+            ai.chat("ask", [{"role": "user", "content": "x"}], override={"provider": "fake", "model": "no-price"})
+            assert ai.budget_check()["unpriced"] == 1 and ai.month_spend() == spent and len(reads) == n, "a call without a price is counted, not added"
+            with open(ai.LEDGER, "a") as f:
+                f.write(row(1.0))                                              # another process, or another computer through the shared folder
+            assert abs(ai.month_spend() - (spent + 1.0)) < 1e-9 and len(reads) == n + 1, "what somebody else appended is seen"
+            r = ai.chat("ask", [{"role": "user", "content": "x"}]); assert abs(ai.month_spend() - (spent + 1.0 + r.cost)) < 1e-9 and len(reads) == n + 1
+            with open(ai.LEDGER, "a") as f:
+                f.write(row(2.0))                                              # somebody else's line, then our own before the total was asked for: both count
+            r2 = ai.chat("ask", [{"role": "user", "content": "x"}]); assert abs(ai.month_spend() - (spent + 3.0 + r.cost + r2.cost)) < 1e-9 and len(reads) == n + 2
+            with open(ai.LEDGER, "w") as f:
+                f.write(row(0.1))                                              # the file was replaced (a sync client, the two-computer merge)
+            assert abs(ai.month_spend() - 0.1) < 1e-9
+            other = os.path.join(TMP, "ledger_month2.jsonl")
+            with open(other, "w") as f:
+                f.write(row(0.4))
+            ai.LEDGER = other; assert abs(ai.month_spend() - 0.4) < 1e-9; ai.LEDGER = os.path.join(TMP, "ledger_month.jsonl")
+            os.remove(ai.LEDGER); assert ai.month_spend() == 0
+        finally:
+            ai._rows, ai.LEDGER = real_rows, saved
+    check("the month's spend is kept in memory and read again only when the ledger file changed", t_month_total_in_memory)
+
+    def t_budget_check():
+        """A job's estimate against what is left of the budget."""
+        from datetime import datetime, timezone
+        saved = ai.LEDGER; ai.LEDGER = os.path.join(TMP, "ledger_check.jsonl")
+        try:
+            with open(ai.LEDGER, "w") as f:
+                f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "feature": "ask", "provider": "fake", "model": "m1", "cost": 3.0}) + "\n")
+            assert ai.budget_check(99.0) == {"budget": None, "spent": 3.0, "left": None, "unpriced": 0, "note": "", "cost": 99.0, "over": False}, ai.budget_check(99.0)
+            ai.save_config({"budget": {"monthly_usd": 5}})
+            b = ai.budget_check(1.0); assert not b["over"] and b["budget"] == 5 and abs(b["left"] - 2.0) < 1e-9, b
+            assert not ai.budget_check(2.0)["over"] and ai.budget_check(2.01)["over"] and not ai.budget_check(None)["over"] and not ai.budget_check()["over"]      # (exactly what is left still fits; an estimate that is not known is not asked about)
+            ai.save_config({"budget": {"monthly_usd": 3}}); b = ai.budget_check(0.01); assert b["over"] and b["left"] == 0, b
+            ai.save_config({"budget": {"monthly_usd": 2}}); b = ai.budget_check(0.0); assert not b["over"] and b["left"] == 0, b                                        # (nothing to pay: nothing to ask, even over the budget)
+        finally:
+            ai.LEDGER = saved; ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("a large job's estimate is compared with what is left of the monthly budget", t_budget_check)
+
+    def t_budget_zero():
+        """0 means "no limit", and is stored as that: the Settings field then shows "no limit", not a 0 that reads as "no paid calls"."""
+        try:
+            for v in (0, "0", 0.0, "", None, -3, "-0.5"):
+                ai.save_config({"budget": {"monthly_usd": 7}}); ai.save_config({"budget": {"monthly_usd": v}})
+                assert ai.config_data()["budget"]["monthly_usd"] is None and ai.config()["budget"]["monthly_usd"] is None, (v, ai.config_data()["budget"])
+            for v, want in ((5, 5.0), ("2.5", 2.5), (0.01, 0.01)):
+                ai.save_config({"budget": {"monthly_usd": v}}); assert ai.config_data()["budget"]["monthly_usd"] == want, (v, ai.config_data()["budget"])
+        finally:
+            ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG)
+    check("a monthly budget of 0 (or nothing, or less) is stored as no limit, never as a 0 that could read as 'no paid calls'", t_budget_zero)
+
+    def t_question_lookup_before_budget():
+        """With a paid embedding model and the budget used up, the question's own lookup still goes (it is what reaches a saved answer), passages are not embedded,
+        and the Evidence grouping says why instead of quietly grouping by identical wording."""
+        write_cfg({**CFG, "prices": {**CFG["prices"], "emb": {"in": 0.5, "out": 0, "cache_write": 0, "cache_read": 0}}})
+        ai.cache_clear(); q = "How many firms does the platform have, exactly?"
+        try:
+            first = list(ask.stream(pdf, q, "rag")); assert first[-1]["type"] == "done" and not first[-1].get("cached"), first[-1]
+            ai.embed(["some paid passage " * 30])                                # (so that this month has a spend)
+            assert ai.month_spend() > 0
+            ai.save_config({"budget": {"monthly_usd": 0.0000001}}); n0, rows0 = len(SEEN), len(ai.usage_log(100000))
+            again = list(ask.stream(pdf, q, "rag"))
+            assert again[-1]["type"] == "done" and again[-1].get("cached") is True, "the saved answer is found although the budget is used up: %s" % again[-1]
+            sent = SEEN[n0:]; assert len(sent) == 1 and sent[0][0].endswith("/embeddings") and sent[0][1]["input"] == [q], [x[0] for x in sent]
+            row = ai.usage_log(1)[0]
+            assert len(ai.usage_log(100000)) >= rows0 + 1 and any(r["feature"] == "embed" and r.get("cost") for r in ai.usage_log(3)), "the question's lookup is still written to the usage record: %s" % row
+            n1 = len(SEEN)
+            try:
+                ai.embed(["a new passage"]); raise AssertionError("embedding passages is a new paid call: the budget stops it")
+            except ai.Blocked as e:
+                assert "budget" in str(e)
+            try:
+                evd.cluster(["platform governance", "platform governance", "something else"], 0.8); raise AssertionError("the grouping fell back to identical wording without a word")
+            except ai.Blocked as e:
+                assert "budget" in str(e) and "Settings → AI" in str(e), str(e)
+            assert len(SEEN) == n1, "nothing was sent for either"
+            ai.save_config({"budget": {"monthly_usd": None}})
+            assert len(evd.cluster(["platform governance", "platform governance", "something else"], 0.8)) == 2
+            real = ai.embed; ai.embed = lambda *a, **k: (_ for _ in ()).throw(ai.AIError("no model yet"))
+            try:
+                assert evd.cluster(["A b", "a  b", "c"], 0.8) == [[0, 1], [2]], "any other problem still falls back to identical wording"
+            finally:
+                ai.embed = real
+        finally:
+            ai.save_config({"budget": {"monthly_usd": None}}); write_cfg(CFG); ai.cache_clear()
+    check("with the budget used up and a paid embedding model, a question's own lookup still goes (a saved answer is found), passages are not embedded, and the Evidence grouping says why", t_question_lookup_before_budget)
+
+    def t_cache_price_fallback():
+        """A price typed with only input and output: kept and re-read text costs what the estimate says (a quarter more than input, a tenth of it), not nothing."""
+        claude = {**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["mA"]}, "ollama": {"type": "openai_compat", "base_url": URL, "key_env": ""}},
+                  "features": {"ask": {"provider": "anth", "model": "mA"}}, "ask": {"keep_paper": True}}
+        old_rows, keep_min = ai._rows, ask.KEEP_MIN_TOKENS; ai._rows = lambda: iter(()); ask.KEEP_MIN_TOKENS = 0
+        try:
+            for typed in ({"in": 3.0, "out": 15.0}, {"in": 3.0, "out": 15.0, "cache_write": 0.0, "cache_read": 0.0}):      # (the second: what Settings stores for the two fields left empty)
+                write_cfg({**claude, "prices": {"mA": typed}})
+                assert abs(ai.cost_of("mA", {"in": 30, "out": 0, "cache_write": 40000, "cache_read": 0}, provider="anth") - (30 * 3.0 + 40000 * 3.75) / 1e6) < 1e-12, ai.cost_of("mA", {"in": 30, "out": 0, "cache_write": 40000}, provider="anth")
+                assert abs(ai.cost_of("mA", {"in": 30, "out": 10, "cache_write": 0, "cache_read": 40000}, provider="anth") - (30 * 3.0 + 10 * 15.0 + 40000 * 0.3) / 1e6) < 1e-12
+                # the figure under the Ask box and the row in the usage record are the same sum
+                e = ask.estimate(pdf, history_chars=660)["full"]; paper, rest = int((e["chars"] - 960) / 3.3), int(960 / 3.3)
+                assert abs(e["cost"] - ai.cost_of("mA", {"in": rest, "out": 700, "cache_write": paper}, provider="anth")) < 1e-12 and abs(e["next"] - ai.cost_of("mA", {"in": rest, "out": 700, "cache_read": paper}, provider="anth")) < 1e-12, e
+            write_cfg({**claude, "prices": {"mA": {"in": 3.0, "out": 15.0, "cache_write": 5.0, "cache_read": 1.0}}})        # figures you did type are the ones used
+            assert abs(ai.cost_of("mA", {"in": 0, "out": 0, "cache_write": 1000, "cache_read": 1000}, provider="anth") - 0.006) < 1e-12
+            e = ask.estimate(pdf)["full"]; paper = int((e["chars"] - 300) / 3.3)
+            assert abs(e["cost"] - e["next"] - paper * 4.0 / 1e6) < 1e-12, e
+            assert ai.cost_of("llama3", {"in": 500, "out": 500, "cache_write": 40000, "cache_read": 40000}, provider="ollama") == 0.0, "a free model on this computer stays free"
+            assert ai.pricing.rates({"in": 2.0, "out": 8.0}) == {"in": 2.0, "out": 8.0, "cache_write": 2.5, "cache_read": 0.2}
+        finally:
+            ai._rows = old_rows; ask.KEEP_MIN_TOKENS = keep_min; write_cfg(CFG)
+    check("a price typed with only input and output: text kept ready and read back is charged a quarter more than input and a tenth of it, in the usage record as in the estimate", t_cache_price_fallback)
+
+    def t_sha_memo_threads():
+        """The remembered hash of the PDF hashed last: a second thread hashing another file at the worst moment never makes one file get the other's hash."""
+        import hashlib
+        fa, fb = os.path.join(TMP, "sha_a.pdf"), os.path.join(TMP, "sha_b.pdf")
+        for p, data in ((fa, b"paper A" * 100), (fb, b"paper B" * 100)):
+            with open(p, "wb") as f:
+                f.write(data)
+        ha, hb = hashlib.sha1(b"paper A" * 100).hexdigest(), hashlib.sha1(b"paper B" * 100).hexdigest()
+
+        class Racy(dict):
+            """The memo, with "another thread" (hashing B) running right after the n-th store of this thread."""
+            def __init__(self, at):
+                super().__init__(); self.at, self.n, self.busy = at, 0, False
+
+            def __setitem__(self, k, v):
+                super().__setitem__(k, v)
+                if not self.busy:
+                    self.n += 1
+                    if self.n == self.at:
+                        self.busy = True
+                        try:
+                            assert ns.sha1_of(fb) == hb
+                        finally:
+                            self.busy = False
+        real = ns._sha
+        try:
+            for at in (1, 2):
+                ns._sha = Racy(at)
+                got = ns.sha1_of(fa)
+                assert got == ha, "store %d: paper A was given %s" % (at, "paper B's hash" if got == hb else got)
+                assert ns.sha1_of(fb) == hb and ns.sha1_of(fa) == ha and ns.sha1_of(fb) == hb, "store %d: the memo holds one file's name with the other's hash" % at
+                assert ns.sha1_known(fb) == hb and ns.sha1_known(fa) is None and ns.sha1_known(os.path.join(TMP, "sha_none.pdf")) is None
+            ns._sha = {}
+            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == ha and ns.sha1_known(fa) == ha
+            with open(fa, "ab") as f:
+                f.write(b"more")
+            assert ns.sha1_known(fa) is None and ns.sha1_of(fa) == hashlib.sha1(b"paper A" * 100 + b"more").hexdigest()      # (a changed file is hashed again)
+        finally:
+            ns._sha = real
+    check("the remembered PDF hash is safe with several threads: another file hashed at the same moment never gives a paper the other's hash", t_sha_memo_threads)
+
+    def t_scan_parsed_once():
+        """A scan has no text: that is found out once and kept, not by parsing the whole PDF again each time (the cost line asks every time it is shown)."""
+        import pymupdf
+        scan = os.path.join(TMP, "scan.pdf")
+        doc = pymupdf.open(); doc.new_page(); doc.new_page(); doc.save(scan); doc.close()
+        real, opens = pymupdf.open, []
+        pymupdf.open = lambda *a, **k: (opens.append(a[:1]), real(*a, **k))[1]
+        try:
+            assert bl.extract(scan) == [] and len(opens) == 1
+            assert bl.extract(scan) == [] and bl.extract(scan) == [] and len(opens) == 1, "the scan was parsed %d times" % len(opens)
+            e = ask.estimate(scan); assert e["rag"]["cost"] is None and e["full"]["passages"] == 0 and len(opens) == 1, e
+            assert bl.extract(scan, force=True) == [] and len(opens) == 2                    # (asked to read it again: it does)
+            assert bl.extract(pdf) == bs and len(opens) == 2
+        finally:
+            pymupdf.open = real
+    check("a scan (no text) is parsed once and that is remembered, not parsed again for every estimate", t_scan_parsed_once)
+
+    def t_ask_estimate_blocked():
+        """When a question cannot be asked at all, the estimate says why (in Ask's own words) so that the page shows that and no price."""
+        try:
+            assert "blocked" not in ask.estimate(pdf)
+            for feats in ({}, {"ask": {"provider": "fake"}}, {"ask": {"provider": "fake", "model": ""}}):
+                write_cfg({**CFG, "features": feats}); e = ask.estimate(pdf)
+                assert e["blocked"] == "No model chosen — click ⚙" and e["rag"]["cost"] is None and e["rag"]["passages"] > 0, (feats, e)
+            write_cfg({**CFG, "features": {"ask": {"provider": "nokey", "model": "m1"}}}); e = ask.estimate(pdf)
+            assert e["blocked"].startswith("nokey isn’t set up: add NO_SUCH_KEY_XYZ=") and e["blocked"] == _blocked(lambda: ai._route("ask")), e
+            write_cfg({**CFG, "features": {"ask": {"provider": "gone", "model": "m1"}}}); e = ask.estimate(pdf)
+            assert e["blocked"] == "No provider is set for “ask”. Choose one in Settings → AI.", e
+            far = {**CFG, "providers": {**CFG["providers"], "far": {"type": "openai_compat", "base_url": "https://far.invalid/v1", "key_env": "FAKE_KEY"}}, "features": {"ask": {"provider": "far", "model": "m1"}}}
+            write_cfg(far); assert "blocked" not in ask.estimate(pdf)
+            write_cfg({**far, "privacy": {"local_only": True}}); e = ask.estimate(pdf)
+            assert e["blocked"].startswith("Local-only mode is on, so “ask” can’t use far."), e
+        finally:
+            write_cfg(CFG)
+
+    def _blocked(fn):
+        try:
+            fn()
+        except ai.Blocked as e:
+            return str(e)
+        return None
+    check("the Ask estimate says when a question cannot be asked at all (no model chosen, no provider, no key, local-only mode), in the words Ask itself uses", t_ask_estimate_blocked)
+
     def t_prompts():
         out = prefs.save_prompts({"prompts": [{"name": "Explain it", "prompt": "Explain {{text}} from {{title}}", "pinned": True}, {"id": "explain-it", "name": "Again", "prompt": "x", "scope": "area"}],
                                   "summaries": [{"id": "brief", "name": "Brief", "prompt": "Summarize {{title}} for {{interests}}"}]})
@@ -3201,6 +3682,108 @@ print("OK")
         Fake.pieces = ["The sample has ", "120 firms (2)."]
     check("follow-ups carry history; invalid citations are flagged; override and fresh pass through", t_history)
 
+    def t_ask_paper_first():
+        """Whole-paper Ask: the paper is the first thing sent, the same bytes for every question on it. With "keep the paper ready" on, Claude is told to keep it
+        (one mark, on the paper, never on the question); with it off, or for another kind of provider, nothing is marked. What Claude wrote to and read from
+        its store is priced with the price table's figures."""
+        import types as _t
+        import prices as _pr
+        asked, use = [], [(4000, 0), (0, 4000)]
+        class _S:
+            def __init__(self): self.text_stream = iter(["It is about platforms (1)."])
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get_final_message(self):
+                w, r = use[min(len(asked), 2) - 1]
+                return _t.SimpleNamespace(stop_reason="end_turn", content=[_t.SimpleNamespace(type="text", text="It is about platforms (1).")],
+                                          usage=_t.SimpleNamespace(input_tokens=30, output_tokens=10, cache_creation_input_tokens=w, cache_read_input_tokens=r, server_tool_use=None))
+        ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: asked.append(kw) or _S())))
+        claude = {**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["claude-sonnet-5-5"]}}, "features": {"ask": {"provider": "anth", "model": "claude-sonnet-5-5"}}}
+        marks = lambda kw: [b for m in kw["messages"] if isinstance(m["content"], list) for b in m["content"] if "cache_control" in b]   # noqa: E731
+        hist = [{"q": "Summarise.", "a": "It is about platforms (1)."}]
+        try:
+            write_cfg({**claude, "ask": {"keep_paper": True}})
+            one = list(ask.stream(pdf, "Summarise.", "full", fresh=True))
+            two = list(ask.stream(pdf, "and why?", "full", history=hist, fresh=True))
+            assert one[-1]["type"] == "done" and two[-1]["type"] == "done" and len(asked) == 2, (one[-1], two[-1])
+            k1, k2 = asked
+            first = k1["messages"][0]["content"]
+            assert k1["messages"][0]["role"] == "user" and isinstance(first, list) and first[0]["type"] == "text" and first[0]["text"].startswith("Passages from the paper:"), "the paper is the first block"
+            assert first[0]["text"].count("[") >= len(bs) and "120 firms" in first[0]["text"] and "Summarise." not in first[0]["text"], "every passage, and nothing of the question"
+            assert first[0].get("cache_control") == {"type": "ephemeral"} and set(first[0]) == {"type", "text", "cache_control"}, first[0].keys()
+            assert first[1] == {"type": "text", "text": "Question: Summarise."} and len(first) == 2, "the question follows, unmarked"
+            assert len(marks(k1)) == 1 and len(marks(k2)) == 1, "one mark, on the paper"
+            assert json.dumps(k2["system"]) == json.dumps(k1["system"]) and json.dumps(k2["messages"][0]["content"][0]) == json.dumps(k1["messages"][0]["content"][0]), "the next question starts with exactly the same bytes"
+            assert [m["role"] for m in k2["messages"]] == ["user", "assistant", "user"] and k2["messages"][0]["content"][1]["text"] == "Question: Summarise."
+            assert "Passages from the paper" not in json.dumps(k2["messages"][1:]) and k2["messages"][1]["content"] == hist[0]["a"] and k2["messages"][2]["content"] == "Question: and why?", k2["messages"][1:]
+            p = _pr.lookup("anth", "claude-sonnet-5-5"); assert p["source"] == "built-in" and p["cache_write"] == round(p["in"] * 1.25, 4) and 0 < p["cache_read"] <= p["in"] * 0.1, p
+            assert abs(one[-1]["cost"] - (30 * p["in"] + 10 * p["out"] + 4000 * p["in"] * 1.25) / 1e6) < 1e-12, "writing the paper costs a quarter more than reading it"
+            assert abs(two[-1]["cost"] - (30 * p["in"] + 10 * p["out"] + 4000 * p["cache_read"]) / 1e6) < 1e-12 and two[-1]["cost"] < one[-1]["cost"] / 5, "reading it back costs about a tenth"
+            row = json.loads(open(ai.LEDGER).readlines()[-1]); assert row["cache_read"] == 4000 and row["cache_write"] == 0 and row["in"] == 30, row
+            # a longer conversation: the paper is still the first block, the same bytes
+            list(ask.stream(pdf, "and then?", "full", history=hist + [{"q": "and why?", "a": "Because (2)."}], fresh=True)); k3 = asked[-1]
+            assert json.dumps(k3["messages"][0]["content"][0]) == json.dumps(k1["messages"][0]["content"][0]) and [m["role"] for m in k3["messages"]] == ["user", "assistant", "user", "assistant", "user"] and len(marks(k3)) == 1
+            # closest passages change with the question, and so does a paper too long to send whole (it falls back to them): nothing to keep
+            list(ask.stream(pdf, "How many firms are in the sample?", "rag", history=hist, fresh=True)); k = asked[-1]
+            assert not marks(k) and [m["content"] for m in k["messages"][:2]] == ["Summarise.", hist[0]["a"]] and k["messages"][-1]["content"].startswith("Passages from the paper:"), "closest passages: as before"
+            lim = ask.FULL_LIMIT; ask.FULL_LIMIT = 10
+            try:
+                list(ask.stream(pdf, "Summarise.", "full", history=hist, fresh=True)); assert not marks(asked[-1]) and asked[-1]["messages"][0]["content"] == "Summarise."
+            finally:
+                ask.FULL_LIMIT = lim
+            # the switch off (and an ai.json from before it existed): the paper is still first, nothing is marked
+            for cfg in ({**claude, "ask": {"keep_paper": False}}, claude):
+                write_cfg(cfg); assert ai.keep_paper() is (False if "ask" in cfg else ai.KEEP_PAPER_DEFAULT)
+                if "ask" not in cfg and ai.KEEP_PAPER_DEFAULT:
+                    continue
+                list(ask.stream(pdf, "and why?", "full", history=hist, fresh=True)); k = asked[-1]
+                assert not marks(k) and k["messages"][0]["content"][0] == {"type": "text", "text": k1["messages"][0]["content"][0]["text"]} and k["messages"][0]["content"][1]["text"] == "Question: Summarise.", "off: first, unmarked"
+                assert "cache_control" not in json.dumps(k["messages"])
+            # the setting is saved with the other AI settings and comes back to the page
+            ai.save_config({"ask": {"keep_paper": True}}); assert ai.keep_paper() is True and ai.config()["ask"] == {"keep_paper": True} and json.load(open(ai.CONFIG))["ask"] == {"keep_paper": True}
+            ai.save_config({"budget": {"monthly_usd": None}}); assert ai.keep_paper() is True, "saving something else leaves it"
+            ai.save_config({"ask": {"keep_paper": False}}); assert ai.keep_paper() is False
+            # another kind of provider: the paper first, as plain text, and no mark even with the switch on
+            write_cfg({**CFG, "ask": {"keep_paper": True}})
+            list(ask.stream(pdf, "and why?", "full", history=hist, fresh=True)); sent = SEEN[-1][1]["messages"]
+            assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"] and isinstance(sent[1]["content"], str), sent[1]
+            assert sent[1]["content"] == k1["messages"][0]["content"][0]["text"] + "\n\nQuestion: Summarise." and sent[3]["content"] == "Question: and why?" and "cache_control" not in json.dumps(SEEN[-1][1]) and '"cache"' not in json.dumps(SEEN[-1][1])
+            list(ask.stream(pdf, "Summarise.", "full", fresh=True)); sent = SEEN[-1][1]["messages"]
+            assert len(sent) == 2 and sent[1]["content"] == k1["messages"][0]["content"][0]["text"] + "\n\nQuestion: Summarise.", "one question: the request other providers always got"
+        finally:
+            ai._clients.pop("a", None); write_cfg(CFG)
+    check("whole-paper Ask: the paper is sent first and the same every time; 'keep the paper ready' marks it for Claude only; what Claude kept and read back is priced", t_ask_paper_first)
+
+    def t_to_anthropic_mark():
+        m = [{"role": "user", "content": [{"type": "text", "text": "p", "cache": True}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]
+        assert ai._to_anthropic(m, True) == [{"role": "user", "content": [{"type": "text", "text": "p", "cache_control": {"type": "ephemeral"}}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]
+        assert ai._to_anthropic(m) == ai._to_anthropic(m, False) == [{"role": "user", "content": [{"type": "text", "text": "p"}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]
+        assert ai._to_compat(m) == [{"role": "user", "content": "p\n\nq"}, {"role": "user", "content": "plain"}]
+        img = [{"role": "user", "content": [{"type": "text", "text": "p", "cache": True}, {"type": "image", "data": "QQ=="}]}]
+        c = ai._to_compat(img)[0]["content"]; assert c[0] == {"type": "text", "text": "p"} and c[1]["type"] == "image_url", "with a picture the parts stay parts, and the mark is not sent"
+        k = lambda mm: ai._cache_key("fake", {"model": "m1"}, mm, None, None, 4000, False)   # noqa: E731
+        assert k(m) == k([{"role": "user", "content": [{"type": "text", "text": "p"}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]), "the mark is not part of what makes a saved answer the same"
+    check("a text part marked to be kept: Claude's request carries the mark only when asked to, other providers get plain text, the saved answer's key ignores it", t_to_anthropic_mark)
+
+    def t_cache_pdf_hash():
+        """A PDF in a saved answer's key is known by its content: another folder, another computer or a new file date is the same request."""
+        ai.cache_clear(); n0 = len(SEEN)
+        req = lambda p: [{"role": "user", "content": [{"type": "pdf", "path": p}, {"type": "text", "text": "Summarise."}]}]   # noqa: E731
+        r1 = ai.chat("ask", req(pdf), cache=True)
+        other = os.path.join(TMP, "second-computer", "same.pdf"); os.makedirs(os.path.dirname(other), exist_ok=True); shutil.copy(pdf, other)
+        st = os.stat(other); os.utime(other, (st.st_atime + 100, st.st_mtime + 100))
+        r2 = ai.chat("ask", req(other), cache=True)
+        assert not r1.cached and r2.cached and r2.cost == 0.0 and r2.text == r1.text and len(SEEN) == n0 + 1, "the same bytes at another path, with another date"
+        key = lambda p: ai._cache_key("fake", {"model": "m1"}, req(p), None, None, 4000, False)   # noqa: E731
+        diff = os.path.join(TMP, "second-computer", "diff.pdf")
+        with open(pdf, "rb") as a, open(diff, "wb") as b:
+            b.write(a.read() + b"\n% changed\n")
+        gone = os.path.join(TMP, "second-computer", "gone.pdf")
+        assert key(pdf) == key(other) != key(diff) and key(gone) and key(gone) != key(pdf), "other bytes: another request; a file that is not there does not raise"
+        assert not ai.chat("ask", req(diff), cache=True).cached and len(SEEN) == n0 + 2
+        ai.cache_clear(); shutil.rmtree(os.path.dirname(other))
+    check("the saved answers know a PDF by its content, not by where it is or its date", t_cache_pdf_hash)
+
     def t_suggest():
         Fake.pieces = [json.dumps({"questions": ["What is the sample?", "What is the finding?", " ", "What next?"]})]
         qs = ask.suggest(pdf); assert qs == ["What is the sample?", "What is the finding?", "What next?"] and "response_format" in SEEN[-1][1]
@@ -3235,6 +3818,169 @@ print("OK")
         assert pl.summarize({"title": "Platforms"}, target, usage).strip() == text          # an existing summary is never overwritten
         Fake.pieces = ["The sample has ", "120 firms (2)."]
     check("pipeline summaries go through the AI layer: your template, any provider, cost added to the run", t_summary)
+
+    def t_cut_off():
+        import pipeline as pl
+        import audio as au_, citeuse as cu_
+        chats = lambda: sum(1 for x in SEEN if x[0].endswith("/chat/completions"))  # noqa: E731
+        msg = [{"role": "user", "content": "explain CUT OFF"}]
+        target = os.path.join(TMP, "cut.pdf"); shutil.copy(pdf, target); usage = pl.Usage()
+        Fake.pieces = ["Half an ans"]; Fake.ending = "length"
+        try:
+            e0 = ai.cache_stats()["entries"]; n0 = chats()
+            r1 = ai.chat("explain", msg, system="s", cache=True)                                        # (never raised: the connection test and the references importer use such answers)
+            assert r1.stop == "length" and r1.cut_off is True and r1.text == "Half an ans", r1.stop
+            assert ai.cache_stats()["entries"] == e0, "a cut-off answer is not kept in the cache"
+            r2 = ai.chat("explain", msg, system="s", cache=True)
+            assert chats() == n0 + 2 and not r2.cached, "asking again really asks again"
+            # --- the pages are told
+            a = list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]
+            assert a["type"] == "done" and a["cut_off"] is True and not a["cached"], a
+            n1 = chats(); a = list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]
+            assert chats() == n1 + 1 and a["cut_off"] is True and not a["cached"], a
+            e = list(explain.stream(pdf, {"title": "P"}, text="Our sample covers 120 firms", page=1, custom="Say it, CUT"))[-1]
+            assert e["type"] == "done" and e["cut_off"] is True, e
+            s = list(ask.summary_stream(target, {"title": "Platforms CUT"}))[-1]
+            assert s["type"] == "done" and s["cut_off"] is True, s
+            b = list(au_._stream("You write a script.", "Notes of the paper, CUT.", False))[-1]
+            assert b["type"] == "done" and b["cut_off"] is True and SEEN[-1][1]["max_tokens"] == 2200, (b, SEEN[-1][1]["max_tokens"])
+            c = cu_.answer("Smith (2020). A paper.", ["Smith (2020) shows CUT."])
+            assert c["cut_off"] is True and c["text"] == "Half an ans", c
+            # --- suggested questions: half a JSON answer is no list, and it is not kept for ever
+            n1 = chats()
+            assert ask.suggest(pdf, "CUT q", "CUT a") == [] and ask.suggest(pdf, "CUT q", "CUT a") == [] and chats() == n1 + 2, chats() - n1
+            # --- a paper's summary: nothing is written, the reason is said, the cost still counts
+            try:
+                pl.summarize({"title": "Platforms"}, target, usage); raise AssertionError("a cut-off summary was written")
+            except ai.AIError as x:
+                assert "cut off at the model’s length limit" in str(x) and "not saved" in str(x) and "try again" in str(x), str(x)
+            assert not os.path.exists(target[:-4] + ".md") and usage.cost() > 0
+            # --- in a run, the note on the paper (its first 100 characters are kept) still says why and that it can be tried again
+            import types as _t
+            pp = {"id": "cut1", "file": target}
+            pl._summarize_one(_t.SimpleNamespace(usage=pl.Usage(), save=lambda: None), pp, lambda *a: None)
+            assert pp["dl_note"] == "summary failed: The summary was cut off at the model’s length limit, so it was not saved. You can try again." and "summary" not in pp, pp
+            # --- the older direct path (no summary template): the same
+            class _LM:
+                stop_reason, content = "max_tokens", [_t.SimpleNamespace(type="text", text="Half a summ")]
+                usage = _t.SimpleNamespace(input_tokens=5, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+            class _LS:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def get_final_message(self): return _LM()
+            keep_ = (prefs.summary_prompt, pl.client)
+            prefs.summary_prompt = lambda *a, **k: ""; pl.client = lambda: _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _LS())))
+            try:
+                pl.summarize({"title": "Platforms"}, target, pl.Usage()); raise AssertionError("a cut-off summary was written (direct path)")
+            except RuntimeError as x:
+                assert "cut off at the model’s length limit" in str(x) and "try again" in str(x), str(x)
+            finally:
+                prefs.summary_prompt, pl.client = keep_
+            assert not os.path.exists(target[:-4] + ".md")
+        finally:
+            Fake.ending = None
+        # --- the same requests, complete this time: asked (nothing was cached), marked as complete, and cached as before
+        n1 = chats()
+        r3 = ai.chat("explain", msg, system="s", cache=True); assert chats() == n1 + 1 and r3.stop is None and not r3.cut_off and not r3.cached
+        assert ai.chat("explain", msg, system="s", cache=True).cached and chats() == n1 + 1
+        a = list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]; assert a["cut_off"] is False and not a["cached"], a
+        assert list(ask.stream(pdf, "How many firms are in the sample, CUT?", "rag"))[-1]["cached"] is True
+        assert cu_.answer("Smith (2020). A paper.", ["Smith (2020) shows CUT."])["cut_off"] is False
+        assert pl.summarize({"title": "Platforms"}, target, pl.Usage()) == "Half an ans" and os.path.exists(target[:-4] + ".md")
+        Fake.ending = "stop"
+        try:
+            r4 = ai.chat("explain", [{"role": "user", "content": "explain STOP"}], system="s", cache=True)
+            assert r4.stop == "stop" and not r4.cut_off and ai.chat("explain", [{"role": "user", "content": "explain STOP"}], system="s", cache=True).cached
+        finally:
+            Fake.ending = None
+        for stop, cut in (("max_tokens", True), ("model_context_window_exceeded", True), ("length", True), ("end_turn", False), ("stop", False), ("refusal", False), ("content_filter", False), (None, False)):
+            assert ai.Result("x", {}, "fake", "m1", cost=0.0, stop=stop).cut_off is cut, stop
+        Fake.pieces = ["The sample has ", "120 firms (2)."]
+    check("an answer that stopped at the length limit is marked cut off (OpenAI-style 'length'), is given back but never cached, the pages are told, and it is not written as a paper's summary", t_cut_off)
+
+    def t_cut_off_old_cache():
+        """An answer saved before cut-off answers were kept out of the cache has no stop reason on it. One whose output reached the limit it was asked with is taken as
+        cut off: asked again (and replaced by the new answer); a shorter one, and any answer saved since, is served as before."""
+        chats = lambda: sum(1 for x in SEEN if x[0].endswith("/chat/completions"))  # noqa: E731
+        def entry_of(msg, limit):          # the cache file of this request (asked once, complete, so it is saved)
+            before = set(os.listdir(ai.CACHE)) if os.path.isdir(ai.CACHE) else set()
+            assert not ai.chat("explain", msg, system="s", cache=True, max_tokens=limit).cached
+            new = set(os.listdir(ai.CACHE)) - before; assert len(new) == 1, new
+            return os.path.join(ai.CACHE, new.pop())
+        def rewrite(f, **k):               # as it was saved before the change: no "stop", and the tokens it came out at
+            d = json.load(open(f)); d.pop("stop", None); d.update(k); json.dump(d, open(f, "w"))
+        Fake.pieces = ["The passage argues that the half ans"]
+        try:
+            m1 = [{"role": "user", "content": "explain OLD CUT"}]
+            f1 = entry_of(m1, 1800); rewrite(f1, usage={"in": 900, "out": 1800})
+            n0 = chats(); Fake.pieces = ["The passage argues that the half answer is now whole."]
+            r = ai.chat("explain", m1, system="s", cache=True, max_tokens=1800)
+            assert chats() == n0 + 1 and not r.cached and r.text.endswith("now whole."), ("an old answer as long as its limit was served as complete", r.cached, r.text)
+            r = ai.chat("explain", m1, system="s", cache=True, max_tokens=1800)
+            assert chats() == n0 + 1 and r.cached and r.text.endswith("now whole.") and not r.cut_off, "the new answer took its place"
+            assert "stop" in json.load(open(f1)), "an answer saved now says how it ended"
+            # an old answer shorter than its limit is complete: served, not asked again; so is one with more tokens than the limit that was saved since (it says how it ended)
+            m2 = [{"role": "user", "content": "explain OLD WHOLE"}]
+            f2 = entry_of(m2, 1800); rewrite(f2, usage={"in": 900, "out": 1799}); n0 = chats()
+            assert ai.chat("explain", m2, system="s", cache=True, max_tokens=1800).cached and chats() == n0
+            rewrite_new = json.load(open(f2)); rewrite_new.update(stop=None, usage={"in": 900, "out": 5000}); json.dump(rewrite_new, open(f2, "w"))
+            assert ai.chat("explain", m2, system="s", cache=True, max_tokens=1800).cached and chats() == n0
+            rewrite(f2, usage={}); assert ai.chat("explain", m2, system="s", cache=True, max_tokens=1800).cached and chats() == n0      # (no token count on it: nothing to go by, served)
+        finally:
+            Fake.pieces = ["The sample has ", "120 firms (2)."]
+    check("an answer saved before cut-off answers were kept out of the cache, with as many output tokens as the limit it was asked with, is asked again; a shorter one and any saved since are served", t_cut_off_old_cache)
+
+    def t_agent_summary():
+        """The agent's summarize tool goes through the AI layer: the summary is written and returned, and a cut-off answer comes back as the tool's error text."""
+        had = os.environ.get("ANTHROPIC_API_KEY"); env0 = dict(os.environ)
+        os.environ["ANTHROPIC_API_KEY"] = had or "not-a-key"       # (agent.py will not load without one; nothing is sent to Claude here)
+        try:
+            import agent as ag_
+        finally:
+            os.environ.clear(); os.environ.update(env0)
+        import pipeline as pl
+        keep = (ag_.find_paper, ag_.pdf_for, ag_.log, dict(ag_.USAGE), prefs.summary_prompt, pl.client)
+        prefs.summary_prompt = lambda *a, **k: "Summarise this paper for the agent."      # (a summary template is set, as it is by default: the AI-layer path)
+        def no_direct(): raise AssertionError("the summary did not go through the AI layer")
+        pl.client = no_direct
+        t1, t2 = os.path.join(TMP, "agent1.pdf"), os.path.join(TMP, "agent2.pdf")
+        shutil.copy(pdf, t1); shutil.copy(pdf, t2)
+        ag_.find_paper = lambda k: {"id": k, "title": "Platforms %s" % k, "abbr": "MISQ"}; ag_.pdf_for = lambda p: t1 if p["id"] == "a1" else t2; ag_.log = lambda m: None
+        try:
+            Fake.pieces = ["# Summary\n\nWritten for the agent."]; rows0 = len(ai.usage_log(100000))
+            out = ag_.summarize_pdf.func("a1")
+            assert out.startswith("# Summary") and open(t1[:-4] + ".md").read().startswith("# Summary"), out
+            assert len(ai.usage_log(100000)) == rows0 + 1 and ai.usage_log(1)[0]["feature"] == "summarize" and ag_.USAGE == keep[3], "in the usage record, not in the agent's own Claude tokens"
+            Fake.pieces = ["Half a summ"]; Fake.ending = "length"
+            out = ag_.summarize_pdf.func("a2")
+            assert "cut off at the model’s length limit" in out and "not saved" in out and not os.path.exists(t2[:-4] + ".md"), out
+        finally:
+            Fake.ending = None; Fake.pieces = ["The sample has ", "120 firms (2)."]
+            ag_.find_paper, ag_.pdf_for, ag_.log = keep[:3]; prefs.summary_prompt, pl.client = keep[4:]
+    check("the agent's summarize tool goes through the AI layer: the summary is written and returned, and a cut-off answer is the tool's error text, not a crash", t_agent_summary)
+
+    def t_cut_off_claude():
+        import types as _t
+        class _M:
+            stop_reason, content = "max_tokens", [_t.SimpleNamespace(type="text", text="Half an ans")]
+            usage = _t.SimpleNamespace(input_tokens=5, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0, server_tool_use=None)
+        class _S:
+            def __init__(self): self.text_stream = iter(["Half an ans"])
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get_final_message(self): return _M()
+        calls = []
+        ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: calls.append(1) or _S())))
+        c = json.loads(json.dumps(CFG)); c["providers"]["anth"] = {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["m1"]}; write_cfg(c)
+        try:
+            e0 = ai.cache_stats()["entries"]
+            for _ in range(2):
+                r = ai.chat("ask", [{"role": "user", "content": "claude CUT"}], cache=True, override={"provider": "anth", "model": "m1"})
+                assert r.stop == "max_tokens" and r.cut_off is True and not r.cached and r.text == "Half an ans", r.stop
+            assert len(calls) == 2 and ai.cache_stats()["entries"] == e0
+        finally:
+            ai._clients.pop("a", None); write_cfg(CFG)
+    check("Claude's stop reason max_tokens is a cut-off answer too: given back, not cached, asked again", t_cut_off_claude)
 
 
     print("round 2 backend: paper cards, folder evidence, Research Ideas Lab")
@@ -3487,7 +4233,15 @@ print("OK")
     def t_develop():
         Fake.responder = ideas_responder
         doc = idl.load(fid); target = doc["ideas"][0]
+        Fake.ending = "length"                               # an outline that stopped at the length limit: streamed and said, not kept as the idea's outline, not cached
+        try:
+            n0 = len(SEEN); cut = list(idl.develop(fid, target["id"]))
+        finally:
+            Fake.ending = None
+        assert cut[-1]["type"] == "done" and cut[-1]["cut_off"] is True and "".join(m.get("delta", "") for m in cut).startswith("## Working title") and len(SEEN) == n0 + 1, cut[-1]
+        assert "developed" not in idl.load(fid)["ideas"][0] and idl.load(fid)["rev"] == doc["rev"], idl.load(fid)["ideas"][0].get("developed")
         out = list(idl.develop(fid, target["id"]))
+        assert len(SEEN) == n0 + 2 and out[-1]["cut_off"] is False and not out[-1]["cached"], out[-1]
         assert out[-1]["type"] == "done" and "".join(m.get("delta", "") for m in out).startswith("## Working title")
         sent = str(SEEN[-1][1]["messages"][-1]["content"]); assert target["research_question"] in sent and "Smith et al. (2026)" in sent and "Panel DiD" in sent
         assert idl.load(fid)["ideas"][0]["developed"]["text"].startswith("## Working title")
@@ -3540,6 +4294,13 @@ print("OK")
         assert not any(m["type"] == "status" and "first time" in m["msg"] for m in again) and again[-1]["cached"] is True and chats() == n0     # indexed once, answer cached
         h = list(ma.stream(ROWS4, "and why?", "passages", history=[{"q": "How large is the sample of firms?", "a": "120 firms (1)."}], fresh=True))
         assert [m["role"] for m in SEEN[-1][1]["messages"]] == ["system", "user", "assistant", "user"] and h[-1]["type"] == "done"
+        assert msgs[-1]["cut_off"] is False
+        Fake.ending = "length"                               # an answer that stopped at the length limit: the page is told, and it is asked again next time
+        try:
+            n0 = chats(); c1 = list(ma.stream(ROWS4, "Which firms were left out of the sample?", "passages"))[-1]; c2 = list(ma.stream(ROWS4, "Which firms were left out of the sample?", "passages"))[-1]
+        finally:
+            Fake.ending = None
+        assert c1["type"] == "done" and c1["cut_off"] is True and c2["cut_off"] is True and not c2["cached"] and chats() == n0 + 2, (c1, c2, chats() - n0)
         Fake.responder = None
     check("ask several papers: passages from different papers, labelled with paper and page; indexed once; follow-ups carry history; invented citations flagged", t_multi_passages)
 
@@ -3844,6 +4605,29 @@ print("OK")
     def t_folder_cleanup2():
         fo.delete(fid2); assert not any(os.path.exists(os.path.join(fo.DIR, fid2 + x)) for x in (".json", ".ask.json", ".matrix.json"))
     check("deleting a folder also deletes its conversation and matrix", t_folder_cleanup2)
+
+    def t_draft_cut_off():
+        Fake.responder = lambda body: ["## Trust\nPlatform rules shape how participants behave [P1-1]. A second study agrees with this and adds that"]
+        st = {"topic": "Trust on platforms", "words": 300, "files": [r["file"] for r in ROWS[:3]]}
+        try:
+            Fake.ending = "length"; n0 = len(SEEN)
+            m1 = list(rw.stream("cutdraft", ROWS, st)); m2 = list(rw.stream("cutdraft", ROWS, st))
+            assert m1[-1]["type"] == "done" and m1[-1]["cut_off"] is True and m2[-1]["cut_off"] is True and not m2[-1]["cached"] and len(SEEN) == n0 + 2, (m1[-1], m2[-1], len(SEEN) - n0)
+            d1 = next(m for m in m1 if m["type"] == "draft")["doc"]
+            assert d1["cut_off"] is True and rw.load("cutdraft")["cut_off"] is True and rw.load("cutdraft")["raw"].endswith("adds that"), "kept, and marked as unfinished"
+            same = rw.update("cutdraft", raw=d1["raw"])                                                                    # Edit, then Save without typing: the end is still missing, so the note stays
+            assert same["cut_off"] is True and rw.load("cutdraft")["cut_off"] is True and same["raw"] == d1["raw"], "a save that changes nothing keeps the cut-off note"
+            assert rw.update("cutdraft", raw=d1["raw"].replace("\n", "\r\n") + "\n")["cut_off"] is True and rw.update("cutdraft", style="numbered")["cut_off"] is True
+            ed = rw.update("cutdraft", raw=d1["raw"] + " entry rises [P2-1].")
+            assert ed["cut_off"] is False and rw.load("cutdraft")["cut_off"] is False, "once you have edited it, it is yours"
+            Fake.ending = None
+            m3 = list(rw.stream("cutdraft", ROWS, st))
+            assert len(SEEN) == n0 + 3 and m3[-1]["cut_off"] is False and rw.load("cutdraft")["cut_off"] is False and list(rw.stream("cutdraft", ROWS, st))[-1]["cached"] is True, m3[-1]
+        finally:
+            Fake.ending = None; Fake.responder = None
+            if os.path.exists(rw.path("cutdraft")):
+                os.remove(rw.path("cutdraft"))
+    check("related work: a draft that stopped at the length limit is kept but marked as cut off (until you edit it), and is not cached", t_draft_cut_off)
 
     def t_related_work():
         P = {"P1": {"file": "a.pdf", "title": "A", "label": "Tian & Xue", "year": "2026", "short": "Tian & Xue (2026)", "ref": ["Tian, J., & Xue, K. (2026). A. ", "Journal", "."], "key": "k1", "doi": ""},
@@ -6434,7 +7218,7 @@ print("OK")
         import pipeline as pl_
         abbr = pl_.journals()[0]["abbr"]
         hit = [{"term": "DiD", "field": "abstract", "text": "DiD"}]
-        def fake_batch(system, batch, usage, override=None):
+        def fake_batch(system, batch, usage, override=None, stop=None):
             return {n: {"n": n, "verdict": ["download", "borderline", "skip"][n % 3], "relevance": 10 * n, "topics": [], "reason": "r%d" % n, "method": "Econometrics (DiD)"}
                     for n, _ in enumerate(batch, 1)}
         def arts(with_hits):
@@ -6494,7 +7278,7 @@ print("OK")
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         topic = pl_.topic_labels()[0]; abbr = pl_.journals()[0]["abbr"]
         asked, fetched, events = [], [], []
-        def fake_batch(system, batch, usage, override=None):
+        def fake_batch(system, batch, usage, override=None, stop=None):
             asked.extend(p["title"] for p in batch)
             return {n: {"n": n, "verdict": "download" if "Platform" in p["title"] else "skip", "relevance": 80, "topics": [topic], "reason": "because", "method": None} for n, p in enumerate(batch, 1)}
         real = (pl_._screen_batch, pl_.fx.crossref_journal_range, pl_.fill_abstracts)
@@ -6534,7 +7318,7 @@ print("OK")
             asked.clear(); r6 = run_with(); pl_.screen(r6, emit, stop)                           # older than the number of days: asked again, and remembered afresh
             assert len(asked) == 3 and r6.reused == 0
             asked.clear(); r7 = run_with(); pl_.screen(r7, emit, stop); assert not asked and r7.reused == 3
-            pl_._screen_batch = lambda system, batch, usage, override=None: {}                                  # a failure is an error verdict and is never remembered
+            pl_._screen_batch = lambda system, batch, usage, override=None, stop=None: {}                                  # a failure is an error verdict and is never remembered
             asked.clear(); r8 = run_with(query="fails"); pl_.screen(r8, emit, stop)
             assert {r8.papers[i]["verdict"] for i in r8.papers} == {"error"}
             pl_._screen_batch = fake_batch
@@ -6917,12 +7701,102 @@ print("OK")
             assert len(chat_calls()) - n0 == 6, len(chat_calls()) - n0                                                        # 2 batches x 3 tries
             assert {r3.papers[i]["verdict"] for i in r3.order} == {"error"} and all("upstream overloaded" in r3.papers[i]["reason"] and "HTTP 503" in r3.papers[i]["reason"] for i in r3.order), [r3.papers[i]["reason"] for i in r3.order]
             assert sum(1 for e, d in events if e == "log" and "Screening failed for" in d["msg"]) == 2 and r3.screen_error == ""
-            # 4. a summariser: it answers, in prose: every answer is paid for and in the ledger, and the reason says it was not the JSON (with how it began)
+            # 4. a summariser: it answers, in prose: it is asked once more and no further (two requests, not three), every answer is paid for and in the ledger, and the
+            #    reason says it was not the JSON (with how it began)
             Fake.http_error = None; Fake.responder = lambda body: ["This paper studies how ", "platforms nudge users."]
             n0, rows0 = len(chat_calls()), len(ai.usage_log(100000))
             r4 = new_run("prose", n=2); pl_.screen(r4, emit, stop, batch_size=2, workers=1)
-            assert len(chat_calls()) - n0 == 3 and len(ai.usage_log(100000)) - rows0 == 3
+            assert len(chat_calls()) - n0 == 2 and len(ai.usage_log(100000)) - rows0 == 2, (len(chat_calls()) - n0, len(ai.usage_log(100000)) - rows0)
+            assert [x.get("papers") for x in ai.usage_log(2)][::-1] == [2, 0], [x.get("papers") for x in ai.usage_log(2)][::-1]      # (the second request repeats the same papers: 0 on its row)
             assert {r4.papers[i]["verdict"] for i in r4.order} == {"error"} and all("not the JSON" in r4.papers[i]["reason"] and "This paper studies" in r4.papers[i]["reason"] for i in r4.order), r4.papers[r4.order[0]]["reason"]
+            # 4b. an answer cut off at the length limit is not sent again as it was: the batch is asked again as two halves (the papers keep their numbers), every paper
+            #     gets its verdict, and the cut-off answer is paid for and counted like the others
+            asked = lambda body: [it["n"] for it in json.loads(body["messages"][-1]["content"])]
+            Fake.responder = lambda body: [verdicts(body)[0][:40]] if len(asked(body)) > 2 else verdicts(body)
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            n0, rows0, events[:] = len(chat_calls()), len(ai.usage_log(100000)), []
+            r4b = new_run("cutoff", n=4); pl_.screen(r4b, emit, stop, batch_size=4, workers=1)
+            sent = [asked(b) for b in chat_calls()[n0:]]
+            assert sent == [[1, 2, 3, 4], [1, 2], [3, 4]], sent
+            assert all(r4b.papers[i]["verdict"] == "download" for i in r4b.order) and len(ai.usage_log(100000)) - rows0 == 3, [r4b.papers[i].get("verdict") for i in r4b.order]
+            assert abs(r4b.usage.cost() - sum(x["cost"] for x in ai.usage_log(3))) < 1e-9 and not any(e == "log" and "Screening failed" in d["msg"] for e, d in events)
+            assert [x.get("papers") for x in ai.usage_log(3)][::-1] == [4, 0, 0], [x.get("papers") for x in ai.usage_log(3)][::-1]      # the halves repeat papers already counted: 0 on their rows
+            # 4c. every answer is cut off, however small the batch: halved twice and no further (1 + 2 + 4 requests for 8 papers, never one per paper), and the reason says so
+            Fake.responder = lambda body: ['{"results": [{"n": 1, "verd']; Fake.ending = "length"
+            n0 = len(chat_calls()); r4c = new_run("cutall", n=8); pl_.screen(r4c, emit, stop, batch_size=8, workers=1)
+            sent = [asked(b) for b in chat_calls()[n0:]]
+            assert sent == [[1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4], [1, 2], [3, 4], [5, 6, 7, 8], [5, 6], [7, 8]], sent
+            assert all(r4c.papers[i]["verdict"] == "error" and "cut off" in r4c.papers[i]["reason"] for i in r4c.order), r4c.papers[r4c.order[0]]
+            n0 = len(chat_calls()); r4c1 = new_run("cutone", n=1); pl_.screen(r4c1, emit, stop, batch_size=1, workers=1)      # one paper cannot be halved: asked once
+            assert len(chat_calls()) - n0 == 1 and r4c1.papers["cutone-0"]["verdict"] == "error" and "cut off" in r4c1.papers["cutone-0"]["reason"], (len(chat_calls()) - n0, r4c1.papers["cutone-0"])
+            # 4d. one half answers, the other answers in prose (asked twice): the papers that were judged keep their verdicts, only the others fail, and the log counts those
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else (verdicts(body) if asked(body)[0] == 1 else ["Sorry, prose."])
+            n0, events[:] = len(chat_calls()), []
+            r4d = new_run("half", n=4); pl_.screen(r4d, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2], [3, 4], [3, 4]], [asked(b) for b in chat_calls()[n0:]]
+            assert [r4d.papers[i]["verdict"] for i in r4d.order] == ["download", "download", "error", "error"] and "not the JSON" in r4d.papers["half-3"]["reason"], [r4d.papers[i].get("reason") for i in r4d.order]
+            assert [d["msg"] for e, d in events if e == "log" and "Screening failed" in d["msg"]][0].startswith("Screening failed for 2 papers"), [d["msg"] for e, d in events if e == "log"]
+            Fake.ending = None
+            # 4e. Stop pressed while an answer that cannot be used came in: nothing is sent again, and the papers are left unscreened (not marked as failed)
+            st2 = threading.Event()
+            Fake.responder = lambda body: (st2.set(), ["Not JSON at all."])[1]
+            n0 = len(chat_calls()); r4e = new_run("stopped", n=2); pl_.screen(r4e, emit, st2, batch_size=2, workers=1)
+            assert len(chat_calls()) - n0 == 1 and not any(r4e.papers[i].get("verdict") for i in r4e.order), (len(chat_calls()) - n0, [r4e.papers[i].get("verdict") for i in r4e.order])
+            st3 = threading.Event()                                                                                        # …and the same for an answer that was cut off: its halves are not asked
+            Fake.responder = lambda body: (st3.set(), ["{"])[1]; Fake.ending = "length"
+            n0 = len(chat_calls()); r4f = new_run("stoppedcut", n=4); pl_.screen(r4f, emit, st3, batch_size=4, workers=1)
+            assert len(chat_calls()) - n0 == 1 and not any(r4f.papers[i].get("verdict") for i in r4f.order), (len(chat_calls()) - n0, [r4f.papers[i].get("verdict") for i in r4f.order])
+            Fake.ending = None
+            # 4g. Stop pressed while the first half of a split batch was answered (an answer that can be used): the second half is not sent
+            st4 = threading.Event()
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else (st4.set(), verdicts(body))[1]
+            n0 = len(chat_calls()); r4g = new_run("stoppedhalf", n=4); pl_.screen(r4g, emit, st4, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2]], ("a request was sent after Stop", [asked(b) for b in chat_calls()[n0:]])
+            assert not any(r4g.papers[i].get("verdict") for i in r4g.order), [r4g.papers[i].get("verdict") for i in r4g.order]
+            # 4h. the second half numbers its answer from 1 again: its verdicts are not put on the first half's papers; the first half keeps its own, the second fails and says why
+            def renumbered(body):
+                if len(asked(body)) > 2:
+                    return ["{"]
+                if asked(body)[0] == 1:
+                    return verdicts(body)
+                return [json.dumps({"results": [{"n": k, "verdict": "skip", "relevance": 3, "topics": [], "method": "Survey", "reason": "another paper's"} for k in (1, 2)]})]
+            Fake.responder = renumbered
+            n0, events[:] = len(chat_calls()), []
+            r4h = new_run("renumbered", n=4); pl_.screen(r4h, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2], [3, 4]], [asked(b) for b in chat_calls()[n0:]]
+            assert [(r4h.papers[i]["verdict"], r4h.papers[i]["reason"]) for i in r4h.order[:2]] == [("download", "fits")] * 2, ("a paper got another paper's verdict", [(r4h.papers[i]["verdict"], r4h.papers[i]["reason"]) for i in r4h.order])
+            assert all(r4h.papers[i]["verdict"] == "error" and "no verdict for any of the papers it was sent" in r4h.papers[i]["reason"] for i in r4h.order[2:]), [r4h.papers[i]["reason"] for i in r4h.order[2:]]
+            fp4h = pl_.screen_fingerprint(pl_.screening_system(r4h.params.get("topics"), r4h.params.get("query"), r4h.params.get("methods")))
+            assert {k: v["v"] for k, v in json.load(open(pl_.VERDICTS))[fp4h].items() if k.startswith("renumbered-")} == {"renumbered-0": "download", "renumbered-1": "download"}
+            mixed = lambda body: [json.dumps({"results": [{"n": k, "verdict": "skip", "relevance": 3, "topics": [], "method": "Survey", "reason": "r%s" % k} for k in (2, 7, True, "1")]})]
+            Fake.ending = None; Fake.responder = mixed                                                                     # (and in a whole batch: a number it was not sent, True or "1" is no verdict)
+            r4h2 = new_run("strays", n=2); pl_.screen(r4h2, emit, stop, batch_size=2, workers=1)
+            assert [r4h2.papers[i]["verdict"] for i in r4h2.order] == ["error", "skip"] and r4h2.papers["strays-1"]["reason"] == "r2", [r4h2.papers[i].get("reason") for i in r4h2.order]
+            # 4i. the screening is stopped between the halves (a refused key, then the budget): the half that answered was paid for and keeps its verdicts (saved, too);
+            #     the other papers stay unscreened, the reason is on the run, and Retry screening asks only for them
+            Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else verdicts(body)
+            Fake.http_error = lambda body: (401, "User not found.") if body.get("response_format") and asked(body) == [3, 4] else None
+            n0, events[:] = len(chat_calls()), []
+            r4i = new_run("refusedhalf", n=4); pl_.screen(r4i, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4], [1, 2], [3, 4]], [asked(b) for b in chat_calls()[n0:]]
+            assert [r4i.papers[i].get("verdict") for i in r4i.order] == ["download", "download", None, None], ("the verdicts already paid for were dropped", [r4i.papers[i].get("verdict") for i in r4i.order])
+            assert "HTTP 401" in r4i.screen_error and [d for e, d in events if e == "progress"][-1]["done"] == 2, (r4i.screen_error, [d for e, d in events if e == "progress"][-1])
+            Fake.http_error = None; n0 = len(chat_calls()); pl_.screen(r4i, emit, stop, batch_size=4, workers=1)
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2]] and all(r4i.papers[i]["verdict"] == "download" for i in r4i.order) and r4i.screen_error == "", [asked(b) for b in chat_calls()[n0:]]
+            r4i2 = new_run("refusedhalf", n=4); n0 = len(chat_calls()); pl_.screen(r4i2, emit, stop, batch_size=4, workers=1)      # (the same search again: all four are known, nothing is asked)
+            assert len(chat_calls()) == n0 and r4i2.reused == 4, (len(chat_calls()) - n0, r4i2.reused)
+            gate, gates = ai._budget_gate, []
+            ai._budget_gate = lambda *a, **k: (_ for _ in ()).throw(ai.Blocked("This month’s AI budget ($1.00) is used up.")) if (gates.append(1), len(gates))[1] >= 4 else gate(*a, **k)
+            try:                                                                                                           # 8 papers, every answer for more than 2 cut off: 8, 4, 2 are asked, then the budget stops it
+                n0 = len(chat_calls()); r4j = new_run("budgethalf", n=8); pl_.screen(r4j, emit, stop, batch_size=8, workers=1)
+            finally:
+                ai._budget_gate = gate
+            assert [asked(b) for b in chat_calls()[n0:]] == [[1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4], [1, 2]], [asked(b) for b in chat_calls()[n0:]]
+            assert [r4j.papers[i].get("verdict") for i in r4j.order] == ["download", "download"] + [None] * 6 and "budget" in r4j.screen_error, ([r4j.papers[i].get("verdict") for i in r4j.order], r4j.screen_error)
+            Fake.ending = None
             # 5. an answer that leaves a paper out: only that paper fails, and says so
             Fake.responder = lambda body: [json.dumps({"results": [{"n": 1, "verdict": "skip", "relevance": 5, "topics": [], "method": "Survey", "reason": "no"}]})]
             r5 = new_run("partial", n=2); pl_.screen(r5, emit, stop, batch_size=2, workers=1)
@@ -6944,11 +7818,100 @@ print("OK")
             no = pl_.screen_test("fake", "m1"); assert not no["ok"] and no["error"].startswith("Can’t screen papers: the provider refused") and "HTTP 404" in no["error"], no
             assert ai.test("fake", "m1")["ok"]                                                                             # …while the plain test says the model works: why the screening test exists
         finally:
-            Fake.http_error = None; Fake.responder = None; pl_.time.sleep = real_sleep
+            Fake.http_error = None; Fake.responder = None; Fake.ending = None; pl_.time.sleep = real_sleep
             if saved_cfg is None:
                 os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
             else:
                 open(ai.CONFIG, "w").write(saved_cfg)
+
+    def t_pdf_counted():
+        """A PDF sent to a model is counted by what the provider reads of it: from the size of the file alone (never opened to be measured), more for a provider that
+        is sent the PDF itself; from the text and pages already saved when the call has just read it. That count is what a cancelled call's ledger row carries;
+        the row of an ordinary call says what it always said."""
+        import types as _t, notes_store as ns_, activity as act_, blocks as bl_, pymupdf
+        big = os.path.join(TMP, "big_notpdf.pdf"); open(big, "wb").write(b"%PDF-1.4\n" + b"0" * 2_000_000)      # 2 MB that no PDF reader could open
+        real_sha = ns_.sha1_of
+        def no_read(*a, **k):
+            raise AssertionError("the PDF was read to be measured")
+        ns_.sha1_of = no_read; ai.open = no_read                                                    # (ai.open shadows the built-in inside ai.py only)
+        try:
+            lo, mid, hi = ai.pdf_chars(big, True); tlo, tmid, thi = ai.pdf_chars(big, False)
+            assert lo < mid < hi and tlo < tmid < thi and mid > tmid and lo > tlo and thi <= ai.FULL_TEXT_LIMIT, (lo, mid, hi, tlo, tmid, thi)
+            assert mid > 200_000 * 1.5, mid                                                          # (the old rule: a tenth of the size)
+            assert ai.pdf_chars(big, True, saved=True) == (lo, mid, hi)                               # (nothing remembered about this file: its size, and still nothing opened)
+            assert ai.pdf_chars(os.path.join(TMP, "no-such.pdf"), True) == (ai.PDF_MIN_CHARS,) * 3 and ai.pdf_chars(None, False) == (ai.PDF_MIN_CHARS,) * 3
+            huge = ai.pdf_chars(big, False); open(big, "ab").write(b"0" * 60_000_000)
+            cap = ai.pdf_chars(big, False); assert cap[2] == ai.FULL_TEXT_LIMIT and cap[0] <= cap[1] <= cap[2] and cap[0] > huge[0], cap     # (text sent is cut at the limit)
+            assert ai.pdf_chars(big, True)[2] > ai.FULL_TEXT_LIMIT                                    # (the PDF itself is not cut)
+            open(big, "wb").write(b"%PDF-1.4\n" + b"0" * 2_000_000)
+            msgs = [{"role": "user", "content": [{"type": "pdf", "path": big}, {"type": "text", "text": "Summarise."}]}]
+            assert ai._sent(msgs, "sys") == (2000 + len("Summarise.") + 3, "Summarise.")              # (the 'what was sent' count of an ordinary call: as it was)
+            assert ai._sent(msgs, "sys", True)[0] == mid + len("Summarise.") + 3 and ai._sent(msgs, None, False) == (tmid + len("Summarise."), "Summarise.")
+            assert ai._sent([{"role": "user", "content": [{"type": "image", "data": "x"}, {"type": "text", "text": "hi"}]}], None, True)[0] == 2002   # images as before
+        finally:
+            ns_.sha1_of = real_sha; del ai.open
+        long_pdf = os.path.join(TMP, "long.pdf"); d = pymupdf.open()
+        for i in range(30):
+            d.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 790), ("Platform governance shapes complementor entry on page %d. " % i) * 40, fontsize=9)
+        pg = d.new_page(); pg.insert_textbox(pymupdf.Rect(60, 60, 540, 90), "References", fontsize=12)
+        pg.insert_textbox(pymupdf.Rect(60, 100, 540, 790), "\n".join("Doe, J. (20%02d). A paper on platform governance and complementors. MIS Quarterly, 40(%d), 1-20." % (i, i) for i in range(1, 26)), fontsize=9)
+        d.save(long_pdf); d.close()
+        text_len = len(ai._pdf_text(long_pdf)); assert text_len > 30_000, text_len
+        bs = bl_.extract(long_pdf); pages = max(b["page"] for b in bs) + 1; refs = sum(len(b["text"]) for b in bs if b.get("kind") == "ref"); assert pages == 31 and refs > 1500, (pages, refs)
+        assert ai.pdf_chars(long_pdf, True, saved=True) == (sum(len(b["text"]) for b in bs) + 31 * ai.PDF_PAGE_IMAGE,) * 3          # (just read: its saved text, references too, and each page as an image)
+        t3 = ai.pdf_chars(long_pdf, False, saved=True); assert t3[0] == t3[1] == t3[2] and abs(t3[1] - text_len) < 300, (t3, text_len)   # (the text that is sent, so without the references, give or take its heading)
+        assert ai.pdf_chars(long_pdf, False) != t3 and ai.pdf_chars(long_pdf, False)[1] == ai.PDF_MIN_CHARS                          # (not asked to look: the size only)
+        write_cfg({**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["m1"]}},
+                   "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
+        ask = [{"role": "user", "content": [{"type": "pdf", "path": long_pdf}, {"type": "text", "text": "Summarise."}]}]
+        saved_ledger = ai.LEDGER; ai.LEDGER = os.path.join(TMP, "pdf_ledger.jsonl")
+        try:
+            Fake.responder = lambda body: ["A whole ", "answer."]
+            ai.chat("summarize", ask)
+            row = ai.usage_log(1)[0]; assert row["chars"] == 2000 + len("Summarise.") and not row.get("cancelled") and row["in"] + row["cache_read"] == 1000, row     # an ordinary row: unchanged (the provider's own count)
+            job = act_.start("summary", "cancel test")
+            Fake.responder = lambda body: (job.cancel_ev.set(), ["Half an ", "answer."])[1]
+            try:
+                try:
+                    ai.chat("summarize", ask); raise AssertionError("not cancelled")
+                except ai.Cancelled:
+                    pass
+                row = ai.usage_log(1)[0]
+                assert row.get("cancelled") and row.get("estimated") and row["feature"] == "summarize" and row["preview"] == "Summarise.", row
+                assert row["chars"] == t3[1] + len("Summarise.") and row["in"] == int(row["chars"] / 3.3) and row["cost"] > 0.005, row    # (old: 2,010 characters, about 600 tokens)
+            finally:
+                Fake.responder = None; job.finish("cancelled")
+            # a provider that is sent the PDF itself: every page's text and the page as an image; from the size when nothing about the file is remembered
+            class _S:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                @property
+                def text_stream(self):
+                    act_.current().cancel_ev.set(); yield "Half"; yield " more"
+                def get_final_message(self): raise AssertionError("a cancelled answer was read to its end")
+            ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _S())))
+            try:
+                for forget, want in ((False, ai.pdf_chars(long_pdf, True, saved=True)[1]), (True, ai.pdf_chars(long_pdf, True)[1])):
+                    assert want > 2 * t3[1] or forget, (want, t3)
+                    bl_.extract(long_pdf)
+                    if forget:
+                        ns_._sha.clear()
+                    job = act_.start("summary", "cancel test")
+                    try:
+                        try:
+                            ai.chat("summarize", ask, override={"provider": "anth", "model": "m1"}); raise AssertionError("not cancelled")
+                        except ai.Cancelled:
+                            pass
+                        row = ai.usage_log(1)[0]
+                        assert row.get("cancelled") and row["provider"] == "anth" and row["chars"] == want + len("Summarise.") and row["in"] == int(row["chars"] / 3.3), (forget, want, row)
+                        assert not forget or not ns_._sha, "the PDF was read again to be measured"
+                    finally:
+                        job.finish("cancelled")
+            finally:
+                ai._clients.pop("a", None)
+        finally:
+            ai.LEDGER = saved_ledger; write_cfg(CFG); os.remove(big)
+    check("a PDF sent to a model is counted by what the provider reads of it (from its size, never opened to be measured; from its saved text when just read), and a cancelled call's ledger row carries that count while an ordinary row is unchanged", t_pdf_counted)
 
     def t_summaries_job():
         """Library → "Summarise N papers…": only downloaded papers without a summary (never a book, a missing PDF or a failed download); the cost guess rests on earlier
@@ -6990,13 +7953,34 @@ print("OK")
             index(["a", "b", "book", "missing", "failed"])
             assert [r["file"] for r in su.pending()] == [rel("a")], [r["file"] for r in su.pending()]                  # not b (summarised), not the book, not a missing PDF, not a failed download
             e = su.estimate(); assert e["n"] == 1 and e["files"] == [rel("a")] and e["basis"] == "prices" and e["cost"] > 0 and e["provider"] == "fake" and e["model"] == "m1", e
+            # while the guess rests on file sizes it is a range, no file is opened for it, and a provider that is sent the PDF itself (every page also as an image) costs more
+            open(os.path.join(root, rel("a")), "wb").write(b"%PDF-1.4\n" + b"0" * 2_000_000)                             # 2 MB no reader could open
+            import notes_store as ns_
+            real_sha = ns_.sha1_of
+            def no_read(*a, **k):
+                raise AssertionError("the estimate read the PDF")
+            ns_.sha1_of = no_read; ai.open = no_read
+            try:
+                e = su.estimate()
+                assert e["basis"] == "prices" and 0 < e["cost_low"] < e["cost"] < e["cost_high"] and abs(e["per_paper"] - e["cost"]) < 1e-9 and e["history_min"] == su.HISTORY_MIN == 3 and e["calls"] == 0, e
+                lo_, mid_, hi_ = ai.pdf_chars(os.path.join(root, rel("a")), False)
+                assert [round(e[k], 6) for k in ("cost_low", "cost", "cost_high")] == [round(ai.estimate("summarize", c + 3000, su.OUT_TOKENS), 6) for c in (lo_, mid_, hi_)], e
+                write_cfg({**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["m1"]}},
+                           "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "anth", "model": "m1"}}})
+                en = su.estimate(); assert en["basis"] == "prices" and en["provider"] == "anth" and en["cost"] > e["cost"] and en["cost_low"] > e["cost_low"] and en["cost_high"] > e["cost_high"], (en, e)
+                index(["a", "f1"]); write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
+                e2 = su.estimate(); small = ai.estimate("summarize", ai.pdf_chars(os.path.join(root, rel("f1")), False)[1] + 3000, su.OUT_TOKENS)      # two papers: each end is the sum over the papers
+                assert e2["n"] == 2 and abs(e2["cost"] - (e["cost"] + small)) < 1e-4 and e2["cost_low"] < e2["cost"] < e2["cost_high"] and abs(e2["per_paper"] - e2["cost"] / 2) < 1e-9, (e2, e, small)
+            finally:
+                ns_.sha1_of = real_sha; del ai.open; shutil.copy(src, os.path.join(root, rel("a"))); index(["a", "b", "book", "missing", "failed"])
+                write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
             for c in (0.002, 0.004, 0.003):                                                                                # three earlier summaries with this model: the guess rests on them
                 open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "fake", "model": "m1", "in": 1, "out": 1, "cost": c}) + "\n")
             open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "fake", "model": "m1", "cost": 0.0, "cached": True}) + "\n")      # (free, from the cache: not counted)
             open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "other", "model": "m1", "cost": 9.0}) + "\n")                    # (another provider: not counted)
-            e = su.estimate(); assert e["basis"] == "history" and e["calls"] == 3 and abs(e["per_paper"] - 0.003) < 1e-9 and abs(e["cost"] - 0.003) < 1e-9, e
+            e = su.estimate(); assert e["basis"] == "history" and e["calls"] == 3 and abs(e["per_paper"] - 0.003) < 1e-9 and abs(e["cost"] - 0.003) < 1e-9 and e["cost_low"] is None and e["cost_high"] is None and e["history_min"] == 3, e
             write_cfg({**CFG, "prices": {}, "features": {"ask": {"provider": "fake", "model": "m2"}, "summarize": {"provider": "fake", "model": "m2"}}})
-            e = su.estimate(); assert e["basis"] == "unknown" and e["cost"] is None and e["model"] == "m2", e                # no price, no history: said, not invented
+            e = su.estimate(); assert e["basis"] == "unknown" and e["cost"] is None and e["model"] == "m2" and e["cost_low"] is None and e["cost_high"] is None, e                # no price, no history: said, not invented
             write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
             # the job: one summary written beside its PDF, through the AI layer (the ledger), in the tray as one job
             Fake.responder = lambda body: ["# Paper A\n\n", "**Authors**: Jane Doe\n\n## TL;DR\nA test summary."]
@@ -7035,7 +8019,82 @@ print("OK")
                 open(ai.CONFIG, "w").write(saved[4])
             shutil.rmtree(root, ignore_errors=True)
 
-    check("screening errors: the provider's own words on every failed paper; a refused request (a model without structured output, a refused key) stops at the first batch and leaves the papers unscreened with the reason on the run; a busy provider or prose marks only that batch; Retry screening asks again; the screening Test finds a model that cannot screen", t_screen_errors)
+    check("screening errors: the provider's own words on every failed paper; a refused request (a model without structured output, a refused key) stops at the first batch and leaves the papers unscreened with the reason on the run; a busy provider or prose marks only that batch (prose is asked twice, not three times); a cut-off answer is asked again in halves, twice at most; Stop sends nothing again; Retry screening asks again; the screening Test finds a model that cannot screen", t_screen_errors)
+
+    def t_screen_estimate():
+        """The screening estimate rests on what your earlier screenings with the same provider and model cost per paper (the ledger rows that say how many papers they
+        carried, the last 200 of them), once 50 papers are on record; else on the price; a Settings Test, another provider or model, a saved answer or a call without a
+        price never counts. A screening call writes its number of papers on its ledger row; the Settings Test does not."""
+        import pipeline as pl_
+        saved = (ai.LEDGER, open(ai.CONFIG).read() if os.path.exists(ai.CONFIG) else None)
+        ai.LEDGER = os.path.join(TMP, "ledger-screen-est.jsonl")
+        def row(**k):
+            open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "screen", "provider": "fake", "model": "m1", "in": 1, "out": 1, **k}) + "\n")
+        feats = {"ask": {"provider": "fake", "model": "m1"}, "screen": {"provider": "fake", "model": "m1"}}
+        try:
+            write_cfg({**CFG, "features": feats})
+            by_price = (int(1500 / 3.3) * 1.0 + 60 * 2.0) / 1e6
+            assert pl_.screen_estimate() == (by_price, "prices"), pl_.screen_estimate()                                  # nothing on record: the price
+            row(cost=0.05, papers=25); row(cost=0.01); row(cost=0.07, papers=24)                                           # 49 papers (one too few), and a Settings Test (no number of papers)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 49 and abs(mean - 0.12 / 49) < 1e-12, (n, mean)
+            assert pl_.screen_estimate() == (by_price, "prices") and pl_.est_screen_cost_per_paper() == by_price, pl_.screen_estimate()
+            row(cost=0.005, papers=1)                                                                                      # the 50th paper: from here on, what they cost
+            row(cost=9.0, papers=25, provider="other"); row(cost=9.0, papers=25, model="m2"); row(cost=9.0, papers=25, feature="ask"); row(cost=0.0, papers=25, cached=True)
+            row(cost=None, papers=25); row(cost=9.0, papers=25, cancelled=True); row(cost=9.0, papers=-1); row(cost=9.0, papers="25"); row(cost=9.0, papers=True)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 50 and abs(mean - 0.0025) < 1e-12, (n, mean)
+            # a request that repeats papers already sent (a resend, the halves of a split batch) carries 0 papers: what it cost counts, its papers are not counted twice
+            kept = open(ai.LEDGER).read()
+            row(cost=0.05, papers=0); row(cost=0.025, papers=0)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 50 and abs(mean - 0.004) < 1e-12, (n, mean)
+            open(ai.LEDGER, "w").write(kept)
+            per, basis = pl_.screen_estimate(); assert basis == "history" and abs(per - 0.0025) < 1e-12 and pl_.est_screen_cost_per_paper() == per, (per, basis)
+            assert pl_.screen_estimate("fake", "m9") == (None, None) and pl_.est_screen_cost_per_paper("fake", "m9") is None      # a model with no price and nothing on record: not known
+            write_cfg({**CFG, "prices": {}, "features": feats})
+            assert pl_.screen_estimate()[1] == "history" and abs(pl_.est_screen_cost_per_paper() - 0.0025) < 1e-12        # no price, but 50 papers on record: still known
+            write_cfg({**CFG, "features": feats})
+            for _ in range(pl_.SCREEN_HISTORY_CALLS - 1):                                                                  # only the most recent 200 calls count: the three old ones age out one by one
+                row(cost=0.001, papers=1)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 200 and abs(mean - (0.005 + 199 * 0.001) / 200) < 1e-12, (n, mean)
+            row(cost=0.001, papers=1)
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 200 and abs(mean - 0.001) < 1e-12, (n, mean)
+            # a real screening writes the number of papers each request carried on its ledger row (a batch of 3, then one of 2); the Settings Test does not
+            os.remove(ai.LEDGER)
+            if os.path.exists(pl_.VERDICTS): os.remove(pl_.VERDICTS)
+            Fake.responder = lambda body: [json.dumps({"results": [{"n": it["n"], "verdict": "skip", "relevance": 1, "topics": [], "method": "Survey", "reason": "no"} for it in json.loads(body["messages"][-1]["content"])]})]
+            r = pl_.Run("weekly", {"topics": [], "query": "the estimate"})
+            for k in range(5):
+                r.add_paper({"id": "est-%d" % k, "title": "Paper %d" % k, "abbr": pl_.journals()[0]["abbr"], "pub_date": "2026-09-01", "abstract": "About something.", "keywords": None})
+            pl_.screen(r, lambda *a, **k: None, threading.Event(), batch_size=3, workers=1)
+            rows = ai.usage_log(10)
+            assert sorted(x.get("papers") or 0 for x in rows) == [2, 3] and all(x["feature"] == "screen" for x in rows), rows
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 5 and mean > 0 and abs(mean - sum(x["cost"] for x in rows) / 5) < 1e-12, (n, mean)
+            assert pl_.screen_test("fake", "m1")["ok"] and "papers" not in ai.usage_log(1)[0] and pl_.screen_history("fake", "m1")[0] == 5, ai.usage_log(1)[0]
+            # a batch of 4 whose answer is cut off, asked again as two halves: three requests paid for, four different papers; an answer in prose asked twice: two papers
+            os.remove(ai.LEDGER)
+            whole = Fake.responder; asked = lambda body: [it["n"] for it in json.loads(body["messages"][-1]["content"])]
+            Fake.responder = lambda body: ["{"] if len(asked(body)) > 2 else whole(body); Fake.ending = lambda body: "length" if len(asked(body)) > 2 else "stop"
+            r2 = pl_.Run("weekly", {"topics": [], "query": "the estimate, split"})
+            for k in range(4):
+                r2.add_paper({"id": "split-%d" % k, "title": "Paper %d" % k, "abbr": pl_.journals()[0]["abbr"], "pub_date": "2026-09-01", "abstract": "About something.", "keywords": None})
+            pl_.screen(r2, lambda *a, **k: None, threading.Event(), batch_size=4, workers=1)
+            rows = ai.usage_log(10); assert len(rows) == 3 and all(r2.papers[i]["verdict"] == "skip" for i in r2.order), rows
+            n, mean = pl_.screen_history("fake", "m1"); assert n == 4 and abs(mean - sum(x["cost"] for x in rows) / 4) < 1e-12, ("the same papers were counted more than once", n, mean)
+            Fake.ending = None; Fake.responder = lambda body: ["Prose, not verdicts."]
+            r3 = pl_.Run("weekly", {"topics": [], "query": "the estimate, prose"})
+            for k in range(2):
+                r3.add_paper({"id": "prose-%d" % k, "title": "Paper %d" % k, "abbr": pl_.journals()[0]["abbr"], "pub_date": "2026-09-01", "abstract": "About something.", "keywords": None})
+            pl_.screen(r3, lambda *a, **k: None, threading.Event(), batch_size=2, workers=1)
+            rows = ai.usage_log(10); n, mean = pl_.screen_history("fake", "m1")
+            assert len(rows) == 5 and n == 6 and abs(mean - sum(x["cost"] for x in rows) / 6) < 1e-12, (len(rows), n, mean)
+            Fake.responder = whole
+            ai.chat("ask", [{"role": "user", "content": "hello"}]); assert "papers" not in ai.usage_log(1)[0]             # (and no other call carries it)
+        finally:
+            Fake.responder = None; Fake.ending = None; ai.LEDGER = saved[0]
+            if saved[1] is None:
+                os.path.exists(ai.CONFIG) and os.remove(ai.CONFIG)
+            else:
+                open(ai.CONFIG, "w").write(saved[1])
+    check("the screening estimate: from what earlier screenings with the same model cost per paper (the ledger rows that say how many papers, the last 200 calls, once 50 papers are on record), else the price; a Test, another model, a saved or unpriced call never counts; a screening call records its number of papers", t_screen_estimate)
     check("summarise the papers without a summary: only downloaded papers (no book, missing PDF or failed download), a cost guess that says what it rests on, one background job in the tray, a summary beside each PDF, skipped if written meanwhile, stopped by a refused key, the budget or three failures in a row, never an empty summary", t_summaries_job)
 
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)

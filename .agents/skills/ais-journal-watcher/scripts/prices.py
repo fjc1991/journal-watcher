@@ -179,6 +179,14 @@ def refresh_soon(force=False):
     return True
 
 
+def rates(price):
+    """USD per million tokens of each kind for a price lookup() gave: {"in", "out", "cache_write", "cache_read"}. A price without figures for keeping a text ready
+    and for reading it back (one you typed with only input and output) uses a quarter more than the input price to keep and a tenth of it to read back, as Claude
+    charges. The one place the estimate before a question (ask.estimate) and the cost written to the usage record (ai.cost_of) take them from, so the two agree."""
+    i = float(price.get("in") or 0)
+    return {"in": i, "out": float(price.get("out") or 0), "cache_write": price.get("cache_write") or 1.25 * i, "cache_read": price.get("cache_read") or 0.1 * i}
+
+
 def lookup(provider, model, cfg=None, yours=True):
     """The price of `model` at `provider` (see the module's docstring), or None. yours=False: what the app would use without a price you typed (Settings shows it)."""
     if not model:

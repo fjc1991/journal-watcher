@@ -78,13 +78,27 @@ def sidecars(pdf):
 def sha1_of(pdf):
     st = os.stat(pdf)
     key = (pdf, st.st_mtime_ns, st.st_size)
-    if _sha.get("k") != key:
-        h = hashlib.sha1()
-        with open(pdf, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        _sha["k"], _sha["v"] = key, h.hexdigest()
-    return _sha["v"]
+    memo = _sha.get("kv")                # (key, hash) as ONE object, read once: several threads hash different PDFs at the same time, and none may be handed another's hash
+    if memo and memo[0] == key:
+        return memo[1]
+    h = hashlib.sha1()
+    with open(pdf, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    v = h.hexdigest()
+    _sha["kv"] = (key, v)                # (one store; what is returned is this thread's own value, never read back from the shared memo)
+    return v
+
+
+def sha1_known(pdf):
+    """The hash of this PDF when it is the one hashed last and has not changed since, else None. The file is never opened (ai.pdf_chars: measuring a call that has
+    just been cancelled must not read the PDF again)."""
+    try:
+        st = os.stat(pdf)
+    except (OSError, TypeError):
+        return None
+    memo = _sha.get("kv")                # (the pair, read once: see sha1_of)
+    return memo[1] if memo and memo[0] == (pdf, st.st_mtime_ns, st.st_size) else None
 
 
 # ---------------------------------------------------------------- file io

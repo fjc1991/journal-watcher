@@ -481,7 +481,7 @@ def config():
                     for m in pl.methods()],
         "years": list(range(y, 1999, -1)),
         "openalex_key": bool(pl.fx.openalex_key()),
-        "est_cost_per_paper": pl.est_screen_cost_per_paper(),          # with the model chosen for screening; None when its price is not known (the page says so)
+        **dict(zip(("est_cost_per_paper", "est_cost_basis"), pl.screen_estimate())),      # with the model chosen for screening: per paper, and "history" (what your earlier screenings cost) or "prices"; None when not known (the page says so)
         "screen_model": ai.pricing.name(*ai.feature_model("screen")) if ai else "Claude Sonnet 5.5",
         "screen_feature": dict(zip(("provider", "model"), ai.feature_model("screen"))) if ai else {},     # (which provider and model: a backup on a run's page is compared with it)
         "model": pl.MODEL,
@@ -976,6 +976,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/doc/chat":     # the Ask tab's saved conversation
             pdf = ns.pdf_path(one("file"))
             return self.send_json(ns.load_chat(pdf) if pdf else {"error": "no such paper"}, 200 if pdf else 404)
+        if path in ("/api/doc/ask/estimate", "/api/doc/summary/estimate"):     # what the next question (?file=&from=&to=&hist=) or "Generate" in the Summary tab (?file=&template=) costs; nothing is sent
+            pdf = ns.pdf_path(one("file"))
+            if not pdf:
+                return self.send_json({"error": "no such paper"}, 404)
+            if not ask:
+                return self.send_json({"error": "AI features aren't installed"}, 501)
+            if path == "/api/doc/summary/estimate":
+                if books.is_book(one("file")):                 # (as POST /api/ai/summary: a book is summarised chapter by chapter)
+                    return self.send_json({"error": books.BOOK_NO_TEMPLATE}, 400)
+                return self.send_json(ask.summary_estimate(pdf, self.doc_info(one("file"))[0], one("template") or None))
+            pg = None
+            try:
+                if one("from") or one("to"):                   # one chapter of a book, as {from, to} in POST /api/ai/ask
+                    pg = (int(one("from")), int(one("to")))
+                hist = int(one("hist", "0") or 0)              # the length of the conversation that would go along
+            except ValueError:
+                return self.send_json({"error": "bad chapter range"}, 400)
+            if pg and (pg[0] < 1 or pg[1] < pg[0]):
+                return self.send_json({"error": "bad chapter range"}, 400)
+            return self.send_json(ask.estimate(pdf, pg, hist))
         if path == "/api/doc/blocks":    # the paper as paragraphs in reading order, for the text view
             pdf = ns.pdf_path(one("file"))
             if not pdf:
@@ -1059,7 +1079,11 @@ class Handler(BaseHTTPRequestHandler):
             for r in miss[:60]:
                 pdf = ns.pdf_path(r["file"]); e = papercard.estimate(pdf, quick=True) if pdf else None
                 cost = None if cost is None or not e or e["cost"] is None else cost + e["cost"]
-            return self.send_json({"evidence": evidence.build(rows), "cards": cards, "estimate": {"cards": cost}})
+            try:
+                ev = evidence.build(rows)
+            except ai.Blocked as e:                            # (grouping by meaning needs a paid embedding call and the month's budget is used up: the tab says so)
+                return self.send_json({"error": str(e)}, 400)
+            return self.send_json({"evidence": ev, "cards": cards, "estimate": {"cards": cost}})
         if path == "/api/library/search":     # books=only: just the books (the Books tab); books=all: both; otherwise papers only (a book has its own tab)
             bk_ = one("books")
             rows_ = [r for r in pl.library() if bk_ == "all" or (r.get("journal") == "Books") == (bk_ == "only")]
@@ -1166,9 +1190,15 @@ class Handler(BaseHTTPRequestHandler):
             if one("pending", "") and indexer:
                 out["indexing"]["pending"] = len(indexer.pending())
             return self.send_json(out)
-        if path in ("/api/ai/config", "/api/ai/usage", "/api/ai/log"):
+        if path in ("/api/ai/config", "/api/ai/usage", "/api/ai/log", "/api/ai/budget"):
             if not ai:
                 return self.send_json({"error": "AI features aren't installed"}, 501)
+            if path == "/api/ai/budget":        # ?cost=: a large job's estimate against what is left of the monthly budget, asked by the page before the job starts (no cost: the estimate is not known)
+                try:
+                    cost = float(one("cost")) if one("cost") else None
+                except ValueError:
+                    return self.send_json({"error": "cost must be a number"}, 400)
+                return self.send_json(ai.budget_check(cost))
             return self.send_json({"/api/ai/config": ai.config, "/api/ai/usage": ai.usage_summary,
                                    "/api/ai/log": lambda: ai.usage_log(int(one("limit", "40")))}[path]())
         self.send_json({"error": "not found"}, 404)
@@ -1807,7 +1837,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not f:
                     return self.send_json({"error": "no such folder"}, 404)
                 if path.endswith("/estimate"):
-                    ev = evidence.build(rows)
+                    try:
+                        ev = evidence.build(rows)
+                    except ai.Blocked as e:                    # (as GET /api/folder/evidence)
+                        return self.send_json({"error": str(e)}, 400)
                     board = ideas.load(f["id"])
                     return self.send_json({"events": ideas.estimate_events(), "generate": ideas.estimate_generate(ev, [e for e in board["events"]["items"] if e.get("keep", True)], ideas._brief(b.get("brief"))), "papers": len(ev["papers"])})
                 if path.endswith("/events"):

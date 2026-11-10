@@ -70,7 +70,7 @@ def extract(pdf_path, force=False):
     cache = os.path.join(INDEX, ns.sha1_of(pdf_path) + ".blocks.json")
     if not force and os.path.exists(cache):
         d = dl.load_json(cache, None)
-        if d and d.get("blocks") and d.get("v") == VERSION:
+        if d and isinstance(d.get("blocks"), list) and d.get("v") == VERSION:      # (also an empty list: a scan has no text, and is not parsed again each time to find that out)
             return d["blocks"]
     import pymupdf
     pages = []

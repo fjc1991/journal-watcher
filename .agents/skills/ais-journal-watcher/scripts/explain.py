@@ -61,7 +61,7 @@ def stream(pdf_path, meta, text="", page=1, prompt_id=None, custom=None, image_b
             if kind == "text":
                 yield {"type": "text", "delta": v}
             else:
-                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached}
+                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "cut_off": v.cut_off}
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
     except Exception as e:  # noqa: BLE001

@@ -4,7 +4,7 @@
 // "⋯ N lines hidden" gaps between them. Highlights are fractions of the page, so every band can draw them.
 import * as pdfjs from "/static/vendor/pdfjs/pdf.mjs";
 import {errBox, notifyError, ico, S, $, $$, esc, fileUrl, clamp, debounce, toast, md, COLORS, colorOf, colorName, legend, emit, on, BOOK_HOW, BOOK_STALE, bookEmpty, usd, exactCost} from "./state.js";
-import {frame, mdParts, chipList, wire as wireOut} from "./output.js";
+import {frame, mdParts, chipList, callout, wire as wireOut} from "./output.js";
 import * as N from "./notes.js";
 import * as T from "./text.js";
 
@@ -130,7 +130,7 @@ export async function open(meta, push = true, opts = {}) {
     if (S.open) jump(g.page, y, {flash: rects || undefined});
   }, 250);
   postState({opened: true, page: pos && pos.n || 1, total: S.pages.length});   // Library: status "reading", last opened
-  showTab(opts.tab || localStorage.getItem("jw-rd-tab") || (S.notes.cards.length ? "notes" : "hl"));
+  showTab(opts.tab || localStorage.getItem("jw-rd-tab") || (S.notes.cards.length ? "notes" : "hl"), !opts.tab);      // (the tab of last time is only put back: nothing is worked out for it)
 }
 async function teardown() {
   N.saveNow(); savePos.flush();
@@ -566,12 +566,14 @@ function popEvents() {
 const saveComment = debounce((id, v) => N.updateHighlight(id, {comment: v}), 400);
 
 // ---------------------------------------------------------------- side panels
-function showTab(k) {
+// restored: the tab was not chosen by the reader but put back as it was when a paper is opened. The Ask and Summary tabs then work out no cost (that reads the
+// whole paper's text): only once the reader chooses the tab or does something in it (S.tabRestored says which, for the Ask tab's own script).
+function showTab(k, restored) {
   $$(".rd-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.tab === k));
   $$(".rd-panel", root).forEach(p => p.classList.toggle("on", p.dataset.p === k));
-  root.classList.remove("noside"); S.tab = k;
+  root.classList.remove("noside"); S.tab = k; S.tabRestored = !!restored;
   try { localStorage.setItem("jw-rd-tab", k); } catch (e) {}
-  if (k === "sum") loadSum();
+  if (k === "sum") loadSum(!!restored);
   emit("tab:show", k);
 }
 S.fn.showTab = showTab;
@@ -674,10 +676,12 @@ function renderToc() {
 
 // -- summary tab: the markdown the pipeline wrote next to the PDF, and "generate with another template" (shown, not saved, until you say so)
 function buildSum() {
-  panels.sum.innerHTML = `<div class="rd-sub"><select id="sum-t" title="Summary template (edit them in Settings)"></select><button class="rd-btn" id="sum-go" title="Write this kind of summary with the model chosen in Settings; the saved summary is not touched">Generate</button>
+  panels.sum.innerHTML = `<div class="rd-sub"><select id="sum-t" title="Summary template (edit them in Settings)"></select><button class="rd-btn" id="sum-go" title="Write this kind of summary with the model chosen in Settings; the saved summary is not touched">Generate</button><span class="pmeta" id="sum-est" role="status"></span>
     <button class="rd-btn hide" id="sum-saved">Show saved</button><span class="pmeta hide" id="sum-bk">A book is summarised chapter by chapter in Library → Books → Chapters, not with a paper template.</span></div><div class="rd-scroll" id="sum-body"></div><div class="ex-act hide" id="sum-act"></div>`;
   wireOut($("#sum-body", panels.sum));
   $("#sum-go", panels.sum).onclick = () => genSummary(false);
+  $("#sum-t", panels.sum).onchange = () => sumEstFor(true);
+  for (const ev of ["pointerdown", "focusin"]) panels.sum.addEventListener(ev, () => { if (S.file && SUM_EST !== S.file) sumEstFor(true); });      // (the tab was only put back on opening: the first thing done in it asks for the figure)
   $("#sum-saved", panels.sum).onclick = () => { delete $("#sum-body", root).dataset.file; $("#sum-act", root).classList.add("hide"); $("#sum-saved", root).classList.add("hide"); loadSum(); };
   panels.sum.addEventListener("click", e => { const x = e.target.closest("[data-sx]")?.dataset.sx; if (!x) return; const text = $("#sum-body", root)._gen;
     if (x === "again") genSummary(true);
@@ -698,6 +702,23 @@ function fillTemplates() {
   const sel = $("#sum-t", root); if (!sel) return;
   sel.innerHTML = (S.summaries || []).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
   if (S.prefs && S.prefs.summary_template) sel.value = S.prefs.summary_template;
+  if (S.open && S.tab === "sum") sumEstFor();
+}
+// The figure beside Generate is worked out only for a paper the reader asked it for (chose the Summary tab, or did something in it): want says this is such a
+// moment. A paper that was merely opened with the Summary tab put back gets no figure, and the last paper's is taken away.
+let SUM_EST = "";
+function sumEstFor(want) {
+  if (want) SUM_EST = S.file;
+  if (SUM_EST === S.file) return sumEst();
+  const el = $("#sum-est", root); if (el) { el.textContent = ""; el.classList.toggle("hide", !!(S.meta && S.meta.journal === "Books")); }
+}
+// what Generate costs with the chosen template, said beside the button before it is pressed (GET /api/doc/summary/estimate; nothing is sent for it)
+async function sumEst() {
+  const el = $("#sum-est", root), file = S.file, tpl = $("#sum-t", root).value, book = !!(S.meta && S.meta.journal === "Books"); if (!el) return;
+  el.textContent = ""; el.classList.toggle("hide", book); if (!file || book) return;
+  let e; try { e = await (await fetch("/api/doc/summary/estimate?file=" + encodeURIComponent(file) + "&template=" + encodeURIComponent(tpl))).json(); } catch (er) { return; }
+  if (S.file !== file || $("#sum-t", root).value !== tpl || !e || e.error || !e.model) return;      // (another paper or template since; no model chosen: Generate says so)
+  el.textContent = e.saved ? "free: you have this answer saved" + (e.cost != null ? ` (⟳ asks again, ${usd(e.cost)})` : "") : usd(e.cost, "cost not known (this model has no price in Settings → AI)");
 }
 async function genSummary(fresh) {
   const el = $("#sum-body", root), act = $("#sum-act", root), tpl = $("#sum-t", root).value, tplName = $("#sum-t", root).selectedOptions[0].textContent; let text = "", done = null;
@@ -713,12 +734,12 @@ async function genSummary(fresh) {
         if (S.file !== forFile) { rd.cancel().catch(() => {}); return; }       // (another paper was opened meanwhile: its tab is not written over)
         if (m.type === "text") { text += m.delta; el.innerHTML = sumFrame(text, {live: true, key: "gen", title: tplName}); } else if (m.type === "error") throw new Error(m.error); else if (m.type === "done") done = m; }
     }
-    el._gen = text; el._model = done ? done.model : "";
-    el.innerHTML = sumFrame(text, {key: "gen", title: tplName, meta: [done && {t: done.provider + " · " + done.model}, done && (done.cached ? {t: "cached"} : done.cost != null ? {t: exactCost(done.cost)} : null), {t: "not saved yet", cls: "edited", title: "Use the buttons below to keep it"}]});
-    act.innerHTML = `<button class="rd-btn" data-sx="notes">→ Save to notes</button><button class="rd-btn" data-sx="replace">${S.meta.summary ? "Replace the saved summary" : "Save as this paper’s summary"}</button><button class="rd-btn" data-sx="copy">Copy</button><button class="rd-btn" data-sx="again" title="Generate again, ignoring the stored answer">⟳</button>`;
+    el._gen = text; el._model = done ? done.model : ""; const cut = !!(done && done.cut_off);          // it stopped at the model’s length limit: shown, but never offered as the paper’s summary
+    el.innerHTML = sumFrame(text, {key: "gen", title: tplName, notices: cut ? callout("warn", `This summary was cut off at the model’s length limit; the end is missing, so it can’t be saved as this paper’s summary. <button class="rd-btn" data-sx="again">Generate again</button>`) : "", meta: [done && {t: done.provider + " · " + done.model}, done && (done.cached ? {t: "cached"} : done.cost != null ? {t: exactCost(done.cost)} : null), {t: "not saved yet", cls: "edited", title: "Use the buttons below to keep it"}]});
+    act.innerHTML = `<button class="rd-btn" data-sx="notes">→ Save to notes</button>${cut ? "" : `<button class="rd-btn" data-sx="replace">${S.meta.summary ? "Replace the saved summary" : "Save as this paper’s summary"}</button>`}<button class="rd-btn" data-sx="copy">Copy</button><button class="rd-btn" data-sx="again" title="Generate again, ignoring the stored answer">⟳</button>`;
     act.classList.remove("hide"); $("#sum-saved", root).classList.toggle("hide", !S.meta.summary);
   } catch (e) { if (S.file === forFile) el.innerHTML = errBox(e, {retry: 'data-sx="again"'}); }
-  finally { $("#sum-go", root).disabled = false; }            // (also when another paper was opened meanwhile: its Generate button works)
+  finally { $("#sum-go", root).disabled = false; if (S.tab === "sum") sumEstFor(S.file === forFile); }            // (also when another paper was opened meanwhile: its Generate button works; the answer is saved now, so the line beside the button says so)
 }
 async function replaceSummary(text) {
   if (S.meta.summary && !confirm("Replace the saved summary of this paper with this one?\nThe old one is kept in state/summary_backups/.")) return;
@@ -729,10 +750,10 @@ async function replaceSummary(text) {
   } catch (e) { notifyError(e); }
 }
 let SUM_FOR = "";
-async function loadSum() {
+async function loadSum(restored) {
   const el = $("#sum-body", root), path = S.meta.summary, book = !!(S.meta && S.meta.journal === "Books");
   if (SUM_FOR !== S.file) { SUM_FOR = S.file; delete el.dataset.file; el._gen = ""; el._title = ""; $("#sum-act", root).classList.add("hide"); $("#sum-go", root).disabled = false; }      // (a summary of the last paper may still be coming: it stops at its next line)      // (another paper: nothing of the last one stays)
-  $("#sum-t", root).classList.toggle("hide", book); $("#sum-go", root).classList.toggle("hide", book); $("#sum-bk", root).classList.toggle("hide", !book);
+  $("#sum-t", root).classList.toggle("hide", book); $("#sum-go", root).classList.toggle("hide", book); $("#sum-bk", root).classList.toggle("hide", !book); sumEstFor(!restored);
   if (book) { $("#sum-saved", root).classList.add("hide"); $("#sum-act", root).classList.add("hide"); if (await loadBookSum(el)) return; }
   if (!path) { delete el.dataset.file; el.innerHTML = book ? el.innerHTML : `<div class="rd-empty">No summary has been written for this paper yet.<br>Pick a template above and press Generate.</div>`; return; }
   if (el.dataset.file === path) return; el.dataset.file = path; el.textContent = "Loading…";

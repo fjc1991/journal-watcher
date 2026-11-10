@@ -4,7 +4,7 @@
 //   Ideas Lab: your brief -> current events from a web search (you untick or add) -> ideas generated from the evidence, scored by a tough
 //             "editor" and checked against OpenAlex -> a board you star, shortlist, annotate, develop into an outline and export.
 // Server streams are newline-delimited JSON ({type: status|progress|events|ideas|text|paper|done|error}).
-import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost, exactCost} from "./state.js";
+import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost, exactCost, budgetOk} from "./state.js";
 import {frame, kv, callout, mdParts, sectionsHtml, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -64,6 +64,7 @@ export async function evidence(el, fid) {
   el.onclick = e => { const o = e.target.closest("[data-open]"); if (o) openAt(o.dataset.open, +o.dataset.page, o.dataset.q); };
   $("#ev-exp", el)?.addEventListener("click", () => dl("/api/export/cards?folder=" + encodeURIComponent(fid)));
   $("#ev-make", el)?.addEventListener("click", async () => {
+    if (!(await budgetOk(r.estimate.cards))) return;
     const prog = $("#ev-prog", el), btn = $("#ev-make", el); btn.disabled = true; prog.classList.remove("hide"); prog.innerHTML = "Starting…"; let total = 0, ok = 0; const errs = [];
     try {
       await ndjson("/api/ai/cards", {folder: fid}, m => {
@@ -276,10 +277,11 @@ async function onClick(e) {
 async function develop(idea, card) {
   if (idea.developed) { L.itab[idea.id] = "outline"; return redrawIdea(idea.id); }
   if (L.busy) return; L.busy = true; L.itab[idea.id] = "outline"; redrawIdea(idea.id);
-  const box = $(`#dev-${idea.id}`, L.root); box.classList.remove("empty"); box.innerHTML = `<span class="ask-status">Developing the idea…</span>`; let text = "";
+  const box = $(`#dev-${idea.id}`, L.root); box.classList.remove("empty"); box.innerHTML = `<span class="ask-status">Developing the idea…</span>`; let text = "", cut = false;
   try { await ndjson("/api/ai/ideas/develop", {id: L.fid, idea: idea.id}, m => {
     if (m.type === "text") { text += m.delta; box.innerHTML = outlineHtml(idea, text); } else if (m.type === "error") throw new Error(m.error);
-    else if (m.type === "done") { idea.developed = {text, model: m.model, cost: m.cost}; L.doc.rev = m.rev || L.doc.rev; } }); }
+    else if (m.type === "done") { L.doc.rev = m.rev || L.doc.rev; if (m.cut_off) cut = true; else idea.developed = {text, model: m.model, cost: m.cost}; } });
+    if (cut) box.insertAdjacentHTML("beforeend", callout("warn", `This outline was cut off at the model’s length limit; the end is missing, so it was not kept with the idea. <button class="rd-btn" data-a="develop">Develop it again</button>`)); }
   catch (e) { box.innerHTML = errBox(e, {retry: 'data-a="develop"'}); }
   L.busy = false; if (idea.developed) redrawIdea(idea.id);
 }

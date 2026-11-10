@@ -11,12 +11,16 @@ Ollama model can be swapped per feature.
 
 A message's content is a string or a list of parts: {"type":"text","text"}, {"type":"image","media_type","data"(base64)},
 {"type":"pdf","path"} (sent natively to Claude; for other providers the paper's extracted text is sent instead).
+A text part may also carry "cache": True: a long text that is the same from one request to the next and comes first (the paper in whole-paper Ask). With
+ai.json -> ask.keep_paper on, Claude is asked to keep everything up to and including it for five minutes (a prompt-cache breakpoint: writing it costs 1.25 x
+the input price, reading it back about 0.1 x); every other provider gets it as plain text, and with the setting off Claude does too.
 Options: web_search=True (the provider searches the web; sources come back in Result.sources), cache=True (identical
-requests are answered from state/ai_cache/ and cost nothing; fresh=True skips the cache), override={"provider","model"}.
+requests are answered from state/ai_cache/ and cost nothing; a PDF counts by its content, so the same paper in another place is the same request; fresh=True skips the cache), override={"provider","model"}.
 
 Two adapters: `anthropic` (the SDK, same call style as pipeline.py) and `openai_compat` (plain HTTPS with urllib, so no
-extra dependency). Every call is appended to state/ai_usage.jsonl. Keys come from .env (never from ai.json). Settings that
-guard spending and privacy: ai.json -> budget.monthly_usd, privacy.local_only.
+extra dependency). Every call is appended to state/ai_usage.jsonl (a paid embedding call too, as feature "embed"). Keys come from .env (never from ai.json).
+Settings that guard spending and privacy: ai.json -> budget.monthly_usd (a new paid call is refused once the month's spend reaches it; an answer already saved
+and a free model on this computer are not; budget_check() compares a large job's estimate with what is left), privacy.local_only.
 """
 import base64
 import hashlib
@@ -42,6 +46,12 @@ LEDGER = os.path.join(STATE, "ai_usage.jsonl")
 MODELS = os.path.join(dl.LOCAL, "models")       # local embedding models are cached here (survives reboots)
 CACHE = os.path.join(dl.STATE, "ai_cache")      # answers to identical requests (regenerable; shared with the other computers that use the data folder, so an answer paid for once is free on all of them)
 FULL_TEXT_LIMIT = 450_000                    # characters of a paper sent as text to providers without native PDF input
+# What a PDF counts as when only the size of its file is known, as (low, likely, high). These are reasoned from how PDFs are usually made, not measured on a
+# collection of real papers: a file's size says only roughly how many pages it has, which is why the estimate that rests on them is shown as a range.
+PDF_PAGE_BYTES = (120_000, 45_000, 15_000)   # bytes of file per page: a scan or a paper full of figures, a typical publisher's PDF, a plainly typeset preprint
+PDF_PAGE_TEXT = (2_500, 4_000, 5_500)        # characters of text on a page
+PDF_PAGE_IMAGE = 5_000                       # a provider that is sent the PDF itself (Claude) also reads each page as an image: about 1,500 tokens, in characters
+PDF_MIN_CHARS = 30_000                       # the likely and the high figure are never below this (the floor the summaries estimate always had)
 
 _lock = threading.Lock()
 _clients = {}
@@ -93,9 +103,22 @@ class Cancelled(AIError):
     """The user pressed Cancel in the activity tray: the call stops between two pieces of the answer (what was already generated is still billed)."""
 
 
+class CutOff(AIError):
+    """The answer stopped at the model's length limit and was not kept. `result` is the Result (already logged and billed); `text` is what the page may still show."""
+
+    def __init__(self, message, result=None, text=""):
+        super().__init__(message)
+        self.result, self.text = result, text
+
+
+CUT_OFF_STOPS = frozenset({"max_tokens", "model_context_window_exceeded", "length"})      # how an answer that hit a length limit ends: Anthropic's stop_reason (the first two), the finish_reason of OpenAI-style providers (OpenAI, Gemini, OpenRouter, Ollama)
+
+
 # ---------------------------------------------------------------- config
 
 SCREEN_FEATURE = {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}      # the screening of new papers (pipeline.screen): what it used before it had a setting of its own
+
+KEEP_PAPER_DEFAULT = False      # "Whole-paper questions: keep the paper ready between questions (Claude)" in Settings → AI, for an ai.json that does not say (True: on unless switched off)
 
 DEFAULT = {
     "providers": {"anthropic": {"type": "anthropic", "key_env": "ANTHROPIC_API_KEY", "models": ["claude-sonnet-5-5"]}},
@@ -104,6 +127,7 @@ DEFAULT = {
     "prices": {},
     "privacy": {"local_only": False},
     "budget": {"monthly_usd": None},
+    "ask": {"keep_paper": KEEP_PAPER_DEFAULT},
     "screening": {"reuse_days": 90},      # an earlier screening verdict is believed for this many days (0 = always ask again): pipeline.reuse_days
 }
 
@@ -113,6 +137,8 @@ def config_data():
     c.setdefault("privacy", {"local_only": False})
     c.setdefault("budget", {"monthly_usd": None})
     c.setdefault("screening", {"reuse_days": 90})
+    if not isinstance(c.get("ask"), dict) or not isinstance(c["ask"].get("keep_paper"), bool):
+        c["ask"] = {"keep_paper": KEEP_PAPER_DEFAULT}
     feats = c.setdefault("features", {})
     if "screen" not in feats:           # an ai.json from before screening had a setting: screening keeps Claude (it does not follow the Ask setting, which may be another provider), unless that provider is not there at all
         feats["screen"] = dict(SCREEN_FEATURE) if SCREEN_FEATURE["provider"] in (c.get("providers") or {}) else dict(feats.get("ask") or SCREEN_FEATURE)
@@ -313,7 +339,7 @@ def config():
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
     in_env = [n for n in dl.key_names() if key_where(n) == ".env file"]          # every key still in the synced .env file: the AI providers' and the paper sources'
     return {"providers": provs, "keychain": keychain.available(), "keys_in_env": in_env, "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
-            "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
+            "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"], "ask": c["ask"]}
 
 
 def price_auto(c=None):
@@ -354,7 +380,9 @@ def save_config(patch):
         c["privacy"] = {"local_only": bool((patch["privacy"] or {}).get("local_only"))}
     if "budget" in patch:
         v = (patch["budget"] or {}).get("monthly_usd")
-        c["budget"] = {"monthly_usd": None if v in (None, "") else max(0.0, float(v))}
+        c["budget"] = {"monthly_usd": float(v) if v not in (None, "") and float(v) > 0 else None}      # (0, nothing or less than 0 all mean "no limit", and are stored as that: the Settings field then shows "no limit", never a 0 that reads as "no paid calls")
+    if "ask" in patch:
+        c["ask"] = {"keep_paper": bool((patch["ask"] or {}).get("keep_paper"))}
     if "screening" in patch:
         try:
             days = int((patch["screening"] or {}).get("reuse_days", 90))
@@ -389,6 +417,11 @@ class Result:
         self.sources, self.searches, self.cached = sources or [], searches, cached
         self.cost = cost if cost is not None else cost_of(model, self.usage, searches, provider)
 
+    @property
+    def cut_off(self):
+        """True when the answer stopped at a length limit and not because it was finished: its end is missing, so it is never cached and never saved as if complete."""
+        return str(self.stop or "").lower() in CUT_OFF_STOPS
+
 
 def cost_of(model, usage, searches=0, provider=None):
     """USD for these tokens of `model` at `provider` (prices.lookup: your price, OpenRouter's list, the built-in table, free on this computer), plus web searches
@@ -397,23 +430,55 @@ def cost_of(model, usage, searches=0, provider=None):
     if not p:
         return None
     per_search = p["web_search"] if p.get("web_search") is not None else (config_data().get("prices", {}).get("_web_search") or {}).get("per_search", 0.01)
-    return sum(usage.get(k, 0) * p.get(k, 0) for k in ("in", "out", "cache_write", "cache_read")) / 1e6 + searches * per_search
+    rate = pricing.rates(p)              # (a price typed without the two cache figures: kept and re-read text is not counted as free)
+    return sum(usage.get(k, 0) * rate[k] for k in rate) / 1e6 + searches * per_search
 
 
-def _sent(messages, system):
-    """(characters, preview) of what is being sent, for the 'what was sent' log (images and PDFs are counted, not stored)."""
+def pdf_chars(path, native, saved=False):
+    """(low, likely, high) characters a PDF counts as for the provider that is sent it. native: the PDF itself goes (Anthropic: the text of every page and the page
+    as an image); otherwise its extracted text (_pdf_text, cut at FULL_TEXT_LIMIT). From the size of the file alone: the file is never opened here, so one that
+    Dropbox keeps online only is not downloaded to be measured. saved=True (a call that has just been cancelled) uses the text and the pages saved in the index
+    instead when this very file was hashed last (the call itself did that when it sent the text), and the three numbers are then the same."""
+    try:
+        size = os.path.getsize(path)
+    except (OSError, TypeError):
+        return (PDF_MIN_CHARS,) * 3
+    if saved:
+        try:
+            import blocks as bl
+            import notes_store as ns
+            sha = ns.sha1_known(path)
+            d = dl.load_json(os.path.join(bl.INDEX, sha + ".blocks.json"), None) if sha else None
+            bs = d.get("blocks") if isinstance(d, dict) and d.get("v") == bl.VERSION else None
+            if bs:
+                n = (sum(len(b["text"]) for b in bs) + (max(b["page"] for b in bs) + 1) * PDF_PAGE_IMAGE if native
+                     else min(FULL_TEXT_LIMIT, sum(len(b["text"]) for b in bs if b.get("kind", "body") != "ref")))
+                return (n,) * 3
+        except Exception:  # noqa: BLE001      (bookkeeping: the size will do)
+            pass
+    out = []
+    for per_page, text in zip(PDF_PAGE_BYTES, PDF_PAGE_TEXT):
+        pages = max(1.0, size / per_page)
+        out.append(int(pages * (text + PDF_PAGE_IMAGE)) if native else int(min(FULL_TEXT_LIMIT, pages * text)))
+    return out[0], max(PDF_MIN_CHARS, out[1]), max(PDF_MIN_CHARS, out[2])
+
+
+def _sent(messages, system, native=None):
+    """(characters, preview) of what is being sent, for the 'what was sent' log (images and PDFs are counted, not stored). An image or a PDF counts as 2,000
+    there. For the row of a cancelled call, whose tokens are worked out from this count, native says how the provider is sent a PDF (True: the PDF itself,
+    False: its text), and a PDF then counts as what the provider read of it (pdf_chars)."""
     n, last = len(system or ""), ""
     for m in messages:
         c = m.get("content")
         parts = [{"type": "text", "text": c}] if isinstance(c, str) else (c or [])
         text = " ".join(x.get("text", "") for x in parts if x.get("type") == "text")
-        n += len(text) + sum(2000 for x in parts if x.get("type") in ("image", "pdf"))
+        n += len(text) + sum(2000 if native is None or x["type"] == "image" else pdf_chars(x.get("path"), native, saved=True)[1] for x in parts if x.get("type") in ("image", "pdf"))
         if m.get("role") == "user":
             last = text
     return n, re.sub(r"\s+", " ", last)[:180]
 
 
-def _log(feature, r, sent=None, note=None):
+def _log(feature, r, sent=None, extra=None):
     row = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "feature": feature, "provider": r.provider,
            "model": r.model, **r.usage, "cost": 0.0 if r.cached else r.cost}
     act.add_cost(row["cost"])           # the activity tray shows what the running job has cost so far
@@ -423,15 +488,15 @@ def _log(feature, r, sent=None, note=None):
         row["cached"] = True
     if sent:
         row["chars"], row["preview"] = sent
-    with _lock:
-        os.makedirs(STATE, exist_ok=True)
-        with open(LEDGER, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if extra:
+        row.update({k: v for k, v in extra.items() if k not in row})      # the caller's own facts about the call (screening: how many papers it carried); never over a field of the ledger
+    _append(row)
 
 
 def _log_cancelled(feature, provider, f, sent, text):
     """A call the user cancelled was still billed for what it had read and written by then. The provider reports exact usage only at the end of an answer, so the
-    ledger gets an estimate (about 3.3 characters per token) marked as such: better a slight over-count than money that vanishes from the totals."""
+    ledger gets an estimate (about 3.3 characters per token; a PDF by what the provider read of it: pdf_chars) marked as such: better a slight over-count than money
+    that vanishes from the totals."""
     try:
         usage = {"in": int((sent[0] if sent else 0) / 3.3), "out": int(len(text) / 3.3)}
         r = Result(text, usage, provider, f["model"])
@@ -439,12 +504,24 @@ def _log_cancelled(feature, provider, f, sent, text):
         if sent:
             row["chars"], row["preview"] = sent
         act.add_cost(r.cost)
-        with _lock:
-            os.makedirs(STATE, exist_ok=True)
-            with open(LEDGER, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _append(row)
     except Exception:  # noqa: BLE001      (never let bookkeeping hide the cancel)
         pass
+
+
+def _append(row):
+    """One row at the end of the ledger. The month's total kept in memory follows it without reading the file again, but only when nobody else wrote in between."""
+    line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    with _lock:
+        os.makedirs(STATE, exist_ok=True)
+        before = _ledger_stat()
+        with open(LEDGER, "ab") as f:
+            f.write(line)
+        after = _ledger_stat()
+        if _month["key"] == (LEDGER, row["ts"][:7], before) and after and after[0] == (before[0] if before else 0) + len(line):
+            _month_add(row)
+            _month["key"] = (LEDGER, row["ts"][:7], after)
+        # (otherwise the key no longer matches the file, and the next _month_state() reads it again)
 
 
 def _rows():
@@ -458,16 +535,51 @@ def _rows():
                 continue
 
 
-def month_spend():
+_month = {"key": None, "cost": 0.0, "calls": 0, "unpriced": 0}      # this month's rows of the ledger, added up once (see _month_state)
+
+
+def _ledger_stat():
+    try:
+        st = os.stat(LEDGER)
+        return (st.st_size, st.st_mtime_ns, st.st_ino)
+    except OSError:
+        return None
+
+
+def _month_add(r):
+    c = r.get("cost")
+    _month["calls"] += 1
+    if isinstance(c, (int, float)):
+        _month["cost"] += c
+    else:
+        _month["unpriced"] += 1          # (a call whose model had no price: not in the total, but counted, so that the budget can say the total is too low)
+
+
+def _month_state():
+    """{cost, calls, unpriced} of this (UTC) month. Kept in memory: the ledger is read again only when its size, time or identity changed (another process or
+    another computer appended to it, a sync client replaced it, the two-computer merge rewrote it), when the month turned, or when LEDGER points elsewhere."""
     ym = datetime.now(timezone.utc).strftime("%Y-%m")
-    return sum(r.get("cost") or 0 for r in _rows() if r.get("ts", "").startswith(ym))
+    with _lock:
+        key = (LEDGER, ym, _ledger_stat())           # (taken BEFORE reading: a line appended while we read makes the next call read again)
+        if _month["key"] != key:
+            _month.update(key=None, cost=0.0, calls=0, unpriced=0)
+            for r in _rows():
+                if str(r.get("ts", "")).startswith(ym):
+                    _month_add(r)
+            _month["key"] = key
+        return {"cost": _month["cost"], "calls": _month["calls"], "unpriced": _month["unpriced"]}
+
+
+def month_spend():
+    """USD of this month's calls with a known price (kept in memory, see _month_state)."""
+    return _month_state()["cost"]
 
 
 def usage_summary():
-    """{calls, cost, unpriced, cached, month:{cost,calls}, budget, warn, by_feature, by_provider, by_day} from the ledger
-    (cost = known prices only)."""
+    """{calls, cost, unpriced, cached, month:{cost,calls,unpriced}, budget, left, warn, by_feature, by_provider, by_day} from the ledger
+    (cost = known prices only; month.unpriced = this month's calls without a known price, which the budget cannot count; left = what remains of the budget, None without one)."""
     ym = datetime.now(timezone.utc).strftime("%Y-%m")
-    out = {"calls": 0, "cost": 0.0, "unpriced": 0, "cached": 0, "month": {"cost": 0.0, "calls": 0}, "by_feature": {}, "by_provider": {}, "by_day": {}}
+    out = {"calls": 0, "cost": 0.0, "unpriced": 0, "cached": 0, "month": {"cost": 0.0, "calls": 0, "unpriced": 0}, "by_feature": {}, "by_provider": {}, "by_day": {}}
     for r in _rows():
         b = out["by_feature"].setdefault(r.get("feature", "?"), {"calls": 0, "cost": 0.0, "in": 0, "out": 0})
         pv = out["by_provider"].setdefault(r.get("provider", "?"), {"calls": 0, "cost": 0.0})
@@ -482,10 +594,11 @@ def usage_summary():
             day = out["by_day"].setdefault(r.get("ts", "")[:10], 0.0)
             out["by_day"][r.get("ts", "")[:10]] = day + c
         if r.get("ts", "").startswith(ym):
-            out["month"]["calls"] += 1; out["month"]["cost"] += c or 0
+            out["month"]["calls"] += 1; out["month"]["cost"] += c or 0; out["month"]["unpriced"] += 1 if c is None else 0
     bud = config_data()["budget"].get("monthly_usd")
     out["budget"] = bud
     out["warn"] = bool(bud) and out["month"]["cost"] >= 0.8 * bud
+    out["left"] = max(0.0, bud - out["month"]["cost"]) if bud else None
     out["by_day"] = dict(sorted(out["by_day"].items())[-30:])
     return out
 
@@ -511,12 +624,42 @@ def _route(feature, override=None, web=False):
     if p.get("key_env") and not _key(p["key_env"]):
         raise Blocked("%s isn’t set up: add %s=… to the .env file in the project folder (no restart needed), "
                       "or pick another provider in Settings → AI." % (f["provider"], p["key_env"]))
-    bud = c["budget"].get("monthly_usd")
-    if bud and month_spend() >= bud:
-        raise Blocked("This month’s AI budget ($%.2f) is used up. Raise it in Settings → Usage, or wait until next month." % bud)
     if web and not can_search_web(p):
         raise AIError("%s can’t search the web. Pick Claude, OpenRouter or OpenAI for this feature in Settings → AI." % f["provider"])
     return f["provider"], p, f
+
+
+def is_free(provider, model, cfg=None):
+    """A model on this computer that needs no key (prices.lookup says "free": Ollama, LM Studio). It cannot add to the month's spend, so the budget never stops it."""
+    return ((pricing.lookup(provider, model, cfg) or {}).get("source")) == "free"
+
+
+def unpriced_note(n):
+    """The words for this month's calls without a known price ("" when there are none): the budget cannot count them, and says so."""
+    return "%d call%s this month had no known price, so the real total is higher" % (n, "" if n == 1 else "s") if n else ""
+
+
+def _budget_gate(provider, model, cfg=None):
+    """Raise Blocked when this month's budget is used up. Called only when a new call is about to be sent (after the saved answers were looked at), and never for a
+    free model on this computer."""
+    cfg = cfg or config_data()
+    bud = cfg["budget"].get("monthly_usd")
+    if not bud or is_free(provider, model, cfg):
+        return
+    if month_spend() >= bud:
+        note = unpriced_note(_month_state()["unpriced"])
+        raise Blocked("This month’s AI budget ($%.2f) is used up%s. Raise it in Settings → AI, or wait until next month. Answers already saved and free models on this computer still work."
+                      % (bud, " (%s)" % note if note else ""))
+
+
+def budget_check(cost=None):
+    """Before a job that makes many calls: its estimate (USD, None when not known) against what is left of this month's budget.
+    {budget, spent, left (None without a budget), unpriced (this month's calls without a known price), note (the same in words), cost, over (the estimate is more than what is left)}"""
+    bud = config_data()["budget"].get("monthly_usd")
+    m = _month_state()
+    left = max(0.0, bud - m["cost"]) if bud else None
+    return {"budget": bud or None, "spent": m["cost"], "left": left, "unpriced": m["unpriced"], "note": unpriced_note(m["unpriced"]), "cost": cost,
+            "over": bool(bud) and cost is not None and cost > left + 1e-9}
 
 
 # ---------------------------------------------------------------- message parts (text / image / pdf)
@@ -538,7 +681,13 @@ def _pdf_text(path):
     return "Full text of the paper (extracted from the PDF):\n\n" + "\n\n".join(text)
 
 
-def _to_anthropic(messages):
+def keep_paper():
+    """Whether Claude is asked to keep the paper of a whole-paper question ready for the next one (Settings → AI; ai.json -> ask.keep_paper)."""
+    return config_data()["ask"]["keep_paper"]
+
+
+def _to_anthropic(messages, keep=False):
+    """keep: a text part marked "cache" gets the prompt-cache breakpoint (Claude keeps the request up to and including it for five minutes)."""
     out = []
     for m in messages:
         if isinstance(m.get("content"), str):
@@ -551,7 +700,7 @@ def _to_anthropic(messages):
                 with open(x["path"], "rb") as fh:
                     parts.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": base64.standard_b64encode(fh.read()).decode()}})
             else:
-                parts.append({"type": "text", "text": x.get("text", "")})
+                parts.append({"type": "text", "text": x.get("text", ""), **({"cache_control": {"type": "ephemeral"}} if keep and x.get("cache") else {})})
         out.append({**m, "content": parts})
     return out
 
@@ -569,7 +718,10 @@ def _to_compat(messages):
                 parts.append({"type": "text", "text": _pdf_text(x["path"])})
             else:
                 parts.append({"type": "text", "text": x.get("text", "")})
-        out.append({**m, "content": parts})
+        if any(x.get("cache") for x in _parts(m.get("content"))) and all(x["type"] == "text" for x in parts):
+            out.append({**m, "content": "\n\n".join(x["text"] for x in parts)})      # (a message with a marked text and nothing but text goes as one plain string: the mark is never sent, and servers that take only a string still work)
+        else:
+            out.append({**m, "content": parts})
     return out
 
 
@@ -583,8 +735,9 @@ def _cache_key(name, f, messages, system, schema, max_tokens, web):
                 parts.append(["image", hashlib.sha1(x["data"].encode()).hexdigest()])
             elif x["type"] == "pdf":
                 try:
-                    st = os.stat(x["path"]); parts.append(["pdf", x["path"], st.st_mtime_ns, st.st_size])
-                except OSError:
+                    import notes_store as ns
+                    parts.append(["pdf", ns.sha1_of(x["path"])])      # the file's content, not where it is or when it was written: the same paper on another computer is the same request
+                except (OSError, TypeError):
                     parts.append(["pdf", x["path"]])
             else:
                 parts.append(["text", x.get("text", "")])
@@ -608,9 +761,11 @@ def cache_stats():
 
 # ---------------------------------------------------------------- chat
 
-def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_search=False, cache=False, fresh=False, override=None, cache_if=None):
+def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_search=False, cache=False, fresh=False, override=None, cache_if=None, log=None):
     """Yield ("text", delta) as the answer arrives, then ("done", Result). `schema` asks for JSON matching it.
-    cache_if(text) -> bool lets the caller keep a bad answer (cut-off JSON, say) out of the cache, so asking again really asks again."""
+    cache_if(text) -> bool lets the caller keep a bad answer (cut-off JSON, say) out of the cache, so asking again really asks again.
+    An answer that stopped at the length limit (Result.cut_off) is still returned, never raised (the connection test and the references importer use such answers), but it is never cached.
+    log: extra fields for this call's row in the usage ledger (screening writes {"papers": n}: how many papers the request carried)."""
     if act.is_cancelled():
         raise Cancelled("Cancelled.")
     name, p, f = _route(feature, override, web_search)
@@ -618,12 +773,15 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
     key = _cache_key(name, f, messages, system, schema, max_tokens, web_search) if cache else None
     if key and not fresh:
         hit = dl.load_json(os.path.join(CACHE, key + ".json"), None) if os.path.exists(os.path.join(CACHE, key + ".json")) else None
+        if hit and "stop" not in hit and type((hit.get("usage") or {}).get("out")) is int and hit["usage"]["out"] >= max_tokens:
+            hit = None                                     # saved before cut-off answers were kept out (no stop reason on it) and as long as the limit it was asked with: taken as cut off, so it is asked again
         if hit:
             r = Result(hit["text"], hit.get("usage"), name, f["model"], cost=0.0, sources=hit.get("sources"), cached=True)
             yield "text", r.text
-            _log(feature, r, sent)
+            _log(feature, r, sent, log)
             yield "done", r
             return
+    _budget_gate(name, f.get("model"))                     # (after the saved answers: one already paid for is given even when the budget is used up)
     run = _anthropic if p.get("type") == "anthropic" else _compat
     got = []
     try:
@@ -631,20 +789,20 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
             if kind == "text":
                 got.append(v)
             if act.is_cancelled() and kind != "done":      # stop between two pieces of the answer (a finished answer is kept and logged)
-                _log_cancelled(feature, name, f, sent, "".join(got))
+                _log_cancelled(feature, name, f, _sent(messages, system, p.get("type") == "anthropic"), "".join(got))      # (a PDF at what was read of it, not the 2,000 of the 'what was sent' log)
                 raise Cancelled("Cancelled.")
             if kind == "done":
-                _log(feature, v, sent)
-                if key and (cache_if is None or cache_if(v.text)):
+                _log(feature, v, sent, log)
+                if key and not v.cut_off and (cache_if is None or cache_if(v.text)):
                     os.makedirs(CACHE, exist_ok=True)
                     tmp = dl.tmp_path(os.path.join(CACHE, key + ".json"))
                     with open(tmp, "w", encoding="utf-8") as fh:
-                        json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
+                        json.dump({"text": v.text, "usage": v.usage, "sources": v.sources, "model": v.model, "stop": v.stop, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}, fh, ensure_ascii=False)
                     os.replace(tmp, os.path.join(CACHE, key + ".json"))
             yield kind, v
     except Declined as e:
         if e.result is not None:                           # a refusal is billed like any answer: it counts in the ledger, the budget and Settings → Usage
-            _log(feature, e.result, sent)
+            _log(feature, e.result, sent, log)
         raise
 
 
@@ -676,7 +834,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     oc = {"effort": f.get("effort", "low")}
     if schema:
         oc["format"] = {"type": "json_schema", "schema": schema}
-    kw = {"model": f["model"], "max_tokens": max_tokens, "messages": _to_anthropic(messages), "output_config": oc}
+    kw = {"model": f["model"], "max_tokens": max_tokens, "messages": _to_anthropic(messages, keep_paper()), "output_config": oc}
     for k in ("betas", "fallbacks", "thinking"):       # Sonnet 5.5 settings, as in pipeline.py (no temperature / forced tool_choice)
         if p.get(k):
             kw[k] = p[k]
@@ -752,7 +910,7 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
             raise _http_error(name, e, raw)
         except urllib.error.URLError as e:
             raise AIError("Can’t reach %s at %s (%s)%s" % (name, p["base_url"], e.reason, " — is Ollama running?" if name == "ollama" else ""))
-    text, usage, sources, seen, refusal, filtered = "", {}, [], set(), "", False
+    text, usage, sources, seen, refusal, filtered, finish = "", {}, [], set(), "", False, None
     with resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -775,6 +933,8 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
                     yield "text", d["content"]
                 if d.get("refusal"):                        # OpenAI's structured outputs answer a refusal in this field instead of the JSON
                     refusal += d["refusal"]
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]            # how the answer ended: "stop", "length" (it hit the length limit), "content_filter", ...
                 if ch.get("finish_reason") == "content_filter":
                     filtered = True
                 for a in d.get("annotations") or []:        # OpenRouter / OpenAI web citations
@@ -785,7 +945,7 @@ def _compat(name, p, f, messages, system, schema, max_tokens, web=False):
                 usage = ev["usage"]
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
     res = Result(text, {"in": max(0, usage.get("prompt_tokens", 0) - cached), "out": usage.get("completion_tokens", 0),
-                        "cache_read": cached}, name, f["model"], cost=usage.get("cost"), sources=sources)
+                        "cache_read": cached}, name, f["model"], cost=usage.get("cost"), sources=sources, stop=finish)
     if (refusal or filtered) and not text.strip():
         res.stop = "refusal"
         raise Declined("The model declined to answer this." + (" (%s)" % refusal.strip()[:160] if refusal.strip() else ""), res)
@@ -877,19 +1037,31 @@ def embed(texts, kind="passage", progress=None):
             raise AIError("Local-only mode is on: choose the local embedding model in Settings → AI.")
         if p.get("key_env") and not _key(p["key_env"]):
             raise AIError("%s isn’t set up: add %s=… to .env." % (c["provider"], p["key_env"]))
-        rows = []
-        for i in range(0, len(texts), 64):
-            req = urllib.request.Request(p["base_url"].rstrip("/") + "/embeddings",
-                                         json.dumps({"model": c["model"], "input": texts[i:i + 64]}).encode(), _headers(p))
-            try:
-                with urllib.request.urlopen(req, timeout=120) as r:
-                    rows += [d["embedding"] for d in sorted(json.load(r)["data"], key=lambda d: d["index"])]
-            except urllib.error.HTTPError as e:
-                raise _http_error(c["provider"], e)
-            except urllib.error.URLError as e:
-                raise AIError("Can’t reach %s (%s)." % (c["provider"], e.reason))
-            if progress:
-                progress(min(i + 64, len(texts)), len(texts))
+        if kind != "query":                                   # a paid embedding of passages counts under the monthly budget like any other call. A question's own
+            _budget_gate(c["provider"], c["model"], cfg)      # vector does not stop there: it is a few words, it is what finds an answer already saved or the passages for a free model on this computer, and it is still written to the usage record below
+        rows, tokens, chars, exact = [], 0, 0, True
+        try:
+            for i in range(0, len(texts), 64):
+                part = texts[i:i + 64]
+                req = urllib.request.Request(p["base_url"].rstrip("/") + "/embeddings",
+                                             json.dumps({"model": c["model"], "input": part}).encode(), _headers(p))
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as r:
+                        body = json.load(r)
+                except urllib.error.HTTPError as e:
+                    raise _http_error(c["provider"], e)
+                except urllib.error.URLError as e:
+                    raise AIError("Can’t reach %s (%s)." % (c["provider"], e.reason))
+                rows += [d["embedding"] for d in sorted(body["data"], key=lambda d: d["index"])]
+                n = sum(len(t) for t in part)
+                u = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+                said = u.get("prompt_tokens") or u.get("total_tokens")
+                chars += n; tokens += int(said or n / 3.3); exact = exact and bool(said)      # (the provider did not say: about 3.3 characters per token, marked as an estimate)
+                if progress:
+                    progress(min(i + 64, len(texts)), len(texts))
+        finally:
+            if chars:                                         # what was sent is billed even when a later piece fails or the job is cancelled; the passages themselves are not stored
+                _log("embed", Result("", {"in": tokens}, c["provider"], c["model"]), (chars, ""), None if exact else {"estimated": True})
         arr = np.array(rows, dtype="float32")
     arr /= np.maximum(np.linalg.norm(arr, axis=1, keepdims=True), 1e-9)
     return arr

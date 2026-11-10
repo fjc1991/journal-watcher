@@ -150,8 +150,27 @@ export function bookEmpty(R) {          // what to say when a book has no overvi
 // estimate before you start ("about $0.12", "under 1 cent"); exactCost: an amount that was charged or is on record ("$0.12", and up to four decimals below
 // a cent: "$0.0015"). `none` is what to say when the price is not known.
 export const aboutCost = (c, none = "") => c == null ? none : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
+// An estimate that is a range (what the summaries may cost, guessed from the sizes of the files): "between about $0.40 and $1.62"; one figure when both ends
+// round to the same.
+export const aboutRange = (lo, hi, none = "") => lo == null || hi == null ? none : hi < 0.005 || lo.toFixed(2) === hi.toFixed(2) ? aboutCost(hi)
+  : lo < 0.005 ? `up to about $${hi.toFixed(2)}` : `between about $${lo.toFixed(2)} and $${hi.toFixed(2)}`;
 export const exactCost = (c, none = "") => c == null ? none : c > 0 && c < 0.00005 ? "under $0.0001" : c > 0 && c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "") : "$" + c.toFixed(2);
 export const usd = aboutCost;
+// Before a job that makes many AI calls starts: when its estimate is more than what is left of this month's budget, ask first (GET /api/ai/budget). Resolves to
+// true to go on. Nothing is asked without a budget, without an estimate, or when the estimate fits. The job is never refused here: each call still stops at the budget.
+let budgetAsking = false;
+// high (and low): the ends of an estimate that is a range. It is then the HIGH figure that is compared with what is left (the job may well cost that much),
+// and the question says so.
+export async function budgetOk(cost, high, low) {
+  const range = cost != null && high != null && high > cost; if (range) { low = low != null ? low : cost; cost = high; }
+  if (cost == null || !(cost > 0)) return true;
+  if (budgetAsking) return false;      // (the button was pressed twice: the first press is still asking, and one job is enough)
+  budgetAsking = true;
+  let b; try { b = await api("/api/ai/budget?cost=" + encodeURIComponent(cost)); } catch (e) { return true; } finally { budgetAsking = false; }      // (the dashboard is gone or has no AI: the job itself says so)
+  if (!b.over) return true;
+  return confirm(`This is estimated at ${range ? aboutRange(low, cost) + " (the higher figure is the one compared with your budget)" : aboutCost(cost)}; ${exactCost(b.left)} is left of this month’s budget (${exactCost(b.budget)}).${b.note ? " " + b.note[0].toUpperCase() + b.note.slice(1) + "." : ""} It would stop part-way when the budget is reached; you can raise the budget in Settings → AI.\n\nStart anyway?`);
+}
+window.budgetOk = budgetOk;          // (the Watch page's own script asks through it too)
 
 export function debounce(fn, ms) {
   let t = null;

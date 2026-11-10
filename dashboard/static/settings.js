@@ -4,7 +4,7 @@ import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, 
 
 let root, D = null, tab = "ai", LOG = [];
 const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's passages"], ["explain", "Explain selection", "The one-click prompts on selected text and figures"],
-  ["suggest", "Suggested questions", "Ideas for what to ask next"], ["screen", "Screening new papers", "Judges each new paper from its title and abstract (weekly check and archive search). Needs a model that answers in structured JSON: Test checks that. The monthly budget stops it; what is left unscreened is picked up by Retry screening or the next search"],
+  ["suggest", "Suggested questions", "Ideas for what to ask next — a cheap model is enough"], ["screen", "Screening new papers", "Judges each new paper from its title and abstract (weekly check and archive search). Needs a model that answers in structured JSON: Test checks that. The monthly budget stops it; what is left unscreened is picked up by Retry screening or the next search"],
   ["summarize", "Paper summaries", "The pipeline's summary for each downloaded paper"],
   ["card", "Paper cards", "The structured, cited card of each paper (needs long, reliable JSON output)"], ["events", "Ideas Lab: current events", "Searches the web: pick Claude, OpenAI or OpenRouter"],
   ["ideas", "Ideas Lab: ideas and outlines", "Writes the research ideas and develops them — your strongest model"], ["reviewer", "Reviewer 2: a critical read of your text", "Needs judgement and care — use your strongest model"], ["audio", "Spoken briefings", "Writes the two-minute script that your browser reads aloud — a cheap model is enough"], ["flashcards", "Flashcards", "Writes question-and-answer cards from your paper cards — a cheap model is enough"], ["synthesis", "Synthesis map and gaps", "Reads all the cards of a folder at once — a strong model finds more"], ["claims", "Claim check", "Judges whether your papers support what you wrote — a strong model checks more carefully"], ["draft", "Related-work drafter", "Writes the section from your paper cards — prose matters, so use a strong model"], ["critique", "Ideas Lab: the editor", "Scores each idea for novelty, feasibility, significance and fit"],
@@ -85,8 +85,9 @@ function renderAI(body) {
       <td><input type="text" class="fm" aria-label="Embedding model" value="${esc(A.embeddings.model)}"></td><td></td><td><small>“local” runs on this Mac, free</small></td></tr></table></div></div>
   <div class="card st-card"><h2>Privacy and spending</h2>
     <label class="chk"><input type="checkbox" id="st-local"${A.privacy.local_only ? " checked" : ""}> <b>Local-only mode</b> — never send paper text to a provider outside this computer (only Ollama works; Ask and Explain need an Ollama model)</label>
-    <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd ?? ""}" placeholder="no limit" style="width:110px"> <small>calls stop when the month's spend reaches it; a warning shows at 80%</small></label>
-    <label class="chk">Reuse earlier screening verdicts for <input type="number" id="st-reuse" min="0" max="3650" step="1" value="${(A.screening || {}).reuse_days ?? 90}" style="width:80px"> days <small>0 = always ask the AI again. A verdict is reused only for the same paper text and the same question (topics, method and focus phrase), so searching again does not pay for papers it already judged</small></label></div>
+    <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd || ""}" placeholder="no limit" style="width:110px"> <small>new paid calls stop when the month's spend reaches it (answers already saved and free models on this computer still work); a warning shows at 80%</small></label>
+    <label class="chk">Reuse earlier screening verdicts for <input type="number" id="st-reuse" min="0" max="3650" step="1" value="${(A.screening || {}).reuse_days ?? 90}" style="width:80px"> days <small>0 = always ask the AI again. A verdict is reused only for the same paper text and the same question (topics, method and focus phrase), so searching again does not pay for papers it already judged</small></label>
+    <label class="chk"><input type="checkbox" id="st-keep"${(A.ask || {}).keep_paper ? " checked" : ""}> <b>Whole-paper questions: keep the paper ready between questions (Claude)</b> <small>The first question on a paper then costs about a quarter more on the paper's text; each further question within 5 minutes costs about a tenth of it. Later than 5 minutes, the quarter is paid again. Off: every question pays for the whole paper, as before.</small></label></div>
   <div class="card st-card"><h2>Prices <small>USD per million tokens — for cost figures and the budget</small></h2>
     <table class="st-table" id="st-prices"><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th><th>Where the price comes from</th></tr>
     ${used.map(m => { const au = (A.price_auto || {})[m] || {}, mine = Object.keys(price(m)).length > 0;
@@ -135,7 +136,7 @@ function renderAI(body) {
     const emb = $('tr[data-f="emb"]', body);
     try {
       D.ai = await api("/api/ai/config", {features, provider_models, prices, embeddings: {provider: $(".fp", emb).value, model: $(".fm", emb).value.trim()},
-        privacy: {local_only: $("#st-local", body).checked}, budget: {monthly_usd: $("#st-budget", body).value}, screening: {reuse_days: $("#st-reuse", body).value}});
+        privacy: {local_only: $("#st-local", body).checked}, budget: {monthly_usd: $("#st-budget", body).value}, screening: {reuse_days: $("#st-reuse", body).value}, ask: {keep_paper: $("#st-keep", body).checked}});
       note(msg, "Saved."); window.dispatchEvent(new Event("jw-settings-changed"));
     } catch (e) { note(msg, e.message, true); }
   };
@@ -143,16 +144,19 @@ function renderAI(body) {
 
 // ---------------------------------------------------------------- usage & cost
 async function renderUsage(body) {
-  const U = D.usage; if (!U) { body.innerHTML = `<div class="card st-card">AI features aren’t installed.</div>`; return; }
-  LOG = await api("/api/ai/log?limit=40").catch(() => []);
+  if (!D.usage) { body.innerHTML = `<div class="card st-card">AI features aren’t installed.</div>`; return; }
+  const [log, U] = await Promise.all([api("/api/ai/log?limit=40").catch(() => []), api("/api/ai/usage").catch(() => D.usage)]);      // (the figures are read again each time: the budget may have been changed on the AI page a moment ago, and what is left follows it)
+  if (tab !== "usage") return;      // (another tab was pressed while these were on their way: do not draw over it)
+  LOG = log; D.usage = U;
   const bud = U.budget, pct = bud ? Math.min(100, 100 * U.month.cost / bud) : 0, days = Array.from({length: 30}, (_, i) => { const d = new Date(Date.now() - (29 - i) * 864e5).toISOString().slice(0, 10); return [d, U.by_day[d] || 0]; }), max = Math.max(0.0001, ...days.map(d => d[1])), spent = days.some(d => d[1] > 0);
   body.innerHTML = `
   <div class="st-cards">
-    <div class="card st-stat"><span>This month</span><b>${money(U.month.cost)}</b><small>${U.month.calls} calls${bud ? ` · budget ${money(bud)}` : ""}</small>${bud ? `<div class="st-bar"><i class="${U.warn ? "warn" : ""}" style="width:${pct}%"></i></div>` : ""}</div>
+    <div class="card st-stat"><span>This month</span><b>${U.month.unpriced ? "at least " : ""}${money(U.month.cost)}</b><small>${U.month.calls} calls${bud ? ` · budget ${money(bud)} · ${money(U.left)} left` : ""}</small>${bud ? `<div class="st-bar"><i class="${U.warn ? "warn" : ""}" style="width:${pct}%"></i></div>` : ""}</div>
     <div class="card st-stat"><span>All time</span><b>${money(U.cost)}</b><small>${U.calls} calls</small></div>
     <div class="card st-stat"><span>Answered from cache</span><b>${U.cached}</b><small>free repeats · ${D.cache ? D.cache.entries + " entries, " + Math.round(D.cache.bytes / 1024) + " KB" : ""}</small></div>
     <div class="card st-stat"><span>Calls without a price</span><b>${U.unpriced}</b><small>add prices in Settings → AI</small></div></div>
   ${U.warn ? `<div class="card st-card warnbox">You have used ${Math.round(pct)}% of this month's budget.</div>` : ""}
+  ${U.month.unpriced ? `<div class="card st-card warnbox" id="st-unpriced">${U.month.unpriced} call${U.month.unpriced === 1 ? "" : "s"} this month had no known price, so the real total is higher than ${money(U.month.cost)}${bud ? `, and the budget cannot count ${U.month.unpriced === 1 ? "it" : "them"}` : ""}. Add the model’s price in Settings → AI → Prices, and the calls after that are counted.</div>` : ""}
   <div class="card st-card"><h2>Last 30 days</h2><div class="st-chart">${days.map(([d, v], i) => `<div title="${d}: ${money(v)}"><i class="${v ? "" : "zero"}" style="height:${v ? Math.max(4, 100 * v / max) : 2}%"></i><small>${i % 5 === 4 || i === 0 ? d.slice(5) : ""}</small></div>`).join("")}</div>${spent ? "" : `<div class="hint">No spend in the last 30 days.</div>`}</div>
   <div class="st-two"><div class="card st-card"><h2>By feature</h2><table class="st-table"><tr><th>Feature</th><th>Calls</th><th>Tokens in/out</th><th>Cost</th></tr>${Object.entries(U.by_feature).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.calls}</td><td>${v.in.toLocaleString()} / ${v.out.toLocaleString()}</td><td>${money(v.cost)}</td></tr>`).join("")}</table></div>
   <div class="card st-card"><h2>By provider</h2><table class="st-table"><tr><th>Provider</th><th>Calls</th><th>Cost</th></tr>${Object.entries(U.by_provider).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.calls}</td><td>${money(v.cost)}</td></tr>`).join("")}</table></div></div>

@@ -44,6 +44,7 @@ async function write(body, my) {
   $("#lsn-body", box).innerHTML = P.script.split(/\n{2,}/).map(par => `<p>${sentences(par).map(s => `<span class="lsn-s" data-i="${P.sents.indexOf(s)}">${esc(s)} </span>`).join("")}</p>`).join("");
   $(".lsn-bar", box).hidden = false;
   $("#lsn-meta", box).textContent = `${P.script.split(/\s+/).length} words · about ${Math.max(1, Math.round(P.script.split(/\s+/).length / 150))} min${done ? " · " + (done.cached ? "saved" : done.cost != null ? exactCost(done.cost) : "") : ""}`;
+  if (done && done.cut_off) $("#lsn-meta", box).textContent += " · cut off at the model’s length limit: the end is missing (close this and open it again to have it written again)";
   if (!tts()) $("#lsn-meta", box).textContent += " · this browser can't speak aloud, but you can read the script";
 }
 function voices() {

@@ -2,7 +2,8 @@
 // the passage. Follow-ups remember the conversation; ⟳ asks again; ⇄ asks a second model the same question side by side; 💡 suggests what
 // to ask next. The server (POST /api/ai/ask) streams newline-delimited JSON:
 //   {type:"status", msg} {type:"passages", passages:[{n,page,quote}]} {type:"text", delta} {type:"done", model, provider, cost, cached, invalid} {type:"error", error}
-import {notifyError, S, $, esc, toast, on, debounce, api} from "./state.js";
+// A line under the box says what the next question costs before it is asked (GET /api/doc/ask/estimate; nothing is sent for it).
+import {notifyError, S, $, esc, toast, on, debounce, api, aboutCost} from "./state.js";
 import * as N from "./notes.js";
 import * as C from "./canvas.js";
 import {wireCites} from "./cite.js";
@@ -10,13 +11,14 @@ import {wire as wireOut} from "./output.js";
 import {turnHtml as askTurn, actionButtons, compareButtons} from "./askview.js";
 
 let panel, log, input, busy = false, ctxText = "", CFG = null;
+let EST = null, estFor = "", estSeq = 0;      // what the next question costs in each mode, the paper it is for ("": not asked for yet), and a count so that a late answer never replaces a newer one
 let turns = [];            // [{q, text, passages, model, cost, cached, invalid, done, error, alt?, follow?, chap?, pages?}]
 let chapters = [], chap = -1;          // a book's chapters, and the one the questions are limited to (-1: the whole book)
 const curPages = () => chap >= 0 && chapters[chap] ? {from: chapters[chap].start, to: chapters[chap].end, title: chapters[chap].title} : null;
 const STARTERS = ["What is the main contribution of this paper?", "What theory, method and sample does it use?",
   "List the hypotheses or propositions and whether they were supported.", "What are the limitations and the suggested future research?"];
 const saveChat = debounce(() => fetch("/api/doc/chat", {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-  body: JSON.stringify({file: S.file, turns: turns.filter(t => t.done || t.text).map(({q, text, passages, model, cost, cached, invalid, follow, alt, pages}) => ({q, text, passages, model, cost, cached, invalid, follow, alt, pages, done: true}))})}).catch(() => {}), 600);
+  body: JSON.stringify({file: S.file, turns: turns.filter(t => t.done || t.text).map(({q, text, passages, model, cost, cached, invalid, cut_off, follow, alt, pages}) => ({q, text, passages, model, cost, cached, invalid, cut_off, follow, alt, pages, done: true}))})}).catch(() => {}), 600);
 
 export function mount(el) {
   panel = el; S.fn.askAbout = askAbout;
@@ -24,10 +26,11 @@ export function mount(el) {
       <select id="ask-mode" title="What the model reads"><option value="rag">Relevant passages</option><option value="full">Whole paper</option></select>
       <button class="rd-btn" data-k="clear" title="Start a new conversation">🗑</button><button class="rd-btn" data-k="cfg" title="AI provider and model (Settings)">⚙</button></div>
     <div class="ask-log" id="ask-log"></div>
-    <div class="ask-box"><textarea id="ask-q" rows="1" placeholder="Ask about this paper…  (Ctrl/⌘+Enter)"></textarea><button class="btn primary small" data-k="send">Ask</button></div>`;
+    <div class="ask-box"><textarea id="ask-q" rows="1" placeholder="Ask about this paper…  (Ctrl/⌘+Enter)"></textarea><button class="btn primary small" data-k="send">Ask</button></div>
+    <div class="ask-est" id="ask-est" role="status"></div>`;
   log = $("#ask-log", el); input = $("#ask-q", el); wireOut(log);
   try { $("#ask-mode", el).value = localStorage.getItem("jw-ask-mode") || "rag"; } catch (e) {}
-  $("#ask-mode", el).onchange = e => { try { localStorage.setItem("jw-ask-mode", e.target.value); } catch (er) {} };
+  $("#ask-mode", el).onchange = e => { try { localStorage.setItem("jw-ask-mode", e.target.value); } catch (er) {} drawEst(); };
   el.addEventListener("click", e => {
     const k = e.target.closest("[data-k]")?.dataset.k, q = e.target.closest("[data-starter]"), t = e.target.closest("[data-t]");
     if (k === "send") submit(); else if (k === "cfg") settings(); else if (k === "clear") clearChat(); else if (k === "suggest") suggest();
@@ -37,9 +40,11 @@ export function mount(el) {
   input.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } });
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(140, input.scrollHeight) + "px"; });
   wireCites(el, b => { const t = turns[+b.closest(".ask-turn")?.dataset.i]; return t && (b.closest(".ask-alt") && t.alt ? t.alt.passages : t.passages); });
-  on("paper:opened", async () => { loadBook(); turns = []; ctxText = ""; draw(); status(); try { turns = (await api("/api/doc/chat?file=" + encodeURIComponent(S.file))).turns || []; draw(); } catch (e) { /* no saved chat */ } });
-  on("reader:closed", () => { turns = []; });
-  window.addEventListener("jw-settings-changed", () => status());
+  on("paper:opened", async () => { EST = null; estFor = ""; estSeq++; drawEst(); loadBook(); turns = []; ctxText = ""; draw(); status(); try { turns = (await api("/api/doc/chat?file=" + encodeURIComponent(S.file))).turns || []; draw(); } catch (e) { /* no saved chat */ } if (estFor && turns.length) loadEst(); });      // (a saved conversation goes along with the next question)
+  on("tab:show", k => { if (k === "ask" && estFor !== S.file && !S.tabRestored) loadEst(); });      // only once the reader chooses this tab: opening a paper works nothing out, also not when the tab is put back as it was last time
+  for (const ev of ["pointerdown", "focusin"]) el.addEventListener(ev, () => { if (S.file && estFor !== S.file) loadEst(); });      // (the tab was only put back: the cursor in the box, or anything else done here, asks for the figure)
+  on("reader:closed", () => { turns = []; EST = null; estFor = ""; estSeq++; });
+  window.addEventListener("jw-settings-changed", () => { status(); if (estFor) loadEst(); });      // (another model, another price, "keep the paper ready")
   draw();
 }
 
@@ -50,15 +55,16 @@ async function loadBook() {
   chapters = b.chapters || []; if (!chapters.length || !slot) return;
   slot.innerHTML = `<select id="ask-chapsel" aria-label="What the model reads" title="Read the whole book, or only one chapter of it"><option value="-1">Whole book</option>${chapters.map(c => `<option value="${c.i}">${"– ".repeat(c.level - 1)}${esc(c.title)}</option>`).join("")}</select>`;
   const sel = $("#ask-chapsel", slot);
-  sel.onchange = () => { chap = +sel.value; };
+  sel.onchange = () => { chap = +sel.value; if (estFor) loadEst(); };
   const want = window.__askChapter && window.__askChapter.file === S.file ? window.__askChapter.i : -1; window.__askChapter = null;      // "Ask about it" in the Library's chapter list
   if (want >= 0 && chapters[want]) { chap = want; sel.value = String(want); }
+  if (estFor) loadEst();           // (the line was worked out as for a paper: say "book", and count the chapter chosen for you)
 }
 const submit = () => { const q = input.value.trim(); if (q) { input.value = ""; input.style.height = "auto"; ask(q); } };
 export function askAbout(text) { ctxText = text; draw(); input.value = ""; input.focus(); }
 function clearChat() {
   if (turns.length && !confirm("Clear this conversation? (It is only stored next to the paper.)")) return;
-  turns = []; ctxText = ""; draw();
+  turns = []; ctxText = ""; draw(); if (estFor) loadEst();
   fetch("/api/doc/chat", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({file: S.file, turns: []})}).catch(() => {});
 }
 
@@ -94,7 +100,7 @@ async function run(q, extra, onMsg) {
 function apply(t, m) {
   if (m.type === "status") t.status = m.msg; else if (m.type === "passages") t.passages = m.passages;
   else if (m.type === "text") t.text += m.delta; else if (m.type === "error") t.error = m.error;
-  else if (m.type === "done") Object.assign(t, {done: true, model: (m.provider ? m.provider + " · " : "") + (m.model || ""), cost: m.cost, cached: m.cached, invalid: m.invalid});
+  else if (m.type === "done") Object.assign(t, {done: true, model: (m.provider ? m.provider + " · " : "") + (m.model || ""), cost: m.cost, cached: m.cached, invalid: m.invalid, cut_off: m.cut_off || undefined});      // cut_off: it stopped at the model’s length limit (said with the answer, and remembered with the conversation)
 }
 const redraw = i => { const el = log.querySelector(`.ask-turn[data-i="${i}"]`); if (el) { el.outerHTML = turnHtml(turns[i], i); log.scrollTop = log.scrollHeight; } };
 
@@ -109,6 +115,7 @@ export async function ask(q, opts = {}) {
   try { await run(full, {fresh: opts.fresh, history: histBefore(i), pages}, m => { apply(t, m); redraw(i); }); if (!t.error && !t.text) t.error = "The model returned no answer."; }
   catch (e) { t.error = e.message; }
   t.done = !t.error; busy = false; redraw(i); status(); if (t.done) saveChat();
+  if (estFor) loadEst();           // (the conversation is longer now, and it goes along with the next question)
 }
 async function compare(i, over) {
   const t = turns[i]; if (busy || !t) return; busy = true;
@@ -121,7 +128,7 @@ async function turnAction(i, a) {
   if (a === "regen") return ask(t.q, {replace: i, fresh: true});
   if (a === "copy") return S.fn.copyText(t.text, "Answer copied.");
   if (a === "save") { const p = C.nextPos(); N.addCard({type: "ai", question: t.q, text: t.text, cites: t.passages, model: t.model, x: p.x, y: p.y, w: 340}); S.fn.showTab("notes"); return toast("Saved to your notes."); }
-  if (a === "usealt" && t.alt) { Object.assign(t, {text: t.alt.text, model: t.alt.model, cost: t.alt.cost, cached: t.alt.cached, invalid: t.alt.invalid}); delete t.alt; redraw(i); return saveChat(); }
+  if (a === "usealt" && t.alt) { Object.assign(t, {text: t.alt.text, model: t.alt.model, cost: t.alt.cost, cached: t.alt.cached, invalid: t.alt.invalid, cut_off: t.alt.cut_off}); delete t.alt; redraw(i); return saveChat(); }
   if (a === "dropalt") { delete t.alt; redraw(i); return saveChat(); }
   if (a === "compare") return comparePick(i);
   if (a === "follow") { try { const r = await api("/api/ai/suggest", {file: S.file, q: t.q, a: t.text}); t.follow = r.questions; redraw(i); saveChat(); } catch (e) { notifyError(e); } }
@@ -146,6 +153,27 @@ async function comparePick(i) {
   }
   if (!pick.provider || !pick.model) return toast("Use provider/model, e.g. openai/gpt-…");
   compare(i, pick);
+}
+
+// ---------------------------------------------------------------- what the next question costs, said before it is asked
+const histChars = () => histBefore(turns.length).reduce((n, h) => n + Math.min(3000, h.q.length) + Math.min(6000, h.a.length), 0);      // (what the server lets through of each turn)
+async function loadEst() {
+  const file = S.file, pg = curPages(), seq = ++estSeq; if (!file || !panel) return;
+  estFor = file; let e = null;
+  try { e = await api("/api/doc/ask/estimate?file=" + encodeURIComponent(file) + (pg ? `&from=${pg.from}&to=${pg.to}` : "") + "&hist=" + histChars()); } catch (er) { /* no AI backend, or the paper is gone: no line */ }
+  if (seq !== estSeq) return;      // another paper, chapter or answer since: its own figure is on the way
+  EST = e; drawEst();
+}
+function drawEst() {
+  const el = panel && $("#ask-est", panel); if (!el) return;
+  const mode = $("#ask-mode", panel).value, e = EST && EST[mode];
+  if (EST && EST.blocked) { el.textContent = EST.blocked; return; }      // no model chosen, no key, local-only mode: a question cannot be asked, so that is said and no price
+  if (!e || !e.passages) { el.textContent = ""; return; }
+  const what = chap >= 0 ? "chapter" : chapters.length ? "book" : "paper";
+  const reads = e.fallback ? `this ${what} is too long to read whole, so the ${e.passages} closest passages are read` : mode === "full" ? `reads the whole ${what} (${e.passages} passages)` : `reads the ${e.passages} closest passages`;
+  const cost = e.cost == null ? "Next question: cost not known (this model has no price in Settings → AI)"
+    : e.next != null ? `First question ${aboutCost(e.cost)}; further questions within 5 minutes ${aboutCost(e.next)}` : `Next question: ${aboutCost(e.cost)}`;
+  el.textContent = `${cost} · ${reads}`;
 }
 
 async function status() {

@@ -157,7 +157,7 @@ async function onCard(e) {
   const r = card.r;
   if (b.dataset.h === "use" && r && card.ctx) {
     b.disabled = true; const ans = $("#hv-ans", hov); ans.textContent = "Reading the sentences…";
-    try { const x = await api("/api/ai/citeuse", {ref: r.text, contexts: card.ctx.map(c => c.text)}); ans.textContent = x.text; ans.title = (x.cached ? "saved answer" : x.cost != null ? exactCost(x.cost) : "") + " · " + x.model; b.remove(); }
+    try { const x = await api("/api/ai/citeuse", {ref: r.text, contexts: card.ctx.map(c => c.text)}); ans.textContent = x.text + (x.cut_off ? " … (cut off at the model’s length limit: the end is missing)" : ""); ans.title = (x.cached ? "saved answer" : x.cost != null ? exactCost(x.cost) : "") + " · " + x.model; b.remove(); }
     catch (er) { ans.textContent = ""; b.disabled = false; notifyError(er); }
     return;
   }

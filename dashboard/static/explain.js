@@ -74,6 +74,7 @@ async function explain(t, spec, fresh = false) {
   meta.textContent = done ? `${done.provider} · ${done.model}${done.cached ? " · cached" : done.cost != null ? " · " + exactCost(done.cost) : ""}` : "";
   const act = $(".ex-act", card); act.classList.remove("hide");
   act.innerHTML = `<button class="rd-btn" data-x="save">→ Save to notes</button><button class="rd-btn" data-x="copy">Copy</button><button class="rd-btn" data-x="again" title="Ask again, ignoring the saved answer">⟳</button>` + (t.area ? "" : `<button class="rd-btn" data-x="chat">Follow up in chat</button>`);
+  if (done && done.cut_off) body.insertAdjacentHTML("beforeend", `<div class="of-co warn"><div>This answer was cut off at the model’s length limit; the end is missing. Ask again, or ask for something shorter. <button class="rd-btn" data-x="again">Ask again</button></div></div>`);
   card._text = text; card._done = done;
 }
 function onCard(e) {

@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, exactCost} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, aboutRange, exactCost, budgetOk} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -156,8 +156,10 @@ async function sumRefresh() {                                    // the exact li
   try { SUM = await api("/api/summaries"); SUM.at_lib = lib(); SUM_ST = SUM.status || {}; } catch (e) { notifyError(e); return; }
   sumPaint();
 }
+// the cost as the box says it: a range while it rests on the sizes of the files (a file's size says only roughly how many pages it has), else one figure
+const sumCost = e => e.cost == null ? "unknown" : e.basis === "prices" && e.cost_low != null && e.cost_high != null ? aboutRange(e.cost_low, e.cost_high) : aboutCost(e.cost);
 const basisText = e => e.basis === "history" ? `from your ${e.calls} earlier summar${e.calls === 1 ? "y" : "ies"} with this model, ${aboutCost(e.per_paper, "an unknown amount")} each`
-  : e.basis === "prices" ? `a guess from the price in Settings → AI and the size of each PDF${e.provider === "anthropic" ? "; Claude also reads every page as an image, so expect more" : ""}`
+  : e.basis === "prices" ? `a guess from the price in Settings → AI and the size of each PDF file${sumCost(e) === aboutCost(e.cost) ? "" : ", most likely " + aboutCost(e.cost)}; it gets more exact after ${e.history_min} summaries with this model`
   : "this model has no price in Settings → AI, and there are too few earlier summaries with it to go by";
 function sumBox() {
   const box = $("#lf-sumbox"); if (!box) return;
@@ -166,7 +168,7 @@ function sumBox() {
   if (st.running) html = `<p><b>Writing summaries: ${st.done} of ${st.total}.</b> ${st.made} written so far${st.failed.length ? `, ${st.failed.length} failed` : ""}. The AI activity tray shows it and can cancel it.</p>`;
   else if (SUM_OPEN && e.n) html = `<p><b>${e.n} paper${e.n === 1 ? "" : "s"} in your library ${e.n === 1 ? "has" : "have"} no summary yet.</b> Books are left out.</p>
       <p>${e.n === 1 ? "It goes" : "They go"} to <b>${esc(e.provider)} · ${esc(e.model)}</b> (Settings → AI → Paper summaries), one at a time, with your summary template.
-      Cost: <b>${e.cost == null ? "unknown" : aboutCost(e.cost)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
+      Cost: <b>${sumCost(e)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
       <div class="row" style="gap:8px"><button class="btn primary small" id="lf-sumgo">Write the summaries</button><button class="btn small" id="lf-sumno">Cancel</button></div>`;
   else if (st.ended && SUM_WATCHED && SUM_SEEN !== st.ended) {
     const fl = st.failed || [];
@@ -176,7 +178,7 @@ function sumBox() {
   } else { box.classList.add("hide"); box.innerHTML = ""; return; }
   box.innerHTML = html; box.classList.remove("hide");
   const go = $("#lf-sumgo", box), no = $("#lf-sumno", box), ok = $("#lf-sumok", box);
-  if (go) go.onclick = async () => { go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
+  if (go) go.onclick = async () => { if (!(await budgetOk(e.cost, e.basis === "prices" ? e.cost_high : null, e.cost_low))) return; go.disabled = true; try { const r = await api("/api/summaries", {files: e.files}); SUM_ST = r.status || {}; SUM_OPEN = false; SUM_WATCHED = true; toast(`Writing ${e.n} summar${e.n === 1 ? "y" : "ies"} in the background.`); sumPaint(); sumPoll(); } catch (er) { go.disabled = false; notifyError(er); } };
   if (no) no.onclick = () => { SUM_OPEN = false; sumBox(); };
   if (ok) ok.onclick = () => { SUM_SEEN = st.ended; sumBox(); };
   if (st.ended && SUM_WATCHED && SUM_DONE !== st.ended) { SUM_DONE = st.ended; ctx.reload().then(() => { if (ctx.rerender) ctx.rerender(); else results(TOP && TOP.opts); }).catch(() => {}); }      // the new summaries: green "Ready to read" bars
@@ -233,12 +235,13 @@ async function chapterSummary(card, box, i, fresh) {         // the estimate fir
     <div class="row" style="gap:8px"><button class="btn primary small" data-sum-go>${fresh ? "Write it again" : "Write the summary"}</button><button class="btn small" data-sum-no>Cancel</button></div></div>`;
   $("[data-sum-no]", out).onclick = () => { out.innerHTML = c.summary ? sumHtml(c.summary) : ""; if (!c.summary) out.classList.add("hide"); };
   $("[data-sum-go]", out).onclick = async () => {
-    out.innerHTML = `<div class="pmeta" role="status">Writing the summary…</div><div class="of-md" data-live></div>`; let text = "", fin = null;
+    out.innerHTML = `<div class="pmeta" role="status">Writing the summary…</div><div class="of-md" data-live></div>`; let text = "", fin = null, cut = null;
     try {
       await lines("/api/ai/chapter", {file, chapter: i, fresh: !!fresh}, m => {
         if (m.type === "text") { text += m.delta; $("[data-live]", out).innerHTML = md(text); } else if (m.type === "final") { fin = m.text; } else if (m.type === "error") throw new Error(m.error);
-        else if (m.type === "done") { c.summary = {text: fin || text, model: m.model, cost: m.cost, left_out: m.left_out}; }
+        else if (m.type === "done") { if (m.cut_off) cut = fin || text; else c.summary = {text: fin || text, model: m.model, cost: m.cost, left_out: m.left_out}; }
       });
+      if (cut != null) { out.innerHTML = `<div class="of-md">${md(cut)}</div><div class="pmeta bad" role="alert">This summary was cut off at the model’s length limit; the end is missing, so it was not saved with the book. <button class="linkbtn" data-chap-redo>Write it again</button></div>`; return; }       // (a complete summary saved earlier is still the book’s)
       out.innerHTML = sumHtml(c.summary); const b = $(`[data-chap-sum="${i}"]`, box); if (b) b.textContent = "Summary";
     } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }
   };
@@ -298,6 +301,7 @@ async function wholeBook(card, box, b) {                        // the estimate 
     <div class="row" style="gap:8px"><button class="btn primary small" data-whole-go>Summarise</button><button class="btn small" data-whole-no>Cancel</button></div></div>`;
   $("[data-whole-no]", out).onclick = () => { out.innerHTML = ""; out.classList.add("hide"); };
   $("[data-whole-go]", out).onclick = async () => {
+    if (!(await budgetOk(e.cost))) return;
     try { const r = await api("/api/book/whole", {file, title}); follow(card, box, out, file, r.status); } catch (er) { out.innerHTML = `<div class="pmeta bad" role="alert">${esc(er.message)}</div>`; }     // (409 while another book's job runs: its words say so)
   };
 }

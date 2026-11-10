@@ -3,7 +3,7 @@
 // supported / partly / contradicted / not found in your papers, with the passages it rests on (click one: the paper opens at that page); when a claim names a paper
 // ("Singhal et al., 2026") it says whether that paper's own passages really say it. The model may only point at passages it was given; anything else is dropped on the server.
 // Saved as Papers/_folders/<id>.claims.json. Server: GET /api/folder/claims, POST /api/ai/claims[/estimate] (stream: status | progress | claims | done | error), POST /api/folder/claims (tick off).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress, aboutCost, exactCost} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress, aboutCost, exactCost, budgetOk} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -126,6 +126,7 @@ async function run(fresh) {
   if (C.busy) return;
   const texts = fresh && C.data.doc && !C.sel.size ? C.data.doc.claims.map(c => c.text) : C.split.filter(c => C.sel.has(c.n)).map(c => c.text);
   if (!texts.length) return toast("Tick at least one sentence.");
+  if (!(await budgetOk((C.est || {}).cost))) return;
   C.busy = true; drawGo(); const st = () => $("#cl-st", C.el);
   try {
     const r = await fetch("/api/ai/claims", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: C.fid, scope: C.scope, text: C.text, texts, fresh})});

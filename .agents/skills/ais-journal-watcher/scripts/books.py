@@ -418,8 +418,8 @@ class NoText(ValueError):
 def _summarise(pdf, info, c, title="", fresh=False, override=None, blocks=None):
     """Write the summary of chapter c and save it in the book's .book.json. A generator: yields ("status", msg) and ("text", delta) as the answer arrives, and
     returns the saved record ({"title", "start", "end", "text", "provider", "model", "cost", "left_out", "at"}). Raises ValueError (no text) or ai.AIError (Blocked,
-    Cancelled, the provider's refusal with its HTTP status, or an empty answer: an empty summary is never saved, nor kept in the answer cache, so asking again
-    really asks again)."""
+    Cancelled, the provider's refusal with its HTTP status, an empty answer, or ai.CutOff for an answer that stopped at the model's length limit: an empty or cut-off
+    summary is never saved, nor kept in the answer cache, so asking again really asks again)."""
     import ai
     key = chapter_key(c)
     yield "status", "Reading the chapter…"
@@ -429,7 +429,7 @@ def _summarise(pdf, info, c, title="", fresh=False, override=None, blocks=None):
     messages = [{"role": "user", "content": "Book: %s\nChapter: %s (pages %d–%d of the file)\n\nText of the chapter:\n\n%s" % (title or "a book", c["title"], c["start"], c["end"], text)}]
     yield "status", "Writing the summary…"
     res = None
-    for kind, v in ai.stream("summarize", messages, system=SUMMARY_SYSTEM, max_tokens=1200, cache=True, fresh=fresh, override=override,
+    for kind, v in ai.stream("summarize", messages, system=SUMMARY_SYSTEM, max_tokens=2400, cache=True, fresh=fresh, override=override,
                              cache_if=lambda t: bool((t or "").strip())):
         if kind == "text":
             yield "text", v
@@ -437,6 +437,8 @@ def _summarise(pdf, info, c, title="", fresh=False, override=None, blocks=None):
             res = v
     if res is None or not (res.text or "").strip():
         raise ai.AIError("The model gave an empty summary, so nothing was saved. Ask again, or choose another model in Settings → AI.")
+    if res.cut_off:                     # half a summary would count as done for ever, and would feed the overview
+        raise ai.CutOff("The summary was cut off at the model’s length limit, so it was not saved. You can try again.", res, _relabel(res.text, info))
     rec = {"title": c["title"], "start": c["start"], "end": c["end"], "text": _relabel(res.text, info), "provider": res.provider, "model": res.model,
            "cost": res.cost, "left_out": left_out, "at": datetime.now().isoformat(timespec="seconds")}
     with _BOOKLOCK:
@@ -470,6 +472,9 @@ def summary_stream(rel, i, title="", fresh=False, override=None):
         yield {"type": "done", "provider": rec["provider"], "model": rec["model"], "cost": rec["cost"], "cached": False, "saved": True, "left_out": rec["left_out"]}
     except ValueError as e:
         yield {"type": "error", "error": str(e)}
+    except ai.CutOff as e:              # shown, with a note that its end is missing, but not saved (a complete summary saved earlier stays)
+        yield {"type": "final", "text": e.text}
+        yield {"type": "done", "provider": e.result.provider, "model": e.result.model, "cost": e.result.cost, "cached": False, "saved": False, "cut_off": True}
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
 
@@ -639,7 +644,7 @@ def whole_estimate(rel):
 
 def write_overview(rel, title="", override=None):
     """Write the book's overview from its stored summaries only (never the book's text) and save it as info["overview"]. Raises ValueError when a part has no
-    summary yet, ai.AIError otherwise (an empty answer included: nothing is saved or cached). The page references are the summaries' own, copied as they are."""
+    summary yet, ai.AIError otherwise (an empty answer or one cut off at the length limit included: nothing is saved or cached). The page references are the summaries' own, copied as they are."""
     import ai
     pdf, info = _book(rel)
     ps = parts(info)
@@ -649,11 +654,13 @@ def write_overview(rel, title="", override=None):
     body, cut = _overview_input(info, ps)
     messages = [{"role": "user", "content": "Book: %s\n\nSummaries of its chapters and sections, in the book's order:\n\n%s" % (title or "a book", body)}]
     res = None
-    for kind, v in ai.stream("summarize", messages, system=OVERVIEW_SYSTEM, max_tokens=2000, cache=True, override=override, cache_if=lambda t: bool((t or "").strip())):
+    for kind, v in ai.stream("summarize", messages, system=OVERVIEW_SYSTEM, max_tokens=4000, cache=True, override=override, cache_if=lambda t: bool((t or "").strip())):
         if kind == "done":
             res = v
     if res is None or not (res.text or "").strip():
         raise ai.AIError("The model gave an empty overview, so nothing was saved.")
+    if res.cut_off:
+        raise ai.CutOff("The overview was cut off at the model’s length limit, so it was not saved. You can try again.", res, res.text)      # (it carries what it cost: see bookjob)
     rec = {"text": res.text.strip(), "provider": res.provider, "model": res.model, "cost": res.cost, "parts": len(ps), "fingerprint": _fingerprint(info, ps), "cut": cut,
            "at": datetime.now().isoformat(timespec="seconds")}
     with _BOOKLOCK:

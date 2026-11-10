@@ -208,7 +208,7 @@ def stream(rows, question, mode="passages", history=None, override=None, fresh=F
             if kind == "text":
                 yield {"type": "text", "delta": v}
             else:
-                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "invalid": [n for n in ask.invalid_citations(v.text, len(items)) if n < 1000]}   # "(2026)" after an author's name is a year, not a citation
+                yield {"type": "done", "provider": v.provider, "model": v.model, "cost": v.cost, "cached": v.cached, "cut_off": v.cut_off, "invalid": [n for n in ask.invalid_citations(v.text, len(items)) if n < 1000]}   # "(2026)" after an author's name is a year, not a citation
     except ai.AIError as e:
         yield {"type": "error", "error": str(e)}
     except Exception as e:  # noqa: BLE001

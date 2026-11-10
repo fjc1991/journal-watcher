@@ -95,6 +95,7 @@ def _run(rel, title, pdf, todo):
                 stopped = "cancelled"
                 break
             except ai.AIError as e:
+                cost += getattr(getattr(e, "result", None), "cost", None) or 0.0      # a summary cut off at the length limit was not saved, but it was paid for in full
                 err = str(e) or "the provider gave no answer"
                 if isinstance(e, ai.Blocked) or getattr(e, "status", None) in STOP_ALL:
                     failed.append({"key": key, "title": c["title"][:120], "error": err[:300]})
@@ -125,6 +126,7 @@ def _run(rel, title, pdf, todo):
                 except ai.Cancelled:
                     stopped = "cancelled"
                 except (ai.AIError, ValueError) as e:
+                    cost += getattr(getattr(e, "result", None), "cost", None) or 0.0      # (a cut-off overview was paid for too)
                     stopped = "The overview could not be written: %s" % (str(e) or "no answer")[:200]
         elif job.cancelled and not stopped:
             stopped = "cancelled"

@@ -30,6 +30,16 @@ PROJECT = os.path.abspath(os.path.join(SKILL, "..", "..", ".."))
 TMP = tempfile.mkdtemp(prefix="jw-ui-")
 FAILS = []
 SEEN = []          # requests the fake AI provider received
+CUT_NEXT = [0]     # how many of the fake provider's next answers end as cut off at the length limit (a question with the word CUTOFF always does)
+
+
+def cut_now(text):
+    if "CUTOFF" in text:
+        return True
+    if CUT_NEXT[0] > 0:
+        CUT_NEXT[0] -= 1
+        return True
+    return False
 
 
 def check(name, cond, extra=""):
@@ -147,6 +157,8 @@ class Fake(BaseHTTPRequestHandler):
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {"content": out[i:i + 24]}}]}) + "\n\n").encode())
             if "SLOW" in text:
                 self.wfile.flush(); time.sleep(0.15)
+        if cut_now(text):                # the answer stops at the model's length limit: all its words, then finish_reason "length"
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "length"}]}) + "\n\n").encode())
         self.wfile.write(("data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 500, "completion_tokens": 40}}) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n"); self.close_connection = True
 
@@ -238,6 +250,8 @@ class Fake(BaseHTTPRequestHandler):
             if k == 0 and urls:
                 delta["annotations"] = urls
             self.wfile.write(("data: " + json.dumps({"choices": [{"delta": delta}]}) + "\n\n").encode())
+        if cut_now(str(body["messages"][-1]["content"])):                # the answer stops at the model's length limit: all its words, then finish_reason "length"
+            self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "length"}]}) + "\n\n").encode())
         self.wfile.write(("data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 800, "completion_tokens": 300}}) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n"); self.close_connection = True
 
@@ -474,7 +488,7 @@ def fake_ssrn(query, y0, y1, limit=200, progress=None):                         
     open(SSRNLOG, 'a').write('%s|%s|%s|%s\n' % (query, y0, y1, limit))
     return [{'title': 'Platform governance on SSRN %d' % i, 'doi': '10.2139/ssrn.99000%d%d' % (y0, i), 'pub_date': '%d-01' % y0, 'abstract': 'We study platform governance on SSRN.', 'keywords': None, 'authors': ['A. Author']} for i in range(2)]
 fx.crossref_ssrn = fake_ssrn
-def fake_screen(system, batch, usage, override=None):                                          # what the model is asked, one line per batch (the test counts them)
+def fake_screen(system, batch, usage, override=None, stop=None):                                          # what the model is asked, one line per batch (the test counts them)
     open(SCREENLOG, 'a').write('%d\n' % len(batch))
     return {n: {'n': n, 'verdict': 'download' if 'Platform' in p['title'] else 'skip', 'relevance': 80, 'topics': [], 'reason': 'test', 'method': None} for n, p in enumerate(batch, 1)}
 pl._screen_batch = fake_screen
@@ -531,6 +545,22 @@ fx.fetch_journal = lambda j: []                                                 
             ctx = br.new_context(viewport={"width": 1400, "height": 950}, permissions=["clipboard-read", "clipboard-write"])
             ctx.add_init_script("try { if (!sessionStorage.getItem('jw-wl-test')) localStorage.setItem('jw-welcome', 'done'); } catch (e) {}")      # the welcome guide has its own test below
             page = ctx.new_page(); rescue.page = page
+            # "Library" and "Folders" in the sidebar draw the page at once and then once more when the list of papers has come back from the server. A step that types or
+            # opens a menu between the two is undone by the second drawing (an emptied search box, a closed menu), and how long the list takes differs from one
+            # computer to the next. So a click on either waits for the list and for the page to go quiet before the next step.
+            click_now_ = page.click
+
+            def click_settled_(sel, *a_, **k_):
+                if sel not in ("#libitem", "#folditem"):
+                    return click_now_(sel, *a_, **k_)
+                try:
+                    with page.expect_response(lambda r_: r_.url.split("?")[0].endswith("/api/library"), timeout=15000):
+                        click_now_(sel, *a_, **k_)
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception as e_:  # noqa: BLE001
+                    if "Timeout" not in type(e_).__name__:      # (the list did not come or the page never went quiet: go on, the step after says what is wrong)
+                        raise
+            page.click = click_settled_
             if os.environ.get("JW_TEST_THROTTLE"):          # JW_TEST_THROTTLE=4 runs the page four times slower: how a busy CI machine behaves
                 ctx.new_cdp_session(page).send("Emulation.setCPUThrottlingRate", {"rate": float(os.environ["JW_TEST_THROTTLE"])})
             errors = []
@@ -538,7 +568,21 @@ fx.fetch_journal = lambda j: []                                                 
             page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
             dialogs = []
             answers = []        # canned answers for the next prompt() dialogs (otherwise the default value, or "fake/m2" for the compare picker)
-            page.on("dialog", lambda d: (dialogs.append(d.message), d.accept(answers.pop(0) if answers else (d.default_value or "fake/m2"))))
+            refuse = []         # put one item in it and the next dialog is answered with Cancel
+            page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss() if refuse and refuse.pop() else d.accept(answers.pop(0) if answers else (d.default_value or "fake/m2"))))
+
+            def budget_asks(sel, what):
+                """With next to nothing as the monthly budget, pressing `sel` (a job with an estimate) must ask first; the answer here is Cancel, which must start nothing."""
+                was_ = api("/api/ai/config")["budget"]["monthly_usd"]; api("/api/ai/config", {"budget": {"monthly_usd": 0.0000001}})
+                n_dlg_, n_chat_ = len(dialogs), len([1 for _p, b_ in SEEN if b_.get("messages")]); refuse.append(1)
+                try:
+                    page.click(sel); page.wait_for_timeout(800)
+                finally:
+                    del refuse[:]; api("/api/ai/config", {"budget": {"monthly_usd": was_}})
+                said_ = dialogs[n_dlg_:]
+                check("%s: when the estimate is more than what is left of the monthly budget, the page asks first (the estimate, what is left, where to raise it), and Cancel starts nothing" % what,
+                      len(said_) == 1 and said_[0].startswith("This is estimated at ") and "$0.00 is left of this month’s budget" in said_[0] and "Settings → AI" in said_[0] and said_[0].endswith("Start anyway?")
+                      and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_chat_, str(said_)[:300])
             page.goto(base + "/"); page.wait_for_selector("#libitem")
 
             print("markdown from an AI answer or a synced file")
@@ -796,6 +840,10 @@ fx.fetch_journal = lambda j: []                                                 
             page.evaluate(JS_SELECT, [1, "Platform effects are large"]); page.wait_for_selector("#rd-sel:not(.hide)")
             page.click('#rd-sel [data-s="explain"]'); page.click(".rd-expmenu [data-id='plain']"); page.wait_for_selector(".ex-act:not(.hide)", timeout=15000)
             check("asking the same thing again is answered from the cache (no new request)", len([x for x in SEEN if "chat" in x[0]]) == n_req + 1 and "cached" in page.inner_text(".ex-meta"))
+            CUT_NEXT[0] = 1; page.click('.rd-exp .ex-act [data-x="again"]'); page.wait_for_selector(".rd-exp .ex-body .of-co.warn", timeout=15000)
+            check("an explanation that stopped at the model's length limit says its end is missing, with a way to ask again", "cut off at the model’s length limit" in page.inner_text(".rd-exp .ex-body .of-co.warn") and "EXPLAINED" in page.inner_text(".ex-body") and page.locator('.rd-exp .of-co.warn [data-x="again"]').count() == 1, page.inner_text(".ex-body")[-200:])
+            page.click('.rd-exp .of-co.warn [data-x="again"]'); page.wait_for_function("!document.querySelector('.rd-exp .of-co.warn')", timeout=15000); page.wait_for_selector(".ex-act:not(.hide)", timeout=15000)
+            check("…and its Ask again button asks the provider again; a complete answer has no such note", len([x for x in SEEN if "chat" in x[0]]) == n_req + 3 and "EXPLAINED" in page.inner_text(".ex-body") and page.locator(".rd-exp .of-co.warn").count() == 0, "%d requests" % (len([x for x in SEEN if "chat" in x[0]]) - n_req))
             page.click('.rd-exp [data-x="save"]'); page.wait_for_selector(".nc-card.ai", timeout=5000)
             page.click(".rd-exp [data-x='close']") if page.locator(".rd-exp:not(.hide)").count() else None
 
@@ -916,7 +964,45 @@ fx.fetch_journal = lambda j: []                                                 
             check("…cancelled, offline, budget, set-up, local-only, busy, unreachable and plain messages are told apart", kinds_ == ["cancelled", "offline", "budget", "setup", "setup", "setup", "busy", "net", "error", "error", "boom", "That didn’t work"], str(kinds_))
 
             print("reader: Ask, summary, settings")
-            page.click('.rd-tabs button[data-tab="ask"]'); page.fill("#ask-q", "How many firms are on the platform?"); page.click('#reader [data-k="send"]')
+            beside_ = lambda: sorted(os.listdir(os.path.dirname(sidecar(2, ".pdf"))))  # noqa: E731
+            n_sent0 = len(SEEN); beside0 = beside_()
+            page.click('.rd-tabs button[data-tab="ask"]')
+            page.wait_for_function("/Next question/.test(document.querySelector('#ask-est').innerText)", timeout=20000)
+            page.select_option("#ask-mode", "rag"); est_rag = page.inner_text("#ask-est"); page.select_option("#ask-mode", "full"); est_full = page.inner_text("#ask-est"); page.select_option("#ask-mode", "rag")
+            e_ = api("/api/doc/ask/estimate?file=" + urllib.request.quote(rows[2][3]))
+            check("under the Ask box a line says what the next question costs and what the model reads, before anything is asked; choosing 'Whole paper' changes it",
+                  est_rag == "Next question: under 1 cent · reads the %d closest passages" % e_["rag"]["passages"] and est_full == "Next question: under 1 cent · reads the whole paper (%d passages)" % e_["full"]["passages"]
+                  and page.eval_on_selector("#ask-est", "e => e.previousElementSibling.className") == "ask-box", est_rag + " | " + est_full)
+            check("…the figures are the server's, for both modes (the whole paper is never less than the closest passages), and a model's price is never shown as nothing",
+                  e_["model"] == "m1" and 0 < e_["rag"]["cost"] <= e_["full"]["cost"] and e_["full"]["chars"] >= e_["rag"]["chars"] and e_["out_basis"] in ("default", "history") and "next" not in e_["full"], str(e_))
+            check("…working it out asked no provider anything and wrote nothing next to the paper", len(SEEN) == n_sent0 and beside_() == beside0, "%d requests; %s" % (len(SEEN) - n_sent0, beside_()))
+            fake_est = lambda **full: json.dumps({"provider": "claude", "model": "mA", "out_tokens": 700, "out_basis": "default", "rag": {"passages": 12, "chars": 9000, "cost": 0.031}, "full": {"passages": 40, "chars": 90000, **full}})  # noqa: E731
+            said_ = []
+            for full_ in ({"cost": 0.12, "next": 0.021}, {"cost": 0.12}, {"cost": None}, {"cost": 0.12, "fallback": True}):
+                page.unroute("**/api/doc/ask/estimate*"); page.route("**/api/doc/ask/estimate*", (lambda b_: lambda route: route.fulfill(status=200, content_type="application/json", body=b_))(fake_est(**full_)))
+                page.select_option("#ask-mode", "rag"); page.evaluate("document.querySelector('#ask-est').textContent = ''; window.dispatchEvent(new Event('jw-settings-changed'))")
+                page.wait_for_function("/about \\$0\\.03/.test(document.querySelector('#ask-est').innerText)", timeout=10000)
+                said_.append(page.inner_text("#ask-est")); page.select_option("#ask-mode", "full"); said_.append(page.inner_text("#ask-est"))
+            check("…with 'keep the paper ready' and Claude, a whole-paper question shows two figures in plain words: the first question, and further ones within 5 minutes",
+                  said_[1] == "First question about $0.12; further questions within 5 minutes about $0.02 · reads the whole paper (40 passages)" and said_[0] == "Next question: about $0.03 · reads the 12 closest passages"
+                  and said_[3] == "Next question: about $0.12 · reads the whole paper (40 passages)", str(said_[:4]))
+            check("…a model without a price is said to have none (never shown as free), and a paper too long to read whole says the closest passages are read",
+                  said_[5] == "Next question: cost not known (this model has no price in Settings → AI) · reads the whole paper (40 passages)"
+                  and said_[7] == "Next question: about $0.12 · this paper is too long to read whole, so the 40 closest passages are read", str(said_[4:]))
+            blk_, whys_ = [], ("No model chosen — click ⚙", "claude isn’t set up: add ANTHROPIC_API_KEY=… to the .env file in the project folder (no restart needed), or pick another provider in Settings → AI.")
+            for why_ in whys_:                          # (the first as the server answers with no model: no figure; the second with a figure, which must not be shown either)
+                b_ = json.loads(fake_est(cost=0.12)); b_["blocked"] = why_
+                if why_.startswith("No model"):
+                    b_["model"] = None; b_["rag"]["cost"] = None; b_["full"]["cost"] = None
+                page.unroute("**/api/doc/ask/estimate*"); page.route("**/api/doc/ask/estimate*", (lambda body_: lambda route: route.fulfill(status=200, content_type="application/json", body=body_))(json.dumps(b_)))
+                page.select_option("#ask-mode", "rag"); page.evaluate("document.querySelector('#ask-est').textContent = 'x'; window.dispatchEvent(new Event('jw-settings-changed'))")
+                page.wait_for_function("document.querySelector('#ask-est').textContent !== 'x'", timeout=10000)
+                blk_.append(page.inner_text("#ask-est")); page.select_option("#ask-mode", "full"); blk_.append(page.inner_text("#ask-est"))
+            check("…when a question cannot be asked at all (no model chosen, a provider without its key, local-only mode) the line says that in Ask's own words: no price, and never 'this model has no price'",
+                  blk_ == [whys_[0], whys_[0], whys_[1], whys_[1]] and not any("$" in t_ or "cost not known" in t_ for t_ in blk_), str(blk_))
+            page.unroute("**/api/doc/ask/estimate*"); page.select_option("#ask-mode", "rag"); page.evaluate("document.querySelector('#ask-est').textContent = ''; window.dispatchEvent(new Event('jw-settings-changed'))")
+            page.wait_for_function("/under 1 cent/.test(document.querySelector('#ask-est').innerText)", timeout=10000)
+            page.fill("#ask-q", "How many firms are on the platform?"); page.click('#reader [data-k="send"]')
             page.wait_for_selector(".ask-turn [data-t='regen']", timeout=30000)
             check("Ask answers with a clickable citation", page.locator(".ask-turn .cite").count() >= 1 and "120 firms" in page.inner_text(".ask-turn"))
             check("the answer is split into titled sections: Short answer, Evidence, Not in the passages (marked as a caveat), Sources",
@@ -927,7 +1013,11 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.ask-turn .of-sec[data-sec="evidence-0"] .of-sh h4'); page.wait_for_timeout(150)
             check("a section collapses and expands by clicking its title", page.locator('.ask-turn .of-sec[data-sec="evidence-0"].col').count() == 1)
             page.click('.ask-turn .of-sec[data-sec="evidence-0"] .of-sh h4')
-            page.fill("#ask-q", "And why is that?"); page.click('#reader [data-k="send"]'); page.wait_for_function("document.querySelectorAll('.ask-turn').length === 2 && document.querySelectorAll(\".ask-turn [data-t='regen']\").length === 2", timeout=30000)
+            with page.expect_request(lambda r_: "/api/doc/ask/estimate" in r_.url, timeout=40000) as est_req:
+                page.fill("#ask-q", "And why is that?"); page.click('#reader [data-k="send"]'); page.wait_for_function("document.querySelectorAll('.ask-turn').length === 2 && document.querySelectorAll(\".ask-turn [data-t='regen']\").length === 2", timeout=30000)
+            hist_n = int(re.search(r"hist=(\d+)", est_req.value.url).group(1)); turns_txt = page.evaluate("[...document.querySelectorAll('.ask-turn .ask-q')].map(e => e.innerText.length)")
+            check("after an answer the line is worked out again with the conversation that now goes along (both turns: the questions and the answers)",
+                  hist_n > sum(turns_txt) + 2 * 40 and api("/api/doc/ask/estimate?file=" + urllib.request.quote(rows[2][3]) + "&hist=%d" % hist_n)["rag"]["chars"] == e_["rag"]["chars"] + hist_n, "hist=%d, questions %s" % (hist_n, turns_txt))
             hist = [x for x in SEEN if "chat" in x[0] and "Question:" in json.dumps(x[1])][-1][1]["messages"]
             check("a follow-up sends the earlier turn as history", any(m["role"] == "user" and str(m["content"]).startswith("How many firms") for m in hist) and any(m["role"] == "assistant" and "120 firms" in str(m["content"]) for m in hist))
             page.locator(".ask-turn").last.locator("[data-t='compare']").click(); page.wait_for_selector(".ask-alt [data-t='usealt']", timeout=30000)
@@ -941,16 +1031,73 @@ fx.fetch_journal = lambda j: []                                                 
             check("💡 suggests follow-up questions", page.locator(".ask-turn [data-starter]").count() == 4)
             page.wait_for_timeout(1200)
             check("the conversation is saved next to the paper (and the reader asks first, so nothing else is created)", os.path.exists(sidecar(2, ".chat.json")) and len(json.load(open(sidecar(2, ".chat.json")))["turns"]) == 2)
-            page.click('.rd-tabs button[data-tab="sum"]'); page.select_option("#sum-t", "tldr"); page.click("#sum-go"); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
+            cut_reqs = lambda: len([x for x in SEEN if "chat" in x[0] and "CUTOFF" in json.dumps(x[1])])  # noqa: E731
+            page.fill("#ask-q", "CUTOFF How many firms are there?"); page.click('#reader [data-k="send"]')
+            page.wait_for_selector(".ask-turn >> nth=-1 >> .of-co.warn:has-text('cut off')", timeout=30000)
+            note_ = page.inner_text(".ask-turn >> nth=-1 >> .of-co.warn")
+            check("an answer that stopped at the model's length limit says so with the answer (its end is missing), with a way to ask again",
+                  "This answer was cut off at the model’s length limit; the end is missing." in note_ and "120 firms" in page.inner_text(".ask-turn >> nth=-1") and page.locator(".ask-turn >> nth=-1 >> .of-co.warn [data-t=regen]").count() == 1 and page.locator(".ask-turn .of-co.warn:has-text('cut off')").count() == 1, note_)
+            page.click(".ask-turn >> nth=-1 >> .of-co.warn [data-t=regen]")
+            for _ in range(100):
+                if cut_reqs() == 2:
+                    break
+                page.wait_for_timeout(100)
+            page.wait_for_selector(".ask-turn >> nth=-1 >> .of-co.warn:has-text('cut off')", timeout=30000)
+            check("…and its Ask again button asks the provider again", cut_reqs() == 2 and page.locator(".ask-turn").count() == 3, "%d requests, %d turns" % (cut_reqs(), page.locator(".ask-turn").count()))
+            page.wait_for_timeout(1200)
+            chat_ = json.load(open(sidecar(2, ".chat.json")))["turns"]
+            check("the saved conversation remembers which answer was cut off", [t_.get("cut_off") for t_ in chat_] == [None, None, True], str([t_.get("cut_off") for t_ in chat_]))
+            n_sent1 = len(SEEN); beside1 = beside_()
+            page.click('.rd-tabs button[data-tab="sum"]'); page.select_option("#sum-t", "tldr")
+            se_ = api("/api/doc/summary/estimate?file=" + urllib.request.quote(rows[2][3]) + "&template=tldr")
+            page.wait_for_function("document.querySelector('#sum-est').innerText.trim() !== ''", timeout=20000)
+            check("beside Generate in the Summary tab the cost is said before it is pressed (for the chosen template), and nothing is sent or written for it",
+                  se_["saved"] is False and se_["model"] == "m1" and 0 < se_["cost"] < 0.005 and page.inner_text("#sum-est") == "under 1 cent" and page.eval_on_selector("#sum-est", "e => e.previousElementSibling.id") == "sum-go"
+                  and len(SEEN) == n_sent1 and beside_() == beside1, page.inner_text("#sum-est") + " " + str(se_))
+            page.click("#sum-go"); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
+            page.wait_for_function("/free/.test(document.querySelector('#sum-est').innerText)", timeout=20000)
+            n_sent2 = len(SEEN); page.select_option("#sum-t", [o_ for o_ in page.eval_on_selector_all("#sum-t option", "os => os.map(o => o.value)") if o_ != "tldr"][0])
+            page.wait_for_function("document.querySelector('#sum-est').innerText.trim() === 'under 1 cent'", timeout=20000); page.select_option("#sum-t", "tldr")
+            page.wait_for_function("/free/.test(document.querySelector('#sum-est').innerText)", timeout=20000)
+            check("…once it is written, the line says the answer is saved and free (and what asking again costs); another template has its own price",
+                  page.inner_text("#sum-est") == "free: you have this answer saved (⟳ asks again, under 1 cent)" and api("/api/doc/summary/estimate?file=" + urllib.request.quote(rows[2][3]) + "&template=tldr")["saved"] is True and len(SEEN) == n_sent2, page.inner_text("#sum-est"))
             check("a summary can be generated with another template (not saved until you say so)", "FAKE SUMMARY" in page.inner_text("#sum-body") and not os.path.exists(sidecar(2, ".md")))
             check("…in titled sections, the TL;DR first and highlighted as the lead", [t.strip().lower() for t in page.locator("#sum-body .of-sec h4").all_inner_texts()] == ["tl;dr", "method", "key findings"] and page.locator("#sum-body .of-sec.lead").count() == 1 and "not saved yet" in page.inner_text("#sum-body"),
                   str(page.locator("#sum-body .of-sec h4").all_inner_texts()))
+            CUT_NEXT[0] = 1; page.click("#sum-act [data-sx='again']"); page.wait_for_selector("#sum-body .of-co.warn:has-text('cut off')", timeout=30000); page.wait_for_selector("#sum-act:not(.hide)", timeout=30000)
+            check("a summary that stopped at the model's length limit says its end is missing and cannot be saved as the paper's summary (no such button; Generate again is offered)",
+                  "cut off at the model’s length limit" in page.inner_text("#sum-body .of-co.warn") and page.locator("#sum-act [data-sx='replace']").count() == 0 and page.locator("#sum-act [data-sx='notes']").count() == 1 and page.locator("#sum-body .of-co.warn [data-sx='again']").count() == 1 and not os.path.exists(sidecar(2, ".md")), page.inner_text("#sum-act"))
+            page.click("#sum-body .of-co.warn [data-sx='again']"); page.wait_for_selector("#sum-act [data-sx='replace']", timeout=30000)
+            check("…and generating it again gives a complete one that can be saved", page.locator("#sum-body .of-co.warn").count() == 0 and "FAKE SUMMARY" in page.inner_text("#sum-body"))
             page.click("#sum-act [data-sx='replace']"); page.wait_for_timeout(800)
             check("…and saved as the paper's summary on request", os.path.exists(sidecar(2, ".md")) and "FAKE SUMMARY" in open(sidecar(2, ".md")).read())
             page.reload(); page.wait_for_selector("#libitem"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
             page.locator('.librow:has-text("Citations and Links") [data-read]').click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
             page.click('.rd-tabs button[data-tab="ask"]'); page.wait_for_selector(".ask-turn", timeout=10000)
-            check("after a reload the conversation is still there", page.locator(".ask-turn").count() == 2)
+            check("after a reload the conversation is still there (and the cut-off answers still say so)", page.locator(".ask-turn").count() == 3 and page.locator(".ask-turn .of-co.warn:has-text('cut off')").count() == 1, "%d turns, %d notes" % (page.locator(".ask-turn").count(), page.locator(".ask-turn .of-co.warn:has-text('cut off')").count()))
+            est_reqs_ = []
+            on_req_ = lambda r_: est_reqs_.append(r_.url.split("/api/doc/")[1].split("?")[0]) if "/api/doc/" in r_.url and "/estimate" in r_.url else None  # noqa: E731
+            page.on("request", on_req_)
+
+            def reopen_(tab_):
+                """The same paper opened again after a reload, with `tab_` as the side tab it was left on."""
+                page.evaluate("t => localStorage.setItem('jw-rd-tab', t)", tab_)
+                page.reload(); page.wait_for_selector("#libitem"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
+                del est_reqs_[:]
+                page.locator('.librow:has-text("Citations and Links") [data-read]').click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
+                page.wait_for_selector('.rd-tabs button[data-tab="%s"].on' % tab_, timeout=10000); page.wait_for_timeout(1500)
+            reopen_("ask"); page.wait_for_selector(".ask-turn", timeout=10000)
+            ask_idle_ = (list(est_reqs_), page.inner_text("#ask-est").strip())
+            page.focus("#ask-q"); page.wait_for_function("/Next question/.test(document.querySelector('#ask-est').innerText)", timeout=20000)
+            check("a paper opened with the Ask tab as it was left works out no cost (the paper's text is not read for it); putting the cursor in the Ask box does",
+                  ask_idle_ == ([], "") and est_reqs_ and set(est_reqs_) == {"ask/estimate"}, "%s then %s" % (ask_idle_, est_reqs_))
+            reopen_("sum")
+            sum_idle_ = (list(est_reqs_), page.inner_text("#sum-est").strip())
+            page.click("#sum-body"); page.wait_for_function("document.querySelector('#sum-est').innerText.trim() !== ''", timeout=20000)
+            check("…the same for the Summary tab: no figure beside Generate until something is done in the tab",
+                  sum_idle_ == ([], "") and est_reqs_ and set(est_reqs_) == {"summary/estimate"}, "%s then %s" % (sum_idle_, est_reqs_))
+            page.remove_listener("request", on_req_)
+            page.click('.rd-tabs button[data-tab="ask"]'); page.wait_for_selector(".ask-turn", timeout=10000)
             page.click('.rd-tabs button[data-tab="toc"]'); page.click("#toc-seg [data-v='pages']"); page.wait_for_function("document.querySelectorAll('#thumb-list .thumb canvas').length === 2", timeout=10000)
             page.wait_for_timeout(800)
             check("page thumbnails are drawn", page.locator("#thumb-list .thumb").count() == 2)
@@ -958,6 +1105,7 @@ fx.fetch_journal = lambda j: []                                                 
 
             page.click("#settingsbtn"); page.wait_for_selector("#st-body tr[data-p]")
             check("settings: providers, per-feature models and a key-free status", page.locator("tr[data-f]").count() >= 17 and page.locator("tr[data-f='ideas']").count() == 1 and "key found" in page.inner_text("tr[data-p='fake']"))
+            check("settings: the three small helper features (suggested questions, spoken briefings, flashcards) say that a cheap model is enough", all("a cheap model is enough" in page.inner_text("tr[data-f='%s']" % k_) for k_ in ("suggest", "audio", "flashcards")), page.inner_text("tr[data-f='suggest']"))
             JS_TIDY = """(() => { const r = e => e.getBoundingClientRect(), mid = e => r(e).top + r(e).height / 2;
               const rows = [...document.querySelectorAll('tr[data-p]')], keyRows = rows.filter(t => { const i = t.querySelector('input[type=password]'); return i && i.offsetParent !== null; });
               const hs = rows.map(t => Math.round(r(t).height)), feat = [...document.querySelectorAll('tr[data-f]:not([data-f=emb])')];
@@ -1002,6 +1150,11 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.st-tabs button[data-t="reader"]'); page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector("#st-main")
             check("'Use one for everything' starts at a provider and a model that belong together (10 features on fake split over m1 and m3, 8 on websearch sharing m2: it starts at fake and m1 or m3, never fake with m2)", page.input_value("#mn-p") == "fake" and page.input_value("#mn-m") in ("m1", "m3"), page.input_value("#mn-p") + " / " + page.input_value("#mn-m"))
             api("/api/ai/config", {"features": {k_: {"provider": v_["provider"], "model": v_["model"]} for k_, v_ in saved_feats_.items()}})
+            page.fill("#st-budget", "0"); page.click("#st-save"); page.wait_for_timeout(600)
+            zero_ = api("/api/ai/config")["budget"]["monthly_usd"]
+            page.click('.st-tabs button[data-t="reader"]'); page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector("#st-budget")
+            check("settings: a monthly budget of 0 means no limit and is kept as that: the field is empty again and says 'no limit', it does not show a 0",
+                  zero_ is None and page.input_value("#st-budget") == "" and page.get_attribute("#st-budget", "placeholder") == "no limit", "%r, field %r" % (zero_, page.input_value("#st-budget")))
             page.fill("#st-budget", "5"); page.click("#st-save"); page.wait_for_timeout(600)
             check("settings: the monthly budget is saved", api("/api/ai/config")["budget"]["monthly_usd"] == 5)
             check("settings: 'reuse earlier screening verdicts for N days' shows its default (90) and is saved", page.input_value("#st-reuse") == "90" and api("/api/ai/config")["screening"]["reuse_days"] == 90)
@@ -1010,7 +1163,21 @@ fx.fetch_journal = lambda j: []                                                 
             page.fill("#st-reuse", "99999"); page.click("#st-save"); page.wait_for_function("document.querySelector('#st-msg.bad')", timeout=5000)
             check("…(refused: 0 to 3650 days)", api("/api/ai/config")["screening"]["reuse_days"] == 30 and "3650" in page.inner_text("#st-msg"), page.inner_text("#st-msg"))
             page.fill("#st-reuse", "90"); page.click("#st-save"); page.wait_for_timeout(600)
+            keep0_ = api("/api/ai/config").get("ask", {}).get("keep_paper"); lab_ = page.inner_text("label:has(#st-keep)") if page.locator("#st-keep").count() else ""
+            check("settings: 'Whole-paper questions: keep the paper ready between questions (Claude)' is a switch that shows what is saved and says what it costs",
+                  keep0_ in (True, False) and page.locator("#st-keep").count() == 1 and page.is_checked("#st-keep") == keep0_ and "keep the paper ready between questions (Claude)" in lab_
+                  and "about a quarter more" in lab_ and "within 5 minutes" in lab_ and "about a tenth" in lab_ and "as before" in lab_, lab_)
+            page.set_checked("#st-keep", not keep0_); page.click("#st-save"); page.wait_for_timeout(600)
+            page.click('.st-tabs button[data-t="reader"]'); page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector("#st-keep")
+            check("…switched and saved, it is kept (and still shown after leaving the page and coming back), and the budget saved with it is untouched",
+                  api("/api/ai/config")["ask"] == {"keep_paper": (not keep0_)} and page.is_checked("#st-keep") == (not keep0_) and api("/api/ai/config")["budget"]["monthly_usd"] == 5)
+            page.set_checked("#st-keep", bool(keep0_)); page.click("#st-save"); page.wait_for_timeout(600)
+            check("…and switched back", api("/api/ai/config")["ask"] == {"keep_paper": bool(keep0_)})
             page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat")
+            use_ = api("/api/ai/usage"); body_ = page.inner_text("#st-body")
+            check("usage: calls of this month without a known price are said (the total is 'at least', and a note says the real total is higher and the budget cannot count them), with what is left of the budget",
+                  use_["month"]["unpriced"] > 0 and page.locator("#st-unpriced").count() == 1 and ("%d call" % use_["month"]["unpriced"]) in page.inner_text("#st-unpriced") and "had no known price, so the real total is higher than" in body_
+                  and "the budget cannot count" in body_ and "at least $" in page.inner_text(".st-stat >> nth=0") and "· budget $5.00 · $" in page.inner_text(".st-stat >> nth=0") and " left" in page.inner_text(".st-stat >> nth=0"), body_[:400])
             check("usage panel shows spend, cached answers and what was sent", "cache" in page.inner_text("#st-body").lower() and page.locator(".st-table.log tr").count() > 3)
             check("the usage chart always shows the last 30 days, not just the days with spend", page.locator(".st-chart > div").count() == 30)
             shot(page, "6-usage"); page.click('.st-tabs button[data-t="reader"]'); page.fill('.legend input[data-c="yellow"]', "Claim"); page.click("#st-save"); page.wait_for_timeout(600)
@@ -1044,7 +1211,11 @@ fx.fetch_journal = lambda j: []                                                 
             check("a paper card is saved beside the PDF", os.path.exists(sidecar(0, ".card.json")) and json.load(open(sidecar(0, ".card.json")))["rev"] == 1)
             page.evaluate("""() => { const sp = []; window.__spoken = sp; Object.defineProperty(window, "speechSynthesis", {configurable: true, value: {getVoices() { return []; }, speak(u) { sp.push(u.text); setTimeout(() => u.onend && u.onend(), 5); }, cancel() {}, pause() {}, resume() {}, speaking: false, addEventListener() {}}});
               Object.defineProperty(window, "SpeechSynthesisUtterance", {configurable: true, value: function (t) { this.text = t; }}); }""")
-            page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
+            brief_reqs = lambda: len([b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the script of a short spoken briefing")])  # noqa: E731
+            n_brief = brief_reqs(); CUT_NEXT[0] = 1; page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
+            check("a briefing that stopped at the model's length limit says its end is missing", "cut off at the model’s length limit" in page.inner_text("#lsn-meta"), page.inner_text("#lsn-meta"))
+            page.click('[data-l="close"]'); page.click('#reader [data-k="listen"]'); page.wait_for_selector(".lsn-s", timeout=30000)
+            check("…and opening it again has it written again (it was not kept in the saved answers), complete this time", brief_reqs() == n_brief + 2 and "cut off" not in page.inner_text("#lsn-meta") and "saved" not in page.inner_text("#lsn-meta"), "%d requests; %s" % (brief_reqs() - n_brief, page.inner_text("#lsn-meta")))
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the script of a short spoken briefing")][-1]
             check("🎧 Listen on the Card tab writes a short script from the card (the model is told to write for the ear)", "PAPER:" in req["messages"][-1]["content"] and "for the ear" in req["messages"][0]["content"] and page.locator(".lsn-s").count() >= 6 and "two minutes" in page.inner_text("#lsn-body"))
             page.click("#lsn-play")
@@ -1071,6 +1242,8 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.fchip[data-openfolder="lab"]'); page.wait_for_selector(".fvtabs")
             page.click('.fvtabs [data-ft="evidence"]'); page.wait_for_selector("#ev-make")
             check("Evidence: 1 of 3 papers has a card, with a button for the rest", "1 of 3" in page.inner_text("#fv-body") and "Make 2 cards" in page.inner_text("#ev-make"))
+            budget_asks("#ev-make", "cards for a folder")
+            check("…and nothing was made", "1 of 3" in page.inner_text("#fv-body"))
             page.click("#ev-make"); page.wait_for_selector("#fv-body:has-text('3 of 3')", timeout=60000); page.wait_for_selector(".ev-cl", timeout=20000)
             check("three cards exist after the batch; the shared limitation is one group of 3 papers", all(os.path.exists(sidecar(i, ".card.json")) for i in range(3)) and "3 papers" in page.inner_text(".ev-cl >> nth=0"))
             check("the folder header counts the new cards without a reload", "3 with a card" in page.inner_text(".pagehead .meta"), page.inner_text(".pagehead .meta"))
@@ -1106,7 +1279,10 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('.idea >> nth=0 >> [data-a="star"]'); page.fill(".idea >> nth=0 >> .idea-note", "Talk to my supervisor"); page.wait_for_timeout(1200)
             board = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")))
             check("star and note are saved in Papers/_folders/lab.ideas.json", any(x["star"] and x["note"] == "Talk to my supervisor" for x in board["ideas"]) and board["runs"])
-            page.click('.idea >> nth=0 >> [data-a="develop"]'); page.wait_for_selector(".idea-dev .of-sec", timeout=60000)
+            CUT_NEXT[0] = 1; page.click('.idea >> nth=0 >> [data-a="develop"]'); page.wait_for_selector(".idea-dev .of-co.warn:has-text('cut off')", timeout=60000)
+            check("an outline that stopped at the model's length limit is shown with a note that its end is missing, and is not kept with the idea",
+                  "working title" in page.inner_text(".idea-dev").lower() and "not kept" in page.inner_text(".idea-dev .of-co.warn") and "developed" not in open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")).read() and "✓" not in page.locator('.idea >> nth=0 >> .idea-tabs .on').inner_text(), page.inner_text(".idea-dev")[-200:])
+            page.click('.idea-dev .of-co.warn [data-a="develop"]'); page.wait_for_function("!document.querySelector('.idea-dev .of-co.warn')", timeout=60000); page.wait_for_selector(".idea-dev .of-sec", timeout=60000)
             page.wait_for_function("(document.querySelector('.idea .idea-tabs .on') || {}).textContent.includes('✓')", timeout=60000)   # (the sections show while the answer still streams; the ✓ only once the server has saved it on the board)
             check("the outline appears in sections on the Outline tab of the idea card", page.locator('.idea >> nth=0 >> .idea-tabs .on').inner_text().strip().startswith("Outline") and page.locator(".idea-dev .of-sec").count() >= 2)
             check("Develop turns the idea into an outline saved on the board", "working title" in page.inner_text(".idea-dev").lower() and "developed" in open(os.path.join(TMP, "Papers", "_folders", "lab.ideas.json")).read())
@@ -1126,7 +1302,13 @@ fx.fetch_journal = lambda j: []                                                 
             check("the folder has a Related work tab that lists its papers (all with cards ticked) and what the draft will cost", page.locator('.fvtabs [data-ft="draft"]').count() == 1 and page.locator("input[data-pf]:checked").count() == 3)
             page.fill("#dr-topic", "We study how transparency rules change who joins a platform."); page.select_option("#dr-words", "300")
             page.wait_for_function("document.querySelector('#dr-est').textContent.includes('·')", timeout=10000)
-            page.click('[data-dr="go"]'); page.wait_for_selector('.of[data-tool="draft"]', timeout=60000)
+            CUT_NEXT[0] = 1; page.click('[data-dr="go"]'); page.wait_for_selector('.of[data-tool="draft"]', timeout=60000)
+            draft_file = os.path.join(TMP, "Papers", "_folders", "lab.draft.json")
+            check("a draft that stopped at the model's length limit is kept, and its Check section says first that its end is missing",
+                  "This draft was cut off at the model’s length limit" in page.inner_text('.of-sec[data-sec="check"]') and page.locator('.of-sec[data-sec="check"] .of-co.warn').count() >= 1 and json.load(open(draft_file))["cut_off"] is True, page.inner_text('.of-sec[data-sec="check"]')[:200])
+            n_dr = len([b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the RELATED WORK")])
+            page.click('[data-dr="go"]'); page.wait_for_function("!document.querySelector('.of-sec[data-sec=\"check\"]') || !document.querySelector('.of-sec[data-sec=\"check\"]').innerText.includes('cut off')", timeout=60000); page.wait_for_selector('.of[data-tool="draft"]', timeout=60000)
+            check("…and writing it again gives a complete draft without that note", len([b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the RELATED WORK")]) == n_dr + 1 and "cut off" not in page.inner_text('.of-sec[data-sec="check"]') and json.load(open(draft_file))["cut_off"] is False, page.inner_text('.of-sec[data-sec="check"]')[:200])
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You write the RELATED WORK")][-1]
             user = req["messages"][1]["content"] if len(req["messages"]) > 1 else ""
             check("the model got the cards as numbered notes, your study and the length, and nothing else", "P1-1 [question]" in user and "P3-" in user and "transparency rules" in user and "about 300 words" in user.lower(), user[:300])
@@ -1182,6 +1364,11 @@ fx.fetch_journal = lambda j: []                                                 
             check("reading the cards sends their lines with section and page", "findings, p. " in req["messages"][-1]["content"] and "cards" in req["messages"][0]["content"])
             check("the second question carries the first as history", [m["role"] for m in req["messages"]][1:3] == ["user", "assistant"])
             shot(page, "11-ask-folder")
+            page.fill("#am-q", "CUTOFF Which samples do they use?"); page.click('[data-k="send"]'); page.wait_for_selector(".am-log .ask-turn >> nth=2 >> .of-co.warn:has-text('cut off')", timeout=90000)
+            page.wait_for_timeout(1200)
+            check("a folder answer that stopped at the model's length limit says so too (with Ask again), and the saved conversation remembers it",
+                  "This answer was cut off at the model’s length limit; the end is missing." in page.inner_text(".am-log .ask-turn >> nth=2 >> .of-co.warn") and page.locator(".am-log .ask-turn >> nth=2 >> .of-co.warn [data-t=regen]").count() == 1
+                  and [t_.get("cut_off") for t_ in json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.ask.json")))["turns"]] == [None, None, True], page.inner_text(".am-log .ask-turn >> nth=2")[-200:])
             page.click('[data-k="clear"]'); page.wait_for_selector(".am-log .empty"); page.wait_for_timeout(900)
             check("clearing the conversation deletes its file", not os.path.exists(os.path.join(TMP, "Papers", "_folders", "lab.ask.json")))
 
@@ -1192,6 +1379,7 @@ fx.fetch_journal = lambda j: []                                                 
             page.wait_for_selector('table.mx thead th:has-text("Moderators")')
             check("a new column of your own appears (marked as yours) and the fill button says how many cells it needs", page.locator('th:has-text("Moderators") .cd-tag').count() == 1 and "Fill 3 empty cells" in page.inner_text('[data-k="fill"]'))
             check("matrix headers are tinted by where the column comes from (the paper cards or you), with a legend", page.locator("table.mx th.mx-b").count() >= 5 and page.locator("table.mx th.mx-y").count() == 1 and page.locator(".mx-legend").count() == 1)
+            budget_asks('[data-k="fill"]', "filling the comparison matrix")
             page.click('[data-k="fill"]'); page.wait_for_function("[...document.querySelectorAll('table.mx td')].filter(td => td.innerText.includes('Tenure moderates the effect.')).length === 3", timeout=90000)
             check("filling answers every paper with a page link", page.locator("table.mx td:has-text('Tenure moderates the effect.')").count() == 3, [json.dumps(json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))["cells"])[:500], page.evaluate("[...document.querySelectorAll('.toast, #toast, [class*=toast]')].map(e => e.innerText).join('|')")])
             mx = json.load(open(os.path.join(TMP, "Papers", "_folders", "lab.matrix.json")))
@@ -1236,6 +1424,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("sentences about your own study are not ticked; the one that names a paper in your library says so", page.locator(".cl-s input:checked").count() == 5 and "about your study" in page.locator(".cl-s.off").inner_text() and "names" in page.locator(".cl-s >> nth=2").inner_text())
             page.wait_for_function("document.querySelector('#cl-gob') && /Check 5 claims/.test(document.querySelector('#cl-gob').textContent)", timeout=10000)
             check("the button says how many claims it will check, and the cost", "·" in page.inner_text("#cl-gob") and "Check 5 claims" in page.inner_text("#cl-gob"), page.inner_text("#cl-gob"))
+            budget_asks('[data-cl="go"]', "checking claims")
             page.click('[data-cl="go"]'); page.wait_for_selector('.of[data-tool="claims"]', timeout=60000)
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You check claims")][-1]
             user = req["messages"][-1]["content"]
@@ -1282,7 +1471,18 @@ fx.fetch_journal = lambda j: []                                                 
             page.goto("about:blank"); page.goto(base + "/#/folder/lab/synthesis"); page.wait_for_selector('[data-sy="go"]', timeout=15000)
             check("the folder has a Synthesis tab that lists its papers (all with cards ticked)", page.locator('.fvtabs [data-ft="synthesis"]').count() == 1 and page.locator("input[data-pf]:checked").count() == 3)
             page.fill("#sy-focus", "how disclosure rules change trust and entry"); page.wait_for_function("document.querySelector('#sy-est').textContent.includes('·')", timeout=10000)
+            bud_ = api("/api/ai/budget?cost=1"); bud_over_ = api("/api/ai/budget?cost=%s" % (bud_["left"] + 0.01)); bud_none_ = api("/api/ai/budget")
+            check("GET /api/ai/budget compares an estimate with what is left of the monthly budget", bud_["budget"] == 5 and bud_["over"] is False and bud_["cost"] == 1 and 0 < bud_["left"] <= 5 and abs(bud_["left"] + bud_["spent"] - 5) < 1e-9
+                  and bud_over_["over"] is True and bud_none_["over"] is False and bud_none_["cost"] is None, str((bud_, bud_over_, bud_none_)))
+            budget_asks('[data-sy="go"]', "a synthesis")
+            check("…and no synthesis was started", page.locator('.of[data-tool="synthesis"]').count() == 0 and not page.locator('[data-sy="go"]').is_disabled())
+            said_ = [m_ for m_ in dialogs if m_.startswith("This is estimated at ")][-1]
+            check("…the question also says how many of this month's calls had no known price (the embeddings here), so the real total is higher", bud_["unpriced"] > 0 and (" %d call" % bud_["unpriced"]) in said_ and "this month had no known price, so the real total is higher." in said_, said_)
+            n_dlg_ = len(dialogs)
             page.click('[data-sy="go"]'); page.wait_for_selector('.of[data-tool="synthesis"]', timeout=60000)
+            twice_ = page.evaluate("(async () => { const st = await import('/static/state.js'); return await Promise.all([st.budgetOk(0.01), st.budgetOk(0.01), st.budgetOk(0), st.budgetOk(null)]); })()")
+            check("a button pressed twice while the budget is being asked starts one job, not two (and a job without a cost or without an estimate is not asked about at all)", twice_ == [True, False, True, True], str(twice_))
+            check("an estimate that fits in what is left of the budget is not asked about", not any("budget" in m_ for m_ in dialogs[n_dlg_:]), str(dialogs[n_dlg_:]))
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You synthesise a set")][-1]
             user = req["messages"][-1]["content"]
             check("the model got every card as numbered notes, and what you asked it to organise the themes around", "NOTES ON THE 3 PAPERS" in user and "P1-1 [question]" in user and "P3-" in user and "disclosure rules" in user, user[:300])
@@ -2258,10 +2458,25 @@ fx.fetch_journal = lambda j: []                                                 
             check("opening and closing it again sends nothing", len(chat_calls("You summarise ONE chapter")) == n_sum1)
             page.click("[data-chap-redo]"); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_function("document.querySelector('[data-sumbox=\"1\"] .pmeta') && document.querySelector('[data-sumbox=\"1\"] .pmeta').textContent.includes('Written by')", timeout=60000)
             check("'Write it again' asks again (after showing the cost again)", len(chat_calls("You summarise ONE chapter")) == n_sum1 + 1)
+            bj_sum = lambda: json.load(open(os.path.join(TMP, ep_row["file"])[:-4] + ".book.json", encoding="utf-8")).get("summaries")  # noqa: E731
+            kept_sum = bj_sum(); CUT_NEXT[0] = 1
+            page.click("[data-chap-redo]"); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_selector('[data-sumbox="1"] [role=alert]:has-text("cut off")', timeout=60000)
+            cut_txt = page.inner_text('[data-sumbox="1"]')
+            check("a chapter summary that stopped at the model's length limit is shown with a note that its end is missing and is not saved with the book (the complete one saved before stays)",
+                  "FAKE CHAPTER SUMMARY" in cut_txt and "cut off at the model’s length limit" in cut_txt and "not saved" in cut_txt and "Written by" not in cut_txt and len(chat_calls("You summarise ONE chapter")) == n_sum1 + 2 and bj_sum() == kept_sum and kept_sum, cut_txt[-250:])
+            page.click('[data-sumbox="1"] [role=alert] [data-chap-redo]'); page.wait_for_selector("[data-sum-go]"); page.click("[data-sum-go]"); page.wait_for_function("document.querySelector('[data-sumbox=\"1\"] .pmeta') && document.querySelector('[data-sumbox=\"1\"] .pmeta').textContent.includes('Written by')", timeout=60000)
+            check("…and 'Write it again' in that note asks again and shows the complete one, without the note", len(chat_calls("You summarise ONE chapter")) == n_sum1 + 3 and page.locator('[data-sumbox="1"] [role=alert]').count() == 0 and "FAKE CHAPTER SUMMARY" in page.inner_text('[data-sumbox="1"]') and "FAKE CHAPTER SUMMARY" in bj_sum()["%d-%d" % (c2["start"], c2["end"])]["text"],
+                  "%d requests" % (len(chat_calls("You summarise ONE chapter")) - n_sum1))
             # ask about one chapter: the reader's Ask tab opens limited to it
             page.click('#bk-list [data-chap-ask="1"]'); page.wait_for_selector(".rd-band .textLayer span", timeout=60000); page.wait_for_selector("#ask-chapsel", timeout=10000)
             check("'Ask about it' opens the book in the reader on the Ask tab with that chapter chosen", page.eval_on_selector("#ask-chapsel", "e => e.value") == "1" and page.locator('.rd-tabs button[data-tab="ask"].on').count() == 1 and "Chapter 2" in page.inner_text("#ask-chapsel"), page.inner_text("#ask-chapsel"))
-            page.select_option("#ask-mode", "full"); page.fill("#ask-q", "What does this chapter say about rules?"); page.click('.ask-box [data-k="send"]')
+            page.select_option("#ask-mode", "full")
+            page.wait_for_function("/whole chapter/.test(document.querySelector('#ask-est').innerText)", timeout=30000); est_ch = page.inner_text("#ask-est")
+            page.select_option("#ask-chapsel", "-1"); page.wait_for_function("/whole book/.test(document.querySelector('#ask-est').innerText)", timeout=30000); est_bk = page.inner_text("#ask-est")
+            page.select_option("#ask-chapsel", "1"); page.wait_for_function("/whole chapter/.test(document.querySelector('#ask-est').innerText)", timeout=30000)
+            n_of = lambda t_: int(re.search(r"\((\d+) passages\)", t_).group(1))  # noqa: E731
+            check("…the line under the Ask box counts the chosen chapter only (fewer passages than the whole book), and follows the choice", est_ch.startswith("Next question: ") and 0 < n_of(est_ch) < n_of(est_bk), est_ch + " | " + est_bk)
+            page.fill("#ask-q", "What does this chapter say about rules?"); page.click('.ask-box [data-k="send"]')
             page.wait_for_function("document.querySelector('.ask-turn') && document.querySelector('.ask-turn').innerText.includes('Sources')", timeout=60000)
             ask_req = [b_ for pth_, b_ in SEEN if pth_.endswith("/chat/completions") and "Passages from the paper" in str(b_["messages"][-1]["content"])][-1]
             sent_pages = sorted({int(x_) for x_ in re.findall(r"\(p\. (\d+)\)", ask_req["messages"][-1]["content"])})
@@ -2273,7 +2488,11 @@ fx.fetch_journal = lambda j: []                                                 
             print("book: summarise the whole book")
             def open_chapters_():
                 page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.wait_for_function("document.querySelectorAll('#lf-folder option').length >= 2")
-                page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow"); page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_selector('#bk-list .librow:has-text("Platforms and Their Governance")')
+                page.click('.libtabs [data-tab="books"]'); page.wait_for_selector("#bk-list .librow")
+                for _try in range(6):                                   # (the Library can draw itself once more after loading, with an empty search box and every book: type the title again then, so that the one book listed is this one)
+                    page.fill("#bk-q", "Platforms and Their Governance"); page.wait_for_timeout(400)
+                    if page.input_value("#bk-q") and page.locator("#bk-list .librow").count() == 1 and page.locator('#bk-list .librow:has-text("Platforms and Their Governance")').count() == 1:
+                        break
                 open_chap_list(); page.wait_for_selector("#bk-list [data-chap-whole]")
             open_chapters_()
             n_ch0, n_ov0 = len(chat_calls("You summarise ONE chapter")), len(chat_calls("You write an OVERVIEW"))
@@ -2286,7 +2505,9 @@ fx.fetch_journal = lambda j: []                                                 
                   and len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0, we_)
             page.click("[data-whole-no]"); page.wait_for_function("document.querySelector('#bk-list [data-whole]').classList.contains('hide')")
             check("…Cancel sends nothing", len(chat_calls("You summarise ONE chapter")) == n_ch0 and len(chat_calls("You write an OVERVIEW")) == n_ov0)
-            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("[data-whole-go]"); page.click("[data-whole-go]")
+            page.click("#bk-list [data-chap-whole]"); page.wait_for_selector("[data-whole-go]")
+            budget_asks("[data-whole-go]", "summarising a whole book")
+            page.click("[data-whole-go]")
             ok_ = False
             for _ in range(160):
                 st_ = api("/api/book/whole?file=%s&status=1" % urllib.parse.quote(ep_row["file"]))["status"]
@@ -2329,6 +2550,14 @@ fx.fetch_journal = lambda j: []                                                 
             check("…the reader's Summary tab shows the same overview, marked out of date, with no paper template or Generate button for a book",
                   "FAKE BOOK OVERVIEW" in page.inner_text("#sum-body") and "has changed since" in page.inner_text("#sum-body") and not page.is_visible("#sum-go") and not page.is_visible("#sum-t")
                   and "chapter by chapter" in page.inner_text("#sum-bk"), page.inner_text("#reader .rd-sub")[:300])
+            def get_code_(path):
+                try:
+                    urllib.request.urlopen(base + path); return 200
+                except urllib.error.HTTPError as e_:
+                    return e_.code
+            check("…and no cost of a paper-template summary is shown beside it for a book, nor worked out by the server",
+                  page.locator("#sum-est").count() == 1 and not page.is_visible("#sum-est") and get_code_("/api/doc/summary/estimate?file=" + urllib.request.quote(ep_row["file"]) + "&template=tldr") == 400
+                  and get_code_("/api/doc/ask/estimate?file=" + urllib.request.quote(ep_row["file"]) + "&from=3&to=1") == 400 and get_code_("/api/doc/ask/estimate?file=Papers/none.pdf") == 404)
             open(bj_path_, "w", encoding="utf-8").write(bj_keep_)
             def post_code_(path, body):
                 try:
@@ -2803,6 +3032,8 @@ fx.fetch_journal = lambda j: []                                                 
             page.click('#journalchips .chip[data-abbr="%s"]' % first_two[0]); page.click("#topicchips .chip >> nth=0")
             check("before the first search the form does not claim to have run it", "already ran" not in page.inner_text("#est"))
             n0 = len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"])
+            budget_asks("#searchbtn", "a Discover search")
+            check("…and no search was started", len([r_ for r_ in api("/api/runs") if r_["kind"] == "search"]) == n0)
             page.click("#searchbtn"); run_a = wait_idle(3)
             check("the search finds 3 papers and screens them once (one question to the model)", run_a["n_papers"] == 3 and run_a["n_download"] == 2 and len(batches()) == 1 and batches() == ["3"], str((run_a["n_papers"], batches())))
             # the skipped paper is listed under "Skipped" like any other card. A skipped card once shared its class (skip) with the hidden "Skip to the page" link, whose
@@ -3184,6 +3415,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("…the failed papers are counted ('Screening failed'), and the page says why the last screening stopped", re.search(r"2\s*SCREENING FAILED", stats_t.upper()) is not None and "No endpoints found" in page.inner_text("#screenerr") and page.locator("#screenerr:not(.hide)").count() == 1, stats_t)
             page.evaluate("go({j: '*'})"); page.wait_for_selector("#papers .paper")
             check("…and each failed card shows the provider's own words, not only 'screening failed'", "No endpoints found that can handle the requested parameters" in page.inner_text("#papers"), page.inner_text("#papers")[:300])
+            budget_asks("#screenbtn", "screening a run's papers again")
             page.click("#screenbtn")
             ok_ = False
             for _ in range(80):
@@ -3245,7 +3477,52 @@ fx.fetch_journal = lambda j: []                                                 
                   and not os.path.exists(os.path.join(sumdir, "sumtest.md")), box_t)
             page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
             check("…Cancel closes it and writes nothing", not os.path.exists(os.path.join(sumdir, "sumtest.md")))
-            page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo"); page.click("#lf-sumgo")
+            # the cost: a range while it rests on the sizes of the files, one figure once it rests on your earlier summaries
+            rng_ = page.evaluate("""async () => { const m = await import('/static/state.js'); return [m.aboutRange(0.4, 1.62), m.aboutRange(0.001, 0.003), m.aboutRange(0.121, 0.124), m.aboutRange(0.002, 0.03), m.aboutRange(null, 1, "unknown"), m.aboutRange(1, null, "unknown")]; }""")
+            check("a cost that is a range is written one way: both ends, 'under 1 cent' when all of it is, one figure when the ends round to the same, 'up to' when it starts under a cent",
+                  rng_ == ["between about $0.40 and $1.62", "under 1 cent", "about $0.12", "up to about $0.03", "unknown", "unknown"], str(rng_))
+            check("…the server's estimate carries the range while it rests on file sizes, and how many summaries make it rest on your own",
+                  est_.get("history_min") == 3 and (est_["cost_low"] is not None and est_["cost_low"] <= est_["cost"] <= est_["cost_high"] if est_["basis"] == "prices" else est_["cost_low"] is None and est_["cost_high"] is None),
+                  str({k: est_.get(k) for k in ("basis", "cost_low", "cost", "cost_high", "history_min")}))
+            def est_box(**over):
+                """What the box says for an estimate the server would give (only the answer to GET /api/summaries is replaced; nothing is started)."""
+                body_ = json.dumps({**est_, **over, "status": api("/api/summaries")["status"]})
+                page.route("**/api/summaries", lambda route: route.fulfill(status=200, content_type="application/json", body=body_) if route.request.method == "GET" else route.continue_())
+                try:
+                    page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo", timeout=8000); t_ = page.inner_text("#lf-sumbox")
+                    page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
+                finally:
+                    page.unroute("**/api/summaries")
+                return t_
+            box_r = est_box(basis="prices", calls=1, cost_low=0.4, cost=0.8, cost_high=1.62, per_paper=0.8, history_min=4)
+            check("…while the guess rests on the sizes of the PDF files the box gives the range in plain words, the likely figure, and when it gets more exact",
+                  "Cost: between about $0.40 and $1.62 (a guess from the price in Settings → AI and the size of each PDF file, most likely about $0.80; it gets more exact after 4 summaries with this model)" in box_r
+                  and "expect more" not in box_r, box_r)
+            box_s = est_box(basis="prices", calls=0, cost_low=0.0004, cost=0.001, cost_high=0.003, per_paper=0.001)
+            check("…a range that is all under a cent is one phrase, not said twice", "Cost: under 1 cent (a guess from the price in Settings → AI and the size of each PDF file; it gets more exact after 3 summaries with this model)" in box_s, box_s)
+            box_h = est_box(basis="history", calls=5, cost_low=None, cost=0.5, cost_high=None, per_paper=0.25)
+            check("…and with enough earlier summaries it is one figure, as before", "Cost: about $0.50 (from your 5 earlier summaries with this model, about $0.25 each)" in box_h and "between" not in box_h, box_h)
+            # the likely figure fits in what is left of the budget, the high end does not: the page asks, and says which figure it compared
+            was_bud_ = api("/api/ai/config")["budget"]["monthly_usd"]; api("/api/ai/config", {"budget": {"monthly_usd": api("/api/ai/budget")["spent"] + 1.0}})
+            rng_body_ = json.dumps({**est_, "basis": "prices", "calls": 0, "cost_low": 0.4, "cost": 0.8, "cost_high": 1.62, "per_paper": 0.8, "status": api("/api/summaries")["status"]})
+            page.route("**/api/summaries", lambda route: route.fulfill(status=200, content_type="application/json", body=rng_body_) if route.request.method == "GET"
+                       else route.fulfill(status=500, content_type="application/json", body='{"error": "not started in this test"}'))
+            n_dlg_ = len(dialogs); refuse.append(1)
+            try:
+                page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo", timeout=8000); page.click("#lf-sumgo"); page.wait_for_timeout(800)
+                rng_said_ = dialogs[n_dlg_:]
+                rng_ok_ = page.evaluate("(async () => { const st = await import('/static/state.js'); return [await st.budgetOk(0.4, 0.9, 0.2), await st.budgetOk(0.4, null), await st.budgetOk(0.4, 0.3)]; })()")
+                page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
+            finally:
+                del refuse[:]; page.unroute("**/api/summaries"); api("/api/ai/config", {"budget": {"monthly_usd": was_bud_}})
+            check("…when the estimate is a range, it is the high figure that is compared with what is left of the budget (likely $0.80, up to $1.62, $1.00 left: the page asks), and the question says so",
+                  len(rng_said_) == 1 and rng_said_[0].startswith("This is estimated at between about $0.40 and $1.62 (the higher figure is the one compared with your budget); $1.00 is left of this month’s budget")
+                  and rng_said_[0].endswith("Start anyway?"), str(rng_said_)[:300])
+            check("…a range whose high end still fits is not asked about", rng_ok_ == [True, True, True] and len(dialogs) == n_dlg_ + 1, "%s, %d questions" % (rng_ok_, len(dialogs) - n_dlg_))
+            page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo")
+            budget_asks("#lf-sumgo", "summarising the papers without a summary")
+            check("…and no summary was written", not os.path.exists(os.path.join(sumdir, "sumtest.md")) and not api("/api/summaries")["status"].get("running"))
+            page.click("#lf-sumgo")
             done_ = False
             for _ in range(160):
                 if not api("/api/summaries")["status"]["running"] and os.path.exists(os.path.join(sumdir, "sumtest.md")):
@@ -3280,6 +3557,20 @@ fx.fetch_journal = lambda j: []                                                 
             check("'calls without a price' opens Settings → AI at the prices, where each model says where its price comes from (m1: typed in Settings)", any(m == "m1" and s.startswith("yours") for m, s in rows_), str(rows_))
             cfg_ = api("/api/config")
             check("the screening estimate is the screening model's price, and the page knows that model's name", cfg_.get("est_cost_per_paper") is not None and abs(cfg_["est_cost_per_paper"] - (1500 / 3.3 * 1.0 + 60 * 2.0) / 1e6) < 1e-6 and cfg_.get("screen_model") == "m1", str({k: cfg_.get(k) for k in ("est_cost_per_paper", "screen_model")}))
+            est_js_ = "(async () => { CFG = await api('/api/config'); updateEst(); return document.querySelector('#est').textContent; })()"
+            est0_ = page.evaluate(est_js_)
+            check("with no screening on record the estimate rests on the price, and the search form says nothing more", cfg_.get("est_cost_basis") == "prices" and "est. $" in est0_ and "earlier screenings" not in est0_, str(cfg_.get("est_cost_basis")) + " " + est0_[:200])
+            led_ = os.path.join(TMP, ".agents", "skills", "ais-journal-watcher", "state", "ai_usage.jsonl"); led_n_ = os.path.getsize(led_)
+            try:
+                with open(led_, "a", encoding="utf-8") as f_:                # two earlier screening calls of 25 papers each with this model, $0.05 each: $0.002 a paper
+                    for _ in range(2):
+                        f_.write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "screen", "papers": 25, "in": 1, "out": 1, "cost": 0.05, **cfg_["screen_feature"]}) + "\n")
+                cfg2_ = api("/api/config"); est1_ = page.evaluate(est_js_)
+                check("once 50 screened papers are on record the estimate is what they cost per paper, and the search form says so in one phrase", cfg2_.get("est_cost_basis") == "history" and abs(cfg2_["est_cost_per_paper"] - 0.002) < 1e-9 and "(from what your earlier screenings cost)" in est1_,
+                      str({k: cfg2_.get(k) for k in ("est_cost_per_paper", "est_cost_basis")}) + " " + est1_[:200])
+            finally:
+                os.truncate(led_, led_n_)
+            page.evaluate(est_js_)
             page.evaluate("window.Settings && Settings.close()")
 
             print("you can delete what you added")

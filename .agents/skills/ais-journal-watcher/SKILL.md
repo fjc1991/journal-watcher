@@ -60,6 +60,13 @@ Flags: `--auto` (no questions; downloads all "download" verdicts), `--resume` (s
 fetch and reuse the last batch), `--max-papers N` (download cap per run, default 10).
 At the end it prints token usage and an estimated cost.
 
+Spending: the agent's own conversation with Claude (steps 2, 3 and 6: the screening, the table,
+the report) is sent straight to the Anthropic API with `ANTHROPIC_API_KEY`. The monthly budget in
+Settings → AI does **not** stop it, and it is **not** in the usage record (Settings → Usage); the
+figure printed at the end is the only account of it. The summaries of step 5 go through the app's
+AI layer (`ai.py`), so the budget applies to them and they are in the usage record. The dashboard's
+weekly check does the same work with everything inside the budget. The script says this when it starts.
+
 ## Downloads run in the background
 `browser.py` uses Chromium's new headless mode with a normal user agent, which passes the Cloudflare checks on
 INFORMS, AIS, Wiley, PNAS and others without showing a window. If a site insists on an interactive

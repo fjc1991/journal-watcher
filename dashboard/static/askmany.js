@@ -31,7 +31,7 @@ export function mount(el, opts = {}) {
   el.onclick = e => onClick(S, e); el.onchange = e => onChange(S, e);
   S.input.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(S); } });
   S.save = () => fetch("/api/ask/chat", {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-    body: JSON.stringify({folder: S.folder || "", turns: S.turns.filter(t => t.done || t.text).map(({q, text, passages, scope, mode, model, cost, cached, invalid, label}) => ({q, text, passages, scope, mode, model, cost, cached, invalid, label, done: true}))})}).catch(() => {});
+    body: JSON.stringify({folder: S.folder || "", turns: S.turns.filter(t => t.done || t.text).map(({q, text, passages, scope, mode, model, cost, cached, invalid, cut_off, label}) => ({q, text, passages, scope, mode, model, cost, cached, invalid, cut_off, label, done: true}))})}).catch(() => {});
   api("/api/ask/chat" + (S.folder ? "?folder=" + encodeURIComponent(S.folder) : "")).then(r => { S.turns = r.turns || []; draw(S); }).catch(() => draw(S));
   if (!S.folder) fillSelects(S);
   refreshInfo(S);
@@ -109,7 +109,7 @@ async function ask(S, q, replace, fresh) {
         const line = buf.slice(0, k).trim(); buf = buf.slice(k + 1); if (!line) continue; const m = JSON.parse(line);
         if (m.type === "status") t.status = m.msg; else if (m.type === "scope") t.scope = m; else if (m.type === "passages") t.passages = m.passages;
         else if (m.type === "text") t.text += m.delta; else if (m.type === "error") t.error = m.error;
-        else if (m.type === "done") Object.assign(t, {done: true, model: m.model, cost: m.cost, cached: m.cached, invalid: m.invalid});
+        else if (m.type === "done") Object.assign(t, {done: true, model: m.model, cost: m.cost, cached: m.cached, invalid: m.invalid, cut_off: m.cut_off || undefined});
         redraw(S, i);
       }
     }

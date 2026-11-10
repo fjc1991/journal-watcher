@@ -633,13 +633,14 @@ function fillSearch(p) {
   const tab = document.querySelector('.tabs button[data-tab="search"]'); if (tab) tab.click();
   $("#pane-search").scrollIntoView({block: "nearest"});
 }
+let EST_COST = null;      // the estimate under the search form, in dollars (null: no price), asked against the monthly budget before the search starts
 function updateEst() {
   const y0 = +$("#y0").value, y1 = +$("#y1").value, yrs = Math.abs(y1 - y0) + 1;
   const js = selectedJournals();
   const n = js.reduce((a, j) => a + (jinfo(j).needs_query ? (jinfo(j).limit || 200) : (jinfo(j).per_year || 80) * yrs), 0);       // (SSRN: the best matches of your focus phrase, not every year)
-  const per = CFG.est_cost_per_paper, cost = per == null ? null : n * per;
+  const per = CFG.est_cost_per_paper, cost = per == null ? null : n * per; EST_COST = cost;
   const big = js.filter(j => (jinfo(j).per_year || 0) > 1000);
-  $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · ` + (cost == null ? `cost not known: no price for ${esc(CFG.screen_model || "the screening model")} (Settings → AI → Prices)` : `est. <b>$${cost.toFixed(2)}</b>`) +
+  $("#est").innerHTML = `≈ ${n.toLocaleString()} articles to screen · ` + (cost == null ? `cost not known: no price for ${esc(CFG.screen_model || "the screening model")} (Settings → AI → Prices)` : `est. <b>$${cost.toFixed(2)}</b>` + (CFG.est_cost_basis === "history" ? " (from what your earlier screenings cost)" : "")) +
     (big.length ? `<br>${big.join(" and ")} publish thousands of articles a year — most of the cost.` : "") +
     (js.some(j => jinfo(j).needs_query) ? `<br>SSRN is searched by words: only the ${jinfo("SSRN").limit || 200} best matches of your focus phrase are looked at${$("#focus").value.trim() ? "" : " — <b>type a focus phrase</b> to use it"}.` : "") +
     (CFG.openalex_key ? "" : `<br>JMIS/DSS/NBER abstracts need a free OpenAlex key; otherwise screened by title.`);
@@ -739,6 +740,7 @@ $("#searchbtn").onclick = async () => {
     methods: [...document.querySelectorAll("#methodchips .chip.on")].map(c => c.textContent),
     journals: selectedJournals(),
   };
+  if (window.budgetOk && !(await window.budgetOk(EST_COST))) return;
   try { const r = await api("/api/run/search", body); startedRun(r.run); } catch (e) { toast(e.message); }
 };
 // ---------- Authors: an author's works (OpenAlex) into a folder named after them (authors.py)
@@ -828,6 +830,7 @@ function updateScreenBtn() {
     : `Ask the AI again about ${[failed ? failed + " paper" + (failed === 1 ? "" : "s") + " whose screening failed" : "", waiting ? waiting + " not screened yet" : ""].filter(Boolean).join(" and ")}. Uses the model in Settings → AI → Screening new papers (its Test button checks it can screen). Papers already judged are not asked again; stopped by your monthly budget.`;
 }
 $("#screenbtn").onclick = async () => { if (!RUN) return; const terms = !!(RUN.params && RUN.params.terms), {n} = screenPending();
+  if (window.budgetOk && !(await window.budgetOk(CFG.est_cost_per_paper == null ? null : n * CFG.est_cost_per_paper))) return;
   try { await api("/api/rescreen", {run_id: RUN.id}); toast(terms ? "Ranking the matches against your interests…" : `Screening ${n} paper${n === 1 ? "" : "s"} again…`); } catch (e) { toast(e.message); } };
 window.addEventListener("jw-settings-changed", async () => {      // a model changed in Settings: the page's estimates and the backup note follow it
   try { CFG = await api("/api/config"); if (RUN) render(); } catch (e) {}
