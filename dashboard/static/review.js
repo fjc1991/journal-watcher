@@ -2,11 +2,11 @@
 // show the answer and say how it went (Again / Hard / Good / Easy, or keys 1-4) and the card comes back after a longer or shorter gap (plain SM-2; at most N new cards a day).
 // Make cards from papers that have a card (one model call per six papers; every card has to rest on notes it was given, and carries the page it came from), add your own,
 // browse and edit all of them, suspend or delete any. Saved in Papers/_flashcards.json. Server: GET /api/flashcards, POST /api/flashcards/{rate,add,update,delete,settings}, POST /api/ai/flashcards[/estimate].
-import {$, $$, esc, ico, api, toast, notifyError, errInline, debounce, progress} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errInline, debounce, progress, aboutCost, exactCost} from "./state.js";
 
 let ctx = null;
 const R = {el: null, d: null, view: "study", queue: [], shown: false, done: 0, total: 0, folder: "", sel: new Set(), per: 8, q: "", showSusp: false, edit: null, busy: false, last: null};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const days = n => n <= 0 ? "today" : n === 1 ? "1 day" : n < 14 ? n + " days" : n < 60 ? Math.round(n / 7) + " weeks" : Math.round(n / 30) + " months";
 const rowOf = f => ctx.getLib().find(r => r.file === f);
 const cite = f => { const r = rowOf(f); if (!r) return "a paper"; const a = Array.isArray(r.authors) ? r.authors : String(r.authors || "").split(/;\s*/); const nm = (a[0] || "").trim(), s = nm.includes(",") ? nm.split(",")[0].trim() : nm.split(/\s+/).pop(); return (s || r.title.slice(0, 24)) + (a.length > 1 ? " et al." : "") + (r.year ? " (" + r.year + ")" : ""); };
@@ -149,7 +149,7 @@ async function generate() {
       }
     }
     R.busy = false; R.sel.clear(); await load(); startSession(); R.view = "study"; draw();
-    toast(`${res ? res.added : 0} card${res && res.added === 1 ? "" : "s"} added${res && res.skipped ? " · " + res.skipped + " were already yours" : ""}${res && res.dropped ? " · " + res.dropped + " dropped (no note behind them)" : ""}${done && done.cost != null ? " · " + money(done.cost) : ""}.`);
+    toast(`${res ? res.added : 0} card${res && res.added === 1 ? "" : "s"} added${res && res.skipped ? " · " + res.skipped + " were already yours" : ""}${res && res.dropped ? " · " + res.dropped + " dropped (no note behind them)" : ""}${done && done.cost != null ? " · " + exactCost(done.cost) : ""}.`);
   } catch (e) { R.busy = false; draw(); if (st()) st().innerHTML = errInline(e); if (!/Cancelled/.test(e.message)) notifyError(e); }
 }
 

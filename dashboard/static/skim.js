@@ -3,13 +3,13 @@
 // highlights it (or dismisses it), "Highlight all shown" accepts what you see. Accepted ones become real highlights, coloured by lens and tagged
 // "lens: finding" etc., so they show up in the Highlights tab, the Library's highlights hub and exports like any other.
 // Server: GET /api/doc/skim (saved proposals, lenses, cost), POST /api/ai/skim (stream: status | progress | skim | done | error), POST /api/doc/skim (dismissed ids).
-import {notifyError, S, $, $$, esc, toast, on, api, colorOf, clamp, debounce} from "./state.js";
+import {notifyError, S, $, $$, esc, toast, on, api, colorOf, clamp, debounce, aboutCost, exactCost} from "./state.js";
 import * as N from "./notes.js";
 import * as T from "./text.js";
 import {frame, wire as wireOut} from "./output.js";
 
 const DENS = ["Key points", "More", "Everything"];
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + c.toFixed(2);
+const money = aboutCost;
 const K = {on: null, loaded: null, data: null, lenses: [], est: null, dens: 2, off: new Set(), dismissed: new Set(), cur: -1, busy: false, status: ""};
 let bar, pop, root;
 const ls = {get: (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } }};
@@ -92,7 +92,7 @@ function draw() {
     <label class="sk-dens" title="How many sentences to mark"><input type="range" id="sk-d" min="1" max="3" step="1" value="${K.dens}"><span>${DENS[K.dens - 1]}</span></label>
     <span class="sk-nav"><button class="rd-btn" data-sk="prev" title="Previous marked sentence">◀</button><button class="rd-btn" data-sk="next" title="Next marked sentence">▶</button></span>
     <button class="rd-btn" data-sk="list" title="List the marked sentences by lens, with Highlight and Dismiss on each">☰ List</button><button class="rd-btn" data-sk="all" title="Turn every sentence shown into a real highlight (one undo step)">✓ Highlight all shown</button><span class="sk-sum"></span>
-    <button class="rd-btn" data-sk="redo" title="Skim again with the model (${money((K.data.cost || 0))} last time); what you dismissed stays dismissed">⟳</button><button class="rd-btn" data-sk="close" title="Hide the skim layer">✕</button>`;
+    <button class="rd-btn" data-sk="redo" title="Skim again with the model (${exactCost((K.data.cost || 0))} last time); what you dismissed stays dismissed">⟳</button><button class="rd-btn" data-sk="close" title="Hide the skim layer">✕</button>`;
   dyn();
 }
 // the parts that change with the slider, the lens chips, accepting and dismissing (the slider itself is never rebuilt, so dragging it is smooth)
@@ -143,7 +143,7 @@ async function make(fresh) {
     }
     if (S.meta) S.meta.skim = true;
     K.status = "Placing the sentences on the page…"; draw(); await place();
-    if (done && !done.existing) toast("Skimmed" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
+    if (done && !done.existing) toast("Skimmed" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
   } catch (e) { notifyError(e); }
   K.busy = false; draw(); S.fn.repaint();
 }

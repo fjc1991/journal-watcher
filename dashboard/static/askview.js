@@ -2,7 +2,7 @@
 // "Short answer" / "Evidence" / "Not in the passages" (or "By paper", "Agreement and disagreement") sections, the sources as a
 // collapsed section, follow-up questions as chips, and a second model's answer (compare) as its own frame. Used by the paper's Ask tab
 // and by the folder / library Ask, so both look and behave the same.
-import {esc, ico, errBox} from "./state.js";
+import {esc, ico, errBox, exactCost} from "./state.js";
 import {answerHtml} from "./cite.js";
 import {frame, mdParts, callout} from "./output.js";
 
@@ -11,7 +11,7 @@ export function answerParts(text, passages) {
   if (parts.length === 1 && parts[0].id === "lead") Object.assign(parts[0], {title: "Answer", short: "Answer"});     // no headings from the model: the whole text is the answer
   return parts;
 }
-const chips = t => [t.model ? {t: t.model} : null, t.cached ? {t: "cached"} : t.cost != null ? {t: "$" + t.cost.toFixed(4)} : null, t.label ? {t: t.label.replace(/\s*·\s*$/, "")} : null];
+const chips = t => [t.model ? {t: t.model} : null, t.cached ? {t: "cached"} : t.cost != null ? {t: exactCost(t.cost)} : null, t.label ? {t: t.label.replace(/\s*·\s*$/, "")} : null];
 const btn = (k, v, icon, title, text = "") => `<button class="rd-btn" data-${k}="${v}" title="${esc(title)}" aria-label="${esc(title)}">${icon ? ico(icon, "sm") : ""}${text}</button>`;
 
 // o = {key, sources: {count, note, html} | null, actions: html, notices: html}

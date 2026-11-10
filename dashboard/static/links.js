@@ -1,6 +1,6 @@
 // Links inside the paper: links the PDF already has, citations ([14], Rai et al., 2019) and "Table 3" / "Figure 2" mentions.
 // Hover a citation: its entry from the paper's own reference list (DOI, "in my library?", TL;DR). Click: jump there; ← Back returns.
-import {notifyError, S, $, esc, api, toast, clamp, on} from "./state.js";
+import {notifyError, S, $, esc, api, toast, clamp, on, exactCost} from "./state.js";
 import * as T from "./text.js";
 
 let hov, pill, REFS = null, refsLoad = null, timer = 0, hideT = 0, pillT = 0, cur = null, card = null, raf = 0, lastEv = null;
@@ -157,7 +157,7 @@ async function onCard(e) {
   const r = card.r;
   if (b.dataset.h === "use" && r && card.ctx) {
     b.disabled = true; const ans = $("#hv-ans", hov); ans.textContent = "Reading the sentences…";
-    try { const x = await api("/api/ai/citeuse", {ref: r.text, contexts: card.ctx.map(c => c.text)}); ans.textContent = x.text; ans.title = (x.cached ? "saved answer" : x.cost != null ? "$" + x.cost.toFixed(4) : "") + " · " + x.model; b.remove(); }
+    try { const x = await api("/api/ai/citeuse", {ref: r.text, contexts: card.ctx.map(c => c.text)}); ans.textContent = x.text; ans.title = (x.cached ? "saved answer" : x.cost != null ? exactCost(x.cost) : "") + " · " + x.model; b.remove(); }
     catch (er) { ans.textContent = ""; b.disabled = false; notifyError(er); }
     return;
   }

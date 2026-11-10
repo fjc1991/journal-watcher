@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, exactCost} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -136,7 +136,7 @@ function top(el, opts) {
 // The job runs in the background (the AI activity tray shows it and can cancel it); the button follows it through the cheap ?status=1, and the Library is read
 // again when it ends.
 let SUM = null, SUM_ST = {}, SUM_OPEN = false, sumTimer = 0, SUM_WATCHED = false, SUM_SEEN = null, SUM_DONE = null;
-const usd = c => c == null ? "unknown" : c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "$" + c.toFixed(2);
+const usd = c => exactCost(c, "unknown");
 const sumCount = () => lib().filter(r => r.file && !r.summary && r.journal !== "Books" && !r.book).length;      // (as summaries.pending: a downloaded paper, not a book, no summary beside it)
 function sumPaint() {
   const b = $("#lf-sum"); if (!b) return;
@@ -156,7 +156,7 @@ async function sumRefresh() {                                    // the exact li
   try { SUM = await api("/api/summaries"); SUM.at_lib = lib(); SUM_ST = SUM.status || {}; } catch (e) { notifyError(e); return; }
   sumPaint();
 }
-const basisText = e => e.basis === "history" ? `from your ${e.calls} earlier summar${e.calls === 1 ? "y" : "ies"} with this model, about ${usd(e.per_paper)} each`
+const basisText = e => e.basis === "history" ? `from your ${e.calls} earlier summar${e.calls === 1 ? "y" : "ies"} with this model, ${aboutCost(e.per_paper, "an unknown amount")} each`
   : e.basis === "prices" ? `a guess from the price in Settings → AI and the size of each PDF${e.provider === "anthropic" ? "; Claude also reads every page as an image, so expect more" : ""}`
   : "this model has no price in Settings → AI, and there are too few earlier summaries with it to go by";
 function sumBox() {
@@ -166,7 +166,7 @@ function sumBox() {
   if (st.running) html = `<p><b>Writing summaries: ${st.done} of ${st.total}.</b> ${st.made} written so far${st.failed.length ? `, ${st.failed.length} failed` : ""}. The AI activity tray shows it and can cancel it.</p>`;
   else if (SUM_OPEN && e.n) html = `<p><b>${e.n} paper${e.n === 1 ? "" : "s"} in your library ${e.n === 1 ? "has" : "have"} no summary yet.</b> Books are left out.</p>
       <p>${e.n === 1 ? "It goes" : "They go"} to <b>${esc(e.provider)} · ${esc(e.model)}</b> (Settings → AI → Paper summaries), one at a time, with your summary template.
-      Cost: <b>${e.cost == null ? "unknown" : "about " + usd(e.cost)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
+      Cost: <b>${e.cost == null ? "unknown" : aboutCost(e.cost)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
       <div class="row" style="gap:8px"><button class="btn primary small" id="lf-sumgo">Write the summaries</button><button class="btn small" id="lf-sumno">Cancel</button></div>`;
   else if (st.ended && SUM_WATCHED && SUM_SEEN !== st.ended) {
     const fl = st.failed || [];
@@ -217,8 +217,8 @@ function tabs(el, opts) {
   else if (F.tab === "discover" && window.DiscoverUI) { const box = $("#lib-discover", el); if (!box.dataset.mounted) { window.DiscoverUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
   else if (F.tab === "ask" && window.AskUI) { const box = $("#lib-ask", el); if (!box.dataset.mounted) { window.AskUI.init(ctx); window.AskUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
 }
-const money = c => c == null ? "unknown (its price is not in Settings → AI)" : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
-const sumHtml = s => `<div class="of-md">${md(s.text)}</div><small class="pmeta">Written by ${esc(s.model || "the AI")}${s.cost ? " · " + esc(money(s.cost)) : ""}${s.left_out ? " · the middle of this long chapter was left out" : ""} · <button class="linkbtn" data-chap-redo>Write it again</button></small>`;
+const money = c => aboutCost(c, "unknown (its price is not in Settings → AI)");
+const sumHtml = s => `<div class="of-md">${md(s.text)}</div><small class="pmeta">Written by ${esc(s.model || "the AI")}${s.cost ? " · " + esc(exactCost(s.cost)) : ""}${s.left_out ? " · the middle of this long chapter was left out" : ""} · <button class="linkbtn" data-chap-redo>Write it again</button></small>`;
 async function lines(url, body, onMsg) {                 // a streamed answer: one JSON object per line
   const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
@@ -280,7 +280,7 @@ function openPendingChap(box) {     // (the Library draws its tab again once its
 }
 const overviewHtml = (R, far) => `<div class="chap-h"><b>The whole book</b> <small>an overview written from the summaries of its chapters and sections${R.overview.cut ? " (the book is long: " + (R.overview.cut === "sections" ? "the sections' summaries were left out" : "each summary was shortened") + ")" : ""}</small></div>
   ${R.overview_stale ? `<p class="pmeta warn">${far ? esc(BOOK_STALE) : "A chapter's summary has changed since this overview was written: “Summarise the whole book…” writes it again."}</p>` : ""}
-  <div class="of-md">${md(R.overview.text)}</div><small class="pmeta">Written by ${esc(R.overview.model || "the AI")}${R.overview.cost ? " · " + esc(money(R.overview.cost)) : ""}</small>`;
+  <div class="of-md">${md(R.overview.text)}</div><small class="pmeta">Written by ${esc(R.overview.model || "the AI")}${R.overview.cost ? " · " + esc(exactCost(R.overview.cost)) : ""}</small>`;
 async function wholeBook(card, box, b) {                        // the estimate first; only "Summarise" starts the job (in the background, in the activity tray)
   const file = card.dataset.file, out = $("[data-whole]", box), title = (lib()[byFile(file)] || {}).title || "";
   if (!out.classList.contains("hide") && !out.dataset.running) { out.classList.add("hide"); return; }
@@ -319,7 +319,7 @@ function follow(card, box, out, file, st) {                    // the job's prog
     }
     const o = $("[data-whole]", box); o.classList.remove("hide");
     o.innerHTML = s.stopped === "cancelled" ? `<p class="pmeta">Cancelled: ${s.made} part${s.made === 1 ? "" : "s"} summarised before that are kept.</p>`
-      : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.skipped ? ` (${s.skipped} with no text left out)` : ""}${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(money(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
+      : `<p class="pmeta ${s.stopped || s.failed.length ? "bad" : "ok"}" role="status">${s.stopped ? "Stopped: " + esc(s.stopped) + ". " : ""}${s.made} part${s.made === 1 ? "" : "s"} summarised${s.skipped ? ` (${s.skipped} with no text left out)` : ""}${s.overview ? " and the overview written" : ""}${s.cost ? " (" + esc(exactCost(s.cost)) + ")" : ""}.${s.failed.length ? " Not summarised: " + s.failed.map(f => "“" + esc(f.title) + "” (" + esc(f.error) + ")").join("; ") + ". Press the button again to do only what is missing." : s.overview ? " Finished." : ""}</p>`;
   };
   setTimeout(tick, 1500);
 }

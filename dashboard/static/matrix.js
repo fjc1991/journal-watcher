@@ -2,11 +2,11 @@
 // Built-in columns come from the paper cards (edit them in the reader's Card tab). Your own columns ("Sample size?", "Which industry?") are filled
 // by the model from each paper's closest passages, one call per paper; "Not reported" is a valid answer; click a cell to write your own.
 // The matrix is saved in Papers/_folders/<id>.matrix.json. Export: CSV, Word, LaTeX (with \citet keys), Markdown.
-import {notifyError, $, $$, esc, ico, api, toast} from "./state.js";
+import {notifyError, $, $$, esc, ico, api, toast, aboutCost, exactCost} from "./state.js";
 
 let ctx = null;
 const M = {fid: null, t: null, busy: false};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const dl = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 function openAt(file, page, quote) {
   const row = ctx.getLib().find(r => r.file === file);
@@ -138,7 +138,7 @@ async function fill() {
         if (m.type === "start") { total = m.total; if (st()) st().textContent = `Reading ${total} paper${total === 1 ? "" : "s"}…`; }
         else if (m.type === "paper") { const row = M.t.rows.find(x => x.key === m.key); if (row) Object.assign(row.cells, m.cells); if (st()) st().textContent = `${m.done} of ${m.total} papers done`; M.busy = true; const keep = st() && st().textContent; draw(); if (st()) st().textContent = keep; }
         else if (m.type === "error") { errs++; if (!m.file) throw new Error(m.error); toast((m.title || "A paper").slice(0, 40) + ": " + m.error); }
-        else if (m.type === "done") toast(`${m.made} paper${m.made === 1 ? "" : "s"} filled${m.cost ? " · " + money(m.cost) : ""}${errs ? ` · ${errs} failed` : ""}.`);
+        else if (m.type === "done") toast(`${m.made} paper${m.made === 1 ? "" : "s"} filled${m.cost ? " · " + exactCost(m.cost) : ""}${errs ? ` · ${errs} failed` : ""}.`);
       }
     }
   } catch (e) { notifyError(e); }

@@ -652,6 +652,61 @@ rows3 = [{"file": "a.pdf", "title": "A", "folders": [], "date_checked": "2026-11
          {"file": "c.pdf", "title": "C", "folders": [], "date_checked": "2026-11-07"}]
 assert [x["file"] for x in ls_.search(rows3, folder="~none", sort="added")] == ["c.pdf", "a.pdf"]
 assert [x["file"] for x in ls_.search(rows3, folder="x")] == ["b.pdf"]
+# the server's own guards. A GET that names another host (a site whose name was pointed at this computer), or that another site's page made, gets no data;
+# opening the page itself from elsewhere is allowed
+def get(path, headers=None):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(base + path, None, headers or {})) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+assert get("/api/config")[0] == 200
+pf_ = "/files/" + urllib.parse.quote(W9["file"].replace(os.sep, "/"))          # (a PDF that is there: the guard is what refuses it, not "no such file")
+assert get(pf_)[0] == 200, pf_
+for pth in ("/api/config", "/api/runs", "/", pf_, "/api/events", "/api/backup"):
+    assert get(pth, {"Host": "evil.example"})[0] == 403, pth
+assert get("/api/config", {"Host": "localhost:1"})[0] == 200 and get("/api/config", {"Host": "127.0.0.1.evil.example"})[0] == 403
+assert get("/api/config", {"Sec-Fetch-Site": "cross-site"})[0] == 403 and get(pf_, {"Sec-Fetch-Site": "cross-site"})[0] == 403
+assert get("/", {"Sec-Fetch-Site": "cross-site"})[0] == 200 and get("/api/config", {"Sec-Fetch-Site": "same-origin"})[0] == 200 and get("/api/config", {"Sec-Fetch-Site": "none"})[0] == 200
+# a body that is not a JSON object is refused in words; an error nobody caught is answered (status 500, JSON) and the server goes on
+for bad in (b"[1, 2]", b"{not json", b'"text"'):
+    c, j = post("/api/settings", bad, jh); assert c == 400 and j.get("error"), (bad, c, j)
+keep_cfg, keep_ss = sv.config, sv.prefs.save_settings
+def broken(*a, **k):
+    raise RuntimeError("the test broke it")
+sv.config = broken
+c, raw = get("/api/config"); sv.config = keep_cfg
+assert c == 500 and "the test broke it" in json.loads(raw)["error"] and "RuntimeError" in json.loads(raw)["error"], (c, raw)
+sv.prefs.save_settings = broken
+c, j = post("/api/settings", json.dumps({"prefs": {"wpm": 200}}).encode(), jh); sv.prefs.save_settings = keep_ss
+assert c == 500 and "the test broke it" in j["error"], (c, j)
+assert get("/api/config")[0] == 200 and post("/api/settings", b"{}", jh)[0] == 200, "the server goes on after an error"
+def lost(*a, **k):                                  # (a site the app itself was asking went silent: that is told to the page too, not taken for "the browser left")
+    raise TimeoutError("the other site did not answer")
+sv.config = lost
+c, raw = get("/api/config"); sv.config = keep_cfg
+assert c == 500 and "did not answer" in json.loads(raw)["error"], (c, raw)
+# the export folder is worked out in one place: "~" is the home folder, a path that does not start at the root is taken from the home folder
+keep_gs, keep_home = sv.prefs.get_settings, os.environ.get("HOME")
+import tempfile as _tf, shutil as _sh
+home_ = _tf.mkdtemp(prefix="jw-home-"); os.environ["HOME"] = home_
+had_tilde_ = os.path.exists("~")                    # (a folder literally named "~" where the suite was started: what the old code made)
+try:
+    for typed, want in (("~/JW out", os.path.join(home_, "JW out")), ("Documents/x", os.path.join(home_, "Documents", "x")), ("", ""), ("  /tmp/abs/ ", "/tmp/abs")):
+        sv.prefs.get_settings = lambda t=typed: {"export_dir": t}
+        assert sv.prefs.export_dir() == want, (typed, sv.prefs.export_dir())
+    sv.prefs.get_settings = lambda: {"export_dir": "~/out"}
+    c, j = post("/api/export/folderdir", json.dumps({"folder": fidR}).encode(), jh)
+    assert c == 200 and j["path"].startswith(os.path.join(home_, "out") + os.sep) and os.path.isdir(j["path"]) and not os.path.exists("~"), (c, j)
+finally:
+    sv.prefs.get_settings = keep_gs
+    if keep_home is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = keep_home
+    _sh.rmtree(home_, ignore_errors=True)
+    if not had_tilde_:                              # (a failing run leaves nothing behind in the folder it was started from)
+        _sh.rmtree("~", ignore_errors=True)
 srv.shutdown()
 print("ALL OK")
 '''

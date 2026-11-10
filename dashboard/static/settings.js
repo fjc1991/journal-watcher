@@ -1,6 +1,6 @@
 // Settings page: AI providers and routing, privacy and budget, usage and cost, your prompt library, reader preferences.
 // Opened from the ⚙ in the top bar (window.Settings.open("ai"|"usage"|"prompts"|"reader")) and from the reader's Ask tab.
-import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, api, toast, ico, fileUrl, COLORS} from "./state.js";
+import {errBox, errInline, notifyError, explainUpdate, updateFacts, $, $$, esc, api, toast, ico, fileUrl, COLORS, exactCost} from "./state.js";
 
 let root, D = null, tab = "ai", LOG = [];
 const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's passages"], ["explain", "Explain selection", "The one-click prompts on selected text and figures"],
@@ -10,7 +10,7 @@ const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's 
   ["ideas", "Ideas Lab: ideas and outlines", "Writes the research ideas and develops them — your strongest model"], ["reviewer", "Reviewer 2: a critical read of your text", "Needs judgement and care — use your strongest model"], ["audio", "Spoken briefings", "Writes the two-minute script that your browser reads aloud — a cheap model is enough"], ["flashcards", "Flashcards", "Writes question-and-answer cards from your paper cards — a cheap model is enough"], ["synthesis", "Synthesis map and gaps", "Reads all the cards of a folder at once — a strong model finds more"], ["claims", "Claim check", "Judges whether your papers support what you wrote — a strong model checks more carefully"], ["draft", "Related-work drafter", "Writes the section from your paper cards — prose matters, so use a strong model"], ["critique", "Ideas Lab: the editor", "Scores each idea for novelty, feasibility, significance and fit"],
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
   ["skim", "Skim layer", "Finds the key sentences of a paper by lens (question, finding, limitation…)"]];
-const money = v => v == null ? "—" : v < 0.01 && v > 0 ? "$" + v.toFixed(4) : "$" + v.toFixed(2);
+const money = v => exactCost(v, "—");
 const TABS = [["ai", "AI"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["sync", "Computers & sync"], ["about", "About & updates"]];
 const AI_SUBS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"]];      // three pages under the one main tab "AI" (their keys are unchanged: Settings.open("usage") still opens Usage & cost)
 const groupOf = t => AI_SUBS.some(([k]) => k === t) ? "ai" : t;

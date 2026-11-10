@@ -2,12 +2,12 @@
 // speak to with each paper's position (the map: themes down, papers across, a cell per paper that has something to say) and what is still open (gaps). Every cell and gap points at
 // the notes it rests on (click: the paper opens at that page); the server drops anything that points at a note it was not given, and marks a gap with no note behind it as "not grounded".
 // Saved as Papers/_folders/<id>.synthesis.json. Server: GET /api/folder/synthesis, POST /api/ai/synthesis[/estimate] (stream: status | progress | synthesis | done | error).
-import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress} from "./state.js";
+import {$, esc, ico, api, toast, notifyError, errInline, debounce, progress, aboutCost, exactCost} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
 const Y = {fid: null, el: null, data: null, busy: false, sel: new Set(), focus: ""};
-const money = c => c == null ? "" : c < 0.01 ? "under 1¢" : "about $" + (c < 1 ? c.toFixed(2) : c.toFixed(1));
+const money = aboutCost;
 const CONS = {agree: "They agree", mixed: "Mixed", contested: "Contested", single: "One paper only"};
 const STANCE = {supports: "supports", qualifies: "qualifies", opposes: "opposes", neutral: "neutral"};
 
@@ -60,7 +60,7 @@ function out(doc) {
     <button class="rd-btn" data-sy="save" title="Save a Word file into your export folder (Settings → Reader)">Save to export folder</button><button class="rd-btn" data-sy="redo" title="Make it again, ignoring the saved answer">${ico("redo", "sm")} Redo</button>`;
   const agree = doc.themes.filter(t => t.consensus === "agree").length, split = doc.themes.filter(t => t.consensus === "mixed" || t.consensus === "contested").length;
   return `<div id="sy-out">${frame({tool: "synthesis", kind: "Synthesis", icon: "synthesis", key: "synthesis:" + Y.fid, title: `${Object.keys(P).length} papers · ${doc.themes.length} theme${doc.themes.length === 1 ? "" : "s"} · ${doc.gaps.length} gap${doc.gaps.length === 1 ? "" : "s"}`,
-    sub: doc.themes.length ? `${agree} where the papers agree, ${split} where they differ` : "", actions: acts, meta: [{t: doc.model}, doc.cost != null ? {t: money(doc.cost)} : null, {t: "made " + (doc.generated || "").slice(0, 10)}],
+    sub: doc.themes.length ? `${agree} where the papers agree, ${split} where they differ` : "", actions: acts, meta: [{t: doc.model}, doc.cost != null ? {t: exactCost(doc.cost)} : null, {t: "made " + (doc.generated || "").slice(0, 10)}],
     sections: [{id: "ov", title: "Overview", icon: "sparkle", tone: "lead", body: overview}, {id: "map", title: "Map of the papers", icon: "synthesis", count: doc.themes.length, body: map}, {id: "gaps", title: "What is still open", icon: "warn", count: doc.gaps.length, body: gaps},
       {id: "check", title: "Check", icon: "check", collapsed: !doc.dropped, count: doc.dropped ? "!" : "✓", tone: doc.dropped ? "warn" : "", body: check}]})}</div>`;
 }
@@ -102,7 +102,7 @@ async function run(again) {
         if (m.type === "status" && st()) progress(st(), m); else if (m.type === "synthesis") Y.data.doc = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
-    Y.busy = false; draw(); if (done) toast("Synthesis made" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
+    Y.busy = false; draw(); if (done) toast("Synthesis made" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
     $("#sy-out", Y.el)?.scrollIntoView({behavior: "smooth", block: "start"});
   } catch (e) { Y.busy = false; draw(); if (st()) st().innerHTML = errInline(e); if (!/Cancelled/.test(e.message)) notifyError(e); }
 }

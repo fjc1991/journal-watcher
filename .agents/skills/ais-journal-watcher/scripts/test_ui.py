@@ -38,6 +38,54 @@ def check(name, cond, extra=""):
         FAILS.append(name)
 
 
+# When a step raises (a button that never appears, a page that never loads), the suite used to end in a bare traceback: no word on which part of the app it was
+# in, no picture of the page, and the checks after the browser part never ran. Now that is one FAIL line naming the section and the line, with a screenshot,
+# the page's text and what the app printed kept in ARTIFACTS (CI attaches that folder to the run).
+ARTIFACTS = os.environ.get("JW_UI_ARTIFACTS") or os.path.join(tempfile.gettempdir(), "jw-ui-failure")
+SECTION = [""]
+_print = print
+
+
+def print(*a, **k):  # noqa: A001      (a line that is not a PASS/FAIL line names the section that follows)
+    if a and isinstance(a[0], str) and a[0][:1].strip():
+        SECTION[0] = a[0].strip()
+    _print(*a, **k)
+    sys.stdout.flush()
+
+
+class Rescue:
+    """Around the browser part of the suite. An exception in it becomes a recorded failure (and is not raised again), with what the page looked like."""
+    page = None
+
+    def __init__(self, say=_print):
+        self.say = say
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, et, e, tb):
+        if et is None or not issubclass(et, Exception):
+            return False
+        import traceback
+        here = [f.lineno for f in traceback.extract_tb(tb) if os.path.abspath(f.filename) == os.path.abspath(__file__)]
+        why = (str(e).strip().splitlines() or [""])[0][:300]
+        name = "the suite stopped in “%s” (test_ui.py line %s): %s: %s" % (SECTION[0], here[-1] if here else "?", et.__name__, why)
+        self.say("  FAIL  " + name)
+        FAILS.append(name)
+        try:
+            os.makedirs(ARTIFACTS, exist_ok=True)
+            with open(os.path.join(ARTIFACTS, "stopped.txt"), "w", encoding="utf-8") as f:
+                f.write(name + "\n\n" + "".join(traceback.format_exception(et, e, tb)))
+            if self.page is not None:
+                self.page.screenshot(path=os.path.join(ARTIFACTS, "stopped.png"))
+                with open(os.path.join(ARTIFACTS, "stopped-page.txt"), "w", encoding="utf-8") as f:
+                    f.write(self.page.url + "\n\n" + self.page.inner_text("body")[:20000])
+            self.say("        (kept in %s)" % ARTIFACTS)
+        except Exception as e2:  # noqa: BLE001      (the browser itself may be what died)
+            self.say("        (no screenshot: %s)" % str(e2)[:120])
+        return True
+
+
 # ---------------------------------------------------------------- a fake OpenAI-compatible provider
 class Fake(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -451,7 +499,8 @@ bks.crossref_books = lambda title, rows=3: []
 fx.fetch_journal = lambda j: []                                                   # the weekly check reads no real feed (only the followed authors bring papers)
 """.replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
-    srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    srv_log = os.path.join(tempfile.gettempdir(), "jw-ui-server-%d.log" % os.getpid()); srv_err = open(srv_log, "w")     # what the app prints: kept when a check fails
+    srv = subprocess.Popen([sys.executable, "-c", runner], cwd=TMP, env=env, stdout=subprocess.DEVNULL, stderr=srv_err)
     base = "http://127.0.0.1:%d" % port
     sidecar = lambda i, ext: os.path.join(TMP, rows[i][3][:-4] + ext)  # noqa: E731
     api = lambda path, body=None: json.load(urllib.request.urlopen(urllib.request.Request(base + path, json.dumps(body).encode() if body is not None else None, {"Content-Type": "application/json"})))  # noqa: E731
@@ -462,11 +511,26 @@ fx.fetch_journal = lambda j: []                                                 
             except Exception:  # noqa: BLE001
                 time.sleep(0.3)
         from playwright.sync_api import sync_playwright
-        with sync_playwright() as pw:
+        n_f, had_art = len(FAILS), os.path.isdir(ARTIFACTS)
+        SECTION[0] = "a made-up section"
+        with Rescue(say=lambda *a: None):            # (its own FAIL line is not printed: this failure is the test)
+            raise RuntimeError("a step that raises")
+        stopped_ok = len(FAILS) == n_f + 1 and "a step that raises" in FAILS[-1] and "a made-up section" in FAILS[-1] and "line" in FAILS[-1] and os.path.exists(os.path.join(ARTIFACTS, "stopped.txt"))
+        del FAILS[n_f:]
+        try:                                         # (only what this made: the folder may be one you named, or hold an earlier run's pictures)
+            os.remove(os.path.join(ARTIFACTS, "stopped.txt"))
+            if not had_art:
+                os.rmdir(ARTIFACTS)
+        except OSError:
+            pass
+        before = None
+        print("the suite itself")
+        check("a step that raises is recorded as one failure that names where it happened (and the suite goes on to its last checks)", stopped_ok)
+        with sync_playwright() as pw, Rescue() as rescue:
             br = pw.chromium.launch(headless=True)
             ctx = br.new_context(viewport={"width": 1400, "height": 950}, permissions=["clipboard-read", "clipboard-write"])
             ctx.add_init_script("try { if (!sessionStorage.getItem('jw-wl-test')) localStorage.setItem('jw-welcome', 'done'); } catch (e) {}")      # the welcome guide has its own test below
-            page = ctx.new_page()
+            page = ctx.new_page(); rescue.page = page
             if os.environ.get("JW_TEST_THROTTLE"):          # JW_TEST_THROTTLE=4 runs the page four times slower: how a busy CI machine behaves
                 ctx.new_cdp_session(page).send("Emulation.setCPUThrottlingRate", {"rate": float(os.environ["JW_TEST_THROTTLE"])})
             errors = []
@@ -476,6 +540,18 @@ fx.fetch_journal = lambda j: []                                                 
             answers = []        # canned answers for the next prompt() dialogs (otherwise the default value, or "fake/m2" for the compare picker)
             page.on("dialog", lambda d: (dialogs.append(d.message), d.accept(answers.pop(0) if answers else (d.default_value or "fake/m2"))))
             page.goto(base + "/"); page.wait_for_selector("#libitem")
+
+            print("markdown from an AI answer or a synced file")
+            md_ = page.evaluate("""(async () => { const st = await import('/static/state.js'); const d = document.createElement('div');
+                d.innerHTML = st.md(['[bad](javascript:alert(1))', '[worse](JaVaScRiPt:alert(1))', '[ent](java&#x73;cript:alert(1))', '[data](data:text/html,x)', '[vb](vbscript:x)', '[rel](other.md)',
+                    '[good](https://example.org/a)', '[mail](mailto:a@example.org)', '[here](#top)', '[app](/files/x.pdf)', '[note](jw:page/2)', '[net](//evil.example/x)',
+                    '![pix](https://evil.example/p.png)', '![local](/static/icon.png)', '![x](javascript:alert(1))', '![e1](/&#x2F;evil.example/p.png)', '![e2](/&#92;evil.example/p.png)', '![e3](/&Tab;/evil.example/p.png)', '![A & "B"](https://evil.example/q.png)', '<img src=x onerror=alert(1)>'].join('\\n\\n'));
+                return {hrefs: [...d.querySelectorAll('a')].map(a => a.getAttribute('href')), imgs: [...d.querySelectorAll('img')].map(i => i.getAttribute('src')), text: d.textContent}; })()""")
+            check("a link in rendered Markdown leads only to a web or e-mail address or into the app (no javascript:, data: or other scheme); its words stay; a picture is only loaded from the app",
+                  md_["hrefs"] == ["https://example.org/a", "mailto:a@example.org", "#top", "/files/x.pdf", "jw:page/2"] and md_["imgs"] == ["/static/icon.png"]
+                  and all(w in md_["text"] for w in ("bad", "worse", "ent", "data", "vb", "rel", "net", "pix", "e1", "e2", "e3", 'A & "B"')), str(md_))
+            sm_ = page.evaluate("""(async () => { const d = document.createElement('div'); d.innerHTML = marked.parse('[s](javascript:alert(2)) [ok](https://example.org)'); return [...d.querySelectorAll('a')].map(a => a.getAttribute('href')); })()""")
+            check("the same holds where a paper's summary is shown (the page's own call of the Markdown reader)", sm_ == ["https://example.org"], str(sm_))
 
             print("library")
             page.click("#libitem"); page.wait_for_selector("#lf-q")
@@ -954,7 +1030,7 @@ fx.fetch_journal = lambda j: []                                                 
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
             page.locator('#lib-results .librow:has-text("Open Platforms") [data-read]').click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
             page.click('.rd-tabs button[data-tab="card"]'); page.wait_for_selector('[data-k="make"]')
-            check("the Card tab offers to make a card and says what it will cost", "m1" in page.inner_text("#reader .cd-est") and ("¢" in page.inner_text("#reader .cd-est") or "$" in page.inner_text("#reader .cd-est")), page.inner_text("#reader .cd-est"))
+            check("the Card tab offers to make a card and says what it will cost", "m1" in page.inner_text("#reader .cd-est") and ("cent" in page.inner_text("#reader .cd-est") or "$" in page.inner_text("#reader .cd-est")), page.inner_text("#reader .cd-est"))
             page.click('[data-k="make"]'); page.wait_for_selector(".cd-item", timeout=30000)
             body = page.inner_text("#reader .cd")
             check("the card shows question, method, findings and limitations", all(t in body for t in ("How does governance shape complementor entry?", "fixed effects panel", "Entry rises 12 percent.", "generalize beyond")), [t for t in ("How does governance shape complementor entry?", "fixed effects panel", "Entry rises 12 percent.", "generalize beyond") if t not in body])
@@ -1179,7 +1255,7 @@ fx.fetch_journal = lambda j: []                                                 
             check("ticking a claim off as dealt with is saved", any(c["n"] == 2 and c.get("handled") for c in doc_["claims"]) and len(doc_["claims"]) == 5)
             md_ = urllib.request.urlopen(base + "/api/export/claims?folder=lab&fmt=md").read().decode()
             check("the result exports as Markdown (by verdict, with the passages) and as Word", "## Contradicted (1)" in md_ and "## Supported (2)" in md_ and "We study how transparency" not in md_ and urllib.request.urlopen(base + "/api/export/claims?folder=lab&fmt=docx").read()[:2] == b"PK")
-            page.wait_for_function("document.querySelector('#cl-rvest') && document.querySelector('#cl-rvest').textContent.includes('$') || document.querySelector('#cl-rvest').textContent.includes('¢')", timeout=10000)
+            page.wait_for_function("document.querySelector('#cl-rvest') && document.querySelector('#cl-rvest').textContent.includes('$') || document.querySelector('#cl-rvest').textContent.includes('cent')", timeout=10000)
             page.click("#cl-rvb"); page.wait_for_selector("#cl-rev .of", timeout=60000)
             reqr = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith('You are "Reviewer 2"')][-1]
             check("Reviewer 2 gets your whole text and the folder's paper notes (with ids) as context", "Platforms that publish clear rules" in reqr["messages"][-1]["content"] and "We study how transparency rules" in reqr["messages"][-1]["content"] and "P1-1 [question]" in reqr["messages"][-1]["content"])
@@ -1695,7 +1771,7 @@ fx.fetch_journal = lambda j: []                                                 
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#lf-list"); page.wait_for_selector("#lib-results .librow")
             page.locator('#lib-results .librow:has-text("Citations and Links") [data-read]').click(); page.wait_for_selector(".rd-band .textLayer span", timeout=30000)
             page.click("#rd-skimbtn"); page.wait_for_selector('#rd-skim [data-sk="make"]')
-            check("the Skim button offers to skim the paper and says what it costs", "Skim this paper" in page.inner_text("#rd-skim") and "¢" in page.inner_text("#rd-skim"))
+            check("the Skim button offers to skim the paper and says what it costs", "Skim this paper" in page.inner_text("#rd-skim") and "cent" in page.inner_text("#rd-skim"))
             page.click('#rd-skim [data-sk="make"]'); page.wait_for_selector("#rd-skim .sk-chip", timeout=60000); page.wait_for_selector(".rd-ov .skim-g", timeout=15000)
             sk_file = sidecar(2, ".skim.json")
             check("the skim is saved beside the PDF; a sentence the model invented was dropped", os.path.exists(sk_file) and len(json.load(open(sk_file))["items"]) == 3 and json.load(open(sk_file))["dropped"] == 1)
@@ -3247,10 +3323,25 @@ fx.fetch_journal = lambda j: []                                                 
             check("BibTeX export works", "@article{" in bib and "Open Platforms" in bib)
             check("no JavaScript errors in the console", not errors, "; ".join(errors[:3]))
             br.close()
-        after = sorted(f for f in os.listdir(os.path.dirname(sidecar(0, ".x"))) if not f.endswith(".json") and not f.endswith(".md"))
-        check("papers and filenames in Papers/ unchanged apart from sidecars", after == before, str((before, after)))
+        if before is not None:                       # (a suite that stopped before it looked has already said so)
+            after = sorted(f for f in os.listdir(os.path.dirname(sidecar(0, ".x"))) if not f.endswith(".json") and not f.endswith(".md"))
+            check("papers and filenames in Papers/ unchanged apart from sidecars", after == before, str((before, after)))
     finally:
         srv.terminate(); srv.wait(timeout=10); srv_ai.shutdown(); srv_oa.shutdown(); srv_up.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
+        srv_err.close()
+        if FAILS:                                    # what the app printed, next to the screenshot
+            try:
+                os.makedirs(ARTIFACTS, exist_ok=True)
+                with open(srv_log, encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                with open(os.path.join(ARTIFACTS, "app-log.txt"), "w", encoding="utf-8") as f:
+                    f.write("".join(lines[-3000:]))
+            except OSError:
+                pass
+        try:
+            os.remove(srv_log)
+        except OSError:
+            pass
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")
     sys.exit(1 if FAILS else 0)
 

@@ -2,6 +2,17 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.12
+
+Safer and sturdier:
+
+- **Only this computer can read your library through the app.** The app has no password because it only answers on your own computer. Saving and spending were already refused for anything else; now reading is too: a web page that pretends to be the app's address, or another site's page asking the app for your papers, gets nothing.
+- **A link in an AI answer cannot run code.** Summaries, answers and notes are shown as formatted text. A link in them now only leads to a web address, an e-mail address or a place in the app; a picture is only loaded from the app itself (a picture from another site would tell that site what you are reading). The words of a link that is refused stay.
+- **When something goes wrong inside the app, it says so.** An unexpected error used to end as "Can't reach the dashboard", as if the app had closed. Now the page shows what happened and the app carries on.
+- **The export folder works the same everywhere.** `~/Dropbox/Notes` used to work for a backup and for "Save to my export folder", but "export this folder as a directory" made a folder literally named `~` where the app was running. All three now use the same place, and a name without a leading `/` is taken from your home folder.
+- **Costs are written one way.** An estimate reads "about $0.12" or "under 1 cent" everywhere; an amount on record reads "$0.12" (and up to four decimals below a cent).
+- For releases: the offline checks run before a release is built, and a release is refused if the one before it was signed and the signing key has gone missing from the project.
+
 ## 1.2.11
 
 Keeping your work safe:

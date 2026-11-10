@@ -4,11 +4,11 @@
 //     check (free copies first, then your publisher and library access) and each gets a summary.
 //   · the reader's "Related" tab: the same for the open paper (similar papers you have; what it cites that you don't have; related papers you don't have).
 // Server: POST /api/related/scope (stream: status | result | error), GET /api/related/paper, POST /api/related/{ignore,download}.
-import {errBox, notifyError, S as RS, $, $$, esc, ico, api, toast, on, progress} from "./state.js";
+import {errBox, notifyError, S as RS, $, $$, esc, ico, api, toast, on, progress, aboutCost} from "./state.js";
 import {frame, wire as wireOut} from "./output.js";
 
 let ctx = null;
-const money = c => c == null ? "" : "about $" + c.toFixed(2);
+const money = aboutCost;
 const authorsOf = c => { const a = [...new Set(c.authors || [])]; return a.slice(0, 3).join(", ") + (a.length > 3 ? " et al." : ""); };
 
 function openPaper(file, page) {

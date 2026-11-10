@@ -85,6 +85,16 @@ def get_settings():
     return {**DEFAULT_SETTINGS, **{k: v for k, v in d.items() if k in DEFAULT_SETTINGS}}
 
 
+def export_dir():
+    """The export folder as a full path ("" when none is set). "~" is your home folder, and a path that does not start at the root is taken from your home
+    folder as well: never from wherever the app happens to be running (a folder literally named "~" used to be made there)."""
+    d = str(get_settings().get("export_dir") or "").strip()
+    if not d:
+        return ""
+    d = os.path.expanduser(d)
+    return os.path.normpath(d if os.path.isabs(d) else os.path.join(os.path.expanduser("~"), d))
+
+
 def save_settings(patch):
     cur = get_settings()
     if "legend" in patch:

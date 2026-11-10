@@ -559,17 +559,59 @@ class Handler(BaseHTTPRequestHandler):
             pass  # the viewer cancelled a range it no longer needs
 
     def body(self):
+        """The request's JSON object ({} when there is none). Anything else (not JSON, or JSON that is not an object) is a ValueError: the caller answers 400."""
         n = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+        b = json.loads(self.rfile.read(n) or b"{}") if n else {}
+        if not isinstance(b, dict):
+            raise ValueError("the request is not a JSON object")
+        return b
+
+    LOCAL = ("localhost", "127.0.0.1", "::1")
+
+    def host_ok(self):
+        """The request names this computer as its host. A page on another site whose name was pointed at 127.0.0.1 (DNS rebinding) names its own host, and
+        would otherwise read the library through this server, which has no login."""
+        return (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower() in self.LOCAL
 
     def local_only(self):
         """Host/Origin guard for POSTs: they spend API money and write notes, and the server has no login, so refuse
         anything that isn't the dashboard page itself (cross-site forms, DNS rebinding)."""
-        local = ("localhost", "127.0.0.1", "::1")
-        if (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower() not in local:
+        if not self.host_ok():
             return False
         origin = self.headers.get("Origin")
-        return not origin or (urllib.parse.urlsplit(origin).hostname or "") in local
+        return not origin or (urllib.parse.urlsplit(origin).hostname or "") in self.LOCAL
+
+    def get_ok(self, path):
+        """Guard for GETs: the host must be this computer, and data (/api/, /files/) is not handed to a request another site made (an image or script tag, a
+        fetch: the browser marks those "cross-site"). Opening the page itself from a link elsewhere stays allowed."""
+        if not self.host_ok():
+            return False
+        return not ((path.startswith("/api/") or path.startswith("/files/")) and (self.headers.get("Sec-Fetch-Site") or "").lower() == "cross-site")
+
+    def send_response(self, code, message=None):
+        self._answered = True                       # (an answer has begun: a later error cannot be sent as JSON any more)
+        super().send_response(code, message)
+
+    def guarded(self, fn):
+        """Run a request. An error nobody caught is answered as JSON with status 500 (and printed), so the page can say what happened instead of
+        "can't reach the dashboard"; the connection used to be dropped without an answer."""
+        self._answered = False
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            if self._answered:                      # (a stream or a file was already on its way: end it)
+                if not isinstance(e, (ConnectionResetError, BrokenPipeError, TimeoutError)):          # (those: the browser left, which is no news)
+                    traceback.print_exc()
+                self.close_connection = True
+                return None
+            traceback.print_exc()                   # (also a time-out or a reset from a site the app itself was asking: the page is told, not left waiting)
+            try:
+                self.send_json({"error": "Something went wrong inside the app (%s: %s). Try again; if it happens again, the details are in the app's log."
+                                         % (e.__class__.__name__, str(e)[:160])}, 500)
+            except OSError:
+                pass
+            self.close_connection = True            # (the request's body may not have been read to its end)
+            return None
 
     def send_bytes(self, data, ctype, filename=None):
         self.send_response(200)
@@ -856,6 +898,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET
     def do_GET(self):
+        if not self.get_ok(urllib.parse.urlsplit(self.path).path):
+            return self.send_json({"error": "forbidden"}, 403)
+        return self.guarded(self.get)
+
+    def get(self):
         u = urllib.parse.urlsplit(self.path)
         path = u.path
         if path in ("/", "/index.html"):
@@ -1150,9 +1197,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST
     def do_POST(self):
-        path = urllib.parse.urlsplit(self.path).path
         if not self.local_only():
             return self.send_json({"error": "forbidden"}, 403)
+        return self.guarded(self.post)
+
+    def post(self):
+        path = urllib.parse.urlsplit(self.path).path
         if path == "/api/refs/extract":  # a document with references (Word, PowerPoint, PDF, text; the raw file is the body, X-Filename its name): its references, each
             # looked up on Crossref, streamed with progress. X-Mode "ai": the AI lists the references first (the page showed its cost); otherwise no AI call.
             n = int(self.headers.get("Content-Length") or 0)
@@ -1467,32 +1517,35 @@ class Handler(BaseHTTPRequestHandler):
             ents = bibimport.match(entries, pl.library())
             return self.send_json({"entries": ents, "have": sum(1 for e in ents if e["file"]), "no_doi": sum(1 for e in ents if not e["file"] and not e["has_doi"])})
         if path == "/api/export/folderdir":   # {folder}: the folder as a real directory in your export folder: the PDFs, a .bib and your notes as Markdown
-            d = prefs.get_settings()["export_dir"]
+            d = prefs.export_dir()
             f, rows = self.folder_rows(str(b.get("folder") or ""))
             if not d or not f:
                 return self.send_json({"error": "Choose an export folder in Settings → Reader first." if not d else "no such folder"}, 400)
             safe = re.sub(r"[\\/:*?\"<>|]+", "-", f["name"]).strip(" .") or "folder"
             dest = os.path.join(d, safe)
-            os.makedirs(dest, exist_ok=True)
             n = skipped = 0
-            for r in rows:
-                pdf = ns.pdf_path(r["file"])
-                if not pdf:
-                    continue
-                target = os.path.join(dest, os.path.basename(pdf))
-                if os.path.exists(target) and os.path.getsize(target) == os.path.getsize(pdf):
-                    skipped += 1
-                    continue
-                shutil.copy2(pdf, target)
-                n += 1
-            if rows:
-                with open(os.path.join(dest, "references.bib"), "w", encoding="utf-8") as fh:
-                    fh.write(exports.bibtex(rows))
-                with open(os.path.join(dest, "notes.md"), "w", encoding="utf-8") as fh:
-                    fh.write(exports.notes_markdown(rows, f["name"]))
+            try:
+                os.makedirs(dest, exist_ok=True)
+                for r in rows:
+                    pdf = ns.pdf_path(r["file"])
+                    if not pdf:
+                        continue
+                    target = os.path.join(dest, os.path.basename(pdf))
+                    if os.path.exists(target) and os.path.getsize(target) == os.path.getsize(pdf):
+                        skipped += 1
+                        continue
+                    shutil.copy2(pdf, target)
+                    n += 1
+                if rows:
+                    with open(os.path.join(dest, "references.bib"), "w", encoding="utf-8") as fh:
+                        fh.write(exports.bibtex(rows))
+                    with open(os.path.join(dest, "notes.md"), "w", encoding="utf-8") as fh:
+                        fh.write(exports.notes_markdown(rows, f["name"]))
+            except OSError as e:
+                return self.send_json({"error": "Couldn’t write to %s: %s (%d of the PDFs were copied)" % (dest, e.strerror or e, n)}, 400)
             return self.send_json({"ok": True, "path": dest, "pdfs": n, "unchanged": skipped, "papers": len(rows)})
         if path == "/api/export/save":   # {what: ideas|cards, folder, fmt}: write the file into your export folder (Settings -> Reader)
-            d = prefs.get_settings()["export_dir"]
+            d = prefs.export_dir()
             f = fo.get(str(b.get("folder") or ""))
             if not d or not f:
                 return self.send_json({"error": "Choose an export folder in Settings → Reader first." if not d else "no such folder"}, 400)
@@ -1527,8 +1580,8 @@ class Handler(BaseHTTPRequestHandler):
                     name = "%s-comparison.%s" % (f["name"], fmt)
                 else:
                     return self.send_json({"error": "unknown export"}, 400)
-                os.makedirs(os.path.expanduser(d), exist_ok=True)
-                out = os.path.join(os.path.expanduser(d), re.sub(r"[^\w .()-]+", "_", name))
+                os.makedirs(d, exist_ok=True)
+                out = os.path.join(d, re.sub(r"[^\w .()-]+", "_", name))
                 with open(out, "wb") as fh:
                     fh.write(data)
             except OSError as e:
@@ -1637,12 +1690,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/snapshots/now":         # take one now
             return self.send_json({"ok": True, "name": aifiles.snapshot(force=True), "snapshots": aifiles.snapshots()})
         if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
-            d = prefs.get_settings().get("export_dir") or ""
-            if not d or not os.path.isdir(os.path.expanduser(d)):
+            d = prefs.export_dir()
+            if not d:
                 return self.send_json({"error": "Choose an export folder first (Settings → Reader & summaries)."}, 400)
             tmp = aifiles.backup(bool(b.get("pdfs")))
-            dest = os.path.join(os.path.expanduser(d), "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M"))
-            shutil.move(tmp, dest)
+            dest = os.path.join(d, "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M"))
+            try:
+                os.makedirs(d, exist_ok=True)            # (as the other exports do: a folder that is set but not made yet is made)
+                shutil.move(tmp, dest)
+            except OSError as e:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                return self.send_json({"error": "Couldn’t write to %s: %s" % (d, e.strerror or e)}, 400)
             return self.send_json({"ok": True, "path": dest, "bytes": os.path.getsize(dest)})
         if path == "/api/activity/cancel":       # {id}
             return self.send_json({"ok": activity.cancel(str(b.get("id") or ""))})
