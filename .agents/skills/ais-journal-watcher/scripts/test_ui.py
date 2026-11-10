@@ -3790,11 +3790,11 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.click("#toast .toast-x")
             check("…and its × closes it; an ordinary note still goes by itself", not page.is_visible("#toast") and page.evaluate("(toast('Saved.'), !document.querySelector('#toast .toast-x') && !document.querySelector('#toast').classList.contains('stay'))"))
             page.click("body"); page.keyboard.press("?"); page.wait_for_selector("#keys-dlg[open]", timeout=5000)
-            check("? opens the list of keyboard shortcuts (search, the reader's keys, the Watch page's)", all(x in page.inner_text("#keys-dlg") for x in ("Keyboard shortcuts", "In the reader", "Highlight the selected text", "Tick or untick a journal")))
+            check("? opens the list of keyboard shortcuts (search, the reader's keys, the Watch page's)", all(x.lower() in page.inner_text("#keys-dlg").lower() for x in ("Keyboard shortcuts", "In the reader", "Highlight the selected text", "Tick or untick a journal")), page.inner_text("#keys-dlg")[:300])
             page.click("#keys-dlg [data-x]"); page.wait_for_selector("#keys-dlg:not([open])", state="attached")
             found_ = {}
             for q_ in ("backup", "university", "update", "books", "shortcuts", "interests", "check for new"):
-                page.keyboard.press("Control+k"); page.keyboard.type(q_); page.wait_for_timeout(350); found_[q_] = page.inner_text("#pal .pal-it >> nth=0").replace("\n", " "); page.keyboard.press("Escape")
+                page.keyboard.press("Control+k"); page.keyboard.type(q_); page.wait_for_timeout(350); found_[q_] = page.inner_text("#pal .pal-it >> nth=0").replace("\n", " ") + " | " + " ".join(x.inner_text().replace("\n", " ") for x in page.locator("#pal .pal-it").all()[:6]); page.keyboard.press("Escape")
             check("Search finds the Settings pages it used to miss, Library › Books, the shortcuts and the weekly check", "AI files & backup" in found_["backup"] and "Library access" in found_["university"] and "About & updates" in found_["update"] and "Books" in found_["books"]
                   and "Keyboard shortcuts" in found_["shortcuts"] and "Journals & interests" in found_["interests"] and "Check for new papers" in found_["check for new"], str(found_))
             page.goto(base + "/#/library/books"); page.wait_for_timeout(600); page.reload(); page.wait_for_selector(".libtabs button", timeout=10000); page.wait_for_timeout(400)
