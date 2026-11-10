@@ -31,7 +31,7 @@ function build() {
   [["ai", "AI & privacy", "models keys budget cost provider local only"], ["usage", "Usage & cost", "budget spent spending cost month"], ["prompts", "Prompts", "prompt template"],
    ["watch", "Journals & interests", "journals topics interests terms methods weekly check utd ais basket watch list add journal"], ["reader", "Reader & summaries", "summary template export folder legend colours reading speed"],
    ["files", "AI files & backup", "backup snapshot restore deleted undo trash zip saved answers cache"], ["library", "Library access", "university library proxy ezproxy openathens ebsco institution interlibrary"],
-   ["sources", "Paper sources", "openalex unpaywall elsevier key email crossref semantic scholar"], ["look", "Appearance", "theme dark light subtle bold size"],
+   ["sources", "Paper sources", "openalex unpaywall elsevier key email crossref semantic scholar"], ["look", "Appearance", "theme colours subtle bold size"],
    ["sync", "Computers & sync", "dropbox second computer conflict copies join data folder move"], ["about", "About & updates", "update version new release check for updates"]].forEach(([t, name, hay]) =>
     add("go", "Settings › " + name, "settings", "settings", async () => { await closeReader(); window.Settings && window.Settings.open(t); }, {hint: "settings", quick: t === "ai", hay: "settings preferences " + t + " " + hay}));
   add("go", "About Journal Watcher", "heart", "about", async () => { await closeReader(); window.About && window.About.open(); }, {hint: "page", hay: "about author made by support coffee tip donate ko-fi licence version", sub: "who makes it, and how to support it"});
