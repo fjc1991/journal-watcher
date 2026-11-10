@@ -8017,9 +8017,11 @@ print("OK")
                 real_fj = fx_.fetch_journal
                 fx_.fetch_journal = lambda j: (seen_.append(j["abbr"]) or [])
                 try:
+                    pl_.FEED_HOST_PAUSE = 0                                                                                          # (no waiting between two feeds of one host here)
                     pl_.fetch_weekly(pl_.Run("weekly", {}), lambda ev, d=None: None, threading.Event())
                 finally:
                     fx_.fetch_journal = real_fj
+                    pl_.FEED_HOST_PAUSE = 1.0
                 assert seen_ and "SSRN" not in seen_, seen_
             finally:
                 open(jpath, "w").write(saved) if saved is not None else os.remove(jpath)
@@ -8275,6 +8277,312 @@ print("OK")
     check("library test: where each kind of answer leads (through, asked for a password, a visible versus a hidden password box, a human check, a page that says nothing, a page that does not open) and what the message claims; a library without a sign-in of its own is never said to be 'signed in'", t_library_test)
     check("library test: the tick changes only when the answer is clear (ticked when it got through, taken away when asked for a password), never for a library without a sign-in of its own", t_library_test_record)
     check("SSRN: searched by words through Crossref (prefix 10.2139: only SSRN's own, capped), a pseudo-journal that is never read weekly and not added twice, the papers marked as SSRN's, a saved copy per phrase, the paper's own page, and its download link followed only when it is that paper's", t_ssrn)
+
+    def weekly_fixture(journals_):
+        """A weekly check over `journals_` with stand-in feeds: -> (go, restore). go(fetch, stop=None, on_event=None) runs pl_.fetch_weekly with fx_.fetch_journal = fetch
+        and returns (run, events). journals.json, seen.json, new_papers.json and the runs' files are put back by restore()."""
+        import pipeline as pl_, fetch_new as fx_
+        jpath, seen_p, new_p = os.path.join(pl_.BASE, "journals.json"), os.path.join(pl_.STATE, "seen.json"), os.path.join(pl_.STATE, "new_papers.json")
+        saved = {p_: (open(p_, encoding="utf-8").read() if os.path.exists(p_) else None) for p_ in (jpath, seen_p, new_p)}
+        os.makedirs(pl_.STATE, exist_ok=True)
+        json.dump({"journals": journals_}, open(jpath, "w"))
+        json.dump({}, open(seen_p, "w"))
+        runs_ = []
+
+        def go(fetch, stop=None, on_event=None):
+            events = []
+
+            def emit(ev, d=None):
+                events.append((ev, dict(d or {})))
+                on_event and on_event(ev, d or {})
+            run = pl_.Run("weekly", {"topics": [], "query": ""}, "2031-W%02d_weekly" % (10 + len(runs_)))
+            runs_.append(run)
+            real = fx_.fetch_journal
+            fx_.fetch_journal = fetch
+            try:
+                pl_.fetch_weekly(run, emit, stop or threading.Event())
+            finally:
+                fx_.fetch_journal = real
+            return run, events
+
+        def restore():
+            for p_, txt in saved.items():
+                if txt is None:
+                    os.path.exists(p_) and os.remove(p_)
+                else:
+                    open(p_, "w", encoding="utf-8").write(txt)
+            for r in runs_:
+                f = os.path.join(pl_.RUNS, r.id + ".json")
+                os.path.exists(f) and os.remove(f)
+        return go, restore
+
+    def feed_items(j, n=2):
+        """What fx.fetch_journal returns for a feed whose papers need no lookup (a DOI, a long abstract, a date, authors: enrich asks nobody and sleeps for nothing)."""
+        import fetch_new as fx_
+        out = []
+        for i in range(n):
+            p = {"journal": j["name"], "abbr": j["abbr"], "publisher": j["publisher"], "title": "%s paper %d" % (j["abbr"], i), "url": "https://example.invalid/%s/%d" % (j["abbr"], i),
+                 "doi": "10.5555/%s.%d" % (j["abbr"].lower(), i), "abstract": "An abstract that is long enough to count. " * 6, "keywords": None, "pub_date": "2031-03", "source": "rss",
+                 "authors": ["A. Author"], "issn": None, "doi_prefix": None}
+            p["id"] = fx_.key_for(p["doi"], p["journal"], p["title"])
+            out.append(p)
+        return out
+
+    WJ = lambda abbr, host, source="rss": {"name": abbr + " Journal", "abbr": abbr, "publisher": "test", "source": source, "issn": "1234-5678",      # noqa: E731
+                                            "feed": ("https://%s/%s.rss" % (host, abbr.lower())) if source == "rss" else None}
+    SIX = [WJ("AA", "one.example"), WJ("BB", "two.example"), WJ("CC", "one.example"), WJ("DD", None, "crossref"), WJ("EE", "three.example"), WJ("FF", "four.example")]
+    SIX_NAMES = "AA BB CC DD EE FF".split()
+
+    def weekly_tiles(events):
+        """The tiles' states in the order the page gets them (a repeat of the same state, e.g. the count of lookups going up, is one)."""
+        tiles = [(d["abbr"], d["state"]) for ev, d in events if ev == "journal" and d.get("state")]
+        return [t for k, t in enumerate(tiles) if k == 0 or tiles[k - 1] != t]
+
+    def t_feeds_ahead():
+        """Feeds of different hosts are read while an earlier journal is still being dealt with; one host is never asked twice at once; a journal read through Crossref
+        is read in its own turn; and everything the check shows, saves and remembers comes one journal at a time, in the journals' order."""
+        import pipeline as pl_
+        go, restore = weekly_fixture(SIX)
+        seen_p = os.path.join(pl_.STATE, "seen.json")
+        lock = threading.Lock()
+        started, active, at_once, same_host_twice, threads = [], {}, [0], [], {}
+        two_at_once, shown = threading.Event(), []
+        pause0 = getattr(pl_, "FEED_HOST_PAUSE", None)
+        try:
+            pl_.FEED_HOST_PAUSE = 0.0                            # (the pause between two feeds of one host has its own check)
+
+            def fetch(j):
+                host = j["feed"].split("/")[2] if j.get("feed") else "api.crossref.org"
+                with lock:
+                    started.append(j["abbr"])
+                    threads[j["abbr"]] = threading.current_thread()
+                    if active.get(host):
+                        same_host_twice.append(j["abbr"])
+                    active[host] = active.get(host, 0) + 1
+                    at_once[0] = max(at_once[0], sum(active.values()))
+                    if sum(active.values()) >= 2:
+                        two_at_once.set()
+                    if j["abbr"] == "DD":                        # the Crossref journal: by now every journal before it must be finished on the page
+                        shown.append([d["abbr"] for ev, d in events_now if ev == "journal" and d.get("state") in ("fetched", "failed")])
+                if j["abbr"] == "AA":
+                    two_at_once.wait(3)                          # AA's answer takes until another host's feed is being read (or 3 s: one feed at a time)
+                with lock:
+                    active[host] -= 1
+                if j["abbr"] == "EE":
+                    raise RuntimeError("EE is down")
+                return feed_items(j)
+
+            events_now, checkpoints = [], []
+
+            def on_event(ev, d):
+                events_now.append((ev, d))
+                if ev == "journal" and d.get("state") == "fetching":      # a journal's turn starts: what is remembered on disk, and what the run holds, is exactly the journals before it
+                    checkpoints.append((d["abbr"], sorted({v["journal"][:2] for v in json.load(open(seen_p)).values()}), len(run_now[0].order)))
+            run_now = []
+            real_run = pl_.Run
+
+            class SpyRun(real_run):
+                def __init__(self, *a, **k):
+                    real_run.__init__(self, *a, **k)
+                    run_now[:] = [self]
+            pl_.Run = SpyRun
+            try:
+                run, events = go(fetch, on_event=on_event)
+            finally:
+                pl_.Run = real_run
+            # what the page shows, what is saved and what is remembered: one journal at a time and in the journals' order, exactly as with one feed at a time
+            want = [(a, "queued") for a in SIX_NAMES]
+            for a in SIX_NAMES:
+                want += [(a, "fetching")] + ([(a, "failed")] if a == "EE" else [(a, "enriching"), (a, "fetched")])
+            assert weekly_tiles(events) == want, weekly_tiles(events)
+            assert [(d["label"], d["done"], d["total"]) for ev, d in events if ev == "progress"] == [("Fetching %s" % a, k, 6) for k, a in enumerate(SIX_NAMES)] + [("Fetched", 6, 6)]
+            assert [d["msg"] for ev, d in events if ev == "log"] == ["AA: 2 items, 2 new", "BB: 2 items, 2 new", "CC: 2 items, 2 new", "DD: 2 items, 2 new", "EE feed failed: EE is down", "FF: 2 items, 2 new"]
+            assert run.errors == ["EE: EE is down"], run.errors
+            assert [run.papers[i]["abbr"] for i in run.order] == ["AA", "AA", "BB", "BB", "CC", "CC", "DD", "DD", "FF", "FF"], run.order      # the papers in the journals' order
+            assert [d["abbr"] for ev, d in events if ev == "paper"] == [run.papers[i]["abbr"] for i in run.order]
+            assert checkpoints == [("AA", [], 0), ("BB", ["AA"], 2), ("CC", ["AA", "BB"], 4), ("DD", ["AA", "BB", "CC"], 6), ("EE", ["AA", "BB", "CC", "DD"], 8), ("FF", ["AA", "BB", "CC", "DD"], 8)], checkpoints
+            assert len(json.load(open(seen_p))) == 10 and len(json.load(open(os.path.join(pl_.STATE, "new_papers.json")))) == 10
+            assert sorted(started) == SIX_NAMES and started.index("AA") < started.index("CC"), started          # each feed once, a host's feeds in order
+            assert not same_host_twice, same_host_twice                                                         # AA and CC share a host: never at once
+            assert threads["DD"] is threading.current_thread() and shown == [["AA", "BB", "CC"]], (threads["DD"], shown)       # Crossref: in its turn, in the check's own thread
+            # ... and yet feeds of different hosts were read at once (this is what one feed at a time fails), never more than three
+            assert two_at_once.is_set() and 2 <= at_once[0] <= 3 == pl_.FEEDS_AT_ONCE, at_once
+            assert threads["BB"] is not threading.current_thread()
+            # a second check: every feed is read once again, and only the papers of the feed that failed before are new
+            started.clear()
+            run2, events2 = go(lambda j: (started.append(j["abbr"]), feed_items(j))[1])
+            assert sorted(started) == SIX_NAMES and [run2.papers[i]["abbr"] for i in run2.order] == ["EE", "EE"] and len(json.load(open(seen_p))) == 12, (started, run2.order)
+            # a feed that fails with the same words for two journals of one host is each journal's own failure, at its own turn
+            json.dump({}, open(seen_p, "w"))
+            run3, events3 = go(lambda j: (_ for _ in ()).throw(ValueError(j["abbr"] + " broke")) if j["abbr"] in ("AA", "CC", "DD") else feed_items(j))
+            assert run3.errors == ["AA: AA broke", "CC: CC broke", "DD: DD broke"] and [run3.papers[i]["abbr"] for i in run3.order] == ["BB", "BB", "EE", "EE", "FF", "FF"], (run3.errors, run3.order)
+            assert [t for t in weekly_tiles(events3) if t[1] == "failed"] == [("AA", "failed"), ("CC", "failed"), ("DD", "failed")]
+        finally:
+            if pause0 is None:
+                del pl_.FEED_HOST_PAUSE
+            else:
+                pl_.FEED_HOST_PAUSE = pause0
+            restore()
+    check("weekly check: feeds of different hosts are read ahead (never two of one host at once, a host's feeds in order, a Crossref journal only in its turn), and the tiles, the progress line, "
+          "the log, a failed feed, the papers' order and what is remembered after each journal are as with one feed at a time", t_feeds_ahead)
+
+    def t_feeds_ahead_stop():
+        """Stop is what it was: pressed while a feed is being read, that feed is finished and the check ends at that journal's lookups with nothing remembered; pressed between two
+        journals, the check ends before the next. No feed is asked after it (one being read ahead is finished and dropped), and the next check does not use what a stopped one read."""
+        import pipeline as pl_, time as _t
+        go, restore = weekly_fixture(SIX)
+        seen_p = os.path.join(pl_.STATE, "seen.json")
+        pause0 = getattr(pl_, "FEED_HOST_PAUSE", None)
+        try:
+            pl_.FEED_HOST_PAUSE = 0.0
+            stop, lock, started, ahead_of_aa, release, aa_turn = threading.Event(), threading.Lock(), [], threading.Event(), threading.Event(), threading.Event()
+
+            def fetch(j):
+                with lock:
+                    started.append(j["abbr"])
+                    if j["abbr"] != "AA":
+                        ahead_of_aa.set()
+                if j["abbr"] == "AA":
+                    ahead_of_aa.wait(3)                          # AA answers once another feed is being read ahead (or after 3 s)
+                    aa_turn.wait(3)                              # ... and its turn has come (its tile says "Reading feed")
+                    stop.set()                                   # ... and Stop is pressed while AA is still being read
+                else:
+                    release.wait(3)                              # the feeds read ahead answer only after the check has returned
+                return feed_items(j)
+            run, events = go(fetch, stop=stop, on_event=lambda ev, d: aa_turn.set() if ev == "journal" and d.get("abbr") == "AA" and d.get("state") == "fetching" else None)
+            n_at_stop = len(started)
+            # as with one feed at a time: AA's feed is finished, its papers are counted, and the check ends at the first lookup: nothing added, nothing remembered, no other tile touched
+            assert weekly_tiles(events) == [(a, "queued") for a in SIX_NAMES] + [("AA", "fetching"), ("AA", "enriching")], weekly_tiles(events)
+            assert [d["msg"] for ev, d in events if ev == "log"] == ["AA: 2 items, 2 new"] and [d["label"] for ev, d in events if ev == "progress"] == ["Fetching AA"], events
+            assert not run.order and not run.errors and json.load(open(seen_p)) == {}, (run.order, json.load(open(seen_p)))
+            assert "CC" not in started and "DD" not in started, started                                          # (CC: AA's host; DD: Crossref, only in its turn)
+            release.set(); _t.sleep(0.5)
+            assert len(started) == n_at_stop, started                                                            # nothing was asked after the stop, nor after the check returned
+            assert ahead_of_aa.is_set() and 2 <= n_at_stop <= 3, started                                         # (feeds were read ahead: this is what one feed at a time fails)
+            # the next check starts afresh: every feed is asked again (what the stopped check read ahead is not used)
+            again = []
+            run2, _ = go(lambda j: (again.append(j["abbr"]), feed_items(j))[1])
+            assert sorted(again) == SIX_NAMES and len(run2.order) == 12, (again, run2.order)
+            # Stop pressed between two journals (when BB is shown as fetched): the check ends before CC, AA and BB are remembered, and the Crossref journal was never asked
+            json.dump({}, open(seen_p, "w"))
+            stop2, asked = threading.Event(), []
+            run3, events3 = go(lambda j: (asked.append(j["abbr"]), feed_items(j))[1], stop=stop2,
+                               on_event=lambda ev, d: stop2.set() if ev == "journal" and d.get("abbr") == "BB" and d.get("state") == "fetched" else None)
+            assert weekly_tiles(events3) == [(a, "queued") for a in SIX_NAMES] + [("AA", "fetching"), ("AA", "enriching"), ("AA", "fetched"), ("BB", "fetching"), ("BB", "enriching"), ("BB", "fetched")], weekly_tiles(events3)
+            assert [run3.papers[i]["abbr"] for i in run3.order] == ["AA", "AA", "BB", "BB"] and sorted({v["journal"][:2] for v in json.load(open(seen_p)).values()}) == ["AA", "BB"]
+            n3 = len(asked); _t.sleep(0.3)
+            assert "DD" not in asked and len(asked) == n3 and len(set(asked)) == n3, asked
+            # a check that ends on an error (here the page's connection breaks at BB's turn) reads nothing more either: the feeds being read ahead are finished, FF is never asked
+            json.dump({}, open(seen_p, "w"))
+            asked4, let_go, broke = [], threading.Event(), []
+
+            def slow(j):
+                asked4.append(j["abbr"])
+                j["abbr"] != "AA" and let_go.wait(3)
+                return feed_items(j)
+
+            def breaks(ev, d):
+                if ev == "journal" and d.get("abbr") == "BB" and d.get("state") == "fetching":
+                    t_end = _t.time() + 2
+                    while len(asked4) < 4 and _t.time() < t_end:           # (AA is done; BB, EE and CC are being read: the three places are taken)
+                        _t.sleep(0.01)
+                    raise OSError("the page went away")
+            try:
+                go(slow, on_event=breaks)
+            except OSError as e:
+                broke.append(str(e))
+            n4 = len(asked4); let_go.set(); _t.sleep(0.4)
+            assert broke == ["the page went away"] and len(asked4) == n4 and "FF" not in asked4, (broke, asked4)
+            # Stop pressed in a journal's turn while its feed still waits for its host's pause: the turn has begun, so the feed is read and the check ends at its lookups, as before
+            json.dump({}, open(seen_p, "w"))
+            pl_.FEED_HOST_PAUSE = 0.5
+            go5, restore5 = weekly_fixture([WJ("AA", "one.example"), WJ("CC", "one.example")])
+            try:
+                stop5, asked5, out5 = threading.Event(), [], []
+                th = threading.Thread(target=lambda: out5.append(go5(lambda j: (asked5.append(j["abbr"]), feed_items(j))[1], stop=stop5,
+                                      on_event=lambda ev, d: stop5.set() if ev == "journal" and d.get("abbr") == "CC" and d.get("state") == "fetching" else None)), daemon=True)
+                th.start(); th.join(8)
+                assert not th.is_alive() and out5, "the check did not end"
+                run5, events5 = out5[0]
+                assert asked5 == ["AA", "CC"] and weekly_tiles(events5)[2:] == [("AA", "fetching"), ("AA", "enriching"), ("AA", "fetched"), ("CC", "fetching"), ("CC", "enriching")], (asked5, weekly_tiles(events5))
+                assert [d["msg"] for ev, d in events5 if ev == "log"] == ["AA: 2 items, 2 new", "CC: 2 items, 2 new"] and [run5.papers[i]["abbr"] for i in run5.order] == ["AA", "AA"]
+            finally:
+                restore5()
+        finally:
+            if pause0 is None:
+                del pl_.FEED_HOST_PAUSE
+            else:
+                pl_.FEED_HOST_PAUSE = pause0
+            restore()
+    check("weekly check, read ahead: Stop while a feed is being read ends the check at that journal as before (nothing added or remembered), Stop between two journals ends it before the next, "
+          "no feed is asked after it, and a stopped check's feeds are not used by the next one", t_feeds_ahead_stop)
+
+    def t_feeds_ahead_pace():
+        """No host is asked faster than before and never more than three feeds are being read: two feeds of one host are a pause apart (whoever reads the second), another host
+        is read meanwhile, a journal read through Crossref waits for a free place of the three, and a feed served by the lookups' own hosts is not read ahead."""
+        import pipeline as pl_, time as _t
+        pause0 = getattr(pl_, "FEED_HOST_PAUSE", None)
+        fixtures = []
+        try:
+            pl_.FEED_HOST_PAUSE = 0.4
+            spans = {}
+
+            def timed(secs):
+                def f(j):
+                    t0 = _t.time(); _t.sleep(secs.get(j["abbr"], 0.1)); spans[j["abbr"]] = (t0, _t.time())
+                    return feed_items(j)
+                return f
+            # AA and CC share a host, BB is slow: CC is read ahead while the check waits for BB, but only a pause after AA's answer
+            go, restore = weekly_fixture([WJ("AA", "one.example"), WJ("BB", "two.example"), WJ("CC", "ONE.example")]); fixtures.append(restore)
+            go(timed({"BB": 1.0}))
+            assert spans["CC"][0] - spans["AA"][1] >= 0.39, spans                                                # same host (however it is capitalised): the pause
+            assert spans["BB"][0] < spans["AA"][1] and spans["CC"][0] < spans["BB"][1], spans                    # another host: meanwhile (this is what one feed at a time fails)
+            restore(); fixtures.pop()
+            # two journals of one host and nothing else: the second one's turn comes at once, and it still waits out the pause
+            spans.clear()
+            go, restore = weekly_fixture([WJ("AA", "one.example"), WJ("CC", "one.example")]); fixtures.append(restore)
+            run, _ = go(timed({}))
+            assert spans["CC"][0] - spans["AA"][1] >= 0.39 and len(run.order) == 4, spans
+            restore(); fixtures.pop()
+            # never more than three feeds at once, the check's own reading of a Crossref journal included: with three feeds being read ahead when DD's turn comes, DD waits for one to answer
+            pl_.FEED_HOST_PAUSE = 0.0
+            lock, active, most, dd_started, with_dd = threading.Lock(), [0], [0], threading.Event(), []
+            go, restore = weekly_fixture([WJ("AA", "one.example"), WJ("DD", None, "crossref"), WJ("BB", "two.example"), WJ("CC", "three.example"), WJ("EE", "four.example")]); fixtures.append(restore)
+
+            def fetch(j):
+                with lock:
+                    active[0] += 1
+                    most[0] = max(most[0], active[0])
+                    if j["abbr"] == "DD":
+                        with_dd.append(active[0]); dd_started.set()
+                if j["abbr"] in ("BB", "CC", "EE"):
+                    dd_started.wait(0.7)                         # these answer once DD is being read (or after 0.7 s)
+                with lock:
+                    active[0] -= 1
+                return feed_items(j)
+
+            def on_event(ev, d):                                 # DD's turn starts only once three feeds are being read ahead (BB, CC, EE)
+                if ev == "journal" and d.get("abbr") == "DD" and d.get("state") == "fetching":
+                    t_end = _t.time() + 2
+                    while active[0] < 3 and _t.time() < t_end:
+                        _t.sleep(0.01)
+            run, events = go(fetch, on_event=on_event)
+            assert most[0] == 3 and len(with_dd) == 1 and with_dd[0] <= 3, (most, with_dd)                       # (DD was one of three at most, not a fourth)
+            assert [run.papers[i]["abbr"] for i in run.order] == ["AA", "AA", "DD", "DD", "BB", "BB", "CC", "CC", "EE", "EE"], run.order
+            # which journals are read ahead at all
+            assert pl_.feed_host(WJ("AA", "One.Example")) == "one.example" and pl_.feed_host(WJ("DD", None, "crossref")) is None
+            assert pl_.feed_host({"source": "crossref", "feed": "https://one.example/left-over.rss"}) is None                # (read through Crossref whatever its feed line says)
+            assert pl_.feed_host({"source": "rss", "feed": "https://api.crossref.org/journals/1234-5678/works"}) is None and pl_.feed_host({"source": "rss", "feed": "https://api.openalex.org/works"}) is None
+            assert pl_.feed_host({"source": "rss", "feed": ""}) is None and pl_.feed_host({"source": "rss"}) is None and pl_.feed_host({"source": "rss", "feed": "http://[bad"}) is None
+        finally:
+            if pause0 is None:
+                del pl_.FEED_HOST_PAUSE
+            else:
+                pl_.FEED_HOST_PAUSE = pause0
+            for r in fixtures:
+                r()
+    check("weekly check, read ahead: two feeds of one host are a pause apart while another host is read meanwhile, never more than three feeds are being read (a Crossref journal waits its place), "
+          "and a feed on the lookups' own hosts is not read ahead", t_feeds_ahead_pace)
 
     def t_screen_errors():
         """A screening that fails says why, in the provider's words; an answer that asking again cannot change (a model without structured output, a refused key) stops the

@@ -713,10 +713,124 @@ def set_j(run, emit, abbr, **kw):
     emit("journal", dict(st))
 
 
+FEEDS_AT_ONCE = 3                                        # feeds being read at once, the one of the journal whose turn it is included (always of different hosts)
+FEED_HOST_PAUSE = 1.0                                    # seconds between two feeds of one host (one after the other, never at once)
+NOT_AHEAD = ("api.crossref.org", "api.openalex.org")     # never read ahead: the lookups of the journal whose turn it is ask these hosts
+
+
+def feed_host(j):
+    """The host a journal's feed is read from, or None for a journal that is not read ahead: one read through Crossref (source "crossref"), or a feed without a host."""
+    if j.get("source") != "rss":
+        return None
+    try:
+        host = urllib.parse.urlsplit(j.get("feed") or "").hostname      # (in small letters)
+    except ValueError:
+        return None
+    return host if host and host not in NOT_AHEAD else None
+
+
+class _FeedsAhead:
+    """The weekly check's feeds, read ahead of the journal whose turn it is: while the check looks one journal's new papers up, up to FEEDS_AT_ONCE threads read the
+    feeds of the journals after it. Only reading is done here (fx.fetch_journal: one request and its parsing, no state): the check itself takes the answers one
+    journal at a time and in the journals' order through get(), so what is shown, saved and remembered, and in which order, is as with one feed at a time.
+    One host is asked by one thread at a time, its journals in their order and FEED_HOST_PAUSE apart, so no host gets two requests at once or more requests than
+    before. A journal read through Crossref is not read ahead: get() reads it in its turn, in the caller's thread, and so it does a feed that nobody has started
+    when its turn comes (so a turn that has begun always gets its feed, Stop or not, as before). After close(), or once `stop` is set, nothing more is read ahead
+    (a feed being read is finished and dropped). The threads are daemons: quitting does not wait for a feed."""
+
+    def __init__(self, js, stop):
+        self.fetch = fx.fetch_journal                    # (taken once: a thread that outlives the check never calls whatever the name means later)
+        self.js, self.stop = list(js), stop
+        self.cond = threading.Condition()
+        self.closed = False
+        self.flying = 0                                  # feeds being read now (never more than FEEDS_AT_ONCE)
+        self.busy = set()                                # hosts being asked now
+        self.free_at = {}                                # host -> when it may be asked again (FEED_HOST_PAUSE after its last answer)
+        self.hosts = [feed_host(j) for j in self.js]
+        self.todo = [n for n, host in enumerate(self.hosts) if host]      # journals nobody has started reading, in their order
+        self.box = [{"done": threading.Event(), "items": None, "error": None} for _ in self.js]
+        for _ in range(min(FEEDS_AT_ONCE, len(set(self.hosts) - {None}))):
+            threading.Thread(target=self._work, daemon=True).start()
+
+    def _free(self, n):
+        """Whether journal n's feed may be asked now (call with self.cond held): a place of the FEEDS_AT_ONCE is free, and its host is not being asked and has had its pause."""
+        host = self.hosts[n]
+        return self.flying < FEEDS_AT_ONCE and (not host or (host not in self.busy and time.monotonic() >= self.free_at.get(host, 0)))
+
+    def _take(self, n):
+        """Journal n is being read from now on (call with self.cond held, after _free(n))."""
+        if n in self.todo:
+            self.todo.remove(n)
+        self.flying += 1
+        if self.hosts[n]:
+            self.busy.add(self.hosts[n])
+
+    def _read(self, n):
+        b, host = self.box[n], self.hosts[n]
+        try:
+            b["items"] = self.fetch(self.js[n])
+        except BaseException as e:  # noqa: BLE001      (raised again by get(), in the journal's turn)
+            b["error"] = e
+        finally:
+            with self.cond:
+                self.flying -= 1
+                if host:
+                    self.busy.discard(host)
+                    self.free_at[host] = time.monotonic() + FEED_HOST_PAUSE
+                self.cond.notify_all()
+            b["done"].set()
+
+    def _work(self):
+        """One of the threads that read ahead: the first journal not started whose feed may be asked, again and again, until none is left, Stop or close()."""
+        while True:
+            with self.cond:
+                while True:
+                    if self.closed or self.stop.is_set() or not self.todo:
+                        return
+                    n = next((k for k in self.todo if self._free(k)), None)
+                    if n is not None:
+                        break
+                    self.cond.wait(0.1)
+                self._take(n)
+            self._read(n)
+
+    def get(self, n):
+        """The items of journal number n (what fx.fetch_journal returns), or its error raised. Called in the journal's turn: a feed read ahead is waited for,
+        one nobody has started (a Crossref journal, or a feed whose host was busy or pausing) is read here, once its host and a place are free."""
+        with self.cond:
+            mine = self.hosts[n] is None or n in self.todo
+            if mine:
+                if n in self.todo:
+                    self.todo.remove(n)                  # (from now on no other thread starts it)
+                while not self._free(n):
+                    self.cond.wait(0.1)
+                self._take(n)
+        if mine:
+            self._read(n)
+        b = self.box[n]
+        b["done"].wait()
+        if b["error"] is not None:
+            raise b["error"]
+        return b["items"]
+
+    def close(self):
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+
+
 def fetch_weekly(run, emit, stop):
+    js = [j for j in journals() if j.get("weekly", True)]
+    ahead = _FeedsAhead(js, stop)
+    try:
+        _fetch_weekly(run, emit, stop, js, ahead)
+    finally:
+        ahead.close()
+
+
+def _fetch_weekly(run, emit, stop, js, ahead):
     seen_path = os.path.join(STATE, "seen.json")
     seen = load_json(seen_path, {})
-    js = [j for j in journals() if j.get("weekly", True)]
     fresh_all = []
     for j in js:
         set_j(run, emit, j["abbr"], state="queued", label="Waiting", done=0, total=0)
@@ -726,7 +840,7 @@ def fetch_weekly(run, emit, stop):
         emit("progress", {"stage": "fetching", "label": "Fetching %s" % j["abbr"], "done": n - 1, "total": len(js)})
         set_j(run, emit, j["abbr"], state="fetching", label="Reading feed")
         try:
-            items = fx.fetch_journal(j)
+            items = ahead.get(n - 1)                    # (its feed: read ahead meanwhile, or read now)
         except Exception as e:
             run.errors.append("%s: %s" % (j["abbr"], str(e)[:120]))
             emit("log", {"msg": "%s feed failed: %s" % (j["abbr"], str(e)[:120]), "level": "warn"})

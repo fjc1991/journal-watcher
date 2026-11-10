@@ -511,6 +511,7 @@ def fake_ol(title='', authors=None, isbn='', rows=4):                           
 bks.openlibrary_search = fake_ol
 bks.crossref_books = lambda title, rows=3: []
 fx.fetch_journal = lambda j: []                                                   # the weekly check reads no real feed (only the followed authors bring papers)
+pl.FEED_HOST_PAUSE = 0                                                            # ... and does not wait between two feeds of one host
 """.replace('SCREENLOG', repr(os.path.join(TMP, 'screened.log'))).replace('SSRNLOG', repr(os.path.join(TMP, 'ssrn.log'))).replace('IMPLOG', repr(os.path.join(TMP, 'imp.log')))
     runner = head + search_fakes + FAKE_BROWSER + tail
     srv_log = os.path.join(tempfile.gettempdir(), "jw-ui-server-%d.log" % os.getpid()); srv_err = open(srv_log, "w")     # what the app prints: kept when a check fails
