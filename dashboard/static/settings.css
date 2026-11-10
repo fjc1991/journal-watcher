@@ -80,3 +80,11 @@ body.settings-open { overflow: hidden; }
 table.af td:nth-child(2), table.af td:nth-child(3) { white-space: nowrap; }
 
 .pc-row { padding: 10px 0; border-top: 1px solid var(--line); } .pc-row b { overflow-wrap: anywhere; } .pc-row small { color: var(--ink-3); }
+
+/* Journals & interests */
+.wl-topic { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; background: var(--bg-2, transparent); }
+.wl-topic textarea { width: 100%; margin-top: 6px; font: inherit; resize: vertical; }
+#wl-missing { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; margin: 8px 0 12px; line-height: 1.6; }
+#wl-journals .wl-group th { padding-top: 16px; font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+#wl-journals .wl-group th small { margin-left: 6px; }
+#wl-journals td:nth-child(3), #wl-journals td:nth-child(4) { white-space: nowrap; }

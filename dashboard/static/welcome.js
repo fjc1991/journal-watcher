@@ -6,7 +6,7 @@ import {$, $$, esc, api, toast, ico} from "./state.js";
 const KEY = "jw-welcome";
 const SITE = {anthropic: ["Anthropic (Claude)", "https://console.anthropic.com/settings/keys", "console.anthropic.com"], openai: ["OpenAI", "https://platform.openai.com/api-keys", "platform.openai.com"],
   gemini: ["Google Gemini", "https://aistudio.google.com/apikey", "aistudio.google.com"], openrouter: ["OpenRouter", "https://openrouter.ai/keys", "openrouter.ai"]};
-const STEPS = ["Welcome", "AI keys", "Sign-ins", "Around the app", "Ready"];
+const STEPS = ["Welcome", "AI keys", "Sign-ins", "Your interests", "Around the app", "Ready"];
 let dlg = null, step = 0, AI = null, CFG = null, SIN = null, chosen = "anthropic", saved = {};
 
 const seen = () => { try { return !!localStorage.getItem(KEY); } catch (e) { return true; } };
@@ -70,6 +70,18 @@ const pages = [
         ${btn("publishers", "Other publisher sites", "One tab per publisher; choose your university when asked")}</div>
       <div class="wl-msg" id="wl-simsg" role="status"></div></div></div>`; },
 
+  () => { const ts = (CFG && CFG.topics) || [], weekly = CFG ? CFG.journals.filter(j => j.weekly !== false).length : 0, off = CFG ? CFG.journals.filter(j => j.weekly === false && !j.needs_query).length : 0;
+    return `<h2>Your interests: what the app looks for</h2>
+    <p class="wl-lead">Every new paper is compared with <b>your topics</b>: a list of words and phrases per topic. Only papers that match are shown to the AI, which then judges them against the same topics. Until you put in your own, the app looks for three example topics, and that would spend AI money on papers you do not care about.</p>
+    <div class="wl-two"><div>
+      <h3>Your topics now</h3>
+      <ul class="wl-list">${ts.length ? ts.map(t => `<li>${esc(t)}</li>`).join("") : "<li>None yet.</li>"}</ul>
+      <p class="meta">These three are the examples the app starts with if you have not changed them: GenAI, Platform Economics, Decision Support Systems.</p></div>
+    <div>
+      <h3>Your journals</h3>
+      <p>${weekly} journal${weekly === 1 ? " is" : "s are"} read by the weekly check${off ? `, and ${off} more are in your list, switched off: the rest of the <b>AIS basket of eleven</b> and of the <b>UTD 24</b>` : ""}. You switch each one on or off.</p>
+      <div class="wl-btns"><button class="btn primary" data-si="interests"><b>Set my topics and journals</b><span>Opens Settings → Journals &amp; interests; you can come back to this guide from Search</span></button></div></div></div>`; },
+
   () => `<h2>Finding your way around</h2>
     <div class="wl-map">
       <div><span class="wl-ci" data-tool="watch">${ico("watch")}</span><b>Watch</b><span>Press <i>Check for new papers</i>. The app screens them, you tick the ones you want and press <i>Download &amp; summarize</i>.</span></div>
@@ -105,6 +117,7 @@ async function onClick(e) {
   if (w === "back") { step = Math.max(0, step - 1); return draw(); }
   if (w === "skip" || w === "finish") { mark(); dlg.close(); return; }
   if (t.dataset.si === "setup") { mark(); dlg.close(); if (window.Settings) Settings.open("library"); return; }
+  if (t.dataset.si === "interests") { mark(); dlg.close(); if (window.Settings) Settings.open("watch"); return; }
   if (t.dataset.si) { try { await api("/api/login", {which: t.dataset.si}); saved.signin = true; $("#wl-simsg", dlg).innerHTML = `${ico("check", "sm")} A sign-in window is opening. Sign in there; it closes by itself when you are done.`; } catch (er) { $("#wl-simsg", dlg).textContent = er.message; } return; }
   if (t.id === "wl-save") {
     const inp = $("#wl-key", dlg), msg = $("#wl-keymsg", dlg); if (!inp.value.trim()) { msg.textContent = "Paste the key first."; return; }

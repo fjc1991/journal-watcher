@@ -11,10 +11,13 @@ const FEATURES = [["ask", "Ask the paper", "Questions answered from the paper's 
   ["folder_ask", "Ask a folder or the library", "Questions answered from passages or cards of several papers"], ["matrix", "Comparison matrix", "Fills your own columns, one call per paper"],
   ["skim", "Skim layer", "Finds the key sentences of a paper by lens (question, finding, limitation…)"]];
 const money = v => exactCost(v, "—");
-const TABS = [["ai", "AI"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["sync", "Computers & sync"], ["about", "About & updates"]];
+const TABS = [["ai", "AI"], ["watch", "Journals & interests"], ["reader", "Reader & summaries"], ["files", "AI files & backup"], ["library", "Library access"], ["sources", "Paper sources"], ["look", "Appearance"], ["sync", "Computers & sync"], ["about", "About & updates"]];
 const AI_SUBS = [["ai", "AI & privacy"], ["usage", "Usage & cost"], ["prompts", "Prompts"]];      // three pages under the one main tab "AI" (their keys are unchanged: Settings.open("usage") still opens Usage & cost)
 const groupOf = t => AI_SUBS.some(([k]) => k === t) ? "ai" : t;
 let lastAI = "ai";      // the AI page you were on, for when you come back to the AI tab
+let dirty = false;      // something on this page was changed and not saved (pages with a Save button; a control that saves at once carries data-now)
+let watchChanged = false;      // journals or topics were changed: the Watch page is drawn from them once, so it is loaded again when Settings closes
+const leaveOk = () => !dirty || confirm("You have changes on this page that are not saved.\n\nLeave without saving them?");
 
 function build() {
   if (root) return;
@@ -22,11 +25,19 @@ function build() {
   root.innerHTML = `<div class="st-head"><button class="btn back" id="st-back">← Back</button><h1>Settings</h1><div class="st-tabs">${TABS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div></div><div class="st-sub hide" id="st-sub" aria-label="AI settings">${AI_SUBS.map(([k, t]) => `<button data-t="${k}">${t}</button>`).join("")}</div><div class="st-body" id="st-body"></div>`;
   document.body.append(root);
   $("#st-back", root).onclick = close;
-  $$(".st-tabs button", root).forEach(b => b.onclick = () => { tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
-  $$(".st-sub button", root).forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
+  $$(".st-tabs button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t === "ai" ? lastAI : b.dataset.t; render(); });
+  $$(".st-sub button", root).forEach(b => b.onclick = () => { if (!leaveOk()) return; tab = b.dataset.t; render(); });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && !root.classList.contains("hide") && !e.target.closest("input,textarea,select")) close(); });
+  const touched = e => { if ($("#st-save", root) && !e.target.closest("[data-now]") && e.target.closest("#st-body")) dirty = true; };      // (a page with a Save button: what you type is not kept until you press it)
+  root.addEventListener("input", touched); root.addEventListener("change", touched);
+  addEventListener("beforeunload", e => { if (dirty && root && !root.classList.contains("hide")) { e.preventDefault(); e.returnValue = ""; } });
 }
-export function close() { root?.classList.add("hide"); document.body.classList.remove("settings-open"); }
+export function close() {
+  if (!root || root.classList.contains("hide")) return;
+  if (!leaveOk()) return;
+  dirty = false; root.classList.add("hide"); document.body.classList.remove("settings-open");
+  if (watchChanged) { watchChanged = false; location.reload(); }      // (the Watch page's journals and topics are drawn once, at its start)
+}
 export async function open(t) {
   build(); if (t) tab = t;
   if (window.About) About.close();
@@ -36,15 +47,81 @@ export async function open(t) {
 }
 function render() {
   if (!D) return;          // a tab pressed before the settings arrived: open() draws the page when they do
+  dirty = false;
   if (groupOf(tab) === "ai") lastAI = tab;
   $$(".st-tabs button", root).forEach(b => b.classList.toggle("on", b.dataset.t === groupOf(tab)));
   $("#st-sub", root).classList.toggle("hide", groupOf(tab) !== "ai");
   $$(".st-sub button", root).forEach(b => b.classList.toggle("on", b.dataset.t === tab));
   const on = $(".st-tabs button.on", root); if (on && on.scrollIntoView) on.scrollIntoView({block: "nearest", inline: "nearest"});      // a narrow window scrolls the row: keep the open tab in view
   const body = $("#st-body", root);
-  ({ai: renderAI, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, sync: renderSync, about: renderAbout})[tab](body);
+  ({ai: renderAI, watch: renderWatch, usage: renderUsage, prompts: renderPrompts, reader: renderReader, files: renderFiles, library: renderLibraryAccess, sources: renderSources, look: renderLook, sync: renderSync, about: renderAbout})[tab](body);
 }
-const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); };
+const note = (el, msg, bad) => { el.textContent = msg; el.classList.toggle("bad", !!bad); if (!bad && el.id === "st-msg") dirty = false; };      // (a page's "Saved": nothing is unsaved any more)
+
+// ---------------------------------------------------------------- Journals & interests
+// Your topics (what papers are screened against), the methods, and the journals: which are read by the weekly check and which are ticked for a search by year.
+// Topics are saved with the button (they are checked first); a journal's switch is saved as you flip it.
+const PUBNAME = {aisel: "AIS eLibrary", informs: "INFORMS", wiley: "Wiley", tandfonline: "Taylor & Francis", elsevier: "Elsevier", acm: "ACM", aaas: "AAAS", pnas: "National Academy of Sciences",
+  nber: "NBER", hbr: "Harvard Business Publishing", ssrn: "SSRN", sage: "SAGE", oup: "Oxford University Press", aaa: "American Accounting Association", aom: "Academy of Management", springer: "Springer"};
+const topicRow = (t, kind) => `<div class="wl-topic" data-kind="${kind}" data-name="${esc(t.name || "")}">
+    <div class="row" style="gap:8px"><input type="text" class="wl-label" value="${esc(t.label || "")}" placeholder="${kind === "topic" ? "Name of the topic, e.g. Platform economics" : "Name of the method, e.g. Field experiments"}" aria-label="Name" style="flex:1">
+      <button class="btn small" data-wlrm title="Remove this ${kind}">Remove</button></div>
+    ${kind === "method" ? `<input type="text" class="wl-desc" value="${esc(t.description || "")}" placeholder="One sentence the model reads to recognise it" aria-label="Description" style="width:100%;margin-top:6px">` : ""}
+    <textarea class="wl-terms" rows="3" aria-label="Words and phrases" placeholder="Words and phrases to look for, separated by commas or new lines">${esc((t.terms || []).join(", "))}</textarea></div>`;
+function journalRows(W) {
+  const groups = [...Object.entries(W.sets).map(([k, name]) => [k, name, W.journals.filter(j => j.sets.includes(k))]), ["", "Other journals", W.journals.filter(j => !j.sets.length)]].filter(g => g[2].length);
+  return groups.map(([k, name, js]) => `<tr class="wl-group"><th colspan="2">${esc(name)} <small>${js.filter(j => j.weekly).length} of ${js.length} in the weekly check</small></th>
+      <th colspan="2"><button class="linkbtn" data-wlall="${esc(k)}" data-on="1">weekly check: all on</button> · <button class="linkbtn" data-wlall="${esc(k)}" data-on="0">all off</button></th></tr>` +
+    js.map(j => `<tr data-j="${esc(j.abbr)}"><td><b>${esc(j.name)}</b> <small>${esc(j.abbr)}${j.sets.length > 1 && k ? " · also in the " + esc(j.sets.filter(s => s !== k).map(s => W.sets[s]).join(", ")) : ""}</small></td>
+      <td><small>${esc(PUBNAME[j.publisher] || j.publisher)}</small></td>
+      <td><label class="chk"><input type="checkbox" data-now data-wlsw="weekly"${j.weekly ? " checked" : ""}${j.abbr === "SSRN" ? " disabled" : ""}> weekly check</label></td>
+      <td><label class="chk"><input type="checkbox" data-now data-wlsw="search"${j.search ? " checked" : ""}${j.can_search ? "" : " disabled"}> ticked for a search</label></td></tr>`).join("")).join("");
+}
+async function renderWatch(body) {
+  body.innerHTML = `<div class="card st-card"><p class="pmeta">Loading…</p></div>`;
+  let W, I;
+  try { [W, I] = await Promise.all([api("/api/journals"), api("/api/interests")]); } catch (e) { body.innerHTML = `<div class="card st-card">${errInline(e)}</div>`; return; }
+  if (tab !== "watch") return;
+  const draw = () => {
+    body.innerHTML = `<div class="card st-card"><h2>Your topics <small>what every new paper is compared with</small></h2>
+      <p class="pmeta">A paper is kept when its title, keywords or abstract contain enough of a topic's words (a word in the title counts 3, in the keywords 2, in the abstract 1), and the AI then judges it against the same topics. The three topics the app starts with are only examples: replace them with your own.</p>
+      <div id="wl-topics">${I.topics.map(t => topicRow(t, "topic")).join("")}</div>
+      <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="wl-addt">＋ Add a topic</button>
+        <label class="chk">A paper needs a score of <input type="number" id="wl-min" min="1" max="20" value="${esc(I.min_score)}" style="width:4.5em"> <small>lower lets more papers through to the AI (and costs more)</small></label></div>
+      <h2 style="margin-top:18px">Methods <small>optional: a paper can also be marked by how it was done</small></h2>
+      <div id="wl-methods">${I.methods.map(t => topicRow(t, "method")).join("")}</div>
+      <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="wl-addm">＋ Add a method</button></div>
+      <div class="st-actions"><button class="btn primary" id="st-save">Save topics and methods</button> <span id="st-msg" class="st-msg"></span></div></div>
+    <div class="card st-card"><h2>Your journals <small>${W.journals.filter(j => j.weekly).length} are read by the weekly check</small></h2>
+      <p class="pmeta">“Weekly check” decides whether <b>Check for new papers</b> reads a journal. “Ticked for a search” decides whether it starts ticked when you search by year (you can still tick any journal there). A switch is saved as you flip it. More journals in the weekly check means more papers to screen each week.</p>
+      ${W.missing.length ? `<div id="wl-missing"><b>${W.missing.length} journal${W.missing.length === 1 ? "" : "s"} of the AIS basket and the UTD 24 ${W.missing.length === 1 ? "is" : "are"} not in your list</b> <small>(${esc(W.missing.slice(0, 6).map(j => j.abbr).join(", "))}${W.missing.length > 6 ? ", …" : ""})</small>.
+        <button class="btn small primary" id="wl-add">Add ${W.missing.length === 1 ? "it" : "them"}, switched off</button> <small>None of your own entries is changed; you switch on the ones you want below.</small></div>` : ""}
+      <table class="st-table" id="wl-journals">${journalRows(W)}</table><span class="st-msg" id="wl-jmsg"></span></div>`;
+  };
+  draw();
+  const collect = (box, kind) => $$(`#${box} .wl-topic`, body).map(d => ({name: d.dataset.name, label: $(".wl-label", d).value, terms: $(".wl-terms", d).value, ...(kind === "method" ? {description: $(".wl-desc", d).value} : {})}));
+  const done = r => { W = {journals: r.journals, missing: r.missing, sets: r.sets}; watchChanged = true; const y = $("#st-body", root).scrollTop; draw(); $("#st-body", root).scrollTop = y; };
+  body.onclick = async e => {
+    if (e.target.closest("#wl-addt")) { $("#wl-topics", body).insertAdjacentHTML("beforeend", topicRow({}, "topic")); dirty = true; $("#wl-topics .wl-topic:last-child .wl-label", body).focus(); return; }
+    if (e.target.closest("#wl-addm")) { $("#wl-methods", body).insertAdjacentHTML("beforeend", topicRow({}, "method")); dirty = true; $("#wl-methods .wl-topic:last-child .wl-label", body).focus(); return; }
+    const rm = e.target.closest("[data-wlrm]"); if (rm) { rm.closest(".wl-topic").remove(); dirty = true; return; }
+    if (e.target.closest("#st-save")) {
+      const msg = $("#st-msg", body);
+      try { const r = await api("/api/interests", {topics: collect("wl-topics", "topic"), methods: collect("wl-methods", "method"), min_score: $("#wl-min", body).value});
+        I = r; dirty = false; watchChanged = true; draw(); note($("#st-msg", body), "Saved. The next check and search use them."); }
+      catch (er) { msg.innerHTML = errInline(er); }
+      return;
+    }
+    if (e.target.closest("#wl-add")) { try { const r = await api("/api/journals", {action: "add_missing"}); done(r); toast(`${r.added.length} journal${r.added.length === 1 ? "" : "s"} added, switched off.`); } catch (er) { $("#wl-jmsg", body).innerHTML = errInline(er); } return; }
+    const all = e.target.closest("[data-wlall]");
+    if (all) { const k = all.dataset.wlall, abbrs = W.journals.filter(j => (k ? j.sets.includes(k) : !j.sets.length) && j.abbr !== "SSRN").map(j => j.abbr);
+      try { done(await api("/api/journals", {action: "switch", abbrs, weekly: all.dataset.on === "1"})); } catch (er) { $("#wl-jmsg", body).innerHTML = errInline(er); } }
+  };
+  body.onchange = async e => {
+    const sw = e.target.closest("[data-wlsw]"); if (!sw) return;
+    try { done(await api("/api/journals", {action: "switch", abbrs: [sw.closest("tr").dataset.j], [sw.dataset.wlsw]: sw.checked})); } catch (er) { sw.checked = !sw.checked; $("#wl-jmsg", body).innerHTML = errInline(er); }
+  };
+}
 
 // ---------------------------------------------------------------- AI & privacy
 function srcText(au) {               // where an automatic price comes from, in words

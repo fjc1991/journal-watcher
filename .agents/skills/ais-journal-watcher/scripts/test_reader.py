@@ -5743,6 +5743,71 @@ print("OK")
                 pass
         sid = items[0]["id"]
         assert sm.rename(sid, "Platforms")[0]["name"] == "Platforms" and sm.delete(sid) == [] and not os.path.exists(sm.PATH)
+    def t_watchlist():
+        """Settings → Journals & interests: the shipped list, adding what your list lacks without touching yours, the two switches, and topics checked before they are written."""
+        import watchlist as wl, re as _re
+        shipped = json.load(open(os.path.join(paths.DEFAULTS, "journals.json")))["journals"]
+        abbrs = [j["abbr"] for j in shipped]
+        assert len(shipped) == 38 and len(set(abbrs)) == 38 and len({j["issn"] for j in shipped if j.get("issn")}) == 36, (len(shipped), len(set(abbrs)))
+        assert all(_re.fullmatch(r"\d{4}-\d{3}[\dX]", j["issn"]) for j in shipped if j.get("issn")) and all(_re.fullmatch(r"[A-Z]{2,5}", a) for a in abbrs), abbrs
+        in_set = lambda k: {j["abbr"] for j in shipped if k in (j.get("sets") or [])}                                   # noqa: E731
+        assert len(in_set("ais")) == 11 and len(in_set("utd")) == 24 and in_set("ais") & in_set("utd") == {"MISQ", "ISR"}, (in_set("ais"), in_set("utd"))
+        first14 = shipped[:14]
+        assert all(j.get("weekly", True) and not j.get("default_off") for j in first14 if j["abbr"] != "HBR"), "a journal that was watched before is switched off"
+        assert all(j.get("weekly") is False and j.get("default_off") is True and j["source"] == "crossref" for j in shipped[14:]), "a new journal is not switched off"
+        keep = (wl.JOURNALS, wl.INTERESTS); tmp = tempfile.mkdtemp(prefix="jw-wl-")
+        wl.JOURNALS, wl.INTERESTS = os.path.join(tmp, "journals.json"), os.path.join(tmp, "interests.json")
+        try:
+            mine = {"_comment": "my own", "journals": [dict(shipped[0], name="MISQ (mine)", feed="https://example.org/my.rss", per_year=1), {"name": "My Workshop", "abbr": "MYW", "publisher": "x", "source": "rss", "feed": "https://example.org/w.rss"},
+                                                      {"name": "Org Science under another name", "abbr": "OS", "publisher": "informs", "source": "crossref", "issn": "1047-7039"}]}
+            json.dump(mine, open(wl.JOURNALS, "w"))
+            w = wl.journals()
+            assert [j["abbr"] for j in w["journals"]] == ["MISQ", "MYW", "OS"] and len(w["missing"]) == 36 and "ORSC" not in [m["abbr"] for m in w["missing"]], [m["abbr"] for m in w["missing"]]
+            assert w["journals"][0]["sets"] == ["ais", "utd"] and w["journals"][2]["sets"] == ["utd"] and w["journals"][1]["sets"] == [], w["journals"]      # (the lists are known by ISSN although the file has no "sets")
+            added = wl.add_missing()
+            d = json.load(open(wl.JOURNALS))
+            assert len(added) == 36 and d["journals"][:3] == mine["journals"] and d["_comment"] == "my own", "an entry of yours was changed"
+            assert all(j["weekly"] is False and j["default_off"] is True for j in d["journals"][3:]), "a journal was added switched on"
+            assert [j["abbr"] for j in d["journals"]].count("ORSC") == 0 and wl.add_missing() == [] and wl.journals()["missing"] == []      # (the same ISSN is not added under its other name; nothing twice)
+            assert not [f for f in os.listdir(tmp) if "tmp" in f], os.listdir(tmp)
+            # the two switches: only they change, only for the named journals
+            before = json.load(open(wl.JOURNALS))
+            assert wl.switch(["JF", "JFE"], weekly=True) == 2 and wl.switch(["JF"], weekly=True) == 0
+            after = json.load(open(wl.JOURNALS)); row = lambda dd, a: next(j for j in dd["journals"] if j["abbr"] == a)   # noqa: E731
+            assert "weekly" not in row(after, "JF") and row(after, "JF")["default_off"] is True and row(after, "RFS") == row(before, "RFS") and after["journals"][:3] == mine["journals"]
+            assert wl.switch(["JF"], search=True) == 1 and "default_off" not in row(json.load(open(wl.JOURNALS)), "JF")
+            assert wl.switch(["MISQ"], weekly=False, search=False) == 1 and row(json.load(open(wl.JOURNALS)), "MISQ")["weekly"] is False and row(json.load(open(wl.JOURNALS)), "MISQ")["feed"] == "https://example.org/my.rss"
+            jw = {j["abbr"]: j for j in wl.journals()["journals"]}
+            assert jw["JF"]["weekly"] and jw["JF"]["search"] and not jw["MISQ"]["weekly"] and not jw["MISQ"]["search"] and not jw["RFS"]["weekly"], jw["JF"]
+            assert wl.switch(["NOPE"], weekly=True) == 0
+            json.dump([1, 2], open(wl.JOURNALS, "w"))
+            try:
+                wl.journals(); raise AssertionError("a journals.json that is not a list of journals was taken")
+            except ValueError as e:
+                assert "journals.json" in str(e)
+            # topics: checked first, your file's other fields kept, a topic keeps its inner name
+            json.dump({"_comment": "c", "min_score": 3, "negative_terms": ["erratum"], "extra": {"a": 1}, "topics": [{"name": "genai", "label": "GenAI", "terms": ["LLM"]}], "methods": []}, open(wl.INTERESTS, "w"))
+            r = wl.save_interests({"topics": [{"name": "genai", "label": "Generative AI", "terms": "LLM, large language model\nLLM;  ChatGPT "}, {"label": "Platform markets", "terms": ["two-sided market"]}],
+                                   "methods": [{"label": "Field experiments", "description": "A randomised experiment in the field.", "terms": ["field experiment"]}], "min_score": "4"})
+            d = json.load(open(wl.INTERESTS))
+            assert d["topics"] == [{"name": "genai", "label": "Generative AI", "terms": ["LLM", "large language model", "ChatGPT"]}, {"name": "platform_markets", "label": "Platform markets", "terms": ["two-sided market"]}], d["topics"]
+            assert d["min_score"] == 4 and d["negative_terms"] == ["erratum"] and d["extra"] == {"a": 1} and d["_comment"] == "c" and d["methods"][0]["name"] == "field_experiments" and r["topics"][0]["label"] == "Generative AI"
+            good = open(wl.INTERESTS).read()
+            for bad, why in (({"topics": []}, "at least one topic"), ({"topics": [{"label": "", "terms": ["x"]}]}, "no name"), ({"topics": [{"label": "A", "terms": " , "}]}, "at least one word"),
+                             ({"topics": [{"label": "A", "terms": ["x"]}, {"label": "a", "terms": ["y"]}]}, "called"), ({"topics": "x"}, "not a list"), ({"min_score": "many"}, "whole number"),
+                             ({"min_score": 0}, "between 1 and 20"), ({"topics": [{"label": "A", "terms": ["t%d" % i for i in range(201)]}]}, "more than 200")):
+                try:
+                    wl.save_interests(bad); raise AssertionError("saved: %r" % (bad,))
+                except ValueError as e:
+                    assert why in str(e), (bad, str(e))
+                assert open(wl.INTERESTS).read() == good, "a refused save changed the file"
+        finally:
+            wl.JOURNALS, wl.INTERESTS = keep; shutil.rmtree(tmp, ignore_errors=True)
+        # the weekly check reads only the journals that are on: the shipped list still reads the fourteen it read before (SSRN never)
+        import pipeline as pl_w
+        assert [j["abbr"] for j in pl_w.journals() if j.get("weekly", True)] == [j["abbr"] for j in first14], [j["abbr"] for j in pl_w.journals() if j.get("weekly", True)]
+    check("your journals and interests: the shipped list is the AIS basket and the UTD 24 with the new journals switched off; adding them never changes an entry of yours or adds one twice; a switch changes only itself; topics are checked before they are written and a refused save changes nothing", t_watchlist)
+
     check("saved searches: names and filters are cleaned, repeats refused, an empty list leaves no file", t_smart)
 
     def t_personal():
