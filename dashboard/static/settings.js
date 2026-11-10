@@ -198,6 +198,8 @@ function renderPrompts(body) {
 
 // ---------------------------------------------------------------- reader preferences, colour legend, summary templates
 // ---------------------------------------------------------------- AI files & backup
+const delHtml = D => { const xs = (D && D.kept) || []; return xs.length ? `<table class="st-table"><tr><th>Deleted</th><th>What</th><th>Kept for</th><th></th></tr>${xs.map(x => `<tr><td>${esc(x.when)}</td><td>${esc(x.title)}${x.kind === "book" ? ` <span class="pill">book</span>` : ""}</td><td>${x.days_left} more day${x.days_left === 1 ? "" : "s"}</td><td><button class="btn small" data-undel="${esc(x.token)}">Put back</button></td></tr>`).join("")}</table>` : `<p class="pmeta">Nothing: papers and books you delete are kept here for 30 days, with their notes and highlights, and can be put back.</p>`; };
+const snapHtml = S => { const xs = (S && S.snapshots) || []; return xs.length ? `<table class="st-table"><tr><th>Taken</th><th>Size</th><th></th></tr>${xs.map(x => `<tr><td>${esc(x.when)}${x.before_restore ? ` <span class="pill" title="What you had just before a restore">before a restore</span>` : ""}</td><td>${bytes(x.bytes)}</td><td><button class="btn small" data-snap="${esc(x.name)}" data-when="${esc(x.when)}">Restore…</button></td></tr>`).join("")}</table>` : `<p class="pmeta">None yet: the first is taken the next time the app starts (or press the button).</p>`; };
 const bytes = n => n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB" : (n / 1073741824).toFixed(1) + " GB";
 // ---- Check my PDFs: is each PDF the paper it is filed under? (identity.py; the server reads them in the background and keeps the answer until the app closes)
 let PC = null;
@@ -231,7 +233,7 @@ async function pcClick(body, e) {
 }
 async function renderFiles(body) {
   body.innerHTML = `<div class="card st-card"><span class="ask-status">Counting files…</span></div>`;
-  let R; try { R = await api("/api/aifiles"); } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
+  let R; try { R = await api("/api/aifiles"); R.snaps = await api("/api/snapshots").catch(() => null); R.del = await api("/api/library/deleted").catch(() => null); } catch (e) { body.innerHTML = `<div class="card st-card">${errBox(e)}</div>`; return; }
   const draw = () => {
     const total = R.kinds.reduce((a, k) => a + k.bytes, 0), b = R.backup, pdfs = $("#af-pdfs", body) ? $("#af-pdfs", body).checked : false;
     body.innerHTML = `<div class="card st-card" id="pc-card"><h2>Check my PDFs</h2>
@@ -240,6 +242,12 @@ async function renderFiles(body) {
       <p class="pmeta">A zip of everything that is yours: highlights and notes, paper cards, skims, conversations, folders with their matrices and idea boards, tags, reading status, the library index, your prompts and settings (no API keys). ${bytes(b.data_bytes)} in ${b.files} files.</p>
       <label class="chk"><input type="checkbox" id="af-pdfs"${pdfs ? " checked" : ""}> Include the PDFs too (${bytes(b.pdf_bytes)}; they stay where they are in <code>Papers/</code> either way)</label>
       <div class="row" style="gap:8px;margin-top:8px"><button class="btn primary" id="af-dl">Download the backup (.zip)</button>${R.export_dir ? `<button class="btn" id="af-save" title="${esc(R.export_dir)}">Save it into my export folder</button>` : `<span class="pmeta">Set an export folder in “Reader &amp; summaries” to save it there directly.</span>`}<span class="st-msg" id="af-msg"></span></div></div>
+    <div class="card st-card" id="snap-card"><h2>Daily snapshots <small>on this computer</small></h2>
+      <p class="pmeta">Once a day, when the app starts, a copy of everything that is yours (not the PDFs) is kept on this computer, outside the synced folder: the last ${(R.snaps || {}).keep || 14}. Restoring one puts your notes, folders, library index and settings back as they were then; what you have now is kept first, so a restore can be undone.</p>
+      <div id="snap-list">${snapHtml(R.snaps)}</div>
+      <div class="row" style="gap:8px;margin-top:8px"><button class="btn small" id="snap-now">Take one now</button><span class="st-msg" id="snap-msg"></span></div></div>
+    <div class="card st-card" id="del-card"><h2>Recently deleted <small>kept for ${(R.del || {}).days || 30} days</small></h2>
+      <div id="del-list">${delHtml(R.del)}</div><span class="st-msg" id="del-msg"></span></div>
     <div class="card st-card"><h2>What the AI has written or saved <small>${bytes(total)} in all</small></h2>
       <p class="pmeta">Your highlights and notes are never listed here and are never touched. Anything that is yours or hard to make again is zipped before it is cleared, and can be put back below.</p>
       <table class="st-table af"><tr><th>Kind</th><th>Files</th><th>Size</th><th></th></tr>${R.kinds.map(k => `<tr data-k="${k.id}"><td><b>${esc(k.name)}</b> ${k.human ? `<span class="pill" title="May contain lines you edited, cells you wrote or stars and notes you added">yours</span>` : k.regen ? `<span class="pill" title="Made again by itself, for free or nearly">comes back</span>` : ""}<div class="pmeta">${esc(k.what)}${k.note ? ` <b>${esc(k.note)}.</b>` : ""}</div></td>
@@ -258,6 +266,24 @@ async function renderFiles(body) {
     if (e.target.closest("#pc-card")) return pcClick(body, e);
     const m = $("#af-msg", body), c = e.target.closest("[data-clear]"), rs = e.target.closest("[data-restore]"), mc = e.target.closest("[data-mcpcopy]");
     if (mc) { try { await navigator.clipboard.writeText($("#" + mc.dataset.mcpcopy, body).textContent); toast("Copied."); } catch (er) { notifyError(er); } return; }
+    const ub = e.target.closest("[data-undel]");
+    if (ub) {
+      ub.disabled = true;
+      try { const r = await api("/api/library/restore", {tokens: [ub.dataset.undel]}); R.del = {kept: r.kept, days: (R.del || {}).days}; $("#del-list", body).innerHTML = delHtml(R.del);
+        $("#del-msg", body).textContent = r.errors.length ? r.errors[0].error : `Put back “${(r.restored[0].title || "").slice(0, 60)}”.`; window.dispatchEvent(new Event("jw-library-changed")); }
+      catch (er) { $("#del-msg", body).innerHTML = errInline(er); ub.disabled = false; }
+      return;
+    }
+    const sr = e.target.closest("[data-snap]");
+    if (sr) {
+      const n = sr.dataset.snap, when = sr.dataset.when;
+      if (!confirm(`Put your notes, highlights, folders, tags, reading status, library index and settings back as they were on ${when}?\n\nWhat you have now is kept first in a snapshot of its own, so you can undo this. PDFs are not touched.`)) return;
+      sr.disabled = true;
+      try { const r = await api("/api/snapshots/restore", {name: n}); toast(`Restored ${r.restored} files as of ${when}. Reloading…`); setTimeout(() => location.reload(), 1200); }
+      catch (er) { const sm = $("#snap-msg", body); if (sm) sm.innerHTML = errInline(er); sr.disabled = false; }
+      return;
+    }
+    if (e.target.closest("#snap-now")) { try { const r = await api("/api/snapshots/now", {}); R.snaps = {snapshots: r.snapshots, keep: (R.snaps || {}).keep}; $("#snap-list", body).innerHTML = snapHtml(R.snaps); $("#snap-msg", body).textContent = "Kept."; } catch (er) { $("#snap-msg", body).innerHTML = errInline(er); } return; }
     if (e.target.closest("#af-dl")) { const a = document.createElement("a"); a.href = "/api/backup?pdfs=" + ($("#af-pdfs", body).checked ? 1 : 0); a.download = ""; document.body.append(a); a.click(); a.remove(); if (m) m.textContent = "Building the zip… the download starts in a moment."; }
     else if (e.target.closest("#af-save")) { try { const r = await api("/api/backup/save", {pdfs: $("#af-pdfs", body).checked}); if (m) m.textContent = `Saved ${bytes(r.bytes)} to ${r.path}`; } catch (er) { if (m) m.innerHTML = errInline(er); } }
     else if (c) {
@@ -293,7 +319,7 @@ async function renderSync(body) {
     <div class="card st-card" id="sy-conf"><h2>Copies Dropbox had to make ${R.conflicts.length ? `<small>${R.conflicts.length}</small>` : ""}</h2>
       ${R.conflicts.length ? `<p class="hint">When two computers change the same file before Dropbox has copied the first change, Dropbox keeps both and renames one “… conflicted copy …”. Nothing is deleted by the buttons here: a copy you set aside goes to <code>Papers/_conflicts/</code>.</p>
       <table class="st-table"><tr><th>File</th><th>Changed</th><th></th></tr>${R.conflicts.map(c => `<tr data-p="${esc(c.path)}"><td><code>${esc(c.path)}</code><div class="pmeta">copy of <code>${esc(c.original)}</code>${c.original_exists ? "" : " (that file is gone)"}</div></td><td>${esc(c.modified.slice(0, 10))}</td>
-        <td>${c.kind === "index" && c.original_exists ? `<button class="btn small primary" data-merge="${esc(c.path)}" title="Keeps every paper from both lists">Join the two lists</button> ` : ""}<button class="btn small" data-aside="${esc(c.path)}">Set aside</button></td></tr>`).join("")}</table>`
+        <td>${c.join && c.original_exists ? `<button class="btn small primary" data-merge="${esc(c.path)}" title="${c.join === "index" ? "Keeps every paper from both lists" : "Keeps what is in either copy: nothing of yours is dropped"}">${c.join === "index" ? "Join the two lists" : "Join the two copies"}</button> ` : ""}<button class="btn small" data-aside="${esc(c.path)}">Set aside</button></td></tr>`).join("")}</table>`
       : `<p class="hint ok">✓ None. Dropbox has not had to duplicate any of your files.</p>`}</div>
     <div class="card st-card"><h2>API keys</h2>
       ${AI.keychain ? `<p class="hint">API keys can live in this Mac’s Keychain instead of the <code>.env</code> file in your data folder, so a synced folder never carries them to another computer. You paste each key once on each computer. A key you paste in Settings is saved there from now on.</p>
@@ -306,7 +332,7 @@ async function renderSync(body) {
     const msg = $("#sy-msg", body), b = e.target.closest("button"); if (!b) return;
     try {
       if (b.id === "sy-save") { R = await api("/api/sync", {action: "rename", name: $("#sy-name", body).value}); draw(); toast("Name saved."); }
-      else if (b.dataset.merge) { const r = await api("/api/sync", {action: "merge", path: b.dataset.merge}); R = r; draw(); toast(`Joined: ${r.papers} papers in the list (${r.added} from the other copy). The copy was set aside.`); window.dispatchEvent(new Event("jw-library-changed")); }
+      else if (b.dataset.merge) { const r = await api("/api/sync", {action: "merge", path: b.dataset.merge}); R = r; draw(); toast(`${r.said} The copy was set aside.`); window.dispatchEvent(new Event("jw-library-changed")); }
       else if (b.dataset.aside) { if (!confirm("Set this copy aside?\n\n" + b.dataset.aside + "\n\nIt moves to Papers/_conflicts/ and is not deleted.")) return; R = await api("/api/sync", {action: "set_aside", path: b.dataset.aside}); draw(); toast("Set aside."); }
       else if (b.id === "sy-keys") { const r = await api("/api/ai/keys/move", {}); D.ai = r.config; AI = r.config; inEnv = inEnvN(AI); R = await api("/api/sync"); draw(); toast(r.moved.length ? `Moved ${r.moved.length} key${r.moved.length === 1 ? "" : "s"} to the Keychain.` : "Nothing was moved."); if (Object.keys(r.kept).length) { const m = $("#sy-kmsg", body); if (m) m.textContent = "Not moved: " + Object.entries(r.kept).map(([k, v]) => k + " (" + v + ")").join("; "); } }
     } catch (er) { if (msg) note(msg, er.message, true); else notifyError(er); }

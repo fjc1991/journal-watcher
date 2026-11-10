@@ -2829,7 +2829,7 @@ fx.fetch_journal = lambda j: []                                                 
                 if os.path.exists(marker): break
                 page.wait_for_timeout(250)
             rows_after = list(csv.DictReader(open(idxp, newline=""))); r1 = [r_ for r_ in rows_after if r_["doi"] == "10.9999/pc.wrong1"][0]
-            removed_dirs = os.listdir(os.path.join(TMP, "Papers", "_removed")) if os.path.isdir(os.path.join(TMP, "Papers", "_removed")) else []
+            removed_dirs = [d_ for d_ in os.listdir(os.path.join(TMP, "Papers", "_removed")) if not d_.startswith("deleted-")] if os.path.isdir(os.path.join(TMP, "Papers", "_removed")) else []      # (not what was deleted earlier in this run: that is kept there too, for Undo)
             check("'Remove and download again' moves that PDF and its summary aside (Papers/_removed, nothing deleted), the library forgets it, and the paper is queued for download again",
                   not os.path.exists(os.path.join(folderp, "wrong1.pdf")) and not os.path.exists(os.path.join(folderp, "wrong1.md")) and len(removed_dirs) == 1
                   and os.path.exists(os.path.join(TMP, "Papers", "_removed", removed_dirs[0], "2025-03", "CheckTest", "wrong1.pdf")) and os.path.exists(os.path.join(TMP, "Papers", "_removed", removed_dirs[0], "2025-03", "CheckTest", "wrong1.md"))

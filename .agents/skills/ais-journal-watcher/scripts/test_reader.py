@@ -475,6 +475,54 @@ identity._remove = lambda f: dl.INDEX_LOCK._is_owned()
 assert identity.remove("anything") is True
 identity._remove = keep_rm
 
+# (14j) the sign-in browser does not start: said once in plain words; one paper's error does not stop the others; a full disk stops the batch and says so
+class _NoBr:
+    def __init__(self, **k):
+        dl.BROWSER_ERROR["why"] = "Chromium is missing"
+    def __enter__(self):
+        return None
+    def __exit__(self, *a):
+        return False
+N1 = paper(id="doi:10.1/n1", doi="10.1/n1", title="Paper n one"); N2 = paper(id="doi:10.1/n2", doi="10.1/n2", title="Paper n two", publisher="wiley"); N3 = paper(id="doi:10.1/n3", doi="10.1/n3", title="Paper n three", publisher="acm")
+runN = mkrun([N1, N2, N3]); ev_log.clear(); tried = []
+def fake_dl8(p, env, browser=None, dry=False):
+    tried.append(p["id"])
+    if p["id"] == N1["id"]:
+        raise RuntimeError("the index could not be written")
+    return False, None, "no PDF"
+dl.download_paper, dl.open_browser = fake_dl8, _NoBr
+pl.download_and_summarize(runN, [N1["id"], N2["id"], N3["id"]], lambda e, d: ev_log.append((e, d)), threading.Event(), sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+logs = [d.get("msg", "") for e, d in ev_log if e == "log"]
+assert sum("sign-in browser could not start (Chromium is missing)" in m for m in logs) == 1, logs
+assert sorted(tried) == sorted([N1["id"], N2["id"], N3["id"]]) and runN.papers[N1["id"]]["dl_status"] == "failed" and "could not be saved" in runN.papers[N1["id"]]["dl_note"], (tried, runN.papers[N1["id"]])
+runN2 = mkrun([dict(N1, dl_status=None), dict(N2, dl_status=None), dict(N3, dl_status=None)]); tried.clear(); ev_log.clear()
+def fake_dl9(p, env, browser=None, dry=False):
+    tried.append(p["id"]); raise OSError(28, "No space left on device")
+dl.download_paper, dl.open_browser = fake_dl9, _Br
+stop9 = threading.Event()
+pl.download_and_summarize(runN2, [N1["id"], N2["id"], N3["id"]], lambda e, d: ev_log.append((e, d)), stop9, sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+assert len(tried) == 1 and stop9.is_set() and any("disk is full" in d.get("msg", "") for e, d in ev_log if e == "log"), (tried, [d for e, d in ev_log if e == "log"])
+assert not any(v.get("dl_status") == "downloading" for v in runN2.papers.values()), "no paper is left 'downloading'"
+assert any("disk was full" in x for x in runN2.errors), runN2.errors
+# (14l) a paper whose summary is asked for by hand (a followed author's work) is downloaded with the others and not summarised by the batch
+BH = paper(id="doi:10.1/bh", doi="10.1/bh", title="Paper by hand", summary_by_hand=True); OTH = paper(id="doi:10.1/ot", doi="10.1/ot", title="Paper other", publisher="wiley")
+runH = mkrun([BH, OTH]); calls.clear()
+def fake_dl11(p, env, browser=None, dry=False):
+    fp = os.path.join(dl.PAPERS, "2025-01", "X", p["id"][-2:] + "-hand.pdf"); os.makedirs(os.path.dirname(fp), exist_ok=True); open(fp, "wb").write(R["right"])
+    return True, fp, "browser"
+dl.download_paper, dl.open_browser = fake_dl11, _Br
+pl.download_and_summarize(runH, [BH["id"], OTH["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0)
+assert calls == [OTH["id"]] and runH.papers[BH["id"]]["dl_status"] == "ok", (calls, runH.papers[BH["id"]])
+calls.clear()
+# (14k) what still waits is written down while the batch runs (a quit leaves it in the run's file, and the run offers to go on); a batch that ends leaves no mark
+runQ = mkrun([dict(N1, dl_status=None), dict(N2, dl_status=None), dict(N3, dl_status=None)]); on_disk = []
+def fake_dl10(p, env, browser=None, dry=False):
+    on_disk.append(sorted(x["id"] for x in json.load(open(os.path.join(pl.RUNS, runQ.id + ".json")))["papers"] if x.get("dl_queued")))
+    return False, None, "no PDF"
+dl.download_paper, dl.open_browser = fake_dl10, _Br
+pl.download_and_summarize(runQ, [N1["id"], N2["id"], N3["id"]], lambda *a: None, threading.Event(), sleep=lambda d: None, clock=lambda: 0.0, summarize=False)
+assert on_disk[0] == sorted([N1["id"], N2["id"], N3["id"]]) and all(N3["id"] in x for x in on_disk), on_disk        # (the file is saved at most every two seconds: it may also name papers already tried, which a retry does no harm to)
+assert not any(x.get("dl_queued") for x in json.load(open(os.path.join(pl.RUNS, runQ.id + ".json")))["papers"]) and "dl_queued" in pl.slim({"dl_queued": True}), "a finished batch leaves no mark"
 # (15) the index and a run's file, written by several threads at once: nothing lost, nothing half-written
 def many(tag):
     for i in range(150):
@@ -632,6 +680,136 @@ def main():
         assert ns.save(pdf, out, 1)["rev"] == 2 and len(ns.sidecars(pdf)) == 1
         assert ns.save_tags([{"id": "t1", "name": "a"}, {"bad": 1}], 0)["tags"] == [{"id": "t1", "name": "a"}]
     check("sidecar created on first save, rev conflict, tags", t_notes)
+
+    def t_notes_unreadable():
+        """A notes file that is there but cannot be read (half-synced, damaged) is not taken for 'no notes': the page is told, a save is refused (the next
+        highlight used to replace the whole file), and a copy is kept beside it. The same for the tags file."""
+        import glob
+        np = ns.notes_path(pdf); good = open(np, encoding="utf-8").read()
+        tp = ns.TAGS_PATH; good_t = open(tp, encoding="utf-8").read()
+        try:
+            for bad in ('{"version": 1, "rev": 2, "highlights": [{"id": "h1"', '[1, 2]'):
+                open(np, "w", encoding="utf-8").write(bad)
+                n = ns.load(pdf, {"id": "10.1/x"})
+                assert n.get("unreadable") is True and n["rev"] == 0 and n["highlights"] == [], n
+                n["highlights"].append({"id": "new", "page": 1})
+                try:
+                    ns.save(pdf, n, 0); raise AssertionError("an unreadable notes file was written over")
+                except ns.Unreadable as e:
+                    assert "could not be read" in str(e) and "nothing is saved over it" in str(e)
+                assert open(np, encoding="utf-8").read() == bad, "the file is as it was"
+            kept = glob.glob(np[:-5] + ".unreadable-*.json")
+            assert kept and open(kept[0], encoding="utf-8").read() in ('{"version": 1, "rev": 2, "highlights": [{"id": "h1"', '[1, 2]'), kept
+            open(tp, "w", encoding="utf-8").write('{"version": 1, "tags": [{"id"')
+            try:
+                ns.save_tags([{"id": "t9", "name": "z"}], 0); raise AssertionError("an unreadable tags file was written over")
+            except ns.Unreadable:
+                pass
+            assert open(tp, encoding="utf-8").read() == '{"version": 1, "tags": [{"id"'
+        finally:
+            open(np, "w", encoding="utf-8").write(good); open(tp, "w", encoding="utf-8").write(good_t)
+            for f_ in glob.glob(np[:-5] + ".unreadable-*.json") + glob.glob(tp[:-5] + ".unreadable-*.json"):
+                os.remove(f_)
+        assert "unreadable" not in ns.load(pdf) and ns.load(pdf)["rev"] == 2 and ns.save(pdf, ns.load(pdf), 2)["rev"] == 3, "a readable file is saved as before"
+    check("notes: a notes or tags file that cannot be read is never taken for empty and written over; a copy is kept and the page is told", t_notes_unreadable)
+
+    def t_snapshots():
+        """Your own files (not the PDFs) are kept once a day on this computer; a restore puts them back as they were, keeps what was there first, writes only
+        into the data folder and never a PDF; only the newest few are kept."""
+        import aifiles as af, zipfile, time as _t
+        keep = (af.SNAPSHOTS, af.KEEP_SNAPSHOTS); af.SNAPSHOTS = tempfile.mkdtemp(prefix="jw-snap-")
+        np = ns.notes_path(pdf); good = open(np, encoding="utf-8").read()
+        idx = os.path.join(af.PAPERS, "_index.csv"); idx0 = open(idx, encoding="utf-8", newline="").read() if os.path.exists(idx) else None
+        if idx0 is None:
+            open(idx, "w", encoding="utf-8", newline="").write(",".join(dl.INDEX_COLS) + "\r\n")
+        keep_b = af.KEEP_BEFORE
+        try:
+            first = af.snapshot()
+            assert first and af.snapshot() is None, "once a day"
+            names = zipfile.ZipFile(os.path.join(af.SNAPSHOTS, first)).namelist()
+            assert any(n.endswith(".notes.json") for n in names) and not any(n.lower().endswith(".pdf") for n in names) and not any(".env" in n for n in names), names[:8]
+            open(np, "w", encoding="utf-8").write('{"version": 1, "rev": 9, "highlights": [], "cards": []}')          # a bad save
+            pdf_bytes = open(pdf, "rb").read()
+            r = af.restore_snapshot(first)
+            assert open(np, encoding="utf-8").read() == good and r["restored"] >= 1 and r["before"] and "before-restore" in r["before"], r
+            assert '"rev": 9' in zipfile.ZipFile(os.path.join(af.SNAPSHOTS, r["before"])).read(os.path.relpath(np, af.ROOT)).decode(), "what was there is kept first"
+            assert open(pdf, "rb").read() == pdf_bytes
+            evil = os.path.join(af.SNAPSHOTS, "jw-snapshot-20200101-000000.zip")
+            with zipfile.ZipFile(evil, "w") as z:
+                z.writestr("../outside.txt", "x"); z.writestr(os.path.relpath(os.path.join(af.PAPERS, "evil.pdf"), af.ROOT), "x"); z.writestr(os.path.relpath(np, af.ROOT), good)
+                z.writestr(os.path.relpath(os.path.join(af.PAPERS, "_removed", "deleted-zz", "_undo.json"), af.ROOT), "{}")
+            r = af.restore_snapshot("jw-snapshot-20200101-000000.zip")
+            assert r["restored"] == 1 and not os.path.exists(os.path.join(os.path.dirname(af.ROOT), "outside.txt")) and not os.path.exists(os.path.join(af.PAPERS, "evil.pdf")), r
+            assert not os.path.exists(os.path.join(af.PAPERS, "_removed", "deleted-zz")), "a restore brought something back into Recently deleted"
+            # a damaged snapshot (cut off, or a member whose bytes changed) restores nothing and says so, before anything is touched or kept
+            whole = open(evil, "rb").read(); n_before = len(af.snapshots())
+            hit = whole.index(good.encode()[:40])
+            for i, broken in enumerate((whole[:len(whole) // 2], whole[:hit] + b"X" * 40 + whole[hit + 40:])):
+                bn = "jw-snapshot-2020010%d-000000.zip" % (2 + i)
+                open(os.path.join(af.SNAPSHOTS, bn), "wb").write(broken)
+                open(np, "w", encoding="utf-8").write("mine now")
+                try:
+                    af.restore_snapshot(bn); raise AssertionError("a damaged snapshot was restored")
+                except ValueError as ex:
+                    assert "damaged" in str(ex) and "Nothing was changed" in str(ex), ex
+                assert open(np, encoding="utf-8").read() == "mine now" and len(af.snapshots()) == n_before + 1 + i, af.snapshots()
+            open(np, "w", encoding="utf-8").write(good)
+            for bn in ("jw-snapshot-20200102-000000.zip", "jw-snapshot-20200103-000000.zip"):
+                os.remove(os.path.join(af.SNAPSHOTS, bn))
+            for bad in ("../x.zip", "nope.zip", ""):
+                try:
+                    af.restore_snapshot(bad); raise AssertionError("restored " + bad)
+                except KeyError:
+                    pass
+            # restoring the OLDEST snapshot when the list is full does not delete it first; the copies kept before a restore are counted apart from the daily ones
+            af.KEEP_SNAPSHOTS = 2
+            af.snapshot(force=True); _t.sleep(1.1); last = af.snapshot(force=True)
+            daily = [x for x in af.snapshots() if not x["before_restore"]]
+            assert len(daily) == 2 and daily[0]["name"] == last, af.snapshots()
+            oldest = daily[-1]["name"]; _t.sleep(1.1)
+            with open(idx, "a", encoding="utf-8", newline="") as fh:                       # a paper added since that snapshot
+                import csv as _c0
+                _c0.DictWriter(fh, open(idx, encoding="utf-8", newline="").readline().strip().split(",")).writerow({"title": "Added since", "doi": "10.1/since", "status": "failed"})
+            assert af.restore_snapshot(oldest)["restored"] >= 1 and os.path.exists(os.path.join(af.SNAPSHOTS, oldest)) and len([x for x in af.snapshots() if not x["before_restore"]]) == 2
+            assert "10.1/since" in open(idx, encoding="utf-8").read(), "a restore dropped a paper added since from the library list"
+            _t.sleep(1.1); af.restore_snapshot(oldest)                                       # a second restore: its "what you had" copy does not push a daily one out
+            assert os.path.exists(os.path.join(af.SNAPSHOTS, last)) and os.path.exists(os.path.join(af.SNAPSHOTS, oldest)), af.snapshots()
+            # restoring a "before a restore" copy when those are at their limit does not remove it either
+            af.KEEP_BEFORE = 1; undo_ = [x for x in af.snapshots() if x["before_restore"]][0]["name"]; _t.sleep(1.1)
+            af.restore_snapshot(undo_)
+            assert os.path.exists(os.path.join(af.SNAPSHOTS, undo_)) and len([x for x in af.snapshots() if x["before_restore"]]) == 2, af.snapshots()
+            # a snapshot holds no EPUB, nothing from "Recently deleted", no copy of an unreadable file
+            for junk in (os.path.join(af.PAPERS, "_removed", "deleted-x", "_undo.json"), os.path.join(af.PAPERS, "2020-01", "b.epub"), np[:-5] + ".unreadable-1.json"):
+                os.makedirs(os.path.dirname(junk), exist_ok=True); open(junk, "w").write("{}")
+            _t.sleep(1.1); nm = zipfile.ZipFile(os.path.join(af.SNAPSHOTS, af.snapshot(force=True))).namelist()
+            assert not any("_removed" in n or n.endswith(".epub") or ".unreadable-" in n for n in nm), nm
+            for junk in (os.path.join(af.PAPERS, "_removed", "deleted-x"),):
+                shutil.rmtree(junk, ignore_errors=True)
+            os.remove(os.path.join(af.PAPERS, "2020-01", "b.epub")); os.remove(np[:-5] + ".unreadable-1.json")
+            # the library list after a restore is true to the disk: a paper added since keeps its row, a paper whose PDF is gone is not listed as present
+            then = "title,doi,file,status,note\r\nOld,10.1/old,Papers/gone.pdf,ok,\r\nKept,10.1/kept,%s,ok,then\r\n" % os.path.relpath(pdf, af.ROOT)
+            nowp = os.path.join(af.SNAPSHOTS, "now.csv"); open(nowp, "w", newline="").write("title,doi,file,status,note\r\nOld,10.1/old,,deleted,deleted by you\r\nNew,10.1/new,Papers/new.pdf,ok,\r\nKept,10.1/kept,%s,ok,now\r\n" % os.path.relpath(pdf, af.ROOT))
+            import csv as _c, io as _io
+            j = {r_["doi"]: r_ for r_ in _c.DictReader(_io.StringIO(af._join_index(then, nowp)))}
+            assert j["10.1/old"]["status"] == "deleted" and j["10.1/new"]["status"] == "ok" and j["10.1/kept"]["note"] == "then", j
+            # merging or deleting a tag never writes over a tags file that cannot be read
+            tp_ = ns.TAGS_PATH; good_t = open(tp_, encoding="utf-8").read(); open(tp_, "w", encoding="utf-8").write('{"version": 1, "tags": [{"id"')
+            try:
+                ns.retag("t1"); raise AssertionError("retag wrote over an unreadable tags file")
+            except ns.Unreadable:
+                assert open(tp_, encoding="utf-8").read() == '{"version": 1, "tags": [{"id"'
+            finally:
+                open(tp_, "w", encoding="utf-8").write(good_t)
+                for f_ in __import__("glob").glob(tp_[:-5] + ".unreadable-*.json"):
+                    os.remove(f_)
+        finally:
+            shutil.rmtree(af.SNAPSHOTS, ignore_errors=True); af.SNAPSHOTS, af.KEEP_SNAPSHOTS = keep; af.KEEP_BEFORE = keep_b
+            open(np, "w", encoding="utf-8").write(good)
+            if idx0 is None:
+                os.remove(idx)
+            else:
+                open(idx, "w", encoding="utf-8", newline="").write(idx0)
+    check("snapshots: your own files (no PDFs, no keys) are kept once a day on this computer; a restore puts them back, keeps what was there first, and writes nothing outside the data folder", t_snapshots)
 
     print("blocks")
     bs = bl.extract(pdf)
@@ -1472,12 +1650,59 @@ try:
     ai.remove_key("ollama"); out["key"]["ollama"] = "accepted"
 except ValueError:
     out["key"]["ollama"] = "refused"
+# undo: a deleted paper is kept for 30 days and can be put back with its notes, folders and reading status; after that it is gone
+import time as _t
+C2 = "Papers/2025-01/MISQ/Delta.pdf"; pd2 = put(C2, b"%%PDF-delta"); open(ns.notes_path(pd2), "w").write('{"version": 1, "rev": 3, "highlights": [{"id": "h"}]}')
+dl.save_index({"doi": "10.1/d", "title": "Delta", "journal": "MISQ", "abbr": "MISQ"}, C2, "ok")
+fo.add(fid, ["10.1/d"]); rs.update("10.1/d", {"status": "read"})
+rd = deletion.delete_item(C2)
+u = {"token": bool(rd.get("undo")), "gone": not os.path.exists(pd2) and not os.path.exists(ns.notes_path(pd2)), "listed": [x["title"] for x in deletion.recently_deleted() if x["token"] == rd["undo"]],
+     "not_in_library": C2 not in [r["file"] for r in pl.library()], "out_of_folder": "10.1/d" not in fo.get(fid)["papers"]}
+back = deletion.restore(rd["undo"])
+row = [r for r in pl.library() if r["file"] == C2]
+u.update(back=back["file"] == C2 and os.path.exists(pd2) and '"rev": 3' in open(ns.notes_path(pd2)).read(), row=bool(row), folder="10.1/d" in fo.get(fid)["papers"],
+         status=(row[0]["state"] or {}).get("status") if row else None, not_deleted="10.1/d" not in deletion.deleted_keys(), list_empty=not [x for x in deletion.recently_deleted() if x["token"] == rd["undo"]])
+try:
+    deletion.restore(rd["undo"]); u["twice"] = "accepted"
+except ValueError:
+    u["twice"] = "refused"
+for bad in ("../x", "deleted-20200101-000000-zzzzzz", ""):
+    try:
+        deletion.restore(bad); u["bad"] = "accepted"
+    except ValueError:
+        u.setdefault("bad", "refused")
+rd2 = deletion.delete_item(C2)
+mf = os.path.join(dl.PAPERS, "_removed", rd2["undo"], "_undo.json"); m_ = json.load(open(mf)); m_["when"] = _t.time() - 31 * 86400; json.dump(m_, open(mf, "w"))
+u["old_not_listed"] = not [x for x in deletion.recently_deleted() if x["token"] == rd2["undo"]]
+u["purged"] = deletion.purge_old() == 1 and not os.path.exists(os.path.join(dl.PAPERS, "_removed", rd2["undo"]))
+# a row that says "in the library" for a file that is not there does not stop a put-back; notes written at that place meanwhile stay, the kept ones go beside them
+import glob as _g
+C3 = "Papers/2025-01/MISQ/Echo.pdf"; pd3 = put(C3, b"%%PDF-echo"); open(ns.notes_path(pd3), "w").write('{"version": 1, "rev": 4, "highlights": []}')
+dl.save_index({"doi": "10.1/e", "title": "Echo", "journal": "MISQ", "abbr": "MISQ"}, C3, "ok")
+rd3 = deletion.delete_item(C3)
+import csv as _c
+ip_ = os.path.join(dl.PAPERS, "_index.csv"); rws_ = list(_c.DictReader(open(ip_, newline="", encoding="utf-8")))
+for r_ in rws_:
+    if r_.get("doi") == "10.1/e":
+        r_.update(status="ok", file=C3)
+with open(ip_, "w", newline="", encoding="utf-8") as fh_:
+    w_ = _c.DictWriter(fh_, list(rws_[0].keys())); w_.writeheader(); w_.writerows(rws_)
+os.makedirs(os.path.dirname(pd3), exist_ok=True); open(ns.notes_path(pd3), "w").write("written meanwhile")
+try:
+    deletion.restore(rd3["undo"])
+    u["row_without_file"] = os.path.exists(pd3)
+    u["sidecar_kept"] = open(ns.notes_path(pd3)).read() == "written meanwhile" and any('"rev": 4' in open(x).read() for x in _g.glob(pd3[:-4] + ".notes.put-back-*.json"))
+except ValueError as e:
+    u["row_without_file"] = str(e)
+out["undo"] = u
 print("JSON" + json.dumps(out))
 """ % HERE
             env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL", "OPENAI_API_KEY")}
             r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=180)
             assert r.returncode == 0, r.stderr[-1500:]
             o = json.loads(r.stdout.split("JSON", 1)[1])
+            assert o["undo"] == {"token": True, "gone": True, "listed": ["Delta"], "not_in_library": True, "out_of_folder": True, "back": True, "row": True, "folder": True, "status": "read",
+                                 "not_deleted": True, "list_empty": True, "twice": "refused", "bad": "refused", "old_not_listed": True, "purged": True, "row_without_file": True, "sidecar_kept": True}, o["undo"]
             a, b = o["a"], o["b"]
             assert a["res"]["kind"] == "paper" and a["res"]["title"] == "Alpha" and len(a["res"]["deleted"]) == 4 and a["left"] == [], a
             assert a["index_left"] == [], "its passages in the search index are deleted too"
@@ -2221,6 +2446,45 @@ assert os.path.exists(os.path.join(paths.BASE, "ai (conflicted copy).json")), "a
 w = sy.set_aside(".env (Work Mac's conflicted copy 2026-11-03)")
 assert os.path.exists(os.path.join(paths.ROOT, w)) and w.startswith("Papers/_conflicts/") and not os.path.exists(os.path.join(paths.ROOT, ".env (Work Mac's conflicted copy 2026-11-03)")) and open(os.path.join(paths.ROOT, w)).read() == "X=1"
 i = sy.info(); assert i["separate"] and i["me"]["name"] == "Home laptop" and len(i["conflicts"]) == 1 and i["data_folder"] == paths.ROOT
+# -- your other files join too, with nothing of either copy lost: a paper's notes, reading status, a folder, tags, the AI spending record
+import json as _j
+def two(rel, mine, theirs, text=False):
+    full = os.path.join(paths.ROOT, rel); os.makedirs(os.path.dirname(full), exist_ok=True)
+    name, ext = os.path.splitext(full); cp_ = name + " (Work Mac's conflicted copy 2026-11-04)" + ext
+    for path_, obj in ((full, mine), (cp_, theirs)):
+        open(path_, "w", encoding="utf-8").write(obj if text else _j.dumps(obj))
+    return os.path.relpath(cp_, paths.ROOT), full
+cpn, fn_ = two("Papers/2024-05/Journal/kept.notes.json", {"version": 1, "rev": 4, "highlights": [{"id": "h1", "text": "mine"}, {"id": "h2", "text": "both, my wording"}], "cards": [], "bookmarks": [], "paper_note": "My note."},
+               {"version": 1, "rev": 3, "highlights": [{"id": "h2", "text": "both, their wording"}, {"id": "h3", "text": "theirs"}], "cards": [{"id": "c1", "text": "their card"}], "bookmarks": [], "paper_note": "Their note."})
+assert {x["path"]: x for x in sy.conflicts(fresh=True)}[cpn]["join"] == "notes"
+r = sy.merge(cpn); n_ = _j.load(open(fn_))
+assert r["kind"] == "notes" and r["added"] == 3 and [h["id"] for h in n_["highlights"]] == ["h1", "h2", "h3"] and n_["highlights"][1]["text"] == "both, my wording" and n_["cards"] == [{"id": "c1", "text": "their card"}], n_
+assert n_["rev"] == 5 and "My note." in n_["paper_note"] and "Their note." in n_["paper_note"] and not os.path.exists(os.path.join(paths.ROOT, cpn)) and os.path.exists(os.path.join(paths.ROOT, r["set_aside"]))
+cps, fs_ = two("Papers/_status.json", {"version": 1, "papers": {"10.1/a": {"status": "reading", "opened": "2026-11-01T10:00:00", "page": 3}, "10.1/b": {"star": True}}},
+               {"version": 1, "papers": {"10.1/a": {"status": "read", "opened": "2026-11-03T10:00:00", "page": 12, "takeaway": "Good."}, "10.1/c": {"status": "toread"}}})
+sy.merge(cps); st_ = _j.load(open(fs_))["papers"]
+assert st_["10.1/a"] == {"status": "read", "opened": "2026-11-03T10:00:00", "page": 12, "takeaway": "Good."} and st_["10.1/b"] == {"star": True} and st_["10.1/c"] == {"status": "toread"}, st_
+cpf, ff_ = two("Papers/_folders/lab.json", {"version": 1, "id": "lab", "name": "Lab", "papers": ["10.1/a", "10.1/b"]}, {"version": 1, "id": "lab", "name": "Lab (renamed there)", "papers": ["10.1/b", "10.1/c"]})
+sy.merge(cpf); f_ = _j.load(open(ff_)); assert f_["papers"] == ["10.1/a", "10.1/b", "10.1/c"] and f_["name"] == "Lab", f_
+cpt, ft_ = two("Papers/_tags.json", {"version": 1, "rev": 2, "tags": [{"id": "t1", "name": "a"}]}, {"version": 1, "rev": 5, "tags": [{"id": "t1", "name": "a2"}, {"id": "t2", "name": "b"}]})
+sy.merge(cpt); t_ = _j.load(open(ft_)); assert [x["id"] for x in t_["tags"]] == ["t1", "t2"] and t_["tags"][0]["name"] == "a" and t_["rev"] == 6, t_
+cpu, fu_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-03T10:00:00", "cost": 0.3}\n', '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-02T10:00:00", "cost": 0.2}\n', text=True)
+r = sy.merge(cpu); lines_ = open(fu_).read().splitlines()
+assert r["added"] == 1 and [_j.loads(x)["cost"] for x in lines_] == [0.1, 0.2, 0.3], lines_
+cpu2, fu2_ = two(os.path.relpath(os.path.join(paths.STATE, "ai_usage.jsonl"), paths.ROOT), '{"ts": "2026-11-01T10:00:00", "cost": 0.1}\n{"ts": "2026-11-03T10:00:00", "co', '{"ts": "2026-11-02T10:00:00", "cost": 0.2}\n', text=True)
+r = sy.merge(cpu2); lines_ = open(fu2_).read().splitlines()                    # (a line cut off mid-way, as a quit leaves it: the join still works and keeps it)
+assert r["added"] == 1 and '{"ts": "2026-11-03T10:00:00", "co' in lines_ and any('"cost": 0.2' in x for x in lines_) and len(lines_) == 3, lines_
+# a copy that cannot be read changes nothing; a file of another kind is not joined
+cpb, fb_ = two("Papers/2024-05/Journal/other.notes.json", {"version": 1, "rev": 1, "highlights": [{"id": "k"}]}, {"version": 1}); open(os.path.join(paths.ROOT, cpb), "w").write('{"version": 1, "high')
+before_ = open(fb_).read()
+try:
+    sy.merge(cpb); raise AssertionError("joined an unreadable copy")
+except ValueError as e:
+    assert "Nothing was changed" in str(e) and open(fb_).read() == before_ and os.path.exists(os.path.join(paths.ROOT, cpb))
+try:
+    sy.merge(".agents/skills/ais-journal-watcher/ai (conflicted copy).json"); raise AssertionError("joined settings")
+except ValueError:
+    pass
 print("OK")
 ''' % HERE
             env = {k: v for k, v in os.environ.items() if k not in ("JW_HOME", "JW_LOCAL")}
@@ -4628,6 +4892,18 @@ print("OK")
             pdfs["oa"] = mkpdf([("", "")] * 2, scan=True)
             ok, path, note = dl.download_paper(dict(p), env)
             assert ok and "identity not checked" in note and rows()[-1]["status"] == "ok", note
+            # d2) the disk fills while the free copy is saved: that is not "no free copy" (no other route is tried; the batch is told)
+            clear(); pdfs["oa"] = RIGHT; keep_si = dl.save_index; brf = _FakeBrowser(RIGHT)
+            def full(*a, **k):
+                raise OSError(28, "No space left on device")
+            dl.save_index = full
+            try:
+                try:
+                    dl.download_paper(dict(p), env, browser=brf); raise AssertionError("a full disk was taken for 'no free copy'")
+                except OSError as e:
+                    assert e.errno == 28 and brf.calls == [], (e, brf.calls)
+            finally:
+                dl.save_index = keep_si
             # e) a dry run checks too, and writes nothing
             clear(); pdfs["oa"] = WRONG
             ok, path, note = dl.download_paper(dict(p), env, dry=True)
@@ -5088,10 +5364,8 @@ print("OK")
                      gated=("elsevier", "informs"))
             assert [o[1] for o in _Br.last.opened] == [False, True] and all(st(run, i) == "ok" for i in run.papers) and len(notes) == 2, (_Br.last.opened, {i: st(run, i) for i in run.papers}, notes)
             # 14) an error during the batch: the papers set aside do not stay 'waiting for you'
-            try:
-                go([("E1", "elsevier"), ("W1", "wiley")], raise_in="W1"); raise AssertionError("the error was swallowed")
-            except RuntimeError:
-                pass
+            go([("E1", "elsevier"), ("W1", "wiley")], raise_in="W1")          # (one paper's error is that paper's: it is marked failed with the reason and the batch ends in order)
+            assert S["run"].papers["W1"]["dl_status"] == "failed" and "could not be saved" in S["run"].papers["W1"]["dl_note"] and "something broke" in S["run"].papers["W1"]["dl_note"], S["run"].papers["W1"]
             assert S["run"].papers["E1"]["dl_status"] == "needs_check" and "press Download again" in S["run"].papers["E1"]["dl_note"], S["run"].papers["E1"]
             # 13) the app quit while papers waited: a run opened later says they need a check (not "press Open the check")
             run = pl_.Run("picks", {"label": "quit"})

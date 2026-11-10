@@ -97,6 +97,38 @@ def _read(path):
         return None
 
 
+class Unreadable(ValueError):
+    """A notes file is there but could not be read (still syncing, locked, damaged): nothing is written over it."""
+
+
+UNREADABLE = ("%s could not be read (the file may still be syncing, or it is damaged), so nothing is saved over it. Close and open the paper again in a minute. "
+              "A copy of the file as it is now was kept beside it (%s).")
+
+
+def _state(path):
+    """("missing" | "ok" | "bad", data): a file that is there but cannot be read or is not JSON is "bad", never "missing"."""
+    if not os.path.lexists(path):
+        return "missing", None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return "ok", json.load(f)
+    except (OSError, ValueError):
+        return "bad", None
+
+
+def _set_aside(path):
+    """Keep a copy of an unreadable file (once per state of the file); returns the copy's name."""
+    import shutil
+    try:
+        st = os.stat(path)
+        dest = "%s.unreadable-%d.json" % (path[:-5] if path.endswith(".json") else path, int(st.st_mtime))
+        if not os.path.exists(dest):
+            shutil.copy2(path, dest)
+        return os.path.basename(dest)
+    except OSError:
+        return "no copy could be made"
+
+
 def _write(path, obj):
     data = json.dumps(obj, ensure_ascii=False, indent=1)
     if len(data) > MAX_BYTES:
@@ -116,9 +148,12 @@ def empty(pdf, doc=None):
 def load(pdf, doc=None):
     """The paper's notes, or an empty skeleton (nothing is written until the first save)."""
     with _lock:
-        d = _read(notes_path(pdf))
+        state, d = _state(notes_path(pdf))
         if not isinstance(d, dict):
-            return empty(pdf, doc)
+            e = empty(pdf, doc)
+            if state == "bad" or (state == "ok" and d is not None):          # (there, but not notes that can be read: said on the page, and never saved over)
+                e["unreadable"] = True
+            return e
         for k in LISTS + BOARD:
             d.setdefault(k, [])
         d.setdefault("paper_note", "")
@@ -133,7 +168,9 @@ def save(pdf, notes, base_rev, doc=None):
         raise ValueError("bad notes")
     with _lock:
         path = notes_path(pdf)
-        cur = _read(path)
+        state, cur = _state(path)
+        if state == "bad" or (state == "ok" and not isinstance(cur, dict)):
+            raise Unreadable(UNREADABLE % ("This paper's notes file", _set_aside(path)))
         cur_rev = cur.get("rev", 0) if isinstance(cur, dict) else 0
         if cur_rev != base_rev:
             raise Conflict(load(pdf, doc))
@@ -194,6 +231,9 @@ def save_tags(tags, base_rev):
     if not isinstance(tags, list):
         raise ValueError("bad tags")
     with _lock:
+        state, raw = _state(TAGS_PATH)
+        if state == "bad" or (state == "ok" and not (isinstance(raw, dict) and isinstance(raw.get("tags"), list))):
+            raise Unreadable(UNREADABLE % ("Your tags file", _set_aside(TAGS_PATH)))
         cur = load_tags()
         if cur["rev"] != base_rev:
             raise Conflict(cur)
@@ -207,9 +247,12 @@ def retag(old, new=None):
     Returns how many highlights/cards changed. Close the reader first: an open tab would see its notes as changed (409)."""
     n = 0
     with _lock:
+        state, raw = _state(TAGS_PATH)
+        if state == "bad" or (state == "ok" and not (isinstance(raw, dict) and isinstance(raw.get("tags"), list))):
+            raise Unreadable(UNREADABLE % ("Your tags file", _set_aside(TAGS_PATH)))          # (before any paper's notes are changed)
         for root, _, files in os.walk(PAPERS):
             for fn in files:
-                if not fn.endswith(".notes.json"):
+                if not fn.endswith(".notes.json") or ".unreadable-" in fn:
                     continue
                 path = os.path.join(root, fn)
                 d = _read(path)

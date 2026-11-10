@@ -239,7 +239,7 @@ def conflicts(fresh=False):
                 base = os.path.basename(orig)
                 ost = os.stat(orig) if os.path.exists(orig) else None
                 out.append({"path": os.path.relpath(full, root), "original": os.path.relpath(orig, root), "original_exists": bool(ost),
-                            "kind": "index" if base == "_index.csv" else "json" if base.endswith(".json") else "other", "size": st.st_size,
+                            "kind": "index" if base == "_index.csv" else "json" if base.endswith(".json") else "other", "join": join_kind(orig) if ost else "", "size": st.st_size,
                             "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
                             "original_modified": datetime.fromtimestamp(ost.st_mtime, timezone.utc).isoformat(timespec="seconds") if ost else ""})
     out.sort(key=lambda c: c["path"])
@@ -317,6 +317,143 @@ def merge_index(rel):
     rows = join_rows(mine, theirs)
     write_index(orig, rows)
     return {"papers": len(rows), "added": len(rows) - len(mine), "set_aside": set_aside(rel)}
+
+
+def join_kind(orig):
+    """Which of your own files can be joined from two copies (both sides kept): "index", "notes", "status", "folder", "tags", "usage"; "" for any other file."""
+    base, d = os.path.basename(orig), os.path.realpath(os.path.dirname(orig))
+    papers = os.path.realpath(paths.PAPERS)
+    if base == "_index.csv" and d == papers:
+        return "index"
+    if base.endswith(".notes.json") and (d + os.sep).startswith(papers + os.sep):
+        return "notes"
+    if base == "_status.json" and d == papers:
+        return "status"
+    if base == "_tags.json" and d == papers:
+        return "tags"
+    if d == os.path.join(papers, "_folders") and base.endswith(".json") and "." not in base[:-5]:
+        return "folder"
+    if base == "ai_usage.jsonl":
+        return "usage"
+    return ""
+
+
+def _json(p):
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_json(p, obj):
+    tmp = p + ".join.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def _by_id(mine, theirs):
+    """Two lists of items with an "id": every item of either (the same id once, yours kept). Returns (the list, how many came from the other copy)."""
+    mine = [x for x in (mine or []) if isinstance(x, dict)]
+    have = {x.get("id") for x in mine if x.get("id")}
+    new = [x for x in (theirs or []) if isinstance(x, dict) and x.get("id") and x["id"] not in have]
+    return mine + new, len(new)
+
+
+def join_notes(a, b):
+    """A paper's notes from two computers: every highlight, card, bookmark, frame and arrow of either (by id; one you changed on both keeps this computer's
+    wording); the note on the paper keeps both texts when they differ. Returns (notes, items that came from the other copy)."""
+    out, added = dict(a), 0
+    for k in ("highlights", "cards", "bookmarks", "frames", "links"):
+        out[k], n = _by_id(a.get(k), b.get(k))
+        added += n
+        if not out[k] and k in ("frames", "links"):
+            out.pop(k)
+    na, nb = str(a.get("paper_note") or "").strip(), str(b.get("paper_note") or "").strip()
+    if nb and nb != na:
+        out["paper_note"] = (na + "\n\n(from the other computer)\n" + nb) if na else nb
+        added += 1
+    out["rev"] = max(int(a.get("rev") or 0), int(b.get("rev") or 0)) + 1
+    return out, added
+
+
+def join_status(a, b):
+    """Reading status from two computers: every paper of either; for a paper in both, the entry opened last wins field by field, a star or a takeaway on either stays."""
+    pa, pb = dict((a or {}).get("papers") or {}), (b or {}).get("papers") or {}
+    added = 0
+    for k, eb in pb.items():
+        ea = pa.get(k)
+        if not isinstance(eb, dict):
+            continue
+        if not isinstance(ea, dict):
+            pa[k] = eb
+            added += 1
+            continue
+        newer, older = (eb, ea) if str(eb.get("opened") or "") > str(ea.get("opened") or "") else (ea, eb)
+        m = {**older, **{x: y for x, y in newer.items() if y not in ("", None)}}
+        m["star"] = bool(ea.get("star") or eb.get("star"))
+        if not m.get("star"):
+            m.pop("star", None)
+        if m != ea:
+            added += 1
+        pa[k] = m
+    return {"version": 1, "papers": pa}, added
+
+
+def merge(rel):
+    """Join the two copies of one of your own files so that nothing of either is lost (join_kind says which files); the conflicted copy is then set aside, never
+    deleted. Returns {"kind", "added" (what came from the other copy), "said" (a sentence for the page), "set_aside", and for the index "papers"}."""
+    full, root = _inside(rel)
+    orig = os.path.join(os.path.dirname(full), CONFLICT_RE.sub("", os.path.basename(full), count=1))
+    kind = join_kind(orig)
+    if kind == "index":
+        r = merge_index(rel)
+        return dict(r, kind=kind, said="Joined: %d papers in the list (%d from the other copy)." % (r["papers"], r["added"]))
+    if not kind:
+        raise ValueError("This file cannot be joined by the app: keep one of the two and set the other aside.")
+    if not os.path.exists(orig):
+        raise ValueError("The file this is a copy of is not there: set the copy aside, or rename it by hand.")
+    try:
+        if kind == "usage":
+            with open(orig, encoding="utf-8") as f:
+                mine = f.read().splitlines()
+            with open(full, encoding="utf-8") as f:
+                theirs = f.read().splitlines()
+            have = set(mine)
+            new = [x for x in theirs if x.strip() and x not in have]
+            if new:
+                def when(x):                                # (a line cut off mid-way sorts first; it is kept as it is)
+                    try:
+                        return str(json.loads(x).get("ts") or "")
+                    except (ValueError, AttributeError):
+                        return ""
+                text = "\n".join(sorted([x for x in mine if x.strip()] + new, key=when)) + "\n"
+                tmp = orig + ".join.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(text)
+                os.replace(tmp, orig)
+            added, said = len(new), "Joined: %d AI spending records from the other copy." % len(new)
+        else:
+            a, b = _json(orig), _json(full)
+            if not isinstance(a, dict) or not isinstance(b, dict):
+                raise ValueError("not the expected kind of file")
+            if kind == "notes":
+                out, added = join_notes(a, b)
+                said = "Joined: %d highlights and notes from the other copy." % added
+            elif kind == "status":
+                out, added = join_status(a, b)
+                said = "Joined: reading status of %d papers from the other copy." % added
+            elif kind == "tags":
+                tags, added = _by_id(a.get("tags"), b.get("tags"))
+                out = dict(a, tags=tags, rev=max(int(a.get("rev") or 0), int(b.get("rev") or 0)) + 1)
+                said = "Joined: %d tags from the other copy." % added
+            else:                                           # a folder: the papers of both lists
+                mine = [k for k in (a.get("papers") or []) if isinstance(k, str)]
+                new = [k for k in (b.get("papers") or []) if isinstance(k, str) and k not in set(mine)]
+                out, added = dict(a, papers=mine + new), len(new)
+                said = "Joined: %d papers from the other copy are in the folder too." % added
+            _write_json(orig, out)
+    except (OSError, ValueError) as e:
+        raise ValueError("The two copies could not be joined (%s). Nothing was changed." % (str(e)[:100] or "one of them cannot be read"))
+    return {"kind": kind, "added": added, "said": said, "set_aside": set_aside(rel)}
 
 
 def info():

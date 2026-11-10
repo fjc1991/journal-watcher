@@ -22,6 +22,7 @@ import threading
 import traceback
 import urllib.error
 import urllib.parse
+import zipfile
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
@@ -1106,6 +1107,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/aifiles":      # Settings → AI files: what the AI wrote or cached, how big it is, what was cleared lately, how big a backup is
             return self.send_json({"kinds": aifiles.scan(), "trash": aifiles.trash_list(), "backup": aifiles.backup_size(), "export_dir": prefs.get_settings().get("export_dir") or "",
                                    "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
+        if path == "/api/library/deleted":   # what you deleted in the last 30 days and can put back
+            return self.send_json({"kept": deletion.recently_deleted(), "days": deletion.KEEP_DAYS})
+        if path == "/api/snapshots":    # the daily snapshots of your own files on this computer
+            return self.send_json({"snapshots": aifiles.snapshots(), "keep": aifiles.KEEP_SNAPSHOTS})
         if path == "/api/backup":       # ?pdfs=1: a zip of your own data (notes, cards, folders, tags, settings…), optionally with the PDFs
             name = "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M")
             return self.send_temp_file(aifiles.backup(one("pdfs", "") == "1"), "application/zip", name)
@@ -1235,7 +1240,7 @@ class Handler(BaseHTTPRequestHandler):
                     syncinfo.rename(b.get("name"))
                     return self.send_json({"ok": True, **syncinfo.info()})
                 if act == "merge":
-                    res = syncinfo.merge_index(b.get("path"))
+                    res = syncinfo.merge(b.get("path"))
                 elif act == "set_aside":
                     res = {"set_aside": syncinfo.set_aside(b.get("path"))}
                 else:
@@ -1267,7 +1272,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tags/retag":   # {from, into?}: merge a tag into another (or delete it) across every paper
             if not b.get("from"):
                 return self.send_json({"error": "which tag?"}, 400)
-            return self.send_json({"ok": True, "changed": ns.retag(b["from"], b.get("into") or None)})
+            try:
+                return self.send_json({"ok": True, "changed": ns.retag(b["from"], b.get("into") or None)})
+            except ns.Unreadable as e:
+                return self.send_json({"error": str(e)}, 423)
         if path == "/api/folders":      # {action: create|rename|delete|add|remove, id, name, files:[Papers/…pdf]}
             act, fid = b.get("action"), b.get("id")
             keys = [r["key"] for r in pl.library() if r["file"] in set(b.get("files") or [])]
@@ -1557,6 +1565,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = ns.save(pdf, b.get("notes"), int(b.get("rev") or 0), self.doc_info(b["file"])[1])
             except ns.Conflict as c:
                 return self.send_json({"error": "These notes changed in another window.", "current": c.current}, 409)
+            except ns.Unreadable as e:
+                return self.send_json({"error": str(e)}, 423)
             except (ValueError, TypeError) as e:
                 return self.send_json({"error": str(e)[:120]}, 400)
             return self.send_json({"ok": True, "rev": out["rev"]})
@@ -1613,6 +1623,19 @@ class Handler(BaseHTTPRequestHandler):
             except (KeyError, OSError) as e:
                 return self.send_json({"error": str(e.args[0] if e.args else e)[:120]}, 400)
             return self.send_json({"ok": True, **r, "kinds": aifiles.scan(), "trash": aifiles.trash_list()})
+        if path == "/api/snapshots/restore":     # {name}: your notes, folders, index and settings as they were then (what is there now is kept in a snapshot first)
+            if JOBS.busy():
+                return self.send_json({"error": "Another task is running — wait or press Stop."}, 409)
+            try:
+                return self.send_json({"ok": True, **aifiles.restore_snapshot(b.get("name")), "snapshots": aifiles.snapshots()})
+            except KeyError:
+                return self.send_json({"error": "That snapshot is not there any more."}, 404)
+            except ValueError as e:                  # (a damaged snapshot: found before anything was changed)
+                return self.send_json({"error": str(e)[:200]}, 400)
+            except OSError as e:
+                return self.send_json({"error": "The snapshot could not be restored in full (%s). What you had is in the newest snapshot marked “before a restore”." % (str(e)[:160] or e.__class__.__name__)}, 400)
+        if path == "/api/snapshots/now":         # take one now
+            return self.send_json({"ok": True, "name": aifiles.snapshot(force=True), "snapshots": aifiles.snapshots()})
         if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
             d = prefs.get_settings().get("export_dir") or ""
             if not d or not os.path.isdir(os.path.expanduser(d)):
@@ -1807,6 +1830,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = ns.save_tags(b.get("tags"), int(b.get("rev") or 0))
             except ns.Conflict as c:
                 return self.send_json({"error": "Tags changed in another window.", "current": c.current}, 409)
+            except ns.Unreadable as e:
+                return self.send_json({"error": str(e)}, 423)
             except (ValueError, TypeError) as e:
                 return self.send_json({"error": str(e)[:120]}, 400)
             return self.send_json({"ok": True, "rev": out["rev"]})
@@ -1999,6 +2024,16 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as e:
                     errors.append({"file": str(f)[:300], "error": str(e)[:200]})
             return self.send_json({"ok": not errors, "deleted": done, "errors": errors})
+        if path == "/api/library/restore":       # {tokens: [...]}: put back what you deleted (kept for 30 days: deletion.restore)
+            done, errors = [], []
+            for t in (b.get("tokens") or [])[:500]:
+                try:
+                    done.append(deletion.restore(str(t)))
+                except (ValueError, OSError) as e:
+                    errors.append({"token": str(t)[:60], "error": str(e)[:200]})
+            if done and indexer:
+                indexer.kick(2)
+            return self.send_json({"ok": not errors, "restored": done, "errors": errors, "kept": deletion.recently_deleted()})
         if path == "/api/runs/delete":           # {id}: delete the record of a past run (its papers stay in the library)
             rid = str(b.get("id") or "")
             if JOBS.busy() and JOBS.run is not None and JOBS.run.id == os.path.basename(rid):
@@ -2165,6 +2200,17 @@ def take_lock(port):
     return None
 
 
+def _daily_snapshot():
+    try:
+        deletion.purge_old()            # (what you deleted more than 30 days ago leaves the disk now)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        aifiles.snapshot()
+    except Exception as e:  # noqa: BLE001      (a full disk, a locked file: the app starts all the same)
+        print("(no snapshot today: %s)" % str(e)[:120])
+
+
 def start(port=8765, quiet=False):
     """Everything main() does except waiting for requests. The Mac app runs the server in a thread of its own process with this.
     Returns (server, url), or (None, url) when a dashboard for this folder already runs (url is where)."""
@@ -2188,6 +2234,7 @@ def start(port=8765, quiet=False):
     importer.sweep()           # dropped PDFs nobody confirmed or cancelled within a day are forgotten (a confirmation of an older one is refused anyway)
     updater.start_background()
     threading.Thread(target=lambda: ac.backfill(pl.library()), daemon=True).start()   # authors the feeds left out (a few Crossref lookups, once)
+    threading.Thread(target=_daily_snapshot, daemon=True).start()                     # your notes, folders, index and settings, kept once a day on this computer
     if indexer:
         indexer.kick(25)       # read papers into the index for Ask a little after start-up (local model only, switchable in the activity tray)
     return srv, "http://localhost:%d" % port

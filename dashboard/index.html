@@ -366,6 +366,7 @@ details.logbox summary { padding: 10px 14px; cursor: pointer; font-size: 12px; c
         <button class="btn small" id="selrec">Select all “download”</button>
         <button class="btn small" id="selnone">Clear</button>
         <div class="spacer"></div>
+        <button class="btn small hide" id="resumebtn" title="The app was quit while these papers were still waiting to be downloaded: go on with them"></button>
         <button class="btn small hide" id="fldone" title="This Discover run was made for this folder: every paper of it that is in your library goes in, the others when they arrive"></button>
         <button class="btn small" id="fldbtn" title="Put this run's papers into one of your folders: those in your library now, the others when they arrive">📁 Add to a folder…</button>
         <button class="btn hide" id="qbtn">Download queue</button>
@@ -1257,7 +1258,12 @@ function updateSel() {
   for (const id of [...SEL]) { const p = papers.get(id); if (!p || p.dl_status === "ok") SEL.delete(id); }
   $("#selcount").textContent = `${SEL.size} selected`;
   $("#dlbtn").disabled = !SEL.size || BUSY;
+  const cut = BUSY ? [] : cutOff();              // (a download the app was quit in the middle of)
+  $("#resumebtn").classList.toggle("hide", !cut.length);
+  if (cut.length) $("#resumebtn").textContent = `Go on with the download that was cut off (${cut.length} left)`;
 }
+const cutOff = () => [...papers.values()].filter(p => p.dl_queued && !(p.dl_status === "ok" && p.file) && p.dl_status !== "deleted").map(p => p.id);
+$("#resumebtn").onclick = async () => { const ids = cutOff(); if (!ids.length) return; try { await api("/api/download", {ids}); toast(`Downloading the ${ids.length} that were left.`); } catch (e) { toast(e.message); } };
 document.querySelectorAll("#vfilter button").forEach(b => b.onclick = () => {
   FILTER = b.dataset.v; document.querySelectorAll("#vfilter button").forEach(x => x.classList.toggle("on", x === b)); renderList(); renderMeta();
 });

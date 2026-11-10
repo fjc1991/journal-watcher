@@ -348,8 +348,17 @@ def download_paper(p, env, dry=False, browser=None):
 
     def write(data, via):
         if not dry:
-            with open(path, "wb") as f:
-                f.write(data)
+            tmp = tmp_path(path)                         # (written whole, then put in place: a full disk or a quit never leaves half a PDF under the paper's name)
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
             save_index(p, os.path.relpath(path, ROOT), "ok", via)
         return True, path, via
 
@@ -369,6 +378,8 @@ def download_paper(p, env, dry=False, browser=None):
             else:
                 attempts.append("unpaywall: not a PDF response")
         except Exception as e:
+            if isinstance(e, OSError) and getattr(e, "errno", None) == 28:      # (the disk is full: that is not this route's failure)
+                raise
             attempts.append("unpaywall: %s" % str(e)[:60])
 
     # 2) Elsevier API (DSS)
@@ -406,6 +417,8 @@ def download_paper(p, env, dry=False, browser=None):
             else:
                 attempts.append("%s: blocked/non-PDF" % name)
         except Exception as e:
+            if isinstance(e, OSError) and getattr(e, "errno", None) == 28:
+                raise
             attempts.append("%s: %s" % (name, str(e)[:40]))
 
     # 4) real browser with the user's saved sign-ins (HBR: article page saved as PDF). Every attempt is vetted on its own (a refused PDF does not end the route:
@@ -594,11 +607,16 @@ class open_browser:
         except Exception as e:
             print("(browser route unavailable: %s)" % str(e)[:80])
             self.b = None
+            self.error = str(e)[:200] or e.__class__.__name__       # (the download says so on the page: see pipeline.download_and_summarize)
+            BROWSER_ERROR["why"] = self.error
             return None
 
     def __exit__(self, *exc):
         if self.b is not None:
             self.b.__exit__(*exc)
+
+
+BROWSER_ERROR = {"why": ""}       # why the sign-in browser did not start the last time it was asked for ("" when it did)
 
 
 if __name__ == "__main__":

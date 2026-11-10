@@ -486,7 +486,7 @@ def slim(p):
     keys = ("id", "journal", "abbr", "title", "authors", "doi", "url", "pub_date", "abstract",
             "keywords", "publisher", "verdict", "relevance", "topics", "method", "reason", "dl_status",
             "ai_verdict", "user_set", "model_verdict",
-            "dl_note", "file", "summary", "manual_url", "term_hits", "summary_by_hand")
+            "dl_note", "file", "summary", "manual_url", "term_hits", "summary_by_hand", "dl_queued")
     return {k: p.get(k) for k in keys}
 
 
@@ -1567,6 +1567,9 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     pace = (signins.profile().get("pace") or "careful")
     last_at, challenged = {}, set()
     papers = [run.papers[i] for i in ids if i in run.papers]
+    for p in papers:                         # (what waits its turn is written down: if the app is quit mid-batch, the run offers to go on with the rest)
+        p["dl_queued"] = True
+    run.save(force=True)
     # same publisher back to back: after one manual "verify you are human" the
     # rest of that site's papers go through the same window
     papers.sort(key=lambda p: p.get("publisher") or "")
@@ -1607,6 +1610,7 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
         emit("download", {k: p.get(k) for k in ("id", "dl_status", "dl_note", "file", "manual_url")})
 
     def finished(p, final=True):
+        p.pop("dl_queued", None)
         count["done"] += 1
         count["final"] += final
         emit("progress", {"stage": "downloading", "label": "Downloading", "done": count["done"], "total": total})
@@ -1696,11 +1700,16 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
     import deletion
     gone = deletion.deleted_keys()
     try:
+        getattr(dl, "BROWSER_ERROR", {}).update(why="")
         with dl.open_browser(on_challenge=on_challenge, ask=ask) as br:
             try:
                 br.stop = stop                                  # Stop also ends a wait for the user's tick
             except AttributeError:
                 pass
+            if br is None:                                      # the browser the sign-ins live in did not start: say so once, in plain words (each paper would only say "blocked")
+                why = getattr(dl, "BROWSER_ERROR", {}).get("why") or "it did not start"
+                emit("log", {"msg": "The sign-in browser could not start (%s). Papers that are free to read are still downloaded; papers behind a publisher or library sign-in cannot be, "
+                                    "until this is fixed. Quit other copies of Journal Watcher, then try again; if it stays, restart the computer." % why, "level": "error"})
             while True:
                 while todo_q:
                     if stop.is_set():
@@ -1748,13 +1757,23 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
                     current.clear()
                     current["pub"] = pub
                     emit("download", {"id": p["id"], "dl_status": "downloading"})
-                    ok, path, note = dl.download_paper(dict(p), env, browser=br)
+                    try:
+                        ok, path, note = dl.download_paper(dict(p), env, browser=br)
+                    except Exception as e:  # noqa: BLE001      (one paper's error is that paper's: the batch goes on, except when the disk is full)
+                        full = isinstance(e, OSError) and getattr(e, "errno", None) == 28
+                        ok, path, note = False, None, ("the disk is full: nothing more can be saved" if full else "could not be saved: %s" % (str(e)[:120] or e.__class__.__name__))
+                        emit("log", {"msg": ("The disk is full: the download stops here. Free some space, then press Download again." if full
+                                             else "“%s” could not be saved (%s). The other papers go on." % ((p.get("title") or "")[:60], str(e)[:120])), "level": "error"})
+                        if full:
+                            run.errors.append("The disk was full: the download stopped.")
+                            stop.set()
                     chall = current.get("chall")
                     last_at[pub] = clock()
                     if ok:
                         p.update(dl_status="ok", file=os.path.relpath(path, ROOT), dl_note=note)
                         _write_kind(p, path)
-                        got.append(p)
+                        if not p.get("summary_by_hand"):             # (a followed author's work: its summary is asked for in the Library, with the cost first)
+                            got.append(p)
                         _into_folder(p)
                     elif ask and chall and hasattr(br, "open_check"):
                         host, state = chall
@@ -1824,7 +1843,9 @@ def download_and_summarize(run, ids, emit, stop, sleep=None, clock=None, checks=
             emit("log", {"msg": "%d paper(s) still need a human check: select them and press Download again." % left, "level": "warn"})
         if any(deferred.values()):
             emit("challenge", {"host": "", "state": "done", "msg": ""})
-    run.save()
+        for p in papers:                                    # (the batch ended here, by itself or by Stop: nothing is "still waiting" any more; only a quit leaves the marks)
+            p.pop("dl_queued", None)
+        run.save(force=True)
     todo = [p for p in got if not p.get("summary")] if summarize else []
     for n, p in enumerate(todo, 1):
         if stop.is_set():

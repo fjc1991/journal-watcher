@@ -1021,6 +1021,20 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Not verified.** Real downloads through the author's library for these papers; PowerPoint and PDF files of the author's own (only generated ones); the AI path with a real provider (a fake in the tests, by the standing rule).
 
+### Item 45. Improvements, part A: data safety (2026-11-10, from the audit the author asked for)
+
+**Asked.** "Go over any other things that could be improved", then "Do all 40 now": an audit of five areas (each claim checked against the code by a second reviewer) gave 40 items; they are done in five PRs. This is the first: the seven reliability items.
+
+**Changed.** `notes_store`: `_state` tells a missing file from one that cannot be read; `load` marks it (`unreadable`), `save`/`save_tags` raise `Unreadable` and keep a copy beside it. `aifiles.snapshot/snapshots/restore_snapshot` (in `LOCAL/snapshots`, 14 kept; a restore first keeps what is there, writes only into the data folder, never a PDF) and the server's start-up thread. `deletion.delete_item` moves the files to `Papers/_removed/deleted-<time>/` with `_undo.json` (row, folders, status); `restore`, `recently_deleted`, `purge_old` (30 days). `download.write` through a temporary file; `download_and_summarize` catches one paper's error (a full disk stops the batch), says when the browser did not start (`dl.BROWSER_ERROR`), and marks the papers still waiting (`dl_queued`) so a quit leaves them in the run's file. `syncinfo.merge` joins notes (by item id), reading status (per paper, the one opened last), a folder, tags and the spending record; `conflicts()` says which copies can be joined.
+
+**Tests.** `t_notes_unreadable`, `t_snapshots`, the delete child (undo, restore twice, bad tokens, 31 days), the attach child (browser not started, one paper's error, a full disk, the queue marks), the sync child (each kind of file, an unreadable copy changes nothing).
+
+**Review.** Five reviewers by area, each finding checked by a second; 12 were confirmed and fixed. A restore could remove the oldest snapshot it was restoring, or the copy of "what you had" (the before-a-restore copies are now counted apart, 5 kept, and the one in use is protected). A restore put the old library index over the current one, so papers added since were on disk but not in the list (the two are now joined and checked against the files that are there). Snapshots held the 30-day bin and EPUBs (left out now). `retag` wrote over a tags file it could not read. A restore now tests the zip first, holds the data locks, and answers a damaged snapshot in words. A full disk in the free-copy routes was swallowed as "no free copy" (it now stops the batch and is listed in the run's errors). The spending record could not be joined when one copy ended in a cut-off line. "In the library again" was said for a row whose file is gone. A sidecar in the way of a put-back is kept. A paper of a followed author, resumed, was summarised although set to "by hand".
+
+**Mutation checks.** Fourteen single-rule mutations of these fixes were run against the tests; nine passed unnoticed at first (the tests exercised the helper, not the path through it, and the snapshot test's data folder is not under the project root), so the tests were extended until all fourteen fail. Not mutation-checked: the three server routes that answer 423 for an unreadable file.
+
+**Not verified.** A real half-synced Dropbox file; a real full disk; the restore and undo buttons by hand on a Mac (their server side is tested, their page side only by the UI suite's existing delete checks).
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
