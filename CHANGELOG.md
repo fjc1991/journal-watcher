@@ -2,6 +2,19 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.2.13
+
+What the AI costs, and whether you can trust what it wrote:
+
+- **An answer that was cut off says so.** When a model stops at its length limit, the end of the answer is missing. Such an answer used to be saved as if it were complete: a paper's summary, a chapter summary, an Ask answer. Now a cut-off summary is not saved (the paper says the summary was cut off and can be tried again), and Ask, Explain, the briefing, an idea outline and a related-work draft show a note with **Ask again**. A cut-off answer is never kept among the saved answers, so asking again really asks again. Chapter summaries, the book overview and the briefing have twice the room, so a retry can finish.
+- **You see what a question costs before you ask.** Under the reader's Ask box: "Next question: about $0.03 · reads the 12 closest passages", or what the whole paper costs when "Whole paper" is chosen. Beside **Generate** in the Summary tab: what the summary costs, or that you have it saved and it is free.
+- **The monthly budget has no gaps.** A paid embedding model is counted and stops at the budget. When the budget is used up, answers you already have and a free model on this computer still work. Calls whose model has no known price are still allowed, but the budget message and Settings → Usage now say how many there were ("so the real total is higher"). Before a large job, the page asks first if its estimate is more than what is left of the month's budget. An empty budget, or 0, means no limit; the field now shows that.
+- **Screening does not pay three times for an answer it cannot use.** An answer that is not a list of verdicts is asked for once more, not twice. One that was cut off is asked again in halves, and the verdicts that did come are kept. Stop sends nothing more. The estimate before a search rests on what your own earlier screenings cost per paper, once 50 papers are on record.
+- **"Summarise N papers" gives a range** while it can only go by the size of the files ("between about $0.40 and $1.62"), and one figure after three summaries with that model. A summary you cancel is recorded at what the PDF really cost to read.
+- **Whole-paper questions: keep the paper ready (a switch, off unless you turn it on).** Settings → AI. With Claude, the first question on a paper then costs about a quarter more on the paper's text, and each further question within 5 minutes about a tenth of it. Off, every question pays for the whole paper, as before.
+- **The same paper on your second computer finds its saved answers**: they are known by the PDF's content, not by where the file is.
+- To know: answers saved before this version for a PDF (summaries) and for whole-paper follow-up questions no longer match, so the first repeat of each is asked, and paid for, once more. Answers that were cut off and saved before this version cannot all be recognised; press "ask again" on one that ends mid-sentence.
+
 ## 1.2.12
 
 Safer and sturdier:
