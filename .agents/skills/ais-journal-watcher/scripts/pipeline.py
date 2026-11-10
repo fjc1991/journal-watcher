@@ -23,8 +23,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 import shutil
 
-import anthropic
-
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS)
 import download as dl  # noqa: E402
@@ -98,6 +96,10 @@ _client = None
 def client():
     global _client
     if _client is None:
+        try:
+            import anthropic          # here and not at the top: loading the SDK is most of what starting the app costs, and most starts never come here
+        except ImportError as e:
+            raise RuntimeError("Claude can’t be used: %s — run: pip install -r requirements.txt" % e)
         _client = anthropic.Anthropic()
     return _client
 

@@ -826,7 +826,10 @@ def test(provider, model):
 
 
 def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
-    import anthropic
+    try:
+        import anthropic                  # (outside _lock: the first import takes most of a second)
+    except ImportError as e:              # nothing else stops the app from starting without the SDK any more (pipeline.py loads it only when needed)
+        raise AIError("Claude can’t be used: %s — run: pip install -r requirements.txt" % e)
     with _lock:                           # get or make the client in one step, and keep our own reference: saving a key clears the cache (set_key) and must not break a request already preparing
         client = _clients.get("a")
         if client is None:

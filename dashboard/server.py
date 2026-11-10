@@ -9,6 +9,7 @@ JSON API; live progress is pushed to the page with Server-Sent Events
 profile. Reader requests (notes, AI) run in their own request threads, outside
 that lock, so reading never waits for a download.
 """
+import importlib.util
 import json
 import mimetypes
 import os
@@ -2315,6 +2316,8 @@ def start(port=8765, quiet=False):
         return None, other.get("url")
     if not os.environ.get("ANTHROPIC_API_KEY") and not quiet:
         print("WARNING: ANTHROPIC_API_KEY missing from .env — screening and summaries will fail.")
+    if importlib.util.find_spec("anthropic") is None and not quiet:      # (looked for, not loaded: loading it is what made starting slow)
+        print("AI features unavailable (No module named 'anthropic') — run: pip install -r requirements.txt")
     for canon, olds in pl.migrate_weekly():
         print("Merged %d weekly runs into %s" % (len(olds), canon))
     srv = Server(("127.0.0.1", port), Handler)

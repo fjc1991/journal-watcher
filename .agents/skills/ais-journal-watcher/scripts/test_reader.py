@@ -8794,6 +8794,74 @@ print("OK")
     check("the screening estimate: from what earlier screenings with the same model cost per paper (the ledger rows that say how many papers, the last 200 calls, once 50 papers are on record), else the price; a Test, another model, a saved or unpriced call never counts; a screening call records its number of papers", t_screen_estimate)
     check("summarise the papers without a summary: only downloaded papers (no book, missing PDF or failed download), a cost guess that says what it rests on, one background job in the tray, a summary beside each PDF, skipped if written meanwhile, stopped by a refused key, the budget or three failures in a row, never an empty summary", t_summaries_job)
 
+    def _lazy_child(code, **more):         # (a new process each time: what is loaded cannot be told inside this long-lived one)
+        import subprocess
+        home = tempfile.mkdtemp(prefix="jw-lazy-home-"); loc = tempfile.mkdtemp(prefix="jw-lazy-local-")
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        env.update(JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1", JW_NO_UPDATE_CHECK="1", **more)
+        try:
+            r = subprocess.run([sys.executable, "-c", "import sys\nsys.path.insert(0, %r); sys.path.insert(0, %r)\n" % (HERE, paths.DASHBOARD) + code], env=env, capture_output=True, text=True, timeout=120)
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+        assert r.returncode == 0, r.stdout[-600:] + r.stderr[-1200:]
+        return r.stdout
+
+    def t_start_loads_no_sdk():
+        heavy = ("anthropic", "pydantic", "httpx", "pymupdf", "fitz", "fastembed", "onnxruntime", "numpy", "playwright", "docx")
+        for mod in ("server", "pipeline", "mcp_server"):
+            out = _lazy_child("import %s\nprint('LOADED=' + ','.join(m for m in %r if m in sys.modules))" % (mod, heavy))
+            assert "LOADED=\n" in out, "import %s loaded: %s" % (mod, out.split("LOADED=")[1].strip())
+    check("starting the dashboard, the engine or the MCP server loads neither the Anthropic SDK nor PyMuPDF, fastembed, numpy, Playwright or python-docx", t_start_loads_no_sdk)
+
+    def t_client_on_demand():
+        out = _lazy_child(
+            "import types\nimport pipeline as pl\n"
+            "made = []\n"
+            "class Fake:\n    def __init__(self, *a, **k): made.append(self)\n"
+            "sys.modules['anthropic'] = types.SimpleNamespace(Anthropic=Fake)      # put in place AFTER pipeline was imported: only a look-up at call time finds it\n"
+            "assert made == []\n"
+            "c = pl.client(); assert isinstance(c, Fake) and pl.client() is c and len(made) == 1, (c, made)\n"
+            "print('OK')", ANTHROPIC_API_KEY="not-a-key")
+        assert "OK" in out, out
+    check("the direct summary path looks the Anthropic SDK up when its client is first needed, and makes one client", t_client_on_demand)
+
+    def t_missing_sdk():
+        out = _lazy_child(
+            "sys.modules['anthropic'] = None                 # what a missing package looks like to `import anthropic`\n"
+            "import json, types\nimport server\nimport paths, ai, prefs\nimport pipeline as pl\npaths.seed_home()\n"
+            "assert server.ai is ai, 'the AI features were switched off'\n"
+            "open(ai.CONFIG, 'w').write(json.dumps({'providers': {'anth': {'type': 'anthropic', 'key_env': 'FAKE_KEY', 'models': ['m1']}}, 'features': {'ask': {'provider': 'anth', 'model': 'm1'}}}))\n"
+            "try:\n    ai.chat('ask', [{'role': 'user', 'content': 'x'}]); raise AssertionError('answered without the SDK')\n"
+            "except ai.AIError as e:\n    assert str(e).startswith('Claude can’t be used') and 'anthropic' in str(e) and str(e).endswith('run: pip install -r requirements.txt'), str(e)\n"
+            "assert ai.usage_log(10) == [], 'nothing was sent, so nothing is in the usage record'\n"
+            "prefs.summary_prompt = lambda *a, **k: ''        # no summary template: the direct path\n"
+            "pdf = paths.ROOT + '/Papers/x.pdf'; open(pdf, 'wb').write(b'%PDF-1.4')\n"
+            "p = {'id': 'x', 'title': 'T', 'file': 'Papers/x.pdf'}\n"
+            "pl._summarize_one(types.SimpleNamespace(usage=pl.Usage(), save=lambda: None), p, lambda *a: None)\n"
+            "assert p['dl_status'] == 'ok' and p['dl_note'].startswith('summary failed: Claude can’t be used') and 'anthropic' in p['dl_note'] and 'pip install' in p['dl_note'] and 'summary' not in p, p\n"
+            "import os\nassert not os.path.exists(pdf[:-4] + '.md')\n"
+            "print('OK')", FAKE_KEY="good")
+        assert "OK" in out, out
+    check("without the Anthropic SDK the dashboard still loads: a Claude call is refused with what to install (nothing in the usage record), and the direct summary path notes the same on the paper", t_missing_sdk)
+
+    def t_missing_sdk_said_at_start():
+        line = "AI features unavailable (No module named 'anthropic') — run: pip install -r requirements.txt"
+        code = ("%s"
+                "import io, contextlib\nimport server\n"
+                "server.ac.backfill = lambda *a, **k: None; server._daily_snapshot = lambda: None        # (nothing in the background: only what starting prints is looked at)\n"
+                "if server.ai:\n    server.ai.pricing.refresh_soon = lambda: None\n"
+                "if server.indexer:\n    server.indexer.kick = lambda *a, **k: False\n"
+                "buf = io.StringIO()\n"
+                "with contextlib.redirect_stdout(buf):\n    srv, url = server.start(18990, quiet=%r)\n"
+                "assert srv is not None, url\nsrv.server_close()\n"
+                "print('SAID=%%d' %% buf.getvalue().count(%r)); print('SDK=%%d' %% ('anthropic' in sys.modules and sys.modules['anthropic'] is not None))\n"
+                "sys.stdout.flush(); import os; os._exit(0)")
+        gone = "sys.modules['anthropic'] = None\n"
+        out = _lazy_child(code % (gone, False, line)); assert "SAID=1\n" in out and "SDK=0" in out, out        # the package is missing: one line, in the words used for the other AI parts
+        out = _lazy_child(code % (gone, True, line)); assert "SAID=0\n" in out, out                            # (the Mac app starts quietly)
+        out = _lazy_child(code % ("", False, line)); assert "SAID=0\n" in out and "SDK=0" in out, out          # the package is there: nothing is said, and looking for it did not load it
+    check("starting without the Anthropic SDK says once what to install (not when started quietly, not when the SDK is there), and looking for it does not load it", t_missing_sdk_said_at_start)
+
     srv.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
     print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")
     sys.exit(1 if FAILS else 0)
