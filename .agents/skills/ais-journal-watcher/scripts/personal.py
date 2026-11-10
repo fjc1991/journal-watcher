@@ -276,7 +276,9 @@ def _bands(scores):
     import numpy as np
     if not len(scores):
         return []
-    order = np.argsort(-np.asarray(scores))
+    # Papers whose scores are equal to six decimals count as equal and keep the order they came in. Without that, which of several equally close papers
+    # were the last "high" ones was left to the last digit of the arithmetic, which differs from one computer to the next (macOS and Linux disagreed).
+    order = np.argsort(-np.round(np.asarray(scores, dtype="float64"), 6), kind="stable")
     out = [""] * len(scores)
     for rank, i in enumerate(order):
         out[i] = "high" if rank < len(scores) / 3 else "medium" if rank < 2 * len(scores) / 3 else "lower"

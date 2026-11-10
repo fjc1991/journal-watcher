@@ -5802,8 +5802,10 @@ print("OK")
                 fo.delete(f)
             write_cfg(CFG)
 
-    PIN = [("u20", "medium", "", 0), ("u09", "high", "", 0), ("u02", "high", "", 0), ("u11", "high", "pin-auctions", 1.9), ("u12", "high", "", 0), ("u15", "high", "", 0), ("u18", "high", "pin-platforms", 1.9),
-           ("u21", "high", "pin-platforms", 1.9), ("u05", "medium", "", 0), ("u08", "medium", "", 0), ("u14", "medium", "", 0), ("u17", "medium", "pin-auctions", 2.1), ("u23", "medium", "pin-auctions", 1.9),
+    # (Eight of these papers are exactly as close to what was read as each other. Which two of them are the last "high" ones used to be left to the sort, and
+    # macOS and Linux chose differently: papers that are equal now keep the library's order, so u02 and u05. Everything else is as the version before gave it.)
+    PIN = [("u20", "medium", "", 0), ("u09", "high", "", 0), ("u02", "high", "", 0), ("u05", "high", "", 0), ("u12", "high", "", 0), ("u15", "high", "", 0), ("u18", "high", "pin-platforms", 1.9),
+           ("u21", "high", "pin-platforms", 1.9), ("u08", "medium", "", 0), ("u11", "medium", "pin-auctions", 1.9), ("u14", "medium", "", 0), ("u17", "medium", "pin-auctions", 2.1), ("u23", "medium", "pin-auctions", 1.9),
            ("u07", "lower", "", 0), ("u10", "lower", "", 0), ("u13", "lower", "", 0), ("u16", "lower", "", 0), ("u19", "lower", "", 0), ("u22", "lower", "", 0)]
     shape = lambda q: [(i["file"][7:10], i["fit"], (i["folder"] or {}).get("id", ""), (i["folder"] or {}).get("z", 0)) for i in q["items"]]   # noqa: E731
     REC = 22 + 4 * 512                                                      # one record of the vector file with the fake model's 512 numbers: key, day, vector
@@ -5811,7 +5813,10 @@ print("OK")
     def t_upnext_pinned():
         rows = up_next_fixture()
         q = pe.queue(rows, 30)
-        assert shape(q) == PIN, shape(q)                                    # order, fit and suggested folder of every candidate, as the version before the matrix store gave them (this check passes on that version too)
+        assert shape(q) == PIN, shape(q)                                    # order, fit and suggested folder of every candidate
+        # equally close papers keep the order they came in, whatever the last digits say (they differ from one computer to the next)
+        assert pe._bands([0.5, 0.0, 1e-13, -1e-13, 0.0, -0.3]) == ["high", "high", "medium", "medium", "lower", "lower"], pe._bands([0.5, 0.0, 1e-13, -1e-13, 0.0, -0.3])
+        assert pe._bands([0.0, -1e-13, 1e-13, 0.0, 0.0, 0.0]) == ["high", "high", "medium", "medium", "lower", "lower"] and pe._bands([]) == []
         assert q["total"] == 19 and q["profile"] == {"pos": 4, "neg": 2, "ready": True}, q
         pe._mem.clear()                                                      # the same from the file alone (a restart)
         assert shape(pe.queue(rows, 30)) == PIN
@@ -6129,7 +6134,7 @@ print("OK")
             finally:
                 pe._sig = real
 
-    check("Up next is the same as before the matrix store: order, fit and suggested folder of every candidate", lambda: with_folders(t_upnext_pinned))
+    check("Up next is the same on every computer and as before the matrix store: order, fit and suggested folder of every candidate; equally close papers keep their order", lambda: with_folders(t_upnext_pinned))
     check("Up next embeds a text once, looks the library up as a whole, and one changed text appends one record instead of writing the file again", lambda: with_folders(t_upnext_no_repeat))
     check("another embedding model in Settings: every vector is made again, none of the old model is used, another vector length does not break Up next", lambda: with_folders(t_upnext_model_change))
     check("vectors written by another process are found and not lost; a deleted vector file is written back", lambda: with_folders(t_upnext_other_writer))
