@@ -86,7 +86,8 @@ function renderAI(body) {
   <div class="card st-card"><h2>Privacy and spending</h2>
     <label class="chk"><input type="checkbox" id="st-local"${A.privacy.local_only ? " checked" : ""}> <b>Local-only mode</b> — never send paper text to a provider outside this computer (only Ollama works; Ask and Explain need an Ollama model)</label>
     <label class="chk">Monthly budget (USD) <input type="number" id="st-budget" min="0" step="1" value="${A.budget.monthly_usd ?? ""}" placeholder="no limit" style="width:110px"> <small>new paid calls stop when the month's spend reaches it (answers already saved and free models on this computer still work); a warning shows at 80%</small></label>
-    <label class="chk">Reuse earlier screening verdicts for <input type="number" id="st-reuse" min="0" max="3650" step="1" value="${(A.screening || {}).reuse_days ?? 90}" style="width:80px"> days <small>0 = always ask the AI again. A verdict is reused only for the same paper text and the same question (topics, method and focus phrase), so searching again does not pay for papers it already judged</small></label></div>
+    <label class="chk">Reuse earlier screening verdicts for <input type="number" id="st-reuse" min="0" max="3650" step="1" value="${(A.screening || {}).reuse_days ?? 90}" style="width:80px"> days <small>0 = always ask the AI again. A verdict is reused only for the same paper text and the same question (topics, method and focus phrase), so searching again does not pay for papers it already judged</small></label>
+    <label class="chk"><input type="checkbox" id="st-keep"${(A.ask || {}).keep_paper ? " checked" : ""}> <b>Whole-paper questions: keep the paper ready between questions (Claude)</b> <small>The first question on a paper then costs about a quarter more on the paper's text; each further question within 5 minutes costs about a tenth of it. Later than 5 minutes, the quarter is paid again. Off: every question pays for the whole paper, as before.</small></label></div>
   <div class="card st-card"><h2>Prices <small>USD per million tokens — for cost figures and the budget</small></h2>
     <table class="st-table" id="st-prices"><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th><th>Where the price comes from</th></tr>
     ${used.map(m => { const au = (A.price_auto || {})[m] || {}, mine = Object.keys(price(m)).length > 0;
@@ -135,7 +136,7 @@ function renderAI(body) {
     const emb = $('tr[data-f="emb"]', body);
     try {
       D.ai = await api("/api/ai/config", {features, provider_models, prices, embeddings: {provider: $(".fp", emb).value, model: $(".fm", emb).value.trim()},
-        privacy: {local_only: $("#st-local", body).checked}, budget: {monthly_usd: $("#st-budget", body).value}, screening: {reuse_days: $("#st-reuse", body).value}});
+        privacy: {local_only: $("#st-local", body).checked}, budget: {monthly_usd: $("#st-budget", body).value}, screening: {reuse_days: $("#st-reuse", body).value}, ask: {keep_paper: $("#st-keep", body).checked}});
       note(msg, "Saved."); window.dispatchEvent(new Event("jw-settings-changed"));
     } catch (e) { note(msg, e.message, true); }
   };

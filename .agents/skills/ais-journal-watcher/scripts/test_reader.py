@@ -3399,6 +3399,108 @@ print("OK")
         Fake.pieces = ["The sample has ", "120 firms (2)."]
     check("follow-ups carry history; invalid citations are flagged; override and fresh pass through", t_history)
 
+    def t_ask_paper_first():
+        """Whole-paper Ask: the paper is the first thing sent, the same bytes for every question on it. With "keep the paper ready" on, Claude is told to keep it
+        (one mark, on the paper, never on the question); with it off, or for another kind of provider, nothing is marked. What Claude wrote to and read from
+        its store is priced with the price table's figures."""
+        import types as _t
+        import prices as _pr
+        asked, use = [], [(4000, 0), (0, 4000)]
+        class _S:
+            def __init__(self): self.text_stream = iter(["It is about platforms (1)."])
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get_final_message(self):
+                w, r = use[min(len(asked), 2) - 1]
+                return _t.SimpleNamespace(stop_reason="end_turn", content=[_t.SimpleNamespace(type="text", text="It is about platforms (1).")],
+                                          usage=_t.SimpleNamespace(input_tokens=30, output_tokens=10, cache_creation_input_tokens=w, cache_read_input_tokens=r, server_tool_use=None))
+        ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: asked.append(kw) or _S())))
+        claude = {**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["claude-sonnet-5-5"]}}, "features": {"ask": {"provider": "anth", "model": "claude-sonnet-5-5"}}}
+        marks = lambda kw: [b for m in kw["messages"] if isinstance(m["content"], list) for b in m["content"] if "cache_control" in b]   # noqa: E731
+        hist = [{"q": "Summarise.", "a": "It is about platforms (1)."}]
+        try:
+            write_cfg({**claude, "ask": {"keep_paper": True}})
+            one = list(ask.stream(pdf, "Summarise.", "full", fresh=True))
+            two = list(ask.stream(pdf, "and why?", "full", history=hist, fresh=True))
+            assert one[-1]["type"] == "done" and two[-1]["type"] == "done" and len(asked) == 2, (one[-1], two[-1])
+            k1, k2 = asked
+            first = k1["messages"][0]["content"]
+            assert k1["messages"][0]["role"] == "user" and isinstance(first, list) and first[0]["type"] == "text" and first[0]["text"].startswith("Passages from the paper:"), "the paper is the first block"
+            assert first[0]["text"].count("[") >= len(bs) and "120 firms" in first[0]["text"] and "Summarise." not in first[0]["text"], "every passage, and nothing of the question"
+            assert first[0].get("cache_control") == {"type": "ephemeral"} and set(first[0]) == {"type", "text", "cache_control"}, first[0].keys()
+            assert first[1] == {"type": "text", "text": "Question: Summarise."} and len(first) == 2, "the question follows, unmarked"
+            assert len(marks(k1)) == 1 and len(marks(k2)) == 1, "one mark, on the paper"
+            assert json.dumps(k2["system"]) == json.dumps(k1["system"]) and json.dumps(k2["messages"][0]["content"][0]) == json.dumps(k1["messages"][0]["content"][0]), "the next question starts with exactly the same bytes"
+            assert [m["role"] for m in k2["messages"]] == ["user", "assistant", "user"] and k2["messages"][0]["content"][1]["text"] == "Question: Summarise."
+            assert "Passages from the paper" not in json.dumps(k2["messages"][1:]) and k2["messages"][1]["content"] == hist[0]["a"] and k2["messages"][2]["content"] == "Question: and why?", k2["messages"][1:]
+            p = _pr.lookup("anth", "claude-sonnet-5-5"); assert p["source"] == "built-in" and p["cache_write"] == round(p["in"] * 1.25, 4) and 0 < p["cache_read"] <= p["in"] * 0.1, p
+            assert abs(one[-1]["cost"] - (30 * p["in"] + 10 * p["out"] + 4000 * p["in"] * 1.25) / 1e6) < 1e-12, "writing the paper costs a quarter more than reading it"
+            assert abs(two[-1]["cost"] - (30 * p["in"] + 10 * p["out"] + 4000 * p["cache_read"]) / 1e6) < 1e-12 and two[-1]["cost"] < one[-1]["cost"] / 5, "reading it back costs about a tenth"
+            row = json.loads(open(ai.LEDGER).readlines()[-1]); assert row["cache_read"] == 4000 and row["cache_write"] == 0 and row["in"] == 30, row
+            # a longer conversation: the paper is still the first block, the same bytes
+            list(ask.stream(pdf, "and then?", "full", history=hist + [{"q": "and why?", "a": "Because (2)."}], fresh=True)); k3 = asked[-1]
+            assert json.dumps(k3["messages"][0]["content"][0]) == json.dumps(k1["messages"][0]["content"][0]) and [m["role"] for m in k3["messages"]] == ["user", "assistant", "user", "assistant", "user"] and len(marks(k3)) == 1
+            # closest passages change with the question, and so does a paper too long to send whole (it falls back to them): nothing to keep
+            list(ask.stream(pdf, "How many firms are in the sample?", "rag", history=hist, fresh=True)); k = asked[-1]
+            assert not marks(k) and [m["content"] for m in k["messages"][:2]] == ["Summarise.", hist[0]["a"]] and k["messages"][-1]["content"].startswith("Passages from the paper:"), "closest passages: as before"
+            lim = ask.FULL_LIMIT; ask.FULL_LIMIT = 10
+            try:
+                list(ask.stream(pdf, "Summarise.", "full", history=hist, fresh=True)); assert not marks(asked[-1]) and asked[-1]["messages"][0]["content"] == "Summarise."
+            finally:
+                ask.FULL_LIMIT = lim
+            # the switch off (and an ai.json from before it existed): the paper is still first, nothing is marked
+            for cfg in ({**claude, "ask": {"keep_paper": False}}, claude):
+                write_cfg(cfg); assert ai.keep_paper() is (False if "ask" in cfg else ai.KEEP_PAPER_DEFAULT)
+                if "ask" not in cfg and ai.KEEP_PAPER_DEFAULT:
+                    continue
+                list(ask.stream(pdf, "and why?", "full", history=hist, fresh=True)); k = asked[-1]
+                assert not marks(k) and k["messages"][0]["content"][0] == {"type": "text", "text": k1["messages"][0]["content"][0]["text"]} and k["messages"][0]["content"][1]["text"] == "Question: Summarise.", "off: first, unmarked"
+                assert "cache_control" not in json.dumps(k["messages"])
+            # the setting is saved with the other AI settings and comes back to the page
+            ai.save_config({"ask": {"keep_paper": True}}); assert ai.keep_paper() is True and ai.config()["ask"] == {"keep_paper": True} and json.load(open(ai.CONFIG))["ask"] == {"keep_paper": True}
+            ai.save_config({"budget": {"monthly_usd": None}}); assert ai.keep_paper() is True, "saving something else leaves it"
+            ai.save_config({"ask": {"keep_paper": False}}); assert ai.keep_paper() is False
+            # another kind of provider: the paper first, as plain text, and no mark even with the switch on
+            write_cfg({**CFG, "ask": {"keep_paper": True}})
+            list(ask.stream(pdf, "and why?", "full", history=hist, fresh=True)); sent = SEEN[-1][1]["messages"]
+            assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"] and isinstance(sent[1]["content"], str), sent[1]
+            assert sent[1]["content"] == k1["messages"][0]["content"][0]["text"] + "\n\nQuestion: Summarise." and sent[3]["content"] == "Question: and why?" and "cache_control" not in json.dumps(SEEN[-1][1]) and '"cache"' not in json.dumps(SEEN[-1][1])
+            list(ask.stream(pdf, "Summarise.", "full", fresh=True)); sent = SEEN[-1][1]["messages"]
+            assert len(sent) == 2 and sent[1]["content"] == k1["messages"][0]["content"][0]["text"] + "\n\nQuestion: Summarise.", "one question: the request other providers always got"
+        finally:
+            ai._clients.pop("a", None); write_cfg(CFG)
+    check("whole-paper Ask: the paper is sent first and the same every time; 'keep the paper ready' marks it for Claude only; what Claude kept and read back is priced", t_ask_paper_first)
+
+    def t_to_anthropic_mark():
+        m = [{"role": "user", "content": [{"type": "text", "text": "p", "cache": True}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]
+        assert ai._to_anthropic(m, True) == [{"role": "user", "content": [{"type": "text", "text": "p", "cache_control": {"type": "ephemeral"}}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]
+        assert ai._to_anthropic(m) == ai._to_anthropic(m, False) == [{"role": "user", "content": [{"type": "text", "text": "p"}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]
+        assert ai._to_compat(m) == [{"role": "user", "content": "p\n\nq"}, {"role": "user", "content": "plain"}]
+        img = [{"role": "user", "content": [{"type": "text", "text": "p", "cache": True}, {"type": "image", "data": "QQ=="}]}]
+        c = ai._to_compat(img)[0]["content"]; assert c[0] == {"type": "text", "text": "p"} and c[1]["type"] == "image_url", "with a picture the parts stay parts, and the mark is not sent"
+        k = lambda mm: ai._cache_key("fake", {"model": "m1"}, mm, None, None, 4000, False)   # noqa: E731
+        assert k(m) == k([{"role": "user", "content": [{"type": "text", "text": "p"}, {"type": "text", "text": "q"}]}, {"role": "user", "content": "plain"}]), "the mark is not part of what makes a saved answer the same"
+    check("a text part marked to be kept: Claude's request carries the mark only when asked to, other providers get plain text, the saved answer's key ignores it", t_to_anthropic_mark)
+
+    def t_cache_pdf_hash():
+        """A PDF in a saved answer's key is known by its content: another folder, another computer or a new file date is the same request."""
+        ai.cache_clear(); n0 = len(SEEN)
+        req = lambda p: [{"role": "user", "content": [{"type": "pdf", "path": p}, {"type": "text", "text": "Summarise."}]}]   # noqa: E731
+        r1 = ai.chat("ask", req(pdf), cache=True)
+        other = os.path.join(TMP, "second-computer", "same.pdf"); os.makedirs(os.path.dirname(other), exist_ok=True); shutil.copy(pdf, other)
+        st = os.stat(other); os.utime(other, (st.st_atime + 100, st.st_mtime + 100))
+        r2 = ai.chat("ask", req(other), cache=True)
+        assert not r1.cached and r2.cached and r2.cost == 0.0 and r2.text == r1.text and len(SEEN) == n0 + 1, "the same bytes at another path, with another date"
+        key = lambda p: ai._cache_key("fake", {"model": "m1"}, req(p), None, None, 4000, False)   # noqa: E731
+        diff = os.path.join(TMP, "second-computer", "diff.pdf")
+        with open(pdf, "rb") as a, open(diff, "wb") as b:
+            b.write(a.read() + b"\n% changed\n")
+        gone = os.path.join(TMP, "second-computer", "gone.pdf")
+        assert key(pdf) == key(other) != key(diff) and key(gone) and key(gone) != key(pdf), "other bytes: another request; a file that is not there does not raise"
+        assert not ai.chat("ask", req(diff), cache=True).cached and len(SEEN) == n0 + 2
+        ai.cache_clear(); shutil.rmtree(os.path.dirname(other))
+    check("the saved answers know a PDF by its content, not by where it is or its date", t_cache_pdf_hash)
+
     def t_suggest():
         Fake.pieces = [json.dumps({"questions": ["What is the sample?", "What is the finding?", " ", "What next?"]})]
         qs = ask.suggest(pdf); assert qs == ["What is the sample?", "What is the finding?", "What next?"] and "response_format" in SEEN[-1][1]

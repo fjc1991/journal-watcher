@@ -11,8 +11,11 @@ Ollama model can be swapped per feature.
 
 A message's content is a string or a list of parts: {"type":"text","text"}, {"type":"image","media_type","data"(base64)},
 {"type":"pdf","path"} (sent natively to Claude; for other providers the paper's extracted text is sent instead).
+A text part may also carry "cache": True: a long text that is the same from one request to the next and comes first (the paper in whole-paper Ask). With
+ai.json -> ask.keep_paper on, Claude is asked to keep everything up to and including it for five minutes (a prompt-cache breakpoint: writing it costs 1.25 x
+the input price, reading it back about 0.1 x); every other provider gets it as plain text, and with the setting off Claude does too.
 Options: web_search=True (the provider searches the web; sources come back in Result.sources), cache=True (identical
-requests are answered from state/ai_cache/ and cost nothing; fresh=True skips the cache), override={"provider","model"}.
+requests are answered from state/ai_cache/ and cost nothing; a PDF counts by its content, so the same paper in another place is the same request; fresh=True skips the cache), override={"provider","model"}.
 
 Two adapters: `anthropic` (the SDK, same call style as pipeline.py) and `openai_compat` (plain HTTPS with urllib, so no
 extra dependency). Every call is appended to state/ai_usage.jsonl (a paid embedding call too, as feature "embed"). Keys come from .env (never from ai.json).
@@ -115,6 +118,8 @@ CUT_OFF_STOPS = frozenset({"max_tokens", "model_context_window_exceeded", "lengt
 
 SCREEN_FEATURE = {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}      # the screening of new papers (pipeline.screen): what it used before it had a setting of its own
 
+KEEP_PAPER_DEFAULT = False      # "Whole-paper questions: keep the paper ready between questions (Claude)" in Settings → AI, for an ai.json that does not say (True: on unless switched off)
+
 DEFAULT = {
     "providers": {"anthropic": {"type": "anthropic", "key_env": "ANTHROPIC_API_KEY", "models": ["claude-sonnet-5-5"]}},
     "features": {"ask": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "low"}, "screen": dict(SCREEN_FEATURE)},
@@ -122,6 +127,7 @@ DEFAULT = {
     "prices": {},
     "privacy": {"local_only": False},
     "budget": {"monthly_usd": None},
+    "ask": {"keep_paper": KEEP_PAPER_DEFAULT},
     "screening": {"reuse_days": 90},      # an earlier screening verdict is believed for this many days (0 = always ask again): pipeline.reuse_days
 }
 
@@ -131,6 +137,8 @@ def config_data():
     c.setdefault("privacy", {"local_only": False})
     c.setdefault("budget", {"monthly_usd": None})
     c.setdefault("screening", {"reuse_days": 90})
+    if not isinstance(c.get("ask"), dict) or not isinstance(c["ask"].get("keep_paper"), bool):
+        c["ask"] = {"keep_paper": KEEP_PAPER_DEFAULT}
     feats = c.setdefault("features", {})
     if "screen" not in feats:           # an ai.json from before screening had a setting: screening keeps Claude (it does not follow the Ask setting, which may be another provider), unless that provider is not there at all
         feats["screen"] = dict(SCREEN_FEATURE) if SCREEN_FEATURE["provider"] in (c.get("providers") or {}) else dict(feats.get("ask") or SCREEN_FEATURE)
@@ -331,7 +339,7 @@ def config():
                  "web_search": can_search_web(p)} for n, p in c["providers"].items()}
     in_env = [n for n in dl.key_names() if key_where(n) == ".env file"]          # every key still in the synced .env file: the AI providers' and the paper sources'
     return {"providers": provs, "keychain": keychain.available(), "keys_in_env": in_env, "features": c["features"], "embeddings": c["embeddings"], "prices": c.get("prices", {}),
-            "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"]}
+            "price_auto": price_auto(c), "privacy": c["privacy"], "budget": c["budget"], "screening": c["screening"], "ask": c["ask"]}
 
 
 def price_auto(c=None):
@@ -373,6 +381,8 @@ def save_config(patch):
     if "budget" in patch:
         v = (patch["budget"] or {}).get("monthly_usd")
         c["budget"] = {"monthly_usd": None if v in (None, "") else max(0.0, float(v))}
+    if "ask" in patch:
+        c["ask"] = {"keep_paper": bool((patch["ask"] or {}).get("keep_paper"))}
     if "screening" in patch:
         try:
             days = int((patch["screening"] or {}).get("reuse_days", 90))
@@ -670,7 +680,13 @@ def _pdf_text(path):
     return "Full text of the paper (extracted from the PDF):\n\n" + "\n\n".join(text)
 
 
-def _to_anthropic(messages):
+def keep_paper():
+    """Whether Claude is asked to keep the paper of a whole-paper question ready for the next one (Settings → AI; ai.json -> ask.keep_paper)."""
+    return config_data()["ask"]["keep_paper"]
+
+
+def _to_anthropic(messages, keep=False):
+    """keep: a text part marked "cache" gets the prompt-cache breakpoint (Claude keeps the request up to and including it for five minutes)."""
     out = []
     for m in messages:
         if isinstance(m.get("content"), str):
@@ -683,7 +699,7 @@ def _to_anthropic(messages):
                 with open(x["path"], "rb") as fh:
                     parts.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": base64.standard_b64encode(fh.read()).decode()}})
             else:
-                parts.append({"type": "text", "text": x.get("text", "")})
+                parts.append({"type": "text", "text": x.get("text", ""), **({"cache_control": {"type": "ephemeral"}} if keep and x.get("cache") else {})})
         out.append({**m, "content": parts})
     return out
 
@@ -701,7 +717,10 @@ def _to_compat(messages):
                 parts.append({"type": "text", "text": _pdf_text(x["path"])})
             else:
                 parts.append({"type": "text", "text": x.get("text", "")})
-        out.append({**m, "content": parts})
+        if any(x.get("cache") for x in _parts(m.get("content"))) and all(x["type"] == "text" for x in parts):
+            out.append({**m, "content": "\n\n".join(x["text"] for x in parts)})      # (a message with a marked text and nothing but text goes as one plain string: the mark is never sent, and servers that take only a string still work)
+        else:
+            out.append({**m, "content": parts})
     return out
 
 
@@ -715,8 +734,9 @@ def _cache_key(name, f, messages, system, schema, max_tokens, web):
                 parts.append(["image", hashlib.sha1(x["data"].encode()).hexdigest()])
             elif x["type"] == "pdf":
                 try:
-                    st = os.stat(x["path"]); parts.append(["pdf", x["path"], st.st_mtime_ns, st.st_size])
-                except OSError:
+                    import notes_store as ns
+                    parts.append(["pdf", ns.sha1_of(x["path"])])      # the file's content, not where it is or when it was written: the same paper on another computer is the same request
+                except (OSError, TypeError):
                     parts.append(["pdf", x["path"]])
             else:
                 parts.append(["text", x.get("text", "")])
@@ -811,7 +831,7 @@ def _anthropic(name, p, f, messages, system, schema, max_tokens, web=False):
     oc = {"effort": f.get("effort", "low")}
     if schema:
         oc["format"] = {"type": "json_schema", "schema": schema}
-    kw = {"model": f["model"], "max_tokens": max_tokens, "messages": _to_anthropic(messages), "output_config": oc}
+    kw = {"model": f["model"], "max_tokens": max_tokens, "messages": _to_anthropic(messages, keep_paper()), "output_config": oc}
     for k in ("betas", "fallbacks", "thinking"):       # Sonnet 5.5 settings, as in pipeline.py (no temperature / forced tool_choice)
         if p.get(k):
             kw[k] = p[k]

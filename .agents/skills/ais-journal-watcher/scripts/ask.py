@@ -6,7 +6,9 @@
 
 The model sees numbered passages and must cite them as (3) or (3,7); the reader turns those numbers into links that jump to
 the passage. mode "rag" = the closest passages to the question (needs the local embedding index, built on first use);
-mode "full" = every passage of the paper (long-context models; falls back to "rag" on very long papers).
+mode "full" = every passage of the paper (long-context models; falls back to "rag" on very long papers). In that mode the paper is the first thing
+sent, before the conversation and the question, and the same bytes for every question on it: a provider that reuses a repeated beginning then can, and
+with "keep the paper ready" on (Settings → AI) Claude is asked to (ai.py: a text part marked "cache").
 """
 import json
 import os
@@ -38,12 +40,23 @@ def quote_of(text, n=130):
     return text if len(text) <= n else text[:n].rsplit(" ", 1)[0]
 
 
-def pick(pdf_path, question, mode, k=12, progress=None, pages=None):
-    """pages: (first, last) file pages, both included: read only that part (one chapter of a book)."""
+def readable(pdf_path, pages=None):
+    """The passages a question may be answered from (no reference list). pages: (first, last) file pages, both included: only that part (one chapter of a book)."""
     blocks = [b for b in bl.extract(pdf_path) if b.get("kind", "body") != "ref"]
     if pages:
         blocks = [b for b in blocks if pages[0] - 1 <= b["page"] <= pages[1] - 1]
-    if mode == "full" and sum(len(b["text"]) for b in blocks) <= FULL_LIMIT:
+    return blocks
+
+
+def whole(blocks, mode):
+    """Whether "whole paper" really sends every passage (not the closest ones it falls back to on a very long paper)."""
+    return mode == "full" and sum(len(b["text"]) for b in blocks) <= FULL_LIMIT
+
+
+def pick(pdf_path, question, mode, k=12, progress=None, pages=None):
+    """pages: as in readable()."""
+    blocks = readable(pdf_path, pages)
+    if whole(blocks, mode):
         return blocks
     if not embed.is_indexed(pdf_path):
         embed.index_paper(pdf_path, progress)
@@ -123,9 +136,17 @@ def stream(pdf_path, question, mode="rag", history=None, override=None, fresh=Fa
         yield {"type": "passages", "passages": passages}
         body = "\n\n".join("[%d] (p. %d) %s" % (i + 1, b["page"] + 1, b["text"]) for i, b in enumerate(chosen))
         messages = []
-        for h in history:
-            messages += [{"role": "user", "content": h["q"]}, {"role": "assistant", "content": h["a"]}]
-        messages.append({"role": "user", "content": "Passages from the paper:\n\n%s\n\nQuestion: %s" % (body, question)})
+        if whole(readable(pdf_path, pages), mode):
+            # whole paper: the text goes first, before the conversation and the question, and is the same bytes for every question (every passage in the paper's
+            # order, nothing that depends on what was asked), so a provider can reuse it; the mark is what "keep the paper ready" acts on (ai._to_anthropic)
+            qs = [h["q"] for h in history] + [question]
+            messages.append({"role": "user", "content": [{"type": "text", "text": "Passages from the paper:\n\n%s" % body, "cache": True}, {"type": "text", "text": "Question: %s" % qs[0]}]})
+            for h, q in zip(history, qs[1:]):
+                messages += [{"role": "assistant", "content": h["a"]}, {"role": "user", "content": "Question: %s" % q}]
+        else:
+            for h in history:
+                messages += [{"role": "user", "content": h["q"]}, {"role": "assistant", "content": h["a"]}]
+            messages.append({"role": "user", "content": "Passages from the paper:\n\n%s\n\nQuestion: %s" % (body, question)})
         yield {"type": "status", "msg": "Asking…"}
         for kind, v in ai.stream("ask", messages, system=SYSTEM, max_tokens=2500, cache=True, fresh=fresh, override=override):
             if kind == "text":

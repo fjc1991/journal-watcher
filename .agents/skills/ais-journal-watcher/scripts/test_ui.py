@@ -1064,6 +1064,16 @@ fx.fetch_journal = lambda j: []                                                 
             page.fill("#st-reuse", "99999"); page.click("#st-save"); page.wait_for_function("document.querySelector('#st-msg.bad')", timeout=5000)
             check("…(refused: 0 to 3650 days)", api("/api/ai/config")["screening"]["reuse_days"] == 30 and "3650" in page.inner_text("#st-msg"), page.inner_text("#st-msg"))
             page.fill("#st-reuse", "90"); page.click("#st-save"); page.wait_for_timeout(600)
+            keep0_ = api("/api/ai/config").get("ask", {}).get("keep_paper"); lab_ = page.inner_text("label:has(#st-keep)") if page.locator("#st-keep").count() else ""
+            check("settings: 'Whole-paper questions: keep the paper ready between questions (Claude)' is a switch that shows what is saved and says what it costs",
+                  keep0_ in (True, False) and page.locator("#st-keep").count() == 1 and page.is_checked("#st-keep") == keep0_ and "keep the paper ready between questions (Claude)" in lab_
+                  and "about a quarter more" in lab_ and "within 5 minutes" in lab_ and "about a tenth" in lab_ and "as before" in lab_, lab_)
+            page.set_checked("#st-keep", not keep0_); page.click("#st-save"); page.wait_for_timeout(600)
+            page.click('.st-tabs button[data-t="reader"]'); page.click('.st-tabs button[data-t="ai"]'); page.wait_for_selector("#st-keep")
+            check("…switched and saved, it is kept (and still shown after leaving the page and coming back), and the budget saved with it is untouched",
+                  api("/api/ai/config")["ask"] == {"keep_paper": (not keep0_)} and page.is_checked("#st-keep") == (not keep0_) and api("/api/ai/config")["budget"]["monthly_usd"] == 5)
+            page.set_checked("#st-keep", bool(keep0_)); page.click("#st-save"); page.wait_for_timeout(600)
+            check("…and switched back", api("/api/ai/config")["ask"] == {"keep_paper": bool(keep0_)})
             page.click('.st-sub button[data-t="usage"]'); page.wait_for_selector(".st-stat")
             use_ = api("/api/ai/usage"); body_ = page.inner_text("#st-body")
             check("usage: calls of this month without a known price are said (the total is 'at least', and a note says the real total is higher and the budget cannot count them), with what is left of the budget",
