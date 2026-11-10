@@ -2,7 +2,7 @@
 // limitations, future research. Every statement shows the pages it rests on (click to jump there). Click any text to edit it; your edits are saved
 // next to the paper (<name>.card.json) and marked. The same cards feed the folder's Evidence view and the Research Ideas Lab.
 // The server streams newline-delimited JSON from POST /api/ai/card: {type:"status"|"progress"|"card"|"done"|"error"}.
-import {errBox, notifyError, S, $, esc, ico, toast, on, debounce, api, progress, aboutCost} from "./state.js";
+import {errBox, notifyError, S, $, esc, ico, toast, on, debounce, api, progress, aboutCost, exactCost} from "./state.js";
 import * as N from "./notes.js";
 import * as C from "./canvas.js";
 import {jumpCite} from "./cite.js";
@@ -79,7 +79,7 @@ function draw() {
   const notices = [card.stale && callout("warn", "The PDF was replaced after this card was written: it may no longer match."), card.truncated && callout("warn", "This paper is very long: the card was written from its beginning and end."),
     card.invalid && callout("warn", `${card.invalid} citation${card.invalid > 1 ? "s" : ""} pointed at passages that don’t exist and ${card.invalid > 1 ? "were" : "was"} removed.`)].filter(Boolean).join("");
   body.innerHTML = frame({tool: "card", kind: "Paper card", icon: "card", key: "card:" + S.file, title: S.meta && S.meta.title || "", sub: `<label class="cd-type">Type ${sel("kind", KINDS, d.kind)}</label>`,
-    meta: [{t: card.model || "model unknown"}, card.edited && {t: "✎ edited", cls: "edited", title: "You changed something"}, card.generated && {t: "written " + card.generated.slice(0, 10)}, card.cost != null && {t: money(card.cost)}],
+    meta: [{t: card.model || "model unknown"}, card.edited && {t: "✎ edited", cls: "edited", title: "You changed something"}, card.generated && {t: "written " + card.generated.slice(0, 10)}, card.cost != null && {t: exactCost(card.cost)}],
     actions: `<button class="rd-btn" data-k="copy" title="Copy the card as Markdown">${ico("copy", "sm")} Copy</button><button class="rd-btn" data-k="listen" title="A two-minute spoken briefing of this paper, read aloud by your browser">🎧 Listen</button><button class="rd-btn" data-k="notes" title="Put the whole card on your notes canvas">→ Notes</button><button class="rd-btn" data-k="regen" title="Write the card again (the old one is kept in state/card_backups)">${ico("redo", "sm")}</button>`,
     notices, sections});
 }
@@ -152,7 +152,7 @@ async function make(fresh) {
       }
     }
     card = got || card; loadedFor = S.file;
-    if (done && !done.existing) toast("Card written" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
+    if (done && !done.existing) toast("Card written" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
   } catch (e) {
     busy = false;
     if (card) { notifyError(e); return draw(); }            // a failed rewrite leaves the card you had

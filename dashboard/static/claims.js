@@ -3,7 +3,7 @@
 // supported / partly / contradicted / not found in your papers, with the passages it rests on (click one: the paper opens at that page); when a claim names a paper
 // ("Singhal et al., 2026") it says whether that paper's own passages really say it. The model may only point at passages it was given; anything else is dropped on the server.
 // Saved as Papers/_folders/<id>.claims.json. Server: GET /api/folder/claims, POST /api/ai/claims[/estimate] (stream: status | progress | claims | done | error), POST /api/folder/claims (tick off).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress, aboutCost} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, debounce, progress, aboutCost, exactCost} from "./state.js";
 import {frame, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -93,7 +93,7 @@ function drawOut() {
   const notices = (doc.dropped ? callout("warn", `The model pointed at ${doc.dropped} passage${doc.dropped === 1 ? "" : "s"} it had not been given; ${doc.dropped === 1 ? "it was" : "they were"} ignored.`) : "") +
     (bad.length ? "" : callout("ok", "Nothing here contradicts your papers, and every paper you name says what you attribute to it."));
   box.innerHTML = frame({tool: "claims", kind: "Claim check", icon: "claims", key: "claims:" + C.fid, title: `${n} claim${n === 1 ? "" : "s"} checked against ${doc.papers} paper${doc.papers === 1 ? "" : "s"}`, sub: tally,
-    actions: acts, meta: [{t: doc.model}, doc.cost != null ? {t: money(doc.cost)} : null, {t: doc.scope === "library" ? "whole library" : "this folder"}, {t: "checked " + (doc.generated || "").slice(0, 10)}], notices,
+    actions: acts, meta: [{t: doc.model}, doc.cost != null ? {t: exactCost(doc.cost)} : null, {t: doc.scope === "library" ? "whole library" : "this folder"}, {t: "checked " + (doc.generated || "").slice(0, 10)}], notices,
     sections: [sec("attn", "Needs your attention", "warn", bad, "warn"), sec("sup", "Supported by your papers", "check", sup), sec("nf", "Not found in your papers", "search", nf, "", true)]});
 }
 
@@ -138,7 +138,7 @@ async function run(fresh) {
         if (m.type === "status" && st()) progress(st(), m); else if (m.type === "claims") C.data.doc = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
-    C.busy = false; drawOut(); drawGo(); if (done) toast("Claims checked" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
+    C.busy = false; drawOut(); drawGo(); if (done) toast("Claims checked" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
     $("#cl-out", C.el).scrollIntoView({behavior: "smooth", block: "start"});
   } catch (e) { C.busy = false; drawGo(); if (st()) st().innerHTML = errInline(e); if (!/Cancelled/.test(e.message)) notifyError(e); }
 }
@@ -158,7 +158,7 @@ function drawRev() {
   const lead = `<p class="sy-ov">${esc(doc.summary)}</p><div class="rv2-rec ${tone}">${ico(tone === "ok" ? "check" : "warn", "sm")} <b>${esc(rl)}</b> <span class="pmeta">if this text were submitted as it stands</span></div>`;
   const acts = `<button class="rd-btn" data-cl="rvcopy">${ico("copy", "sm")} Copy</button><button class="rd-btn" data-cl="rvmd">.md</button><button class="rd-btn" data-cl="rvredo" title="Review again, ignoring the saved answer">${ico("redo", "sm")} Redo</button>`;
   box.innerHTML = `<div style="margin-top:14px">` + frame({tool: "claims", kind: "Reviewer 2", icon: "warn", key: "rv2:" + C.fid, title: `${doc.major.length} major · ${doc.minor.length} minor · ${doc.unsupported.length} unsupported claim${doc.unsupported.length === 1 ? "" : "s"}`, actions: acts,
-    meta: [{t: doc.model}, doc.cost != null ? {t: money(doc.cost)} : null, {t: "read " + (doc.generated || "").slice(0, 10)}], notices: doc.dropped ? callout("warn", `${doc.dropped} thing${doc.dropped === 1 ? "" : "s"} the reviewer said (a quotation that is not in your text, or a paper it was not given) ${doc.dropped === 1 ? "was" : "were"} left out.`) : "",
+    meta: [{t: doc.model}, doc.cost != null ? {t: exactCost(doc.cost)} : null, {t: "read " + (doc.generated || "").slice(0, 10)}], notices: doc.dropped ? callout("warn", `${doc.dropped} thing${doc.dropped === 1 ? "" : "s"} the reviewer said (a quotation that is not in your text, or a paper it was not given) ${doc.dropped === 1 ? "was" : "were"} left out.`) : "",
     sections: [{id: "v", title: "Verdict", icon: "sparkle", tone: "lead", body: lead},
       doc.major.length ? {id: "maj", title: "Major concerns", icon: "warn", count: doc.major.length, tone: "warn", body: list(doc.major, (m, i) => `<div class="rv2-i"><b>${i + 1}. ${esc(m.point)}</b><div class="cl-why">${esc(m.why)}</div>${m.suggestion ? `<div class="rv2-fix"><b>Suggestion</b> ${esc(m.suggestion)}</div>` : ""}</div>`)} : null,
       doc.minor.length ? {id: "min", title: "Minor concerns", icon: "info", count: doc.minor.length, collapsed: true, body: list(doc.minor, m => `<div class="rv2-i">${esc(m.point)}${m.suggestion ? `<div class="rv2-fix"><b>Suggestion</b> ${esc(m.suggestion)}</div>` : ""}</div>`)} : null,
@@ -180,7 +180,7 @@ async function review(fresh) {
         if (m.type === "status" && st()) progress(st(), m); else if (m.type === "review") C.data.review = m.doc; else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
-    C.busy = false; if (btn) btn.disabled = false; if (st()) st().textContent = ""; drawRev(); if (done) toast("Reviewer 2 has read it" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
+    C.busy = false; if (btn) btn.disabled = false; if (st()) st().textContent = ""; drawRev(); if (done) toast("Reviewer 2 has read it" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
     $("#cl-rev", C.el).scrollIntoView({behavior: "smooth", block: "start"});
   } catch (e) { C.busy = false; if (btn) btn.disabled = false; if (st()) st().innerHTML = errInline(e); if (!/Cancelled/.test(e.message)) notifyError(e); }
 }

@@ -1,7 +1,7 @@
 // A spoken briefing: the AI writes a two-minute script (from the paper card, or from a folder's synthesis) and your browser reads it aloud with the voices on this computer
 // (Web Speech API: free, offline voices stay offline). A small player floats at the bottom: play / pause / stop, speed, voice, the script with the sentence being read lit, and a download of the text.
 // Server: POST /api/ai/audio {file | folder} (stream: status | text | done | error).
-import {$, esc, ico, toast, notifyError, errBox} from "./state.js";
+import {$, esc, ico, toast, notifyError, errBox, exactCost} from "./state.js";
 
 let box = null, run = 0;
 const P = {tok: 0, sents: [], i: -1, playing: false, paused: false, rate: 1, voice: "", title: "", script: ""};
@@ -43,7 +43,7 @@ async function write(body, my) {
   P.script = P.script.trim(); P.sents = sentences(P.script);
   $("#lsn-body", box).innerHTML = P.script.split(/\n{2,}/).map(par => `<p>${sentences(par).map(s => `<span class="lsn-s" data-i="${P.sents.indexOf(s)}">${esc(s)} </span>`).join("")}</p>`).join("");
   $(".lsn-bar", box).hidden = false;
-  $("#lsn-meta", box).textContent = `${P.script.split(/\s+/).length} words · about ${Math.max(1, Math.round(P.script.split(/\s+/).length / 150))} min${done ? " · " + (done.cached ? "saved" : done.cost != null ? "$" + done.cost.toFixed(4) : "") : ""}`;
+  $("#lsn-meta", box).textContent = `${P.script.split(/\s+/).length} words · about ${Math.max(1, Math.round(P.script.split(/\s+/).length / 150))} min${done ? " · " + (done.cached ? "saved" : done.cost != null ? exactCost(done.cost) : "") : ""}`;
   if (!tts()) $("#lsn-meta", box).textContent += " · this browser can't speak aloud, but you can read the script";
 }
 function voices() {

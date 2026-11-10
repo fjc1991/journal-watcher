@@ -146,8 +146,9 @@ export function bookEmpty(R) {          // what to say when a book has no overvi
   if (R.parts_summarised) return [`${R.parts_summarised} of ${R.parts} chapters and sections have their own summary. “Summarise the whole book…” (in Chapters) summarises the other ${R.parts - R.parts_done}, then writes the overview from all of them; you see what it costs first.`, false];
   return ["No summary yet.", true];
 }
-// What something costs, said one way everywhere. aboutCost: an estimate before you start ("about $0.12", "under 1 cent"); exactCost: an amount that was
-// charged or is on record ("$0.12", and up to four decimals below a cent: "$0.0015"). `none` is what to say when the price is not known.
+// What something costs, said one way in the pages that import these (the Watch page in index.html has its own lines for a run's total). aboutCost: an
+// estimate before you start ("about $0.12", "under 1 cent"); exactCost: an amount that was charged or is on record ("$0.12", and up to four decimals below
+// a cent: "$0.0015"). `none` is what to say when the price is not known.
 export const aboutCost = (c, none = "") => c == null ? none : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
 export const exactCost = (c, none = "") => c == null ? none : c > 0 && c < 0.00005 ? "under $0.0001" : c > 0 && c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "") : "$" + c.toFixed(2);
 export const usd = aboutCost;

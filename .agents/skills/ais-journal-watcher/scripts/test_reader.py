@@ -661,10 +661,12 @@ def get(path, headers=None):
     except urllib.error.HTTPError as e:
         return e.code, e.read()
 assert get("/api/config")[0] == 200
-for pth in ("/api/config", "/api/runs", "/", "/files/x.pdf", "/api/events", "/api/backup"):
+pf_ = "/files/" + urllib.parse.quote(W9["file"].replace(os.sep, "/"))          # (a PDF that is there: the guard is what refuses it, not "no such file")
+assert get(pf_)[0] == 200, pf_
+for pth in ("/api/config", "/api/runs", "/", pf_, "/api/events", "/api/backup"):
     assert get(pth, {"Host": "evil.example"})[0] == 403, pth
 assert get("/api/config", {"Host": "localhost:1"})[0] == 200 and get("/api/config", {"Host": "127.0.0.1.evil.example"})[0] == 403
-assert get("/api/config", {"Sec-Fetch-Site": "cross-site"})[0] == 403 and get("/files/x.pdf", {"Sec-Fetch-Site": "cross-site"})[0] == 403
+assert get("/api/config", {"Sec-Fetch-Site": "cross-site"})[0] == 403 and get(pf_, {"Sec-Fetch-Site": "cross-site"})[0] == 403
 assert get("/", {"Sec-Fetch-Site": "cross-site"})[0] == 200 and get("/api/config", {"Sec-Fetch-Site": "same-origin"})[0] == 200 and get("/api/config", {"Sec-Fetch-Site": "none"})[0] == 200
 # a body that is not a JSON object is refused in words; an error nobody caught is answered (status 500, JSON) and the server goes on
 for bad in (b"[1, 2]", b"{not json", b'"text"'):
@@ -679,6 +681,11 @@ sv.prefs.save_settings = broken
 c, j = post("/api/settings", json.dumps({"prefs": {"wpm": 200}}).encode(), jh); sv.prefs.save_settings = keep_ss
 assert c == 500 and "the test broke it" in j["error"], (c, j)
 assert get("/api/config")[0] == 200 and post("/api/settings", b"{}", jh)[0] == 200, "the server goes on after an error"
+def lost(*a, **k):                                  # (a site the app itself was asking went silent: that is told to the page too, not taken for "the browser left")
+    raise TimeoutError("the other site did not answer")
+sv.config = lost
+c, raw = get("/api/config"); sv.config = keep_cfg
+assert c == 500 and "did not answer" in json.loads(raw)["error"], (c, raw)
 # the export folder is worked out in one place: "~" is the home folder, a path that does not start at the root is taken from the home folder
 keep_gs, keep_home = sv.prefs.get_settings, os.environ.get("HOME")
 import tempfile as _tf

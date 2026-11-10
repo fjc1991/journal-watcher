@@ -4,7 +4,7 @@
 // reference), and a check lists citations that did not exist, sentences with no source and papers that were never cited. Edit the text, switch between
 // author-year and numbered citations, copy it, or export it as Word or Markdown. Saved as Papers/_folders/<id>.draft.json.
 // Server: GET /api/folder/draft, POST /api/ai/draft[/estimate] (stream: status | progress | draft | done | error), POST /api/folder/draft (edits, citation style).
-import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, md, debounce, progress, aboutCost} from "./state.js";
+import {$, $$, esc, ico, api, toast, notifyError, errBox, errInline, md, debounce, progress, aboutCost, exactCost} from "./state.js";
 import {frame, mdParts, callout, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -80,7 +80,7 @@ function out(doc) {
   const body = D.edit ? `<div class="dr-edit"><textarea id="dr-raw" spellcheck="true">${esc(doc.raw)}</textarea><div class="pmeta">Citations are written as <code>[P2-3]</code> (in brackets) or <code>{P2-3}</code> (the study’s name): P2 is the second paper, -3 its third note. Hover a citation in the preview to see which note an id is. They turn into proper citations when you copy or export.</div>
       <div class="row"><button class="btn primary" data-dr="saveedit">Save my edits</button><button class="btn" data-dr="edit">Cancel</button></div></div>` : "";
   const f = frame({tool: "draft", kind: "Related work", icon: "draft", key: "draft:" + D.fid, title: `${doc.words} words · ${used} of ${total} papers cited`, sub, actions: acts,
-    meta: [{t: doc.model}, doc.cost != null ? {t: money(doc.cost)} : null, doc.edited ? {t: "✎ edited by you", cls: "edited"} : null, {t: "written " + (doc.generated || "").slice(0, 10)}], sections: D.edit ? [{id: "edit", title: "Edit the text", icon: "notes", tone: "lead", body}] : sectionsOf(doc)});
+    meta: [{t: doc.model}, doc.cost != null ? {t: exactCost(doc.cost)} : null, doc.edited ? {t: "✎ edited by you", cls: "edited"} : null, {t: "written " + (doc.generated || "").slice(0, 10)}], sections: D.edit ? [{id: "edit", title: "Edit the text", icon: "notes", tone: "lead", body}] : sectionsOf(doc)});
   return f;
 }
 
@@ -136,7 +136,7 @@ async function write(again) {
         else if (m.type === "draft") { D.data.doc = m.doc; D.form.style = m.doc.style; D.form.pages = m.doc.pages; } else if (m.type === "done") done = m; else if (m.type === "error") throw new Error(m.error);
       }
     }
-    if (done) toast("Draft written" + (done.cost != null ? " · " + money(done.cost) : "") + ".");
+    if (done) toast("Draft written" + (done.cost != null ? " · " + exactCost(done.cost) : "") + ".");
   } catch (e) { D.busy = false; draw(); if ($("#dr-st", D.el)) $("#dr-st", D.el).innerHTML = errInline(e); if (!/Cancelled/.test(e.message)) notifyError(e); return; }
   D.busy = false; draw();
 }

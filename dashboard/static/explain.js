@@ -1,6 +1,6 @@
 // The ✨ menu: your one-click prompts (Settings → Prompts) on a selected passage or a boxed figure/table, with the answer
 // streaming into a small card you can save to your notes. Answers are cached on the server, so repeating a prompt is free.
-import {errBox, S, $, esc, toast, md, clamp} from "./state.js";
+import {errBox, S, $, esc, toast, md, clamp, exactCost} from "./state.js";
 import * as N from "./notes.js";
 import * as C from "./canvas.js";
 import * as AREA from "./area.js";
@@ -71,7 +71,7 @@ async function explain(t, spec, fresh = false) {
     }
   } catch (e) { if (my === run) body.innerHTML = errBox(e, {retry: 'data-x="again"'}); return; }
   if (my !== run) return;
-  meta.textContent = done ? `${done.provider} · ${done.model}${done.cached ? " · cached" : done.cost != null ? " · $" + done.cost.toFixed(4) : ""}` : "";
+  meta.textContent = done ? `${done.provider} · ${done.model}${done.cached ? " · cached" : done.cost != null ? " · " + exactCost(done.cost) : ""}` : "";
   const act = $(".ex-act", card); act.classList.remove("hide");
   act.innerHTML = `<button class="rd-btn" data-x="save">→ Save to notes</button><button class="rd-btn" data-x="copy">Copy</button><button class="rd-btn" data-x="again" title="Ask again, ignoring the saved answer">⟳</button>` + (t.area ? "" : `<button class="rd-btn" data-x="chat">Follow up in chat</button>`);
   card._text = text; card._done = done;

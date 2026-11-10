@@ -13,12 +13,14 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip                                  # the downloaded wheels are kept between runs (keyed on requirements.txt)
+      - run: python -m pip install -r requirements.txt
+      - id: pw                                        # (the browser goes with the Playwright version, which requirements.txt does not pin)
+        run: echo "v=$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
       - name: Keep the test browser between runs
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-      - run: python -m pip install -r requirements.txt
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.v }}
       - run: python -m playwright install chromium     # one check opens a page to see the sign-in success banner; it is skipped when no browser is installed
       - name: Offline checks (no network, no API key)
         run: python .agents/skills/ais-journal-watcher/scripts/test_reader.py
@@ -33,12 +35,14 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip                                  # the downloaded wheels are kept between runs (keyed on requirements.txt)
+      - run: python -m pip install -r requirements.txt
+      - id: pw                                        # (the browser goes with the Playwright version, which requirements.txt does not pin)
+        run: echo "v=$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
       - name: Keep the test browser between runs
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-      - run: python -m pip install -r requirements.txt
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.v }}
       - run: python -m playwright install chromium
       - name: Headless-browser end-to-end suite (a fake AI provider, a throw-away copy of the project)
         env:

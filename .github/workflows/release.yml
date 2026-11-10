@@ -36,7 +36,7 @@ jobs:
         run: python .agents/skills/ais-journal-watcher/scripts/test_reader.py
   mac:
     needs: checks
-    if: ${{ always() && (needs.checks.result == 'success' || needs.checks.result == 'skipped') }}
+    if: ${{ !cancelled() && (needs.checks.result == 'success' || needs.checks.result == 'skipped') }}     # (a dry run skips the checks; Cancel still stops this job)
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -54,6 +54,7 @@ jobs:
       - name: Version, update feed address and release notes
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             VERSION="$INPUT_VERSION"
@@ -72,11 +73,26 @@ jobs:
             echo "Update signatures: REQUIRED by this build (app/update_public_key.txt). Run: python app/sign_release.py sign --tag $TAG --upload"
             printf '\n_Installed copies see this update once the release is signed (appcast.json.sig is attached)._\n' >> body.md
           else
-            # no key in this tree. If the release before this one was signed, installed copies have a key built in and would never see an unsigned
-            # release: the key file has been lost from the tree, and publishing would also bring back copies that believe any feed. Stop here.
-            if [ "$GITHUB_EVENT_NAME" = "push" ] && curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.json.sig"; then
-              echo "::error::The last release was signed, but app/update_public_key.txt is missing from this tree. Put the public key back (python app/sign_release.py keygen prints it), commit it, and move the tag."
-              exit 1
+            # no key in this tree. If the release before this one was built WITH a key (the file is in that release's tree), installed copies have the
+            # key built in and would never see an unsigned release: the file has been lost, and publishing would bring back copies that believe any
+            # feed. That is asked of GitHub exactly (the file at the last release's tag); an answer that is neither "there" nor "not there" stops too.
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              api() { curl -sS --retry 3 --retry-all-errors -o "$1" -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/$2" || true; }
+              code="$(api latest.json releases/latest)"
+              if [ "$code" = "200" ]; then
+                last="$(python3 -c 'import json; print(json.load(open("latest.json")).get("tag_name") or "")')"
+                had="$(api keyfile.json "contents/app/update_public_key.txt?ref=${last}")"
+                if [ "$had" = "200" ]; then
+                  echo "::error::The last release ($last) was built with app/update_public_key.txt, and that file is missing from this tree. Put it back (it is in the tree at $last), commit it, and move the tag."
+                  exit 1
+                elif [ "$had" != "404" ]; then
+                  echo "::error::Could not find out whether the last release ($last) had a signing key (GitHub answered $had). Nothing was built; run the release again."
+                  exit 1
+                fi
+              elif [ "$code" != "404" ]; then                # (404: there is no release yet)
+                echo "::error::Could not read the last release (GitHub answered $code). Nothing was built; run the release again."
+                exit 1
+              fi
             fi
             echo "::warning::app/update_public_key.txt is missing: this build accepts an unsigned update feed (see app/sign_release.py)"
             printf '\n_Note: this build does not check a signature on its update feed. To switch that on: run `python app/sign_release.py keygen` on your own computer, keep the private key safe, and commit the public line as `app/update_public_key.txt` before the next release._\n' >> body.md

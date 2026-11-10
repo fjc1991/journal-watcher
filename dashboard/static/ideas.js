@@ -4,7 +4,7 @@
 //   Ideas Lab: your brief -> current events from a web search (you untick or add) -> ideas generated from the evidence, scored by a tough
 //             "editor" and checked against OpenAlex -> a board you star, shortlist, annotate, develop into an outline and export.
 // Server streams are newline-delimited JSON ({type: status|progress|events|ideas|text|paper|done|error}).
-import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost} from "./state.js";
+import {errInline, errBox, notifyError, $, $$, esc, ico, api, toast, debounce, md, progress, aboutCost, exactCost} from "./state.js";
 import {frame, kv, callout, mdParts, sectionsHtml, wire as wireOut} from "./output.js";
 
 let ctx = null;
@@ -70,8 +70,8 @@ export async function evidence(el, fid) {
         if (m.type === "start") { total = m.total; prog.innerHTML = `Making ${total} card${total === 1 ? "" : "s"}, three at a time…`; }
         else if (m.type === "paper") { ok = m.done; prog.innerHTML = `<b>${ok} of ${total}</b> done · last: ${esc(m.title.slice(0, 70))}${errs.length ? ` · ${errs.length} failed` : ""}`; }
         else if (m.type === "error") errs.push(m);
-        else if (m.type === "done") { toast(`Made ${m.made} card${m.made === 1 ? "" : "s"}${m.cost ? " · " + money(m.cost) : ""}.`);
-          prog.innerHTML = `Made <b>${m.made}</b> card${m.made === 1 ? "" : "s"}${m.cost ? " · " + money(m.cost) : ""}.${errs.length ? `<div class="ask-warn">${errs.map(x => esc((x.title || "").slice(0, 50) + ": " + x.error)).join("<br>")}</div>` : ""}`; }
+        else if (m.type === "done") { toast(`Made ${m.made} card${m.made === 1 ? "" : "s"}${m.cost ? " · " + exactCost(m.cost) : ""}.`);
+          prog.innerHTML = `Made <b>${m.made}</b> card${m.made === 1 ? "" : "s"}${m.cost ? " · " + exactCost(m.cost) : ""}.${errs.length ? `<div class="ask-warn">${errs.map(x => esc((x.title || "").slice(0, 50) + ": " + x.error)).join("<br>")}</div>` : ""}`; }
       });
     } catch (e) { prog.innerHTML = errBox(e, {retry: 'data-retry="#ev-make"'}); }
     if (ctx) await ctx.reload(); window.LibraryUI && window.LibraryUI.updateFolderHead(); if (!errs.length) evidence(el, fid); else btn.disabled = false;
@@ -132,14 +132,14 @@ function renderEvents() {
     ${items.map((e, i) => `<label class="lab-event"><input type="checkbox" data-ev="${i}"${e.keep !== false ? " checked" : ""}><span><b>${esc(e.id)}</b> ${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.title)}</a>` : esc(e.title)}
         <small>${esc(e.date || "undated")}${e.user ? " · yours" : e.verified === true ? " · ✓ found in the search results" : e.verified === false ? " · ⚠ link not among the search results" : ""}</small>
         <span class="pmeta">${esc(e.summary)}${e.why ? " — <i>" + esc(e.why) + "</i>" : ""}</span></span>${e.user ? `<button class="cd-x" data-delevent="${i}" style="opacity:1" title="Remove">✕</button>` : ""}</label>`).join("") || `<div class="pmeta">${ev.fetched ? "The search found nothing usable." : "No events yet — the ideas will rest on the papers alone."}</div>`}
-    ${ev.fetched ? `<div class="pmeta">Searched ${esc(ev.fetched.slice(0, 10))} · ${esc(ev.model || "")}${ev.cost ? " · " + money(ev.cost) : ""}</div>` : ""}`;
+    ${ev.fetched ? `<div class="pmeta">Searched ${esc(ev.fetched.slice(0, 10))} · ${esc(ev.model || "")}${ev.cost ? " · " + exactCost(ev.cost) : ""}</div>` : ""}`;
 }
 async function findEvents() {
   if (L.busy) return; L.busy = true; renderEvents(); const st = () => $("#ev-st", L.root);
   try { await saveNow();          // what you typed so far is on the board before the server changes it
     await ndjson("/api/ai/ideas/events", {id: L.fid, focus: $("#lb-focus", L.root).value}, m => {
     if (m.type === "status" && st()) progress(st(), m); else if (m.type === "events") { const b = L.doc.brief; L.doc = m.doc; L.doc.brief = b; } else if (m.type === "error") throw new Error(m.error);
-    else if (m.type === "done") { toast(m.found ? `${m.found} event${m.found === 1 ? "" : "s"} found${m.cost ? " · " + money(m.cost) : ""}.` : "The search found no usable events" + (m.note ? ": " + m.note.slice(0, 120) : "") + "."); if (!m.found && st()) st().textContent = m.note || ""; } }); }
+    else if (m.type === "done") { toast(m.found ? `${m.found} event${m.found === 1 ? "" : "s"} found${m.cost ? " · " + exactCost(m.cost) : ""}.` : "The search found no usable events" + (m.note ? ": " + m.note.slice(0, 120) : "") + "."); if (!m.found && st()) st().textContent = m.note || ""; } }); }
   catch (e) { notifyError(e); }
   L.busy = false; renderEvents(); renderGen(); estimate();
 }
@@ -163,7 +163,7 @@ async function generate() {
   try { await ndjson("/api/ai/ideas/generate", {id: L.fid, brief: L.doc.brief, mode}, m => {
     if (m.type === "status" && st()) progress(st(), m); else if (m.type === "progress" && st()) progress(st(), {msg: `Writing the ideas… ${(m.chars / 1000).toFixed(1)}k characters`, step: 2, steps: 4});
     else if (m.type === "ideas") L.doc = m.doc; else if (m.type === "error") throw new Error(m.error);
-    else if (m.type === "done") toast(`${m.made} ideas added${m.cost ? " · " + money(m.cost) : ""}${m.cached ? " (from the saved answer)" : ""}.`); }); }
+    else if (m.type === "done") toast(`${m.made} ideas added${m.cost ? " · " + exactCost(m.cost) : ""}${m.cached ? " (from the saved answer)" : ""}.`); }); }
   catch (e) { notifyError(e); if ($("#gen-st", L.root)) $("#gen-st", L.root).innerHTML = errInline(e); }
   L.busy = false; renderGen(); renderEvents(); renderBoard();
 }
@@ -209,7 +209,7 @@ function ideaHtml(x) {
       (x.journals.length ? f("Fitting journals", x.journals.map(esc).join(", ")) : ""))}
     ${pane("check", (c ? f("Editor’s view", esc(c.verdict)) : "") + works)}
     ${pane("risks", (c ? f("Main risk", esc(c.main_risk), "warn") : "") + list("Risks", x.risks) + list("First steps", x.first_steps) + list("Not grounded in your papers (a guess)", x.speculative))}
-    ${pane("outline", `<div class="idea-dev${x.developed ? "" : " empty"}" id="dev-${x.id}">${x.developed ? outlineHtml(x, x.developed.text) + `<div class="pmeta">${esc(x.developed.model || "")}${x.developed.cost ? " · " + money(x.developed.cost) : ""} <button class="linkbtn" data-a="copydev">Copy outline</button></div>` : `<span class="pmeta">Not developed yet: press “Develop this idea” below to get a working title, abstract, research questions, design and a first plan.</span>`}</div>`)}
+    ${pane("outline", `<div class="idea-dev${x.developed ? "" : " empty"}" id="dev-${x.id}">${x.developed ? outlineHtml(x, x.developed.text) + `<div class="pmeta">${esc(x.developed.model || "")}${x.developed.cost ? " · " + exactCost(x.developed.cost) : ""} <button class="linkbtn" data-a="copydev">Copy outline</button></div>` : `<span class="pmeta">Not developed yet: press “Develop this idea” below to get a working title, abstract, research questions, design and a first plan.</span>`}</div>`)}
     <textarea class="idea-note" data-note="${x.id}" rows="1" placeholder="My note…">${esc(x.note || "")}</textarea>
     <div class="idea-foot"><button class="btn small" data-a="develop">${x.developed ? "Show the outline" : "Develop this idea"}</button><button class="btn small" data-a="copy">Copy</button><button class="btn small danger" data-a="delete">Delete</button><span class="pmeta" style="margin-left:auto">${esc(x.created ? x.created.slice(0, 10) : "")}</span></div></div>`;
 }

@@ -598,13 +598,13 @@ class Handler(BaseHTTPRequestHandler):
         self._answered = False
         try:
             return fn()
-        except (ConnectionResetError, BrokenPipeError, TimeoutError):
-            raise                                   # (the browser went away: nothing to answer)
         except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
             if self._answered:                      # (a stream or a file was already on its way: end it)
+                if not isinstance(e, (ConnectionResetError, BrokenPipeError, TimeoutError)):          # (those: the browser left, which is no news)
+                    traceback.print_exc()
                 self.close_connection = True
                 return None
+            traceback.print_exc()                   # (also a time-out or a reset from a site the app itself was asking: the page is told, not left waiting)
             try:
                 self.send_json({"error": "Something went wrong inside the app (%s: %s). Try again; if it happens again, the details are in the app's log."
                                          % (e.__class__.__name__, str(e)[:160])}, 500)
@@ -1691,11 +1691,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "name": aifiles.snapshot(force=True), "snapshots": aifiles.snapshots()})
         if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
             d = prefs.export_dir()
-            if not d or not os.path.isdir(d):
+            if not d:
                 return self.send_json({"error": "Choose an export folder first (Settings → Reader & summaries)."}, 400)
             tmp = aifiles.backup(bool(b.get("pdfs")))
             dest = os.path.join(d, "journal-watcher-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M"))
-            shutil.move(tmp, dest)
+            try:
+                os.makedirs(d, exist_ok=True)            # (as the other exports do: a folder that is set but not made yet is made)
+                shutil.move(tmp, dest)
+            except OSError as e:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                return self.send_json({"error": "Couldn’t write to %s: %s" % (d, e.strerror or e)}, 400)
             return self.send_json({"ok": True, "path": dest, "bytes": os.path.getsize(dest)})
         if path == "/api/activity/cancel":       # {id}
             return self.send_json({"ok": activity.cancel(str(b.get("id") or ""))})
