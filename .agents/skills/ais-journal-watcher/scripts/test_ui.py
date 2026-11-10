@@ -3350,6 +3350,31 @@ fx.fetch_journal = lambda j: []                                                 
                   and not os.path.exists(os.path.join(sumdir, "sumtest.md")), box_t)
             page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
             check("…Cancel closes it and writes nothing", not os.path.exists(os.path.join(sumdir, "sumtest.md")))
+            # the cost: a range while it rests on the sizes of the files, one figure once it rests on your earlier summaries
+            rng_ = page.evaluate("""async () => { const m = await import('/static/state.js'); return [m.aboutRange(0.4, 1.62), m.aboutRange(0.001, 0.003), m.aboutRange(0.121, 0.124), m.aboutRange(0.002, 0.03), m.aboutRange(null, 1, "unknown"), m.aboutRange(1, null, "unknown")]; }""")
+            check("a cost that is a range is written one way: both ends, 'under 1 cent' when all of it is, one figure when the ends round to the same, 'up to' when it starts under a cent",
+                  rng_ == ["between about $0.40 and $1.62", "under 1 cent", "about $0.12", "up to about $0.03", "unknown", "unknown"], str(rng_))
+            check("…the server's estimate carries the range while it rests on file sizes, and how many summaries make it rest on your own",
+                  est_.get("history_min") == 3 and (est_["cost_low"] is not None and est_["cost_low"] <= est_["cost"] <= est_["cost_high"] if est_["basis"] == "prices" else est_["cost_low"] is None and est_["cost_high"] is None),
+                  str({k: est_.get(k) for k in ("basis", "cost_low", "cost", "cost_high", "history_min")}))
+            def est_box(**over):
+                """What the box says for an estimate the server would give (only the answer to GET /api/summaries is replaced; nothing is started)."""
+                body_ = json.dumps({**est_, **over, "status": api("/api/summaries")["status"]})
+                page.route("**/api/summaries", lambda route: route.fulfill(status=200, content_type="application/json", body=body_) if route.request.method == "GET" else route.continue_())
+                try:
+                    page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo", timeout=8000); t_ = page.inner_text("#lf-sumbox")
+                    page.click("#lf-sumno"); page.wait_for_selector("#lf-sumbox.hide", state="attached")
+                finally:
+                    page.unroute("**/api/summaries")
+                return t_
+            box_r = est_box(basis="prices", calls=1, cost_low=0.4, cost=0.8, cost_high=1.62, per_paper=0.8, history_min=4)
+            check("…while the guess rests on the sizes of the PDF files the box gives the range in plain words, the likely figure, and when it gets more exact",
+                  "Cost: between about $0.40 and $1.62 (a guess from the price in Settings → AI and the size of each PDF file, most likely about $0.80; it gets more exact after 4 summaries with this model)" in box_r
+                  and "expect more" not in box_r, box_r)
+            box_s = est_box(basis="prices", calls=0, cost_low=0.0004, cost=0.001, cost_high=0.003, per_paper=0.001)
+            check("…a range that is all under a cent is one phrase, not said twice", "Cost: under 1 cent (a guess from the price in Settings → AI and the size of each PDF file; it gets more exact after 3 summaries with this model)" in box_s, box_s)
+            box_h = est_box(basis="history", calls=5, cost_low=None, cost=0.5, cost_high=None, per_paper=0.25)
+            check("…and with enough earlier summaries it is one figure, as before", "Cost: about $0.50 (from your 5 earlier summaries with this model, about $0.25 each)" in box_h and "between" not in box_h, box_h)
             page.click("#lf-sum"); page.wait_for_selector("#lf-sumgo")
             budget_asks("#lf-sumgo", "summarising the papers without a summary")
             check("…and no summary was written", not os.path.exists(os.path.join(sumdir, "sumtest.md")) and not api("/api/summaries")["status"].get("running"))

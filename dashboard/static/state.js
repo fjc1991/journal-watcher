@@ -150,6 +150,10 @@ export function bookEmpty(R) {          // what to say when a book has no overvi
 // estimate before you start ("about $0.12", "under 1 cent"); exactCost: an amount that was charged or is on record ("$0.12", and up to four decimals below
 // a cent: "$0.0015"). `none` is what to say when the price is not known.
 export const aboutCost = (c, none = "") => c == null ? none : c < 0.005 ? "under 1 cent" : "about $" + c.toFixed(2);
+// An estimate that is a range (what the summaries may cost, guessed from the sizes of the files): "between about $0.40 and $1.62"; one figure when both ends
+// round to the same.
+export const aboutRange = (lo, hi, none = "") => lo == null || hi == null ? none : hi < 0.005 || lo.toFixed(2) === hi.toFixed(2) ? aboutCost(hi)
+  : lo < 0.005 ? `up to about $${hi.toFixed(2)}` : `between about $${lo.toFixed(2)} and $${hi.toFixed(2)}`;
 export const exactCost = (c, none = "") => c == null ? none : c > 0 && c < 0.00005 ? "under $0.0001" : c > 0 && c < 0.01 ? "$" + c.toFixed(4).replace(/0+$/, "") : "$" + c.toFixed(2);
 export const usd = aboutCost;
 // Before a job that makes many AI calls starts: when its estimate is more than what is left of this month's budget, ask first (GET /api/ai/budget). Resolves to

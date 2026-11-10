@@ -87,6 +87,17 @@ def sha1_of(pdf):
     return _sha["v"]
 
 
+def sha1_known(pdf):
+    """The hash of this PDF when it is the one hashed last and has not changed since, else None. The file is never opened (ai.pdf_chars: measuring a call that has
+    just been cancelled must not read the PDF again)."""
+    try:
+        st = os.stat(pdf)
+    except (OSError, TypeError):
+        return None
+    k, v = _sha.get("k"), _sha.get("v")
+    return v if k == (pdf, st.st_mtime_ns, st.st_size) else None
+
+
 # ---------------------------------------------------------------- file io
 
 def _read(path):

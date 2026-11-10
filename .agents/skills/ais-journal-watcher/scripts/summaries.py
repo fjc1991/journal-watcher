@@ -1,7 +1,8 @@
 """Summaries for the downloaded papers in your library that have none yet: the Library's "Summarise N papers…" button.
 
     summaries.pending()           [library row] of the papers to summarise: a PDF on disk, no summary beside it, not a book
-    summaries.estimate()          {n, files, provider, model, cost, per_paper, basis, calls, running}: what the button shows before anything is spent
+    summaries.estimate()          {n, files, provider, model, cost, cost_low, cost_high, per_paper, basis, calls, history_min, running}: what the button shows before
+                                  anything is spent
     summaries.start(files)        one background job in the activity tray (Cancel works there); False while one is running
     summaries.status()            {running, done, total, made, failed: [{file, title, error}], cost, error, stopped, ended}
 
@@ -53,14 +54,15 @@ def pending():
     return out
 
 
-def _chars(pdf):
-    """Characters of a paper as the provider will read it, guessed from the file size (about a tenth of it, at least 30,000 and at most what is sent: as
-    papercard.estimate does for a whole folder). The PDF itself is not opened: the button asks this for every paper at once, and a file Dropbox keeps online only
-    would be downloaded just to be measured."""
-    try:
-        return int(min(ai.FULL_TEXT_LIMIT, max(30_000, os.path.getsize(pdf) * 0.1)))
-    except OSError:
-        return 30_000
+def _native(provider):
+    """Whether this provider is sent the PDF itself (Claude reads every page as text and as an image) rather than its extracted text."""
+    return ((ai.config_data().get("providers") or {}).get(provider) or {}).get("type") == "anthropic"
+
+
+def _chars(pdf, native):
+    """(low, likely, high) characters of a paper as the provider will read it, from the size of the file alone (ai.pdf_chars). The PDF itself is not opened: the
+    button asks this for every paper at once, and a file Dropbox keeps online only would be downloaded just to be measured."""
+    return ai.pdf_chars(pdf, native)
 
 
 def _history(provider, model):
@@ -75,18 +77,23 @@ def estimate():
     """What "Summarise N papers…" would do, before anything is spent. basis says what the cost rests on:
     "history"  the mean cost of your earlier summaries with this provider and model (at least HISTORY_MIN of them): the most reliable guess, since it includes how the
                provider counts a PDF (Claude reads its pages as images too) and how long the summaries come out;
-    "prices"   the price table in Settings → AI and the length of each paper (a guess: for Claude, which reads the PDF's pages as images, it is too low);
-    "unknown"  no price for this model and too few past summaries: cost is None."""
+    "prices"   the price table in Settings → AI and the size of each PDF file. The size of a file says only roughly how many pages it has, so this is a range:
+               cost is the likely figure, cost_low and cost_high its ends (for Claude, which is sent the PDF itself, each page is counted as an image too);
+    "unknown"  no price for this model and too few past summaries: cost is None.
+    cost_low and cost_high are None unless the basis is "prices" with papers to do. history_min is how many earlier summaries make the basis "history"."""
     rows = pending()
     provider, model = ai.feature_model("summarize")
     calls, mean = _history(provider, model)
+    low = high = None
     if calls >= HISTORY_MIN:
         basis, per = "history", mean
         cost = per * len(rows)
     else:
-        costs = [ai.estimate("summarize", _chars(_pdf(r)) + 3000, OUT_TOKENS) for r in rows]
+        native = _native(provider)
+        sizes = [_chars(_pdf(r), native) for r in rows]
+        costs = [ai.estimate("summarize", sum(s[i] + 3000 for s in sizes), OUT_TOKENS * len(rows)) for i in range(3)]      # (low, likely, high: one sum for all the papers, the cost being so much per character)
         if rows and all(c is not None for c in costs):
-            basis, cost = "prices", sum(costs)
+            basis, (low, cost, high) = "prices", costs
             per = cost / len(rows)
         elif not rows and ai.estimate("summarize", 30_000, OUT_TOKENS) is not None:
             basis, cost, per = "prices", 0.0, None
@@ -94,8 +101,8 @@ def estimate():
             basis, cost, per = "unknown", None, None
     with _lock:
         running = _state["running"]
-    return {"n": len(rows), "files": [r["file"] for r in rows], "provider": provider, "model": model, "cost": cost, "per_paper": per, "basis": basis, "calls": calls,
-            "running": running}
+    return {"n": len(rows), "files": [r["file"] for r in rows], "provider": provider, "model": model, "cost": cost, "cost_low": low, "cost_high": high, "per_paper": per, "basis": basis,
+            "calls": calls, "history_min": HISTORY_MIN, "running": running}
 
 
 def status():

@@ -7324,6 +7324,95 @@ print("OK")
             else:
                 open(ai.CONFIG, "w").write(saved_cfg)
 
+    def t_pdf_counted():
+        """A PDF sent to a model is counted by what the provider reads of it: from the size of the file alone (never opened to be measured), more for a provider that
+        is sent the PDF itself; from the text and pages already saved when the call has just read it. That count is what a cancelled call's ledger row carries;
+        the row of an ordinary call says what it always said."""
+        import types as _t, notes_store as ns_, activity as act_, blocks as bl_, pymupdf
+        big = os.path.join(TMP, "big_notpdf.pdf"); open(big, "wb").write(b"%PDF-1.4\n" + b"0" * 2_000_000)      # 2 MB that no PDF reader could open
+        real_sha = ns_.sha1_of
+        def no_read(*a, **k):
+            raise AssertionError("the PDF was read to be measured")
+        ns_.sha1_of = no_read; ai.open = no_read                                                    # (ai.open shadows the built-in inside ai.py only)
+        try:
+            lo, mid, hi = ai.pdf_chars(big, True); tlo, tmid, thi = ai.pdf_chars(big, False)
+            assert lo < mid < hi and tlo < tmid < thi and mid > tmid and lo > tlo and thi <= ai.FULL_TEXT_LIMIT, (lo, mid, hi, tlo, tmid, thi)
+            assert mid > 200_000 * 1.5, mid                                                          # (the old rule: a tenth of the size)
+            assert ai.pdf_chars(big, True, saved=True) == (lo, mid, hi)                               # (nothing remembered about this file: its size, and still nothing opened)
+            assert ai.pdf_chars(os.path.join(TMP, "no-such.pdf"), True) == (ai.PDF_MIN_CHARS,) * 3 and ai.pdf_chars(None, False) == (ai.PDF_MIN_CHARS,) * 3
+            huge = ai.pdf_chars(big, False); open(big, "ab").write(b"0" * 60_000_000)
+            cap = ai.pdf_chars(big, False); assert cap[2] == ai.FULL_TEXT_LIMIT and cap[0] <= cap[1] <= cap[2] and cap[0] > huge[0], cap     # (text sent is cut at the limit)
+            assert ai.pdf_chars(big, True)[2] > ai.FULL_TEXT_LIMIT                                    # (the PDF itself is not cut)
+            open(big, "wb").write(b"%PDF-1.4\n" + b"0" * 2_000_000)
+            msgs = [{"role": "user", "content": [{"type": "pdf", "path": big}, {"type": "text", "text": "Summarise."}]}]
+            assert ai._sent(msgs, "sys") == (2000 + len("Summarise.") + 3, "Summarise.")              # (the 'what was sent' count of an ordinary call: as it was)
+            assert ai._sent(msgs, "sys", True)[0] == mid + len("Summarise.") + 3 and ai._sent(msgs, None, False) == (tmid + len("Summarise."), "Summarise.")
+            assert ai._sent([{"role": "user", "content": [{"type": "image", "data": "x"}, {"type": "text", "text": "hi"}]}], None, True)[0] == 2002   # images as before
+        finally:
+            ns_.sha1_of = real_sha; del ai.open
+        long_pdf = os.path.join(TMP, "long.pdf"); d = pymupdf.open()
+        for i in range(30):
+            d.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 790), ("Platform governance shapes complementor entry on page %d. " % i) * 40, fontsize=9)
+        pg = d.new_page(); pg.insert_textbox(pymupdf.Rect(60, 60, 540, 90), "References", fontsize=12)
+        pg.insert_textbox(pymupdf.Rect(60, 100, 540, 790), "\n".join("Doe, J. (20%02d). A paper on platform governance and complementors. MIS Quarterly, 40(%d), 1-20." % (i, i) for i in range(1, 26)), fontsize=9)
+        d.save(long_pdf); d.close()
+        text_len = len(ai._pdf_text(long_pdf)); assert text_len > 30_000, text_len
+        bs = bl_.extract(long_pdf); pages = max(b["page"] for b in bs) + 1; refs = sum(len(b["text"]) for b in bs if b.get("kind") == "ref"); assert pages == 31 and refs > 1500, (pages, refs)
+        assert ai.pdf_chars(long_pdf, True, saved=True) == (sum(len(b["text"]) for b in bs) + 31 * ai.PDF_PAGE_IMAGE,) * 3          # (just read: its saved text, references too, and each page as an image)
+        t3 = ai.pdf_chars(long_pdf, False, saved=True); assert t3[0] == t3[1] == t3[2] and abs(t3[1] - text_len) < 300, (t3, text_len)   # (the text that is sent, so without the references, give or take its heading)
+        assert ai.pdf_chars(long_pdf, False) != t3 and ai.pdf_chars(long_pdf, False)[1] == ai.PDF_MIN_CHARS                          # (not asked to look: the size only)
+        write_cfg({**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["m1"]}},
+                   "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
+        ask = [{"role": "user", "content": [{"type": "pdf", "path": long_pdf}, {"type": "text", "text": "Summarise."}]}]
+        saved_ledger = ai.LEDGER; ai.LEDGER = os.path.join(TMP, "pdf_ledger.jsonl")
+        try:
+            Fake.responder = lambda body: ["A whole ", "answer."]
+            ai.chat("summarize", ask)
+            row = ai.usage_log(1)[0]; assert row["chars"] == 2000 + len("Summarise.") and not row.get("cancelled") and row["in"] + row["cache_read"] == 1000, row     # an ordinary row: unchanged (the provider's own count)
+            job = act_.start("summary", "cancel test")
+            Fake.responder = lambda body: (job.cancel_ev.set(), ["Half an ", "answer."])[1]
+            try:
+                try:
+                    ai.chat("summarize", ask); raise AssertionError("not cancelled")
+                except ai.Cancelled:
+                    pass
+                row = ai.usage_log(1)[0]
+                assert row.get("cancelled") and row.get("estimated") and row["feature"] == "summarize" and row["preview"] == "Summarise.", row
+                assert row["chars"] == t3[1] + len("Summarise.") and row["in"] == int(row["chars"] / 3.3) and row["cost"] > 0.005, row    # (old: 2,010 characters, about 600 tokens)
+            finally:
+                Fake.responder = None; job.finish("cancelled")
+            # a provider that is sent the PDF itself: every page's text and the page as an image; from the size when nothing about the file is remembered
+            class _S:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                @property
+                def text_stream(self):
+                    act_.current().cancel_ev.set(); yield "Half"; yield " more"
+                def get_final_message(self): raise AssertionError("a cancelled answer was read to its end")
+            ai._clients["a"] = _t.SimpleNamespace(beta=_t.SimpleNamespace(messages=_t.SimpleNamespace(stream=lambda **kw: _S())))
+            try:
+                for forget, want in ((False, ai.pdf_chars(long_pdf, True, saved=True)[1]), (True, ai.pdf_chars(long_pdf, True)[1])):
+                    assert want > 2 * t3[1] or forget, (want, t3)
+                    bl_.extract(long_pdf)
+                    if forget:
+                        ns_._sha.clear()
+                    job = act_.start("summary", "cancel test")
+                    try:
+                        try:
+                            ai.chat("summarize", ask, override={"provider": "anth", "model": "m1"}); raise AssertionError("not cancelled")
+                        except ai.Cancelled:
+                            pass
+                        row = ai.usage_log(1)[0]
+                        assert row.get("cancelled") and row["provider"] == "anth" and row["chars"] == want + len("Summarise.") and row["in"] == int(row["chars"] / 3.3), (forget, want, row)
+                        assert not forget or not ns_._sha, "the PDF was read again to be measured"
+                    finally:
+                        job.finish("cancelled")
+            finally:
+                ai._clients.pop("a", None)
+        finally:
+            ai.LEDGER = saved_ledger; write_cfg(CFG); os.remove(big)
+    check("a PDF sent to a model is counted by what the provider reads of it (from its size, never opened to be measured; from its saved text when just read), and a cancelled call's ledger row carries that count while an ordinary row is unchanged", t_pdf_counted)
+
     def t_summaries_job():
         """Library → "Summarise N papers…": only downloaded papers without a summary (never a book, a missing PDF or a failed download); the cost guess rests on earlier
         summaries with the same model when there are enough, else on the prices, else it is unknown; the job writes each summary beside its PDF, skips one written
@@ -7364,13 +7453,34 @@ print("OK")
             index(["a", "b", "book", "missing", "failed"])
             assert [r["file"] for r in su.pending()] == [rel("a")], [r["file"] for r in su.pending()]                  # not b (summarised), not the book, not a missing PDF, not a failed download
             e = su.estimate(); assert e["n"] == 1 and e["files"] == [rel("a")] and e["basis"] == "prices" and e["cost"] > 0 and e["provider"] == "fake" and e["model"] == "m1", e
+            # while the guess rests on file sizes it is a range, no file is opened for it, and a provider that is sent the PDF itself (every page also as an image) costs more
+            open(os.path.join(root, rel("a")), "wb").write(b"%PDF-1.4\n" + b"0" * 2_000_000)                             # 2 MB no reader could open
+            import notes_store as ns_
+            real_sha = ns_.sha1_of
+            def no_read(*a, **k):
+                raise AssertionError("the estimate read the PDF")
+            ns_.sha1_of = no_read; ai.open = no_read
+            try:
+                e = su.estimate()
+                assert e["basis"] == "prices" and 0 < e["cost_low"] < e["cost"] < e["cost_high"] and abs(e["per_paper"] - e["cost"]) < 1e-9 and e["history_min"] == su.HISTORY_MIN == 3 and e["calls"] == 0, e
+                lo_, mid_, hi_ = ai.pdf_chars(os.path.join(root, rel("a")), False)
+                assert [round(e[k], 6) for k in ("cost_low", "cost", "cost_high")] == [round(ai.estimate("summarize", c + 3000, su.OUT_TOKENS), 6) for c in (lo_, mid_, hi_)], e
+                write_cfg({**CFG, "providers": {**CFG["providers"], "anth": {"type": "anthropic", "key_env": "FAKE_KEY", "models": ["m1"]}},
+                           "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "anth", "model": "m1"}}})
+                en = su.estimate(); assert en["basis"] == "prices" and en["provider"] == "anth" and en["cost"] > e["cost"] and en["cost_low"] > e["cost_low"] and en["cost_high"] > e["cost_high"], (en, e)
+                index(["a", "f1"]); write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
+                e2 = su.estimate(); small = ai.estimate("summarize", ai.pdf_chars(os.path.join(root, rel("f1")), False)[1] + 3000, su.OUT_TOKENS)      # two papers: each end is the sum over the papers
+                assert e2["n"] == 2 and abs(e2["cost"] - (e["cost"] + small)) < 1e-4 and e2["cost_low"] < e2["cost"] < e2["cost_high"] and abs(e2["per_paper"] - e2["cost"] / 2) < 1e-9, (e2, e, small)
+            finally:
+                ns_.sha1_of = real_sha; del ai.open; shutil.copy(src, os.path.join(root, rel("a"))); index(["a", "b", "book", "missing", "failed"])
+                write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
             for c in (0.002, 0.004, 0.003):                                                                                # three earlier summaries with this model: the guess rests on them
                 open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "fake", "model": "m1", "in": 1, "out": 1, "cost": c}) + "\n")
             open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "fake", "model": "m1", "cost": 0.0, "cached": True}) + "\n")      # (free, from the cache: not counted)
             open(ai.LEDGER, "a").write(json.dumps({"ts": "2026-11-01T10:00:00+00:00", "feature": "summarize", "provider": "other", "model": "m1", "cost": 9.0}) + "\n")                    # (another provider: not counted)
-            e = su.estimate(); assert e["basis"] == "history" and e["calls"] == 3 and abs(e["per_paper"] - 0.003) < 1e-9 and abs(e["cost"] - 0.003) < 1e-9, e
+            e = su.estimate(); assert e["basis"] == "history" and e["calls"] == 3 and abs(e["per_paper"] - 0.003) < 1e-9 and abs(e["cost"] - 0.003) < 1e-9 and e["cost_low"] is None and e["cost_high"] is None and e["history_min"] == 3, e
             write_cfg({**CFG, "prices": {}, "features": {"ask": {"provider": "fake", "model": "m2"}, "summarize": {"provider": "fake", "model": "m2"}}})
-            e = su.estimate(); assert e["basis"] == "unknown" and e["cost"] is None and e["model"] == "m2", e                # no price, no history: said, not invented
+            e = su.estimate(); assert e["basis"] == "unknown" and e["cost"] is None and e["model"] == "m2" and e["cost_low"] is None and e["cost_high"] is None, e                # no price, no history: said, not invented
             write_cfg({**CFG, "features": {"ask": {"provider": "fake", "model": "m1"}, "summarize": {"provider": "fake", "model": "m1"}}})
             # the job: one summary written beside its PDF, through the AI layer (the ledger), in the tray as one job
             Fake.responder = lambda body: ["# Paper A\n\n", "**Authors**: Jane Doe\n\n## TL;DR\nA test summary."]

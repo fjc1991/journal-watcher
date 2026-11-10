@@ -1,7 +1,7 @@
 // Library front door: search + filters, reading status and stars, virtual folders, "continue reading", adding your own papers,
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
-import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, exactCost, budgetOk} from "./state.js";
+import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, aboutRange, exactCost, budgetOk} from "./state.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -156,8 +156,10 @@ async function sumRefresh() {                                    // the exact li
   try { SUM = await api("/api/summaries"); SUM.at_lib = lib(); SUM_ST = SUM.status || {}; } catch (e) { notifyError(e); return; }
   sumPaint();
 }
+// the cost as the box says it: a range while it rests on the sizes of the files (a file's size says only roughly how many pages it has), else one figure
+const sumCost = e => e.cost == null ? "unknown" : e.basis === "prices" && e.cost_low != null && e.cost_high != null ? aboutRange(e.cost_low, e.cost_high) : aboutCost(e.cost);
 const basisText = e => e.basis === "history" ? `from your ${e.calls} earlier summar${e.calls === 1 ? "y" : "ies"} with this model, ${aboutCost(e.per_paper, "an unknown amount")} each`
-  : e.basis === "prices" ? `a guess from the price in Settings → AI and the size of each PDF${e.provider === "anthropic" ? "; Claude also reads every page as an image, so expect more" : ""}`
+  : e.basis === "prices" ? `a guess from the price in Settings → AI and the size of each PDF file${sumCost(e) === aboutCost(e.cost) ? "" : ", most likely " + aboutCost(e.cost)}; it gets more exact after ${e.history_min} summaries with this model`
   : "this model has no price in Settings → AI, and there are too few earlier summaries with it to go by";
 function sumBox() {
   const box = $("#lf-sumbox"); if (!box) return;
@@ -166,7 +168,7 @@ function sumBox() {
   if (st.running) html = `<p><b>Writing summaries: ${st.done} of ${st.total}.</b> ${st.made} written so far${st.failed.length ? `, ${st.failed.length} failed` : ""}. The AI activity tray shows it and can cancel it.</p>`;
   else if (SUM_OPEN && e.n) html = `<p><b>${e.n} paper${e.n === 1 ? "" : "s"} in your library ${e.n === 1 ? "has" : "have"} no summary yet.</b> Books are left out.</p>
       <p>${e.n === 1 ? "It goes" : "They go"} to <b>${esc(e.provider)} · ${esc(e.model)}</b> (Settings → AI → Paper summaries), one at a time, with your summary template.
-      Cost: <b>${e.cost == null ? "unknown" : aboutCost(e.cost)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
+      Cost: <b>${sumCost(e)}</b> (${esc(basisText(e))}). Your monthly budget applies.</p>
       <div class="row" style="gap:8px"><button class="btn primary small" id="lf-sumgo">Write the summaries</button><button class="btn small" id="lf-sumno">Cancel</button></div>`;
   else if (st.ended && SUM_WATCHED && SUM_SEEN !== st.ended) {
     const fl = st.failed || [];

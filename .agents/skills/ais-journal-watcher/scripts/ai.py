@@ -43,6 +43,12 @@ LEDGER = os.path.join(STATE, "ai_usage.jsonl")
 MODELS = os.path.join(dl.LOCAL, "models")       # local embedding models are cached here (survives reboots)
 CACHE = os.path.join(dl.STATE, "ai_cache")      # answers to identical requests (regenerable; shared with the other computers that use the data folder, so an answer paid for once is free on all of them)
 FULL_TEXT_LIMIT = 450_000                    # characters of a paper sent as text to providers without native PDF input
+# What a PDF counts as when only the size of its file is known, as (low, likely, high). These are reasoned from how PDFs are usually made, not measured on a
+# collection of real papers: a file's size says only roughly how many pages it has, which is why the estimate that rests on them is shown as a range.
+PDF_PAGE_BYTES = (120_000, 45_000, 15_000)   # bytes of file per page: a scan or a paper full of figures, a typical publisher's PDF, a plainly typeset preprint
+PDF_PAGE_TEXT = (2_500, 4_000, 5_500)        # characters of text on a page
+PDF_PAGE_IMAGE = 5_000                       # a provider that is sent the PDF itself (Claude) also reads each page as an image: about 1,500 tokens, in characters
+PDF_MIN_CHARS = 30_000                       # the likely and the high figure are never below this (the floor the summaries estimate always had)
 
 _lock = threading.Lock()
 _clients = {}
@@ -417,14 +423,45 @@ def cost_of(model, usage, searches=0, provider=None):
     return sum(usage.get(k, 0) * p.get(k, 0) for k in ("in", "out", "cache_write", "cache_read")) / 1e6 + searches * per_search
 
 
-def _sent(messages, system):
-    """(characters, preview) of what is being sent, for the 'what was sent' log (images and PDFs are counted, not stored)."""
+def pdf_chars(path, native, saved=False):
+    """(low, likely, high) characters a PDF counts as for the provider that is sent it. native: the PDF itself goes (Anthropic: the text of every page and the page
+    as an image); otherwise its extracted text (_pdf_text, cut at FULL_TEXT_LIMIT). From the size of the file alone: the file is never opened here, so one that
+    Dropbox keeps online only is not downloaded to be measured. saved=True (a call that has just been cancelled) uses the text and the pages saved in the index
+    instead when this very file was hashed last (the call itself did that when it sent the text), and the three numbers are then the same."""
+    try:
+        size = os.path.getsize(path)
+    except (OSError, TypeError):
+        return (PDF_MIN_CHARS,) * 3
+    if saved:
+        try:
+            import blocks as bl
+            import notes_store as ns
+            sha = ns.sha1_known(path)
+            d = dl.load_json(os.path.join(bl.INDEX, sha + ".blocks.json"), None) if sha else None
+            bs = d.get("blocks") if isinstance(d, dict) and d.get("v") == bl.VERSION else None
+            if bs:
+                n = (sum(len(b["text"]) for b in bs) + (max(b["page"] for b in bs) + 1) * PDF_PAGE_IMAGE if native
+                     else min(FULL_TEXT_LIMIT, sum(len(b["text"]) for b in bs if b.get("kind", "body") != "ref")))
+                return (n,) * 3
+        except Exception:  # noqa: BLE001      (bookkeeping: the size will do)
+            pass
+    out = []
+    for per_page, text in zip(PDF_PAGE_BYTES, PDF_PAGE_TEXT):
+        pages = max(1.0, size / per_page)
+        out.append(int(pages * (text + PDF_PAGE_IMAGE)) if native else int(min(FULL_TEXT_LIMIT, pages * text)))
+    return out[0], max(PDF_MIN_CHARS, out[1]), max(PDF_MIN_CHARS, out[2])
+
+
+def _sent(messages, system, native=None):
+    """(characters, preview) of what is being sent, for the 'what was sent' log (images and PDFs are counted, not stored). An image or a PDF counts as 2,000
+    there. For the row of a cancelled call, whose tokens are worked out from this count, native says how the provider is sent a PDF (True: the PDF itself,
+    False: its text), and a PDF then counts as what the provider read of it (pdf_chars)."""
     n, last = len(system or ""), ""
     for m in messages:
         c = m.get("content")
         parts = [{"type": "text", "text": c}] if isinstance(c, str) else (c or [])
         text = " ".join(x.get("text", "") for x in parts if x.get("type") == "text")
-        n += len(text) + sum(2000 for x in parts if x.get("type") in ("image", "pdf"))
+        n += len(text) + sum(2000 if native is None or x["type"] == "image" else pdf_chars(x.get("path"), native, saved=True)[1] for x in parts if x.get("type") in ("image", "pdf"))
         if m.get("role") == "user":
             last = text
     return n, re.sub(r"\s+", " ", last)[:180]
@@ -447,7 +484,8 @@ def _log(feature, r, sent=None, extra=None):
 
 def _log_cancelled(feature, provider, f, sent, text):
     """A call the user cancelled was still billed for what it had read and written by then. The provider reports exact usage only at the end of an answer, so the
-    ledger gets an estimate (about 3.3 characters per token) marked as such: better a slight over-count than money that vanishes from the totals."""
+    ledger gets an estimate (about 3.3 characters per token; a PDF by what the provider read of it: pdf_chars) marked as such: better a slight over-count than money
+    that vanishes from the totals."""
     try:
         usage = {"in": int((sent[0] if sent else 0) / 3.3), "out": int(len(text) / 3.3)}
         r = Result(text, usage, provider, f["model"])
@@ -728,7 +766,7 @@ def stream(feature, messages, system=None, schema=None, max_tokens=4000, web_sea
             if kind == "text":
                 got.append(v)
             if act.is_cancelled() and kind != "done":      # stop between two pieces of the answer (a finished answer is kept and logged)
-                _log_cancelled(feature, name, f, sent, "".join(got))
+                _log_cancelled(feature, name, f, _sent(messages, system, p.get("type") == "anthropic"), "".join(got))      # (a PDF at what was read of it, not the 2,000 of the 'what was sent' log)
                 raise Cancelled("Cancelled.")
             if kind == "done":
                 _log(feature, v, sent, log)
