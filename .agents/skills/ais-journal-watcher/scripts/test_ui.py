@@ -1371,6 +1371,8 @@ fx.fetch_journal = lambda j: []                                                 
             check("…the question also says how many of this month's calls had no known price (the embeddings here), so the real total is higher", bud_["unpriced"] > 0 and (" %d call" % bud_["unpriced"]) in said_ and "this month had no known price, so the real total is higher." in said_, said_)
             n_dlg_ = len(dialogs)
             page.click('[data-sy="go"]'); page.wait_for_selector('.of[data-tool="synthesis"]', timeout=60000)
+            twice_ = page.evaluate("(async () => { const st = await import('/static/state.js'); return await Promise.all([st.budgetOk(0.01), st.budgetOk(0.01), st.budgetOk(0), st.budgetOk(null)]); })()")
+            check("a button pressed twice while the budget is being asked starts one job, not two (and a job without a cost or without an estimate is not asked about at all)", twice_ == [True, False, True, True], str(twice_))
             check("an estimate that fits in what is left of the budget is not asked about", not any("budget" in m_ for m_ in dialogs[n_dlg_:]), str(dialogs[n_dlg_:]))
             req = [b for p_, b in SEEN if b.get("messages") and str(b["messages"][0].get("content", "")).startswith("You synthesise a set")][-1]
             user = req["messages"][-1]["content"]
