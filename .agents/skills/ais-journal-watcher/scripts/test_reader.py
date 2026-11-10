@@ -2209,6 +2209,227 @@ print("JSON" + json.dumps(out))
         assert ls.highlights(rows, q="endogeneity")["n"] == 1 and ls.tag_usage(rows) == {"t1": 1}
     check("search finds titles, summaries AND your own highlights/notes; filters and sorts", t_search)
 
+    # the search keeps what it works out from a summary and a card (lower case, the card's text, the text without markdown) beside the cached file: same results, no repeated work,
+    # and never an answer from a file that has changed since
+    def _plain_scan(rows_, q="", sort=""):
+        """What search() gave before anything was kept: every text lowered for every word. The results must stay exactly these."""
+        def window(text, tok, n=70):
+            text = re.sub(r"(?m)^#+\s*", "", text.replace("**", "").replace("`", ""))
+            i = text.lower().find(tok)
+            if i < 0:
+                return None
+            a, b = max(0, i - n), min(len(text), i + len(tok) + n)
+            return ("…" if a else "") + re.sub(r"\s+", " ", text[a:b]).strip() + ("…" if b < len(text) else "")
+        toks = [t for t in [m[0] or m[1] for m in re.findall(r'"([^"]+)"|(\S+)', q.lower())] if len(t) >= 2]
+        out = []
+        for r in rows_:
+            st = r.get("state") or {}
+            nt = ls.notes_of(r) if toks else None
+            score, snips = 0, []
+            if toks:
+                fields = [("title", 6, r.get("title", "")), ("authors", 4, r.get("authors", "")), ("meta", 2, " ".join([r.get("journal", ""), r.get("abbr", ""), r.get("matched_topics", "")])),
+                          ("takeaway", 3, st.get("takeaway", "")), ("summary", 1, ls.summary_of(r)), ("card", 1, pc.text_of(json.load(open(ns.card_path(os.path.join(TMP, r["file"])), encoding="utf-8"))) if r.get("card") else "")]
+                hl = [("highlight", h.get("text", ""), h) for h in (nt or {}).get("highlights", [])]
+                cm = [("comment", h.get("comment", ""), h) for h in (nt or {}).get("highlights", []) if h.get("comment")]
+                cm += [("comment", (c.get("text", "") if c.get("type") == "note" else c.get("note", "")), c) for c in (nt or {}).get("cards", [])]
+                ok = True
+                for t in toks:
+                    found = False
+                    for name, w, text in fields:
+                        c = text.lower().count(t)
+                        if c:
+                            found = True; score += w * min(c, 3)
+                            if name in ("takeaway", "summary", "card") and len(snips) < 3:
+                                snips.append({"kind": name, "page": None, "text": window(text, t)})
+                    for sk, text, obj in hl + cm:
+                        if t in text.lower():
+                            found = True; score += 3
+                            if len(snips) < 3:
+                                snips.append({"kind": sk, "page": (obj.get("parts") or [{}])[0].get("page") if sk == "highlight" or obj.get("parts") else None, "text": window(text, t)})
+                    ok = ok and found
+                if not ok:
+                    continue
+            out.append({"file": r["file"], "score": score, "snippets": snips, "_r": r})
+        if toks and sort in ("", "relevance"):
+            out.sort(key=lambda x: -x["score"])
+        elif sort == "title":
+            out.sort(key=lambda x: x["_r"].get("title", "").lower())
+        for x in out:
+            x.pop("_r")
+        return out
+
+    class _Spy(str):                                             # a summary that counts how often it is put in lower case
+        lowered = 0
+
+        def lower(self):
+            _Spy.lowered += 1
+            return str.lower(self)
+
+    def _bump(path, by=5):
+        """A file written a moment later can carry the same time on a file system with coarse stamps: make sure this one's differs, as it would in real use."""
+        st_ = os.stat(path); os.utime(path, ns=(st_.st_atime_ns, st_.st_mtime_ns + by * 10 ** 9))
+
+    def _card(*texts):
+        return {"version": 1, "rev": 1, "data": {"kind": "other", "question": {"text": texts[0], "cites": [1]}, "topics": list(texts[1:]), "method": {"design": "", "data": "", "sample": "", "analysis": "", "cites": []}}, "passages": {}}
+
+    _SUMS = ["# Die Straße\n\n**Autoren**: x\n\nDie STRASSE und die Straße, mit ẞ geschrieben: GROẞE Maße. " + "füllwort " * 40 + "Am Ende steht die `Maßnahme`.",
+             "## İstanbul\n\nISTANBUL, İstanbul, istanbul and ıstanbul are four spellings; DİYARBAKIR too. " + "dolgu " * 40 + "The İİİİ shift the window: needle here.",
+             "# ΟΔΟΣ\n\nΟ ΣΟΦΟΣ ΟΔΥΣΣΕΑΣ: the final sigma. ΟΔΟΣ**ab** and ΟΔΟΣ`cd` sit next to markdown. " + "λέξη " * 40 + "ΤΕΛΟΣ.",
+             "Plain ASCII with **bold platform** words, a plat**form** split by markers, `code`, and\n## a heading\nǅungla ﬁnance NAÏVE Ünïcödé — dash.",
+             None, None]
+    _CARDS = [None, _card("Why do PLATFORMS use Fixed Effects?", "platform governance", "Straße", "İstanbul traffic"), _card("ΟΔΟΣ ΣΟΦΟΣ", "**bold** topic", "# not a heading"), None,
+              _card("Only a card here: Zebra CROSSING", "naïve"), None]
+    srows = []
+    os.makedirs(os.path.join(TMP, "search-case"), exist_ok=True)                        # (beside Papers, not in it: no later check that lists the library sees these six)
+    for n_, (summ_, card_) in enumerate(zip(_SUMS, _CARDS)):
+        rel_ = "search-case/c%d.pdf" % n_
+        open(os.path.join(TMP, rel_), "wb").write(b"%PDF-1.4\n")
+        if summ_ is not None:
+            open(os.path.join(TMP, rel_[:-4] + ".md"), "w", encoding="utf-8").write(summ_)
+        if card_:
+            json.dump(card_, open(os.path.join(TMP, rel_[:-4] + ".card.json"), "w", encoding="utf-8"), ensure_ascii=False)
+        srows.append({"file": rel_, "key": "10.1/c%d" % n_, "title": ["Straßenbau", "İSTANBUL Notes", "Οδός", "Platform FORM", "Zebra", "ẞ and SS"][n_], "authors": "Ömer Çelik; Jörg Weiß",
+                      "journal": "Case Studies", "abbr": "CS", "year": "2026", "matched_topics": "Platform Economics", "summary": rel_[:-4] + ".md" if summ_ is not None else None,
+                      "card": bool(card_), "notes": None, "state": {"takeaway": "Maße und Gewichte; İyi"} if n_ == 0 else {}, "folders": []})
+    nn_ = ns.load(os.path.join(TMP, srows[5]["file"]))
+    nn_["highlights"] = [{"id": "h1", "color": "green", "parts": [{"page": 3, "rects": [[0.1, 0.2, 0.5, 0.02]]}], "text": "Die GROẞE Straße nach İstanbul", "comment": "ΣΟΦΟΣ remark", "tags": [], "created": "2026-10-01T10:00:00Z"}]
+    nn_["cards"] = [{"id": "c1", "type": "note", "text": "My NAÏVE note about `platforms`", "tags": [], "x": 0, "y": 0, "w": 280}]
+    ns.save(os.path.join(TMP, srows[5]["file"]), nn_, 0); srows[5]["notes"] = {"highlights": 1, "cards": 1}
+    _QS = ["straße", "STRASSE", "strasse", "Straße", "ẞ", "ss", "große", "GROSSE", "maße", "masse", "maßnahme", "İstanbul", "istanbul", "ISTANBUL", "ıstanbul", "i̇stanbul", "İİ", "diyarbakir", "DİYARBAKIR",
+           "needle", "οδος", "ΟΔΟΣ", "οδοσ", "σοφος", "ΣΟΦΟΣ", "σοφοσ", "οδυσσεασ", "οδυσσεας", "τελος", "οδοσ**ab", "οδος**ab", "οδοσab", "οδοσ`cd", "οδοσcd", "platform", "PLATFORMS", "plat**form", "**",
+           "##", "`code`", "code", "bold platform", '"bold platform"', '"fixed effects"', "fixed effects platform", "ǆungla", "ǅungla", "finance", "ﬁnance", "naïve", "NAÏVE", "naive", "ünïcödé", "—", "zebra crossing",
+           "ömer", "weiß", "WEISS", "case studies", "cs", "a", "", "  ", "heading", "# not", "füllwort", "dolgu λέξη", "x"]
+
+    def t_search_same():
+        ls._cache.clear()
+        for q_ in _QS:
+            for sort_ in ("", "title"):
+                want_ = _plain_scan(srows, q_, sort_)
+                assert ls.search(srows, q_, sort=sort_) == want_, "the first search for %r (sort %r) differs:\n%r\n%r" % (q_, sort_, ls.search(srows, q_, sort=sort_), want_)
+                assert ls.search(srows, q_, sort=sort_) == want_, "the search for %r from what was kept differs from the plain scan" % q_
+        # what lower() does, and the search keeps doing: ß stays ß (so "strasse" is not "straße"), ẞ becomes ß, İ becomes i + a combining dot (two characters), I becomes i, a last Σ becomes ς
+        files_ = lambda q_: sorted(x["file"][-6:] for x in ls.search(srows, q_))
+        assert files_("straße") == ["c0.pdf", "c1.pdf", "c5.pdf"] and files_("strasse") == ["c0.pdf"] and files_("große") == ["c0.pdf", "c5.pdf"] and files_("grosse") == []
+        assert files_("i̇stanbul") == files_("İstanbul") == ["c1.pdf", "c5.pdf"] and files_("istanbul") == ["c1.pdf"] and files_("ıstanbul") == ["c1.pdf"]
+        assert files_("σοφος") == ["c2.pdf", "c5.pdf"] and files_("σοφοσ") == [] and files_("οδος**ab") == ["c2.pdf"] and files_("οδοσ**ab") == []
+        # [fails today] and none of it is worked out twice: a second pass over every query adds nothing
+        made_ = dict(ls.STATS)
+        for q_ in _QS:
+            ls.search(srows, q_)
+        assert ls.STATS == made_, (made_, ls.STATS)
+    check("search: the results (order, scores, snippets) are those of a plain scan for 60+ queries incl. ß/ẞ, İ/ı, final sigma, markdown marks; nothing is worked out twice", t_search_same)
+
+    def t_search_once():
+        keep_ = (ls._text, pc.text_of, ls._plain, ls._lower)
+        calls_, strips_ = [], []
+        try:
+            ls._text = lambda path: _Spy(keep_[0](path))
+            pc.text_of = lambda card: (calls_.append(1), keep_[1](card))[1]
+            ls._plain = lambda text: (strips_.append("plain") if isinstance(text, _Spy) else None, keep_[2](text))[1]          # (the markdown taken out of a summary for a snippet)
+            ls._lower = lambda text: (strips_.append("lower"), keep_[3](text))[1]                                              # (a kept text put in lower case)
+            ls._cache.clear(); _Spy.lowered = 0
+            first_ = ls.search(srows, "straße platform")
+            n_low, n_card = _Spy.lowered, len(calls_)
+            assert n_card == 3 and n_low >= 4, (n_low, n_card)                    # three cards, four summaries
+            for q_ in ("straße platform", "istanbul", "needle zebra", '"fixed effects"', "σοφος"):
+                ls.search(srows, q_)
+            assert ls.search(srows, "straße platform") == first_
+            # [fails today: every search lowers every summary once per word and builds every card's text again]
+            assert (_Spy.lowered, len(calls_)) == (n_low, n_card), "summaries lowered %d times more, card texts built %d times more" % (_Spy.lowered - n_low, len(calls_) - n_card)
+            assert n_low == 4, "each summary is lowered once, not once per word (%d)" % n_low
+            # the text without its markdown is worked out once per file as well, for the first snippet from it, and so is its lower case: the same searches again work out nothing
+            n_strip = len(strips_)
+            assert strips_.count("plain") == 4 and strips_.count("lower") == 4 + 3 + 4 + 1, strips_      # (4 summaries stripped once; 4 summaries, 3 card texts, the 4 stripped summaries and the one stripped card text with ** in it lowered once)
+            for q_ in ("straße platform", "istanbul", "needle zebra", '"fixed effects"', "σοφος"):
+                ls.search(srows, q_)
+            assert len(strips_) == n_strip, "worked out again for a snippet: %r" % strips_[n_strip:]
+            # a summary that changes (this computer's summarizer, or another computer through the shared folder: both just write the file) is read and lowered again, that one only
+            p_ = os.path.join(TMP, srows[3]["summary"])
+            assert [x["file"][-6:] for x in ls.search(srows, "quokka")] == [] and [x["file"][-6:] for x in ls.search(srows, "ǆungla")] == ["c3.pdf"]
+            open(p_, "w", encoding="utf-8").write("Now about a **QUOKKA** colony."); _bump(p_)
+            hit_ = ls.search(srows, "quokka")
+            assert [x["file"][-6:] for x in hit_] == ["c3.pdf"] and hit_[0]["snippets"] == [{"kind": "summary", "page": None, "text": "Now about a QUOKKA colony."}], hit_
+            assert ls.search(srows, "ǆungla") == [] and ls.search(srows, "markers") == [], "the old summary's words are gone at once"
+            assert _Spy.lowered == n_low + 1 and len(calls_) == n_card, (_Spy.lowered, len(calls_))
+            ls.search(srows, "quokka colony"); assert _Spy.lowered == n_low + 1
+            # a summary that is removed: no words, no error; and one that comes back is read again
+            os.remove(p_); assert ls.search(srows, "quokka") == []
+            open(p_, "w", encoding="utf-8").write(_SUMS[3]); _bump(p_, 9); assert [x["file"][-6:] for x in ls.search(srows, "ǆungla")] == ["c3.pdf"]
+        finally:
+            ls._text, pc.text_of, ls._plain, ls._lower = keep_
+            ls._cache.clear()
+    check("search: a summary is put in lower case once and a card's text built once, until the file changes (rewritten, removed, back again): then that one again, and never the old words", t_search_once)
+
+    def t_search_card_changes():
+        keep_ = pc.text_of
+        calls_ = []
+        try:
+            pc.text_of = lambda card: (calls_.append(1), keep_(card))[1]
+            ls._cache.clear()
+            pdf_ = os.path.join(TMP, srows[4]["file"])
+            assert [x["file"][-6:] for x in ls.search(srows, "zebra crossing")] == ["c4.pdf"] and ls.search(srows, "zebra crossing")[0]["snippets"][0] == {"kind": "card", "page": None, "text": "Only a card here: Zebra CROSSING naïve"}
+            n_ = len(calls_)
+            ls.search(srows, "zebra"); ls.search(srows, "naïve crossing")
+            assert len(calls_) == n_, "[fails today] the card's text was built again (%d times)" % (len(calls_) - n_)
+            # saved in this process (papercard writes a new file in its place)
+            pc._write(pdf_, _card("Now it is about WOMBATS", "burrows")); _bump(ns.card_path(pdf_))
+            assert ls.search(srows, "crossing") == [] and [x["file"][-6:] for x in ls.search(srows, "wombats burrows")] == ["c4.pdf"]
+            assert ls.search(srows, "wombats")[0]["snippets"][0]["text"] == "Now it is about WOMBATS burrows" and len(calls_) == n_ + 1, len(calls_)
+            # changed by another computer through the shared folder: the sync client puts a new file there
+            tmp_ = ns.card_path(pdf_) + ".sync"; json.dump(_card("Finally: NUMBATS"), open(tmp_, "w", encoding="utf-8")); os.replace(tmp_, ns.card_path(pdf_)); _bump(ns.card_path(pdf_), 9)
+            assert [x["file"][-6:] for x in ls.search(srows, "numbats")] == ["c4.pdf"] and ls.search(srows, "wombats") == [] and len(calls_) == n_ + 2
+            # a card that cannot be read (half synced) says nothing and breaks nothing; whole again, it is found again
+            open(ns.card_path(pdf_), "w").write('{"data": {"question"'); _bump(ns.card_path(pdf_), 13)
+            assert ls.search(srows, "numbats") == [] and len(calls_) == n_ + 2
+            json.dump(_CARDS[4], open(ns.card_path(pdf_), "w", encoding="utf-8"), ensure_ascii=False); _bump(ns.card_path(pdf_), 17)
+            assert [x["file"][-6:] for x in ls.search(srows, "zebra crossing")] == ["c4.pdf"] and len(calls_) == n_ + 3
+        finally:
+            pc.text_of = keep_
+            ls._cache.clear()
+    check("search: a card's text is built once, and again when the card is saved here, replaced by a sync, or unreadable for a moment", t_search_card_changes)
+
+    def t_search_standin():                 # (passes today; it is what keeps a kept lower case from ever answering for another text than the one it was made from)
+        keep_ = (ls.summary_of, ls.card_text)
+        try:
+            ls._cache.clear()
+            assert [x["file"][-6:] for x in ls.search(srows, "needle")] == ["c1.pdf"]                 # the real files are read and kept
+            ls.summary_of = lambda r: "A Quagga, not the file" if r["file"].endswith("c1.pdf") else ""
+            ls.card_text = lambda r: "An OKAPI, not the card" if r["file"].endswith("c1.pdf") else ""
+            assert ls.search(srows, "needle") == [] and ls.search(srows, "fixed effects") == []
+            got_ = ls.search(srows, "quagga okapi")
+            assert [x["file"][-6:] for x in got_] == ["c1.pdf"] and [s_["text"] for s_ in got_[0]["snippets"]] == ["A Quagga, not the file", "An OKAPI, not the card"], got_
+        finally:
+            ls.summary_of, ls.card_text = keep_
+            ls._cache.clear()
+    check("search: a text that is not the one kept (another reading of the file, a stand-in) is never answered from what was kept", t_search_standin)
+
+    def t_search_threads():                 # (passes today) several requests at once while a summary keeps changing: every answer is one of the two right ones
+        import threading
+        ls._cache.clear()
+        p_ = os.path.join(TMP, srows[3]["summary"])
+        texts_ = [_SUMS[3], "Now about a **QUOKKA** colony, with a platform."]
+        right_ = []
+        for i_, t_ in enumerate(texts_):
+            open(p_, "w", encoding="utf-8").write(t_); _bump(p_, 20 + i_); right_.append(ls.search(srows, "platform"))
+        assert right_[0] != right_[1]
+        wrong_, stop_ = [], threading.Event()
+
+        def reader():
+            while not stop_.is_set():
+                got_ = ls.search(srows, "platform")
+                if got_ not in right_:
+                    wrong_.append(got_)
+        ths_ = [threading.Thread(target=reader) for _ in range(4)]
+        [t_.start() for t_ in ths_]
+        try:
+            for i_ in range(60):
+                tmp_ = p_ + ".tmp"; open(tmp_, "w", encoding="utf-8").write(texts_[i_ % 2]); os.utime(tmp_, ns=(0, (30 + i_) * 10 ** 9 + 1700000000 * 10 ** 9)); os.replace(tmp_, p_)
+        finally:
+            stop_.set(); [t_.join() for t_ in ths_]
+        open(p_, "w", encoding="utf-8").write(_SUMS[3]); _bump(p_, 200); ls._cache.clear()
+        assert not wrong_, wrong_[:1]
+    check("search: four searches at once while a summary is replaced 60 times never mix the old text with the new", t_search_threads)
+
     importer.crossref_meta = lambda doi: {"title": "A Paper About Test Platforms", "authors": ["Ada Lovelace", "Alan van Turing"], "container": "Test Journal of IS", "issn": ["0000-0000"],
         "doi": doi, "pub_date": "2025-03", "url": "https://doi.org/" + doi, "volume": "12", "issue": "3", "pages": "100-120", "publisher": "P", "type": "journal-article", "abstract": None, "keywords": []}
 
