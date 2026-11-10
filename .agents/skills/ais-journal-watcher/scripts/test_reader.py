@@ -722,8 +722,25 @@ def main():
             evil = os.path.join(af.SNAPSHOTS, "jw-snapshot-20200101-000000.zip")
             with zipfile.ZipFile(evil, "w") as z:
                 z.writestr("../outside.txt", "x"); z.writestr("Papers/evil.pdf", "x"); z.writestr(os.path.relpath(np, af.ROOT), good)
+                z.writestr("Papers/_removed/deleted-zz/_undo.json", "{}")
             r = af.restore_snapshot("jw-snapshot-20200101-000000.zip")
             assert r["restored"] == 1 and not os.path.exists(os.path.join(os.path.dirname(af.ROOT), "outside.txt")) and not os.path.exists(os.path.join(af.PAPERS, "evil.pdf")), r
+            assert not os.path.exists(os.path.join(af.PAPERS, "_removed", "deleted-zz")), "a restore brought something back into Recently deleted"
+            # a damaged snapshot (cut off, or a member whose bytes changed) restores nothing and says so, before anything is touched or kept
+            whole = open(evil, "rb").read(); n_before = len(af.snapshots())
+            hit = whole.index(good.encode()[:40])
+            for i, broken in enumerate((whole[:len(whole) // 2], whole[:hit] + b"X" * 40 + whole[hit + 40:])):
+                bn = "jw-snapshot-2020010%d-000000.zip" % (2 + i)
+                open(os.path.join(af.SNAPSHOTS, bn), "wb").write(broken)
+                open(np, "w", encoding="utf-8").write("mine now")
+                try:
+                    af.restore_snapshot(bn); raise AssertionError("a damaged snapshot was restored")
+                except ValueError as ex:
+                    assert "damaged" in str(ex) and "Nothing was changed" in str(ex), ex
+                assert open(np, encoding="utf-8").read() == "mine now" and len(af.snapshots()) == n_before + 1 + i, af.snapshots()
+            open(np, "w", encoding="utf-8").write(good)
+            for bn in ("jw-snapshot-20200102-000000.zip", "jw-snapshot-20200103-000000.zip"):
+                os.remove(os.path.join(af.SNAPSHOTS, bn))
             for bad in ("../x.zip", "nope.zip", ""):
                 try:
                     af.restore_snapshot(bad); raise AssertionError("restored " + bad)

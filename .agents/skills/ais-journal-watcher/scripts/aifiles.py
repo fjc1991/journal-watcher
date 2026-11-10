@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
@@ -259,9 +260,13 @@ def restore_snapshot(name):
         raise KeyError("no such snapshot")
     import deletion
     import notes_store as ns
-    with zipfile.ZipFile(os.path.join(SNAPSHOTS, name)) as z:      # (read to its end before anything is changed: a damaged snapshot restores nothing)
-        if z.testzip() is not None:
-            raise ValueError("That snapshot is damaged and cannot be restored. Nothing was changed.")
+    damaged = ValueError("That snapshot is damaged and cannot be restored. Nothing was changed.")
+    try:
+        with zipfile.ZipFile(os.path.join(SNAPSHOTS, name)) as z:  # (read to its end before anything is changed: a damaged snapshot restores nothing)
+            if z.testzip() is not None:
+                raise damaged
+    except (zipfile.BadZipFile, EOFError, zlib.error):
+        raise damaged
     before = snapshot(force=True, tag="before-restore", protect=name)
     with deletion._lock, dl.INDEX_LOCK, ns._lock:                   # (no delete, download row or notes save in the middle of it)
         done = _restore_files(name)

@@ -1630,8 +1630,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, **aifiles.restore_snapshot(b.get("name")), "snapshots": aifiles.snapshots()})
             except KeyError:
                 return self.send_json({"error": "That snapshot is not there any more."}, 404)
-            except (ValueError, OSError, zipfile.BadZipFile) as e:
-                return self.send_json({"error": "The snapshot could not be restored (%s). What you had was kept in a snapshot of its own first." % (str(e)[:160] or e.__class__.__name__)}, 400)
+            except ValueError as e:                  # (a damaged snapshot: found before anything was changed)
+                return self.send_json({"error": str(e)[:200]}, 400)
+            except OSError as e:
+                return self.send_json({"error": "The snapshot could not be restored in full (%s). What you had is in the newest snapshot marked “before a restore”." % (str(e)[:160] or e.__class__.__name__)}, 400)
         if path == "/api/snapshots/now":         # take one now
             return self.send_json({"ok": True, "name": aifiles.snapshot(force=True), "snapshots": aifiles.snapshots()})
         if path == "/api/backup/save":           # save the zip into "my export folder" (Settings → Reader) instead of downloading it
