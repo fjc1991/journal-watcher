@@ -311,6 +311,7 @@ def build(fake_url):
     shutil.copytree(os.path.join(SKILL, "scripts"), os.path.join(sk, "scripts"), ignore=shutil.ignore_patterns("__pycache__"))
     for f in ("journals.json", "interests.json", "library.json", "prompts.json"):
         shutil.copy(os.path.join(SKILL, "defaults", f), sk)
+    shutil.copytree(os.path.join(SKILL, "defaults"), os.path.join(sk, "defaults"))      # (what the app ships: Settings → Journals & interests compares your list with it)
     fake = {"type": "openai_compat", "base_url": fake_url, "key_env": "FAKE_KEY", "models": ["m1", "m2"]}
     feat = lambda: {"provider": "fake", "model": "m1"}  # noqa: E731
     web = {**fake, "web_body": {"plugins": [{"id": "web"}]}}
@@ -3102,7 +3103,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             tiles_w = page.evaluate("(() => { const old = RUN; RUN = {kind: 'weekly', params: {}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
             tiles_s = page.evaluate("(() => { const old = RUN; RUN = {kind: 'search', params: {journals: ['SSRN']}}; try { return runJournals().map(j => j.abbr); } finally { RUN = old; } })()")
             check("a weekly check shows no SSRN tile (it is never read there, so it would claim 'No new papers'), while an archive search that chose SSRN still shows it",
-                  [j for j in cfg_s if j["abbr"] == "SSRN"][0]["weekly"] is False and all(j["weekly"] is True for j in cfg_s if j["abbr"] != "SSRN") and "SSRN" not in tiles_w and len(tiles_w) == len(cfg_s) - 1 and tiles_s == ["SSRN"], str((tiles_w, tiles_s)))
+                  [j for j in cfg_s if j["abbr"] == "SSRN"][0]["weekly"] is False and all(j["weekly"] is True for j in cfg_s[:14]) and "SSRN" not in tiles_w and tiles_w == [j["abbr"] for j in cfg_s if j["weekly"]] and len(tiles_w) == 14 and tiles_s == ["SSRN"], str((tiles_w, tiles_s)))
 
             print("Check my PDFs: a PDF that is not the paper it is filed under can be found, kept or taken out")
             import pymupdf as _pmu
@@ -3742,7 +3743,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
                   "14 journals" in we_ and "up to about" in we_ and "new papers a week" in we_ and ("at most about $" in we_ or "cost not known" in we_) and "This month: $" in we_
                   and page.inner_text("#weekmodel") == cfg_["screen_model"] and "Sonnet 5.5" not in page.inner_text("#pane-weekly").replace(cfg_["screen_model"], ""), we_)
             page.click("#weekjournals"); page.wait_for_selector("#wl-journals tr[data-j]", timeout=10000)
-            check("its link opens Settings → Journals & interests, which is the ninth tab", page.inner_text(".st-tabs .on").strip() == "Journals & interests" and page.locator("#wl-journals tr[data-j]").count() == 14)
+            check("its link opens Settings → Journals & interests, which is the ninth tab", page.inner_text(".st-tabs .on").strip() == "Journals & interests" and page.locator("#wl-journals tr[data-j]").count() == 14, str((page.inner_text(".st-tabs .on"), page.locator("#wl-journals tr[data-j]").count())))
             check("the page says which journals of the AIS basket and the UTD 24 your list lacks, and offers to add them switched off", "24 journals of the AIS basket and the UTD 24 are not in your list" in page.inner_text("#wl-missing") and page.locator("#wl-add").count() == 1, page.inner_text("#wl-missing"))
             mine_ = json.load(open(jfile))["journals"]
             page.click("#wl-add"); page.wait_for_function("document.querySelectorAll('#wl-journals tr[data-j]').length === 38", timeout=10000)
@@ -3750,7 +3751,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("adding them changes none of your entries and adds the 24 switched off (no weekly check, not ticked for a search)", now_[:14] == mine_ and len(now_) == 38 and all(j["weekly"] is False and j["default_off"] is True for j in now_[14:])
                   and page.locator("#wl-missing").count() == 0 and not page.is_checked('#wl-journals tr[data-j="JF"] [data-wlsw="weekly"]') and page.is_checked('#wl-journals tr[data-j="MISQ"] [data-wlsw="weekly"]'))
             heads_ = [h.inner_text() for h in page.locator("#wl-journals .wl-group th:first-child").all()]
-            check("the journals are listed under their list: AIS basket of eleven, UTD 24, other", len(heads_) == 3 and heads_[0].startswith("AIS basket of eleven") and "6 of 11 in the weekly check" in heads_[0] and heads_[1].startswith("UTD 24") and heads_[2].startswith("Other journals"), str(heads_))
+            check("the journals are listed under their list: AIS basket of eleven, UTD 24, other", len(heads_) == 3 and heads_[0].startswith("AIS basket of eleven") and "6 of 11 in the weekly check" in heads_[0] and heads_[1].startswith("UTD 24") and "5 of 24 in the weekly check · 2 of them listed above" in heads_[1] and heads_[2].startswith("Other journals"), str(heads_))
             page.check('#wl-journals tr[data-j="JF"] [data-wlsw="weekly"]'); page.wait_for_function("document.querySelector('#wl-journals tr[data-j=\"JF\"] [data-wlsw=weekly]').checked && /15 are read/.test(document.querySelector('#st-body').textContent)", timeout=10000)
             jf_ = next(j for j in json.load(open(jfile))["journals"] if j["abbr"] == "JF")
             check("a journal's switch is saved as you flip it (only that switch)", "weekly" not in jf_ and jf_["default_off"] is True and [j for j in json.load(open(jfile))["journals"] if j["abbr"] != "JF"] == [j for j in now_ if j["abbr"] != "JF"])

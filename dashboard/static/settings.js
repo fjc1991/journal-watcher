@@ -69,13 +69,15 @@ const topicRow = (t, kind) => `<div class="wl-topic" data-kind="${kind}" data-na
     ${kind === "method" ? `<input type="text" class="wl-desc" value="${esc(t.description || "")}" placeholder="One sentence the model reads to recognise it" aria-label="Description" style="width:100%;margin-top:6px">` : ""}
     <textarea class="wl-terms" rows="3" aria-label="Words and phrases" placeholder="Words and phrases to look for, separated by commas or new lines">${esc((t.terms || []).join(", "))}</textarea></div>`;
 function journalRows(W) {
-  const groups = [...Object.entries(W.sets).map(([k, name]) => [k, name, W.journals.filter(j => j.sets.includes(k))]), ["", "Other journals", W.journals.filter(j => !j.sets.length)]].filter(g => g[2].length);
-  return groups.map(([k, name, js]) => `<tr class="wl-group"><th colspan="2">${esc(name)} <small>${js.filter(j => j.weekly).length} of ${js.length} in the weekly check</small></th>
+  // each journal once: under the first list it belongs to (MISQ and ISR are in both lists); a list's heading still counts all of its journals
+  const seen = new Set(), groups = [...Object.entries(W.sets).map(([k, name]) => [k, name, W.journals.filter(j => j.sets.includes(k))]), ["", "Other journals", W.journals.filter(j => !j.sets.length)]].filter(g => g[2].length);
+  return groups.map(([k, name, all]) => { const js = all.filter(j => !seen.has(j.abbr)); js.forEach(j => seen.add(j.abbr)); const above = all.length - js.length;
+    return `<tr class="wl-group"><th colspan="2">${esc(name)} <small>${all.filter(j => j.weekly).length} of ${all.length} in the weekly check${above ? ` · ${above} of them listed above` : ""}</small></th>
       <th colspan="2"><button class="linkbtn" data-wlall="${esc(k)}" data-on="1">weekly check: all on</button> · <button class="linkbtn" data-wlall="${esc(k)}" data-on="0">all off</button></th></tr>` +
     js.map(j => `<tr data-j="${esc(j.abbr)}"><td><b>${esc(j.name)}</b> <small>${esc(j.abbr)}${j.sets.length > 1 && k ? " · also in the " + esc(j.sets.filter(s => s !== k).map(s => W.sets[s]).join(", ")) : ""}</small></td>
       <td><small>${esc(PUBNAME[j.publisher] || j.publisher)}</small></td>
       <td><label class="chk"><input type="checkbox" data-now data-wlsw="weekly"${j.weekly ? " checked" : ""}${j.abbr === "SSRN" ? " disabled" : ""}> weekly check</label></td>
-      <td><label class="chk"><input type="checkbox" data-now data-wlsw="search"${j.search ? " checked" : ""}${j.can_search ? "" : " disabled"}> ticked for a search</label></td></tr>`).join("")).join("");
+      <td><label class="chk"><input type="checkbox" data-now data-wlsw="search"${j.search ? " checked" : ""}${j.can_search ? "" : " disabled"}> ticked for a search</label></td></tr>`).join(""); }).join("");
 }
 async function renderWatch(body) {
   body.innerHTML = `<div class="card st-card"><p class="pmeta">Loading…</p></div>`;
