@@ -2326,7 +2326,8 @@ print("JSON" + json.dumps(out))
         by = {x["id"]: x for x in fo.list_all()}
         assert len(by) == 9 and by[m["id"]]["parent"] == by[a["id"]]["parent"] == by[deep["id"]]["parent"] == "" and fo.all_papers(m["id"]) is not None, {k: v["parent"] for k, v in by.items()}
         set_parent(m["id"], "gone-folder"); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == "" and fo.all_papers(m["id"])[:1] == ["k0"]
-        set_parent(m["id"], 7); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == ""
+        for odd in (7, ["wits26"], {"id": "x"}):          # (a file edited by hand, or damaged: a parent that is no name of a folder)
+            set_parent(m["id"], odd); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == "", odd
         d = json.load(open(os.path.join(fo.DIR, m["id"] + ".json"))); d.pop("parent"); json.dump(d, open(os.path.join(fo.DIR, m["id"] + ".json"), "w"))
         # deleting: the folders inside move up one level, or go with it (each with what was made in it)
         open(os.path.join(fo.DIR, deep["id"] + ".matrix.json"), "w").write("{}")
