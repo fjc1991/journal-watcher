@@ -3896,7 +3896,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.fill('#ir-c0 [data-d="session"]', "Session 1B - GenAI, Work & Labor Markets"); page.fill('#ir-c0 [data-d="note"]', "discussant: me")
             page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist; Zed Extra"); page.wait_for_selector('#ir-c0 [data-p="email"][data-pn="2"]')
             check("an author typed into the authors box gets a line of their own under More details, and the others keep theirs", page.input_value('#ir-c0 [data-p="email"][data-pn="2"]') == "" and page.input_value('#ir-c0 [data-p="email"][data-pn="0"]') == "okon0180@northfield.example")
-            page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindquist")
+            page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist"); page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindquist")
             check("a name whose spelling you correct keeps the affiliation and e-mail under it", page.input_value('#ir-c0 [data-p="email"][data-pn="1"]') == "Tao.Lindqvist@lakeside.example" and page.input_value('#ir-c0 [data-p="affiliation"][data-pn="1"]') == "Lakeside Institute of Technology")
             page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist")
             page.select_option("#ir-to", "lib"); page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=30000)
@@ -3908,6 +3908,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
                   and da_["people"][0] == {"name": "Mira Okonkwo", "affiliation": "University of Northfield", "place": "Northfield, MN, USA", "email": "okon0180@northfield.example"}
                   and da_["details"] == {"conference": "Workshop on Information Technology and Systems", "paper_type": "Regular Paper", "session": "Session 1B - GenAI, Work & Labor Markets", "note": "discussant: me"}, str((la_["authors"], da_["details"])))
             page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]'); page.fill("#lf-q", "Skill Demand After"); page.wait_for_selector('#lib-results .librow:has-text("Skill Demand After")', timeout=10000)
+            page.wait_for_timeout(450)       # (the search box draws the rows again 220 ms after the last key, which would close the ⋯ menu)
             page.click('#lib-results .librow:has-text("Skill Demand After") [data-more]'); page.click('#lib-results .librow:has-text("Skill Demand After") [data-details]'); page.wait_for_selector("#dt-dlg[open]")
             check("Edit details (in a paper's ⋯ menu) shows what is kept: the title, each author with affiliation, place and e-mail, the conference, the session, your note; a paper filed without a DOI can be given one",
                   page.input_value("#dt-title") == "Skill Demand After Writing Machines" and page.locator("#dt-people .dt-person").count() == 2 and page.input_value('#dt-people .dt-person >> nth=1 >> [data-pf="email"]') == "Tao.Lindqvist@lakeside.example"
