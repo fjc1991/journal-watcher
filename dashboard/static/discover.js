@@ -68,7 +68,7 @@ const barHtml = inFolder => `<div class="dc-bar hide card"><b><span class="dc-n"
 
 // ---------------------------------------------------------------- folder / library tab
 export function mount(el, opts = {}) {
-  const nIn = opts.folder ? ctx.getLib().filter(r => (r.folders || []).includes(opts.folder)).length : 99;
+  const nIn = opts.folder ? ctx.getLib().filter(r => window.LibraryUI && LibraryUI.inFolder ? LibraryUI.inFolder(r, opts.folder) : (r.folders || []).includes(opts.folder)).length : 99;
   const S = {el, folder: opts.folder || null, scope: {}, min: nIn >= 4 ? 2 : 1, missing: null, related: null, similar: null, busy: false, label: "library"};
   S.label = S.folder ? "this folder" : "the whole library";
   el.innerHTML = `<div class="card ev-card dc-top"><div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
@@ -87,7 +87,7 @@ async function fill(S) {
   const L = ctx.getLib(), sel = k => $(`[data-s="${k}"]`, S.el), opt = (v, t) => `<option value="${esc(v)}">${esc(t)}</option>`;
   const js = [...new Map(L.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1])), ys = [...new Set(L.map(r => r.year).filter(Boolean))].sort().reverse();
   let folders = []; try { folders = await api("/api/folders"); } catch (e) { /* optional */ }
-  sel("folder").insertAdjacentHTML("beforeend", folders.map(f => opt(f.id, "📁 " + f.name)).join(""));
+  sel("folder").insertAdjacentHTML("beforeend", (window.LibraryUI && window.LibraryUI.folderTree && window.LibraryUI.folderTree().length ? window.LibraryUI.folderTree() : folders).map(f => opt(f.id, "📁 " + (f.path || [f.name]).join(" › "))).join(""));
   sel("journal").insertAdjacentHTML("beforeend", js.map(([a, n]) => opt(a, n)).join("")); sel("year").insertAdjacentHTML("beforeend", ys.map(y => opt(y, y)).join(""));
 }
 async function find(S) {

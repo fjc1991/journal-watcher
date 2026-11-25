@@ -123,9 +123,18 @@ def _snippet(path, text, low, tok):
 NO_FOLDER = "~none"
 
 
+def _family(folder):
+    """The folder and every folder inside it: a paper in "Session 1B" is found when you filter by its master folder."""
+    if not folder or folder == NO_FOLDER:
+        return set()
+    import folders as fo
+    return set(fo.family(folder)) or {folder}
+
+
 def search(rows, q="", status="", star=False, folder="", journal="", year="", tag="", notes=False, sort="", kind=""):
     toks = _tokens(q or "")
     out = []
+    fam = _family(folder)
     for r in rows:
         st = r.get("state") or {}
         if status == "none" and st.get("status"):
@@ -137,7 +146,7 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
         if folder == NO_FOLDER:                                    # papers in no folder yet (to file them: select them all, Add to folder)
             if r.get("folders"):
                 continue
-        elif folder and folder not in (r.get("folders") or []):
+        elif folder and not fam.intersection(r.get("folders") or []):
             continue
         if journal and r.get("abbr") != journal:
             continue
@@ -203,8 +212,9 @@ def search(rows, q="", status="", star=False, folder="", journal="", year="", ta
 def highlights(rows, q="", tag=None, color=None, folder=None, journal=None, limit=300):
     toks = _tokens(q or "")
     items = []
+    fam = _family(folder)
     for r in rows:
-        if folder and folder not in (r.get("folders") or []):
+        if folder and not fam.intersection(r.get("folders") or []):
             continue
         if journal and r.get("abbr") != journal:
             continue

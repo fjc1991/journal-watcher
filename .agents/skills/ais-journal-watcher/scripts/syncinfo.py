@@ -460,6 +460,13 @@ def merge(rel):
                 new = [k for k in (b.get("papers") or []) if isinstance(k, str) and k not in set(mine)]
                 out, added = dict(a, papers=mine + new), len(new)
                 said = "Joined: %d papers from the other copy are in the folder too." % added
+                pa, pb = a.get("parent") or "", b.get("parent") or ""        # the folder it is inside: where the two copies disagree, this copy's is kept, or the other's when this one has none
+                if pa != pb:
+                    if not pa and isinstance(pb, str) and re.fullmatch(r"[a-z0-9-]{1,48}", pb) and pb != out.get("id") and os.path.exists(os.path.join(os.path.dirname(orig), pb + ".json")):
+                        out["parent"] = pb
+                        said += " The other copy had it inside another folder: it is there now."
+                    else:
+                        said += " The two copies had it in different places: it stays where this computer has it."
             _write_json(orig, out)
     except (OSError, ValueError) as e:
         raise ValueError("The two copies could not be joined (%s). Nothing was changed." % (str(e)[:100] or "one of them cannot be read"))

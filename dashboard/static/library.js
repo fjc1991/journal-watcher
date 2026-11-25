@@ -29,6 +29,23 @@ async function loadFolders() { try { FOLDERS = await api("/api/folders"); } catc
 async function loadSmart() { try { SMART = (await api("/api/smart")).searches; } catch (e) { SMART = []; } }
 async function loadTags() { try { TAGS = (await api("/api/tags")).tags; } catch (e) { TAGS = []; } }
 const folderName = id => id === "~none" ? "not in any folder" : (FOLDERS.find(f => f.id === id) || {}).name || id;
+// ---- folders inside folders: a folder shows its own papers and those of every folder under it
+const folderLabel = f => ((f && f.path) || [f ? f.name : ""]).join(" › ");                      // "WITS26 › Session 1B"
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, {numeric: true, sensitivity: "base"});
+// a folder, then what is inside it, then the next (walked through the tree itself: sorting the written-out paths would put "WITS26 - posters" between WITS26 and its own folders)
+const folderTree = () => { const ids = new Set(FOLDERS.map(f => f.id)), walk = p => FOLDERS.filter(f => ((f.parent && ids.has(f.parent)) ? f.parent : "") === p).sort(byName).flatMap(f => [f, ...walk(f.id)]); return walk(""); };
+const folderRoots = () => FOLDERS.filter(f => !f.parent);
+const folderKids = id => FOLDERS.filter(f => f.parent === id);
+let famMemo = {of: null, by: {}};
+function famOf(id) {                                                                            // the folder and every folder under it
+  if (famMemo.of !== FOLDERS) famMemo = {of: FOLDERS, by: {}};
+  if (famMemo.by[id]) return famMemo.by[id];
+  const out = new Set([id]); let grew = true;
+  while (grew) { grew = false; for (const f of FOLDERS) if (f.parent && out.has(f.parent) && !out.has(f.id)) { out.add(f.id); grew = true; } }
+  return (famMemo.by[id] = out);
+}
+const inFolder = (r, id) => { const fam = famOf(id); return (r.folders || []).some(x => fam.has(x)); };
+const indent = f => "\u00a0\u00a0\u00a0".repeat(f.depth || 0);
 const download = url => { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.append(a); a.click(); a.remove(); };
 
 // a paper whose AI summary is written, or a book whose overview of the whole book is (read from its own record)
@@ -215,13 +232,13 @@ function fillControls(el) {
   const js = [...new Map(P.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const ys = [...new Set(P.map(r => r.year).filter(Boolean))].sort().reverse();
   $("#lf-q", el).value = F.q; $("#lf-status", el).value = F.status; $("#lf-sort", el).value = F.sort;
-  $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + opt("~none", "Not in any folder", F.folder) + FOLDERS.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")", F.folder)).join("");
+  $("#lf-folder", el).innerHTML = opt("", "Any folder", F.folder) + opt("~none", "Not in any folder", F.folder) + folderTree().map(f => opt(f.id, "📁 " + folderLabel(f) + " (" + f.count + ")", F.folder)).join("");
   $("#lf-kind", el).value = F.kind || "";
   $("#lf-journal", el).innerHTML = opt("", "Any journal or source", F.journal) + js.map(([a, n]) => opt(a, n, F.journal)).join("");
   $("#lf-year", el).innerHTML = opt("", "Any year", F.year) + ys.map(y => opt(y, y, F.year)).join("");
   $("#lf-tag", el).innerHTML = opt("", "Any tag", F.tag) + TAGS.map(t => opt(t.id, (t.category ? t.category + ": " : "") + t.name, F.tag)).join("");
   $("#lf-star", el).classList.toggle("on", F.star); $("#lf-notes", el).classList.toggle("on", F.notes); $("#lf-list", el).classList.toggle("on", F.list);
-  $("#lf-fstrip", el).innerHTML = (FOLDERS.length ? `<span class="chip" data-gotab="folders" title="See all folders as tiles">📂 All folders</span>` : "") + FOLDERS.map(f => `<span class="chip fchip" data-openfolder="${esc(f.id)}" data-dropfolder="${esc(f.id)}">📁 ${esc(f.name)} <small>${f.count}</small></span>`).join("") +
+  $("#lf-fstrip", el).innerHTML = (FOLDERS.length ? `<span class="chip" data-gotab="folders" title="See all folders as tiles">📂 All folders</span>` : "") + folderRoots().map(f => `<span class="chip fchip" data-openfolder="${esc(f.id)}" data-dropfolder="${esc(f.id)}"${f.children ? ` title="${f.children} folder${f.children === 1 ? "" : "s"} inside"` : ""}>📁 ${esc(f.name)} <small>${f.count}</small></span>`).join("") +
     SMART.map(s => `<span class="chip smart" data-smart="${esc(s.id)}" title="A saved search: ${esc(smartText(s))}">${ico("search", "sm")} ${esc(s.name)} <button class="chipx" data-smartdel="${esc(s.id)}" title="Forget this search" aria-label="Forget this search">✕</button></span>`).join("") +
     `<span class="chip" id="lf-newfolder">＋ New folder</span>`;
   $$("[data-smart]", el).forEach(c => c.onclick = e => { const del = e.target.closest("[data-smartdel]");
@@ -658,20 +675,22 @@ function setKind(files) {
 
 // ---------------------------------------------------------------- folders
 async function folderOp(body) {
-  try { const r = await api("/api/folders", body); FOLDERS = r.folders; }
+  let r;
+  try { r = await api("/api/folders", body); FOLDERS = r.folders; }
   catch (e) { notifyError(e); throw e; }
   await ctx.reload(); const el = $("#lib-papers") && $("#libview"); if (el && $("#lf-folder")) fillControls($("#libview")); results();
+  return r;
 }
-async function newFolder(files) {
-  const n = prompt("Name of the new folder:"); if (!n || !n.trim()) return null;
-  await folderOp({action: "create", name: n.trim(), files: files || []}); return FOLDERS.find(f => f.name === n.trim().replace(/\s+/g, " "));
+async function newFolder(files, parent) {
+  const n = prompt(parent ? "Name of the new folder inside “" + folderName(parent) + "”:" : "Name of the new folder:"); if (!n || !n.trim()) return null;
+  const r = await folderOp({action: "create", name: n.trim(), parent: parent || "", files: files || []}); return FOLDERS.find(f => f.id === r.id);      // (by its id: two folders may share a name)
 }
 function folderPop(anchor, target, bulk) {
   $$(".fpop").forEach(p => p.remove());
   const files = Array.isArray(target) ? target : [target], first = lib()[byFile(files[0])];
   const pop = document.createElement("div"); pop.className = "fpop card";
-  const draw = () => { pop.innerHTML = (FOLDERS.length ? FOLDERS.map(f => { const inn = files.every(x => (lib()[byFile(x)].folders || []).includes(f.id));
-      return `<label><input type="checkbox" data-f="${esc(f.id)}"${inn ? " checked" : ""}> 📁 ${esc(f.name)}</label>`; }).join("") : `<div class="pmeta" style="padding:6px">No folders yet.</div>`) +
+  const draw = () => { pop.innerHTML = (FOLDERS.length ? folderTree().map(f => { const inn = files.every(x => (lib()[byFile(x)].folders || []).includes(f.id));      // (ticked: in that folder itself)
+      return `<label title="${esc(folderLabel(f))}">${indent(f)}<input type="checkbox" data-f="${esc(f.id)}"${inn ? " checked" : ""}> 📁 ${esc(f.name)}</label>`; }).join("") : `<div class="pmeta" style="padding:6px">No folders yet.</div>`) +
     `<div class="fnew"><input type="text" placeholder="＋ new folder…"></div>`; };
   draw(); document.body.append(pop);
   const r = anchor.getBoundingClientRect(); pop.style.left = Math.min(r.left, innerWidth - 260) + "px"; pop.style.top = (bulk ? Math.max(8, r.top - pop.offsetHeight - 6) : r.bottom + 4) + "px";
@@ -680,26 +699,43 @@ function folderPop(anchor, target, bulk) {
     await folderOp({action: e.target.checked ? "add" : "remove", id: f, files}); draw(); };
   pop.querySelector(".fnew input").onkeydown = async e => { if (e.key === "Enter" && e.target.value.trim()) { try { await folderOp({action: "create", name: e.target.value.trim(), files}); pop.remove(); } catch (er) { /* toast shown */ } } };
 }
+// the line under a folder's name: how many papers it shows (its own and those of the folders inside it, each once)
+const headMeta = (id, rows) => { const inside = famOf(id).size - 1; return `${rows.length} paper${rows.length === 1 ? "" : "s"}${inside ? ` in this folder and the ${inside} folder${inside === 1 ? "" : "s"} inside it` : ""} · ${rows.filter(r => r.card).length} with a card · papers stay where they are; a folder is just a list`; };
 let FV = {box: null, id: null, tab: "papers"}, pendingFT = null;
+let missed = null;                       // the folder last looked for and not found (asked for again once, not for ever)
 const FVT = {};                       // remembers which tab each folder was left on
 function folderView(box, id) {
   const f = FOLDERS.find(x => x.id === id);
-  if (!f) { box.innerHTML = `<div class="card empty"><h2>Folder not found</h2></div>`; return; }
+  if (!f) {                             // not in the list this page holds: it may have been made a moment ago (a drop that made it is still refreshing the page), so the list is asked for once more
+    box.innerHTML = `<div class="card empty" data-miss="${esc(id)}"><h2>Folder not found</h2></div>`;
+    if (missed !== id) { missed = id; loadFolders().then(() => { if (FOLDERS.some(x => x.id === id) && box.isConnected && $(`[data-miss="${CSS.escape(id)}"]`, box)) { folderView(box, id); ctx.renderNav?.(); } }); }
+    return;
+  }
+  missed = null;
   ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "DraftUI", "ClaimsUI", "SynthUI", "WorkspaceUI"].forEach(n => window[n] && window[n].init(ctx));
   if (pendingFT) { FVT[id] = pendingFT; pendingFT = null; }
   FV = {box, id, tab: window.IdeasUI ? (FVT[id] || "papers") : "papers"};
-  const L = lib(), rows = L.map((r, i) => [r, i]).filter(([r]) => (r.folders || []).includes(id)), cards = rows.filter(([r]) => r.card).length;
-  box.innerHTML = pageHead({tool: "folders", cls: "fv-head", icon: `<span class="fv-ico">${window.FoldersUI ? window.FoldersUI.icon() : "📁"}</span>`, eyebrow: "Folder", title: f.name,
-      sub: `${rows.length} paper${rows.length === 1 ? "" : "s"} · ${cards} with a card · papers stay where they are; a folder is just a list`,
-      actions: `<span class="menuwrap"><button class="btn small" id="fv-add">${ico("plus", "sm")} Add papers ${ico("down", "sm")}</button><div class="menu card hide" id="fv-addmenu"><button data-add="pdf">PDFs from my computer…</button><button data-add="lib">Papers already in my library…</button><div class="pmeta" style="padding:6px 10px">Or drop PDFs anywhere on this page.</div></div></span>
-      <button class="btn small" id="fv-rename">Rename</button><button class="btn small danger" id="fv-del">Delete folder</button>
+  const L = lib(), rows = L.map((r, i) => [r, i]).filter(([r]) => inFolder(r, id)), cards = rows.filter(([r]) => r.card).length;
+  const up = []; for (let p = FOLDERS.find(x => x.id === f.parent); p && up.length < 50; p = FOLDERS.find(x => x.id === p.parent)) up.unshift(p);      // the folders this one is inside, outermost first
+  box.innerHTML = (up.length ? `<nav class="fv-crumbs" aria-label="This folder is inside">${up.map(p => `<button type="button" class="linkbtn" data-up="${esc(p.id)}">📁 ${esc(p.name)}</button> › `).join("")}<b>${esc(f.name)}</b></nav>` : "") +
+    pageHead({tool: "folders", cls: "fv-head", icon: `<span class="fv-ico">${window.FoldersUI ? window.FoldersUI.icon() : "📁"}</span>`, eyebrow: up.length ? "Folder in " + up.map(p => p.name).join(" › ") : "Folder", title: f.name,
+      sub: headMeta(id, rows.map(([r]) => r)),
+      actions: `<span class="menuwrap"><button class="btn small" id="fv-add">${ico("plus", "sm")} Add papers ${ico("down", "sm")}</button><div class="menu card hide" id="fv-addmenu"><button data-add="pdf">PDFs from my computer…</button><button data-add="dir">A folder from my computer…</button><button data-add="lib">Papers already in my library…</button><div class="pmeta" style="padding:6px 10px">Or drop PDFs, or whole folders of them, anywhere on this page.</div></div></span>
+      <button class="btn small" id="fv-sub" title="Make a folder inside this one">${ico("plus", "sm")} New subfolder</button><button class="btn small" id="fv-rename">Rename</button><button class="btn small danger" id="fv-del">Delete folder</button>
       <span class="menuwrap"><button class="btn small" id="fv-export">${ico("download", "sm")} Export ${ico("down", "sm")}</button><div class="menu card hide" id="fv-expmenu"></div></span>`}) + `
     ${window.IdeasUI ? `<div class="libtabs tooltabs fvtabs" style="margin-top:12px">${[["papers", "Papers", "papers", "this folder's list"], ["ask", "Ask", "ask", "ask these papers"], ["matrix", "Matrix", "matrix", "compare them in a table"], ["discover", "Discover", "discover", "papers they cite"], ["evidence", "Evidence", "evidence", "who found what"], ["synthesis", "Synthesis", "synthesis", "what they say together"], ["workspace", "Workspace", "workspace", "a board to arrange them"], ["lab", "Ideas Lab", "ideas", "research ideas from them"], ["draft", "Related work", "draft", "a related-work draft"], ["claims", "Claim check", "claims", "check claims against them"]].map(([k, t, i, h]) => `<button data-ft="${k}" data-tool="${i}">${ico(i)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>` : ""}
     <div id="fv-body" style="margin-top:14px"></div>`;
   $("#fv-add").onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.toggle("hide"); };
-  $$("#fv-addmenu [data-add]").forEach(b => b.onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.add("hide"); const D = window.DropImport; if (D) b.dataset.add === "pdf" ? D.choosePdfs(id) : D.pickFromLibrary(id); });
+  $$("#fv-addmenu [data-add]").forEach(b => b.onclick = e => { e.stopPropagation(); $("#fv-addmenu").classList.add("hide"); const D = window.DropImport; if (D) b.dataset.add === "pdf" ? D.choosePdfs(id) : b.dataset.add === "dir" ? D.chooseFolder(id) : D.pickFromLibrary(id); });
   $("#fv-rename").onclick = async () => { const n = prompt("Rename folder:", f.name); if (n && n.trim()) { await folderOp({action: "rename", id, name: n.trim()}); folderView(box, id); ctx.renderNav?.(); } };
-  $("#fv-del").onclick = async () => { if (confirm(`Delete the folder “${f.name}”? The papers are not deleted, but its Ideas Lab board, workspace, drafts and checks are.`)) { await folderOp({action: "delete", id}); ctx.go({j: null}); } };
+  $$(".fv-crumbs [data-up]", box).forEach(b => b.onclick = () => ctx.go({j: "@" + b.dataset.up}));
+  $("#fv-sub").onclick = async () => { try { const n = await newFolder([], id); if (n) { folderView(box, id); ctx.renderNav?.(); } } catch (e) { /* said in a toast */ } };
+  $("#fv-del").onclick = async () => {
+    const inside = famOf(id).size - 1;
+    const ask = inside ? `Delete the folder “${f.name}” and the ${inside} folder${inside === 1 ? "" : "s"} inside it?\n\nThe papers are not deleted. The Ideas Lab boards, workspaces, drafts and checks of all ${inside + 1} folders are.`
+      : `Delete the folder “${f.name}”? The papers are not deleted, but its Ideas Lab board, workspace, drafts and checks are.`;
+    if (confirm(ask)) { await folderOp({action: "delete", id, children: "delete"}); ctx.go(f.parent && FOLDERS.find(x => x.id === f.parent) ? {j: "@" + f.parent} : {j: null}); }
+  };
   $("#fv-export").onclick = e => { e.stopPropagation(); exportMenu($("#fv-expmenu"), {folder: id}); };
   $$(".fvtabs button", box).forEach(b => b.onclick = () => folderTab(b.dataset.ft));
   showFolderTab();
@@ -710,8 +746,11 @@ function showFolderTab() {
   const fresh = body.cloneNode(false); body.replaceWith(fresh); body = fresh;       // a new element for every tab, so a tab never keeps listeners or late renders from the one you left
   $$(".fvtabs button", FV.box).forEach(b => b.classList.toggle("on", b.dataset.ft === FV.tab));
   if (FV.tab === "papers") {
-    const rows = lib().map((r, i) => [r, i]).filter(([r]) => (r.folders || []).includes(FV.id));
-    body.innerHTML = (rows.length ? `<div class="reshead">${readyKey(rows.map(([r]) => r))}</div>` : "") + `<div class="papers" id="fv-list">${rows.map(([r, i]) => row(r, i)).join("") || `<div class="card empty"><h2>This folder is empty</h2>Drop PDFs here, use <b>＋ Add papers</b>, or use the 📁 button on any paper in the Library.</div>`}</div>`;
+    const rows = lib().map((r, i) => [r, i]).filter(([r]) => inFolder(r, FV.id)), kids = folderKids(FV.id).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase(), undefined, {numeric: true}));
+    // the folders inside this one, as tiles you can open or drop PDFs on; then every paper of this folder and of the folders under it (each paper's own folder is the tag on its row)
+    body.innerHTML = (kids.length ? `<div class="fv-subs" role="group" aria-label="Folders inside this one">${kids.map(k => `<button type="button" class="fv-subtile" data-sub="${esc(k.id)}" data-drop="${esc(k.id)}" title="${esc(folderLabel(k))}"><span class="fp-name">📁 ${esc(k.name)}</span><small>${k.count} paper${k.count === 1 ? "" : "s"}${k.children ? " · " + k.children + " folder" + (k.children === 1 ? "" : "s") : ""}</small></button>`).join("")}</div>` : "") +
+      (rows.length ? `<div class="reshead">${readyKey(rows.map(([r]) => r))}</div>` : "") + `<div class="papers" id="fv-list">${rows.map(([r, i]) => row(r, i)).join("") || `<div class="card empty"><h2>${kids.length ? "No papers in this folder or the folders inside it yet" : "This folder is empty"}</h2>Drop PDFs here, use <b>＋ Add papers</b>, or use the 📁 button on any paper in the Library.</div>`}</div>`;
+    $$(".fv-subtile", body).forEach(b => b.onclick = () => ctx.go({j: "@" + b.dataset.sub}));
     bindRows(body);
   } else if (FV.tab === "ask") window.AskUI.mount(body, {folder: FV.id});
   else if (FV.tab === "matrix") window.MatrixUI.mount(body, FV.id);
@@ -774,7 +813,7 @@ async function highlightsHub() {
   box.innerHTML = `<div class="card libtools"><div class="row filters"><input type="search" id="h-q" placeholder="Search your highlights and comments…" value="${esc(H.q)}">
     <select id="h-color"><option value="">Any colour</option>${COLORS.map(c => `<option value="${c.id}"${H.color === c.id ? " selected" : ""}>${c.name}</option>`).join("")}</select>
     <select id="h-tag"><option value="">Any tag</option>${TAGS.map(t => `<option value="${esc(t.id)}"${H.tag === t.id ? " selected" : ""}>${esc((t.category ? t.category + ": " : "") + t.name)}</option>`).join("")}</select>
-    <select id="h-folder"><option value="">Any folder</option>${FOLDERS.map(f => `<option value="${esc(f.id)}"${H.folder === f.id ? " selected" : ""}>${esc(f.name)}</option>`).join("")}</select>
+    <select id="h-folder"><option value="">Any folder</option>${folderTree().map(f => `<option value="${esc(f.id)}"${H.folder === f.id ? " selected" : ""}>${esc(folderLabel(f))}</option>`).join("")}</select>
     <select id="h-journal"><option value="">Any journal</option>${js.map(([a, n]) => `<option value="${esc(a)}"${H.journal === a ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></div></div><div id="h-list"></div>`;
   const run = async () => {
     const d = await api("/api/library/highlights?" + q2s(H)), by = new Map();
@@ -818,10 +857,11 @@ window.LibraryUI = {
   init(c) { ctx = c; const wire = () => ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "FoldersUI", "DropImport", "Palette", "Activity", "DraftUI", "ClaimsUI", "SynthUI", "ReviewUI", "WorkspaceUI", "BibImport"].forEach(n => window[n] && window[n].init(c)); wire(); addEventListener("load", wire, {once: true});   /* the other tab modules may still be loading */ wireRows(); return Promise.all([loadFolders(), loadTags()]); },
   row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab, bookSummaryHtml, showChapters, summarised,
   refreshFolders: loadFolders, state: F,
-  folderCount: () => FOLDERS.length, folders: () => FOLDERS,
+  folderCount: () => FOLDERS.filter(f => !f.parent).length, folders: () => FOLDERS,                 // (the folders at the top: what the sidebar and the Folders page list)
+  inFolder, folderLabel, folderTree, folderRoots, folderIndent: indent, folderPath: id => { const f = FOLDERS.find(x => x.id === id); return f ? folderLabel(f) : folderName(id); },                          // folders inside folders: the other pages list and count with these
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added
-    if (!FV.id || !$("#libview:not(.hide) #fv-body")) return; const rows = lib().filter(r => (r.folders || []).includes(FV.id)), m = $("#libview .pagehead .meta");
-    if (m) m.textContent = `${rows.length} paper${rows.length === 1 ? "" : "s"} · ${rows.filter(r => r.card).length} with a card · papers stay where they are; a folder is just a list`;
+    if (!FV.id || !$("#libview:not(.hide) #fv-body")) return; const rows = lib().filter(r => inFolder(r, FV.id)), m = $("#libview .pagehead .meta");
+    if (m) m.textContent = headMeta(FV.id, rows);
   },
   folderTabName: () => FV.tab,                                                                  // for the address bar: #/folder/<id>/<tab>
   setFolderTab: t => { if (["papers", "ask", "matrix", "discover", "evidence", "lab", "draft", "claims", "synthesis", "workspace"].includes(t)) pendingFT = t; },

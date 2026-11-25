@@ -99,7 +99,7 @@ function draw() {
     ${E.length ? `<div class="row bd-bar"><label class="chk"><input type="checkbox" id="bd-only"${B.only ? " checked" : ""}> only the ones I don’t have</label><button class="linkbtn" data-bd="all">tick all</button> · <button class="linkbtn" data-bd="none">none</button><span class="pmeta">${nSel} ticked</span></div>
     <div class="bd-list">${shown.map(([e, i]) => `<label class="bd-r${e.file ? " have" : ""}${e.status && e.status !== "found" ? " weak" : ""}"><input type="checkbox" data-i="${i}"${B.sel.has(i) ? " checked" : ""}${canTick(e) ? "" : " disabled"}><span><b>${esc(e.title || e.ref || "")}</b><br><small>${esc(auth(e))}${e.year ? " · " + esc(e.year) : ""}${e.journal ? " · " + esc(e.journal) : ""}</small>
       ${badge(e)}${e.ref && e.status && e.status !== "found" && e.title ? `<br><small class="pmeta">In the document: ${esc(e.ref.slice(0, 200))}</small>` : ""}</span></label>`).join("") || `<div class="pmeta">Nothing to show.</div>`}</div>
-    <div class="row bd-act"><label for="bd-to">Put them in</label><select id="bd-to"><option value="lib"${B.to === "lib" ? " selected" : ""}>Library only (no folder)</option>${folders.map(f => `<option value="f:${esc(f.id)}"${B.to === "f:" + f.id ? " selected" : ""}>Folder: ${esc(f.name)}</option>`).join("")}<option value="new"${B.to === "new" ? " selected" : ""}>New folder…</option></select>
+    <div class="row bd-act"><label for="bd-to">Put them in</label><select id="bd-to"><option value="lib"${B.to === "lib" ? " selected" : ""}>Library only (no folder)</option>${(window.LibraryUI && window.LibraryUI.folderTree && window.LibraryUI.folderTree().length ? window.LibraryUI.folderTree() : folders).map(f => `<option value="f:${esc(f.id)}"${B.to === "f:" + f.id ? " selected" : ""}>Folder: ${esc((f.path || [f.name]).join(" › "))}</option>`).join("")}<option value="new"${B.to === "new" ? " selected" : ""}>New folder…</option></select>
       <input id="bd-toname" class="${B.to === "new" ? "" : "hide"}" maxlength="60" value="${esc(B.toName)}" placeholder="Name of the new folder" aria-label="Name of the new folder"></div>
     <div class="row bd-act"><button class="btn primary" data-bd="go"${(nSel || nHave) && !B.busy ? "" : " disabled"}>${B.busy ? "Working…" : goText}</button><span class="pmeta">${nSel >= CAP ? "Forty at a time; the rest stay in this list: open Import references again for them." : toFolder ? "Each paper goes into the folder once it is in your library." : ""}</span></div>` : ""}
     ${aiRow}`;
@@ -115,7 +115,7 @@ async function folderId() {                                  // the folder the p
   if (B.to === "lib") return "";
   if (B.to !== "new") return B.to.slice(2);
   const name = B.toName.trim(); if (!name) throw new Error("Give the new folder a name.");
-  const r = await api("/api/folders", {action: "create", name}), want = name.replace(/\s+/g, " ").toLowerCase(), f = r.folders.find(x => x.name.toLowerCase() === want);
+  const r = await api("/api/folders", {action: "create", name}), f = r.folders.find(x => x.id === r.id);      // (the folder just made, by its id: a folder inside another may have the same name)
   if (!f) throw new Error("The folder could not be made.");
   B.to = "f:" + f.id; if (window.LibraryUI) await LibraryUI.refreshFolders();
   return f.id;

@@ -535,7 +535,7 @@ def _events_lines(idea, doc):
 def markdown(fid):
     f, doc = fo.get(fid), None
     doc = load(fid)
-    o = "# Research ideas — %s\n\n*%d ideas from %d papers · focus: %s · exported %s*\n\n" % (f["name"], len(_order(doc)), len(f["papers"]), doc["brief"]["focus"] or "none", datetime.now().strftime("%Y-%m-%d"))
+    o = "# Research ideas — %s\n\n*%d ideas from %d papers · focus: %s · exported %s*\n\n" % (f["name"], len(_order(doc)), len(fo.all_papers(fid) or []), doc["brief"]["focus"] or "none", datetime.now().strftime("%Y-%m-%d"))
     for n, x in enumerate(_order(doc), 1):
         c, nv = x.get("critique") or {}, x.get("novelty") or {}
         o += "## %d. %s%s\n\n**Research question.** %s\n\n" % (n, x["title"], " ★" if x.get("star") else "", x["research_question"])
@@ -565,7 +565,7 @@ def docx(fid):
     f, doc = fo.get(fid), load(fid)
     d = Document()
     d.add_heading("Research ideas — %s" % f["name"], 0)
-    d.add_paragraph("%d ideas from %d papers · focus: %s" % (len(_order(doc)), len(f["papers"]), doc["brief"]["focus"] or "none")).runs[0].italic = True
+    d.add_paragraph("%d ideas from %d papers · focus: %s" % (len(_order(doc)), len(fo.all_papers(fid) or []), doc["brief"]["focus"] or "none")).runs[0].italic = True
     bold = lambda label, text: (lambda p: (setattr(p.add_run(label + " "), "bold", True), p.add_run(text)))(d.add_paragraph())  # noqa: E731
     for n, x in enumerate(_order(doc), 1):
         c, nv = x.get("critique") or {}, x.get("novelty") or {}

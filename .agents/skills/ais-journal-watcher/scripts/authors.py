@@ -297,7 +297,7 @@ def folder_for(ids, name, institution=""):
             rec["ids"] = sorted(set(rec.get("ids") or []) | set(ids))
             _save(d)
             return rec["folder"], rec
-        names = {_fkey(f["name"]) for f in fo.list_all()}
+        names = {_fkey(f["name"]) for f in fo.list_all() if not f["parent"]}          # (an author's folder is made at the top: only the names there are taken)
         base = name if _fkey(name) not in names else ("%s · %s" % (name, institution.strip()[:40]) if institution.strip() else name)
         f, n = None, 1
         while f is None:

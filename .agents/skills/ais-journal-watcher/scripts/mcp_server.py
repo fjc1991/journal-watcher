@@ -116,14 +116,17 @@ def t_search_highlights(a):
 
 
 def t_list_folders(a):
-    return {"folders": [{"id": f["id"], "name": f["name"], "papers": f["count"]} for f in fo.list_all()]}
+    return {"folders": [{"id": f["id"], "name": " › ".join(f["path"]), "papers": f["count"]} for f in fo.list_all()]}
 
 
 def t_folder_papers(a):
-    f = next((f for f in fo.list_all() if f["id"] == a.get("folder") or f["name"].lower() == str(a.get("folder") or "").lower()), None)
+    want, every = str(a.get("folder") or ""), fo.list_all()
+    f = (next((f for f in every if f["id"] == want), None) or next((f for f in every if " › ".join(f["path"]).lower() == want.lower()), None)       # (an id first; then the whole path; then a name at the top)
+         or next((f for f in every if f["name"].lower() == want.lower() and not f["parent"]), None) or next((f for f in every if f["name"].lower() == want.lower()), None))
     if not f:
         raise ValueError("No such folder. Use list_folders.")
-    return {"folder": f["name"], "papers": [brief(r) for r in rows() if f["id"] in (r.get("folders") or [])]}
+    keys = set(fo.all_papers(f["id"]) or [])            # (with the papers of the folders inside it)
+    return {"folder": " › ".join(f["path"]), "papers": [brief(r) for r in rows() if r.get("key") in keys]}
 
 
 def t_get_notes(a):
