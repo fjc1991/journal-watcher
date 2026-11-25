@@ -183,6 +183,7 @@ async function review(files, w, o = {}) {
     if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
     cards.forEach(draw); status();
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
+      c.prevNames = null;
       if (c.sel >= 0) {
         const cand = c.a.candidates[c.sel]; c.fields = fieldsOf(cand, c.kind);
         if (c.kind !== "book" && !c.ptypeTouched && !c.ptypeAll) { c.ptype = cand.kind || "journal"; c.label = cand.label || ""; }
@@ -273,7 +274,8 @@ async function review(files, w, o = {}) {
       if (t.dataset.p !== undefined) { const c = cards[+t.dataset.i], n = namesOf(c)[+t.dataset.pn]; if (n) (c.det.people[pkey(n)] = c.det.people[pkey(n)] || {...personOf(c, n)})[t.dataset.p] = t.value; return; }
       if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
       if (t.dataset.k === "authors") {                           // a name whose spelling you correct keeps what stands under it
-        const was = namesOf(c), now = String(t.value || "").split(";").map(norm).filter(Boolean);
+        const was = c.prevNames || namesOf(c), now = String(t.value || "").split(";").map(norm).filter(Boolean);      // (the names as they last stood: a box that is emptied and filled in one go passes through nothing)
+        if (now.length) c.prevNames = now;
         if (was.length === now.length) was.forEach((w, k) => { if (pkey(w) !== pkey(now[k]) && !c.det.people[pkey(now[k])] && !now.some(x => pkey(x) === pkey(w))) { const p = personOf(c, w); if (p.affiliation || p.place || p.email) c.det.people[pkey(now[k])] = {...p}; } });
       }
       c.fields[t.dataset.k] = t.value; $("#ir-e" + c.i, d).textContent = ""; $("#ir-err", d).textContent = "";
