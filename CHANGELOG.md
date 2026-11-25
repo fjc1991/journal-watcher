@@ -15,6 +15,17 @@ The details of the papers you add yourself:
 - **Exports carry them.** BibTeX and RIS include the paper's own keywords and abstract, and a conference paper is exported as one, with its conference.
 - More conferences are known by their short name: WITS, WISE, CIST, SCECR, DESRIST, CSWIM.
 
+Folders inside folders, and whole folders from your computer:
+
+- **Folders inside folders.** A folder can hold other folders, to any depth. Open a folder to see the folders inside it as tiles, then every paper in it and in the folders under it. "New subfolder" makes one. The Folders page and the sidebar show the folders at the top; the ones inside are reached through them.
+- **A folder counts and works on everything inside it.** Its count, its search, its exports and its tools (Ask, the comparison table, Evidence, Synthesis, the Ideas Lab and the rest) cover its own papers and those of the folders under it, each paper once.
+- **Drop whole folders.** Drag folders of PDFs from your computer onto a folder (or onto the Folders page). You are asked whether to keep them as folders inside it, or to put every paper straight into the one folder. Either way each paper remembers the folder it came from as its Session. Files that are not PDFs or EPUBs are left out.
+- **One folder holding the others.** Drop it on the Folders page and a new folder of its name is offered, with the folders inside it kept.
+- **"A folder from my computer…"** in a folder's Add papers menu does the same without dragging.
+- **Undo** after such a drop takes each paper out of its folder again and removes the folders the drop made.
+- Two folders may have the same name when they are in different places (two conferences can each have a "Session 1").
+- Deleting a folder that has folders inside says how many, and takes them with it. The papers are never deleted.
+
 ## 1.3.0
 
 Everything since 1.2.9, in one release.
