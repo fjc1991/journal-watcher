@@ -131,7 +131,7 @@ const discard = tokens => tokens.length ? fetch("/api/import/discard", {method: 
 function cardHtml(c) {
   const book = c.kind === "book", epub = isEpub(c.file);
   const kindSel = epub ? `<span class="ir-kind"><b>Book</b> (EPUB)</span>` : `<span class="ir-kind" role="radiogroup" aria-label="What is ${esc(c.file.name)}?"><label><input type="radio" name="ir-k${c.i}" data-kind="${c.i}" value="paper"${book ? "" : " checked"}> Paper</label><label><input type="radio" name="ir-k${c.i}" data-kind="${c.i}" value="book"${book ? " checked" : ""}> Book</label></span>`;
-  const head = `<div class="ir-h"><label class="ir-inc"><input type="checkbox" data-inc="${c.i}"${c.include ? " checked" : ""} aria-label="Add ${esc(c.file.name)}"><b>${esc(c.file.name)}</b></label>${kindSel}<small>${size(c.file.size)}${c.a ? " · " + plural(c.a.pdf.pages, "page") + (book && c.a.pdf.chapters ? ", outline of " + plural(c.a.pdf.chapters, "item") : "") : ""}</small></div>`;
+  const head = `<div class="ir-h"><label class="ir-inc"><input type="checkbox" data-inc="${c.i}"${c.include ? " checked" : ""} aria-label="Add ${esc(c.file.name)}"><b>${esc(c.file.name)}</b></label>${kindSel}<small>${c.dir && c.dir.length ? "from " + esc(c.dir.join(" › ")) + " · " : ""}${size(c.file.size)}${c.a ? " · " + plural(c.a.pdf.pages, "page") + (book && c.a.pdf.chapters ? ", outline of " + plural(c.a.pdf.chapters, "item") : "") : ""}</small></div>`;
   if (c.state === "reading") return `${head}<div class="ir-st">${epub ? "Opening the EPUB, making its pages" : "Reading the " + (book ? "book" : "PDF")} and looking it up…</div>`;
   if (c.state === "error") return `${head}<div class="ir-st bad">${esc(c.error)}</div>`;
   const a = c.a, cands = a.candidates;
@@ -155,7 +155,9 @@ async function review(files, w, o = {}) {
   const fixed = w.kind === "folder" || w.kind === "open" ? w.id : null, fixedName = fixed ? (w.name || folderName(fs, fixed)) : "";
   const today = new Date().toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
   const last = fs.find(f => f.id === ls.get("jw-drop-last")), first = w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
-  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: "", det: detOf(null), moreOpen: false, many: pdfs.length > 1}));
+  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: "", det: detOf(null), moreOpen: false, many: pdfs.length > 1, dir: (o.paths && o.paths.get(f)) || []}));
+  const dirs = [...new Set(cards.filter(c => c.dir.length).map(c => c.dir.join("/")))], hasTree = dirs.length > 0;      // the PDFs came out of dropped folders
+  cards.forEach(c => { c.det.session = c.dir.length ? c.dir[c.dir.length - 1] : ""; });
   return new Promise(resolve => {
     $("#ir-dlg") && $("#ir-dlg").remove();
     const d = document.createElement("dialog"); d.id = "ir-dlg"; d.className = "card ir-dlg"; d.setAttribute("aria-labelledby", "ir-h");
@@ -164,8 +166,12 @@ async function review(files, w, o = {}) {
       ${pdfs.length > 1 ? `<div class="row ir-all"><label>Set every paper's type to <select id="ir-all" aria-label="Set the type of every paper you have not set yourself"><option value="">(as each one says)</option>${PTYPES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>` : ""}
       <div class="ir-list">${cards.map(c => `<section class="ir-card" id="ir-c${c.i}"></section>`).join("")}${skipped.slice(0, 3).map(f => `<div class="ir-skip">${esc(f.name)} — not a PDF or EPUB, skipped</div>`).join("")}</div>
       <div class="ir-foot">
-        ${fixed ? `<div class="ir-dest">Adding to the folder <b>“${esc(fixedName)}”</b></div>` : `<div class="ir-dest"><label for="ir-to">Add to</label><select id="ir-to"><option value="lib">Library only (no folder)</option>${fs.map(f => `<option value="f:${esc(f.id)}">Folder: ${esc(f.name)} (${plural(f.count, "paper")})</option>`).join("")}<option value="new">A new folder…</option></select>
+        ${fixed ? `<div class="ir-dest">Adding to the folder <b>“${esc(fixedName)}”</b></div>` : `<div class="ir-dest"><label for="ir-to">Add to</label><select id="ir-to"><option value="lib">Library only (no folder)</option>${fs.map(f => `<option value="f:${esc(f.id)}">Folder: ${esc((f.path || [f.name]).join(" › "))} (${plural(f.count, "paper")})</option>`).join("")}<option value="new">A new folder…</option></select>
           <input type="text" id="ir-name" class="hide" maxlength="60" value="Added ${esc(today)}" aria-label="New folder name"></div>`}
+        ${hasTree ? `<fieldset class="ir-tree" id="ir-tree"><legend>These ${plural(pdfs.length, "file")} come from ${plural(dirs.length, "folder")} on your computer</legend>
+          <label><input type="radio" name="ir-tree" value="keep" checked> Keep the folders: each becomes a folder inside the one you add to, with its papers</label>
+          <label><input type="radio" name="ir-tree" value="flat"> No folders: put every paper straight into the one folder</label>
+          <small>Either way each paper remembers the folder it came from as its “Session” (under More details).</small></fieldset>` : ""}
         <label class="chk"><input type="checkbox" id="ir-sum"> Also write a summary for new papers (uses AI, about 1–2 cents each)</label>
         <div class="ir-err" id="ir-err" role="alert"></div>
         <div class="row di-btns"><button class="btn" id="ir-cancel">Cancel</button><button class="btn primary" id="ir-go" disabled>Add</button></div>
@@ -180,7 +186,9 @@ async function review(files, w, o = {}) {
       $("#ir-go", d).disabled = busy || !n; $("#ir-go", d).textContent = busy ? "Reading…" : n ? "Add " + (nb === n ? plural(n, "book") : nb ? plural(n, "item") : plural(n, "paper")) : "Add";
     };
     const to = $("#ir-to", d), nm = $("#ir-name", d);
-    if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
+    if (to && o.top && w.kind !== "library") { to.value = "new"; nm.value = o.top.slice(0, 60); nm.classList.remove("hide"); }      // (one folder holding the others was dropped: a new folder of its name is the natural place)
+    else if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); }
+    if (to) { to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
     cards.forEach(draw); status();
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
       c.prevNames = null;
@@ -227,6 +235,7 @@ async function review(files, w, o = {}) {
         c.a = await analyse(c.file, c.kind); c.state = "ok"; c.sel = c.a.pick; c.existing = c.a.existing || ""; c.kind = c.a.type === "book" ? "book" : "paper";
         if (closed) { discard([c.a.token]); return false; }
         c.det = detOf(c.a);
+        if (c.dir.length) c.det.session = c.dir[c.dir.length - 1];      // (the folder it was in on your disk: "Session 1B - GenAI, Work & Labor Markets")
         take(c);
       } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
       if (!closed) { draw(c); status(); }
@@ -295,7 +304,7 @@ async function review(files, w, o = {}) {
       else if (to.value === "lib") dest = {mode: "lib"};
       else if (to.value === "new") {
         const n = norm(nm.value); if (!n) { err("Give the new folder a name."); return nm.focus(); }
-        const dup = fs.find(f => f.name.toLowerCase() === n.toLowerCase()); if (dup) { err(`A folder called “${dup.name}” already exists — choose it from the list.`); to.value = "f:" + dup.id; nm.classList.add("hide"); return; }
+        const dup = fs.find(f => !f.parent && f.name.toLowerCase() === n.toLowerCase()); if (dup) { err(`A folder called “${dup.name}” already exists — choose it from the list.`); to.value = "f:" + dup.id; nm.classList.add("hide"); return; }
         dest = {mode: "new", name: n};
       } else dest = {mode: "folder", id: to.value.slice(2)};
       discard(cards.filter(c => c.state === "ok" && !c.include).map(c => c.a.token));
@@ -304,7 +313,8 @@ async function review(files, w, o = {}) {
         const cand = c.sel >= 0 ? c.a.candidates[c.sel] : null, sameVenue = cand && norm(cand.journal || "") === norm(c.fields.journal || "");
         return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : [], details: detailsOf(c)};
       };
-      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked});
+      const tree = hasTree && dest.mode !== "lib" ? (($("#ir-tree input:checked", d) || {}).value || "keep") : "";      // (without a folder to add to there is nothing to make folders in)
+      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, path: tree === "keep" ? c.dir : [], session: c.kind === "book" ? "" : c.det.session || "", fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked, tree});
     };
     $("#ir-go", d).onclick = go;
     $("#ir-cancel", d).onclick = () => d.close();
@@ -324,8 +334,8 @@ function snack() {
 }
 function bye(s, ms) { clearTimeout(D.timer); if (ms) D.timer = setTimeout(() => { s.classList.add("gone"); setTimeout(() => s.remove(), 300); }, ms); }
 
-async function run({items, dest, summarize}) {
-  const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false;
+async function run({items, dest, summarize, tree}) {
+  const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false, filed = null;
   const paint = (n, msg) => { s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div><div class="di-bar"><i style="width:${Math.round(100 * n / total)}%"></i></div><div class="row"><button class="btn small" data-di="stop">Stop</button></div>`; };
   s.onclick = e => { if (e.target.closest("[data-di=stop]")) stop = true; };
   const noun = items.every(x => x.kind === "book") ? "book" : items.some(x => x.kind === "book") ? "item" : "paper";
@@ -333,7 +343,7 @@ async function run({items, dest, summarize}) {
   try {
     if (dest.mode === "new") {
       const r = await api("/api/folders", {action: "create", name: dest.name, files: []});
-      const f = r.folders.find(x => x.name.toLowerCase() === dest.name.toLowerCase()); folderId = f && f.id; fname = dest.name; created = true;
+      folderId = r.id; fname = dest.name; created = true;                 // (the new folder by its id: a folder inside another may carry the same name)
       if (!folderId) throw new Error("couldn’t create the folder");
     } else if (folderId) fname = folderName(await folders(), folderId);
   } catch (e) { s.innerHTML = `<div class="di-msg"><b>${esc(e.message)}</b></div><div class="row"><button class="btn small" data-di="x">Close</button></div>`; s.onclick = () => s.remove(); return; }
@@ -341,14 +351,23 @@ async function run({items, dest, summarize}) {
     const f = items[i]; paint(i, `Adding ${i + 1} of ${total}: ${f.name.length > 46 ? f.name.slice(0, 44) + "…" : f.name}`);
     try {
       const r = await api("/api/import/confirm", {token: f.token, fields: f.fields, summarize});
-      if (folderId) await api("/api/folders", {action: "add", id: folderId, files: [r.file]});
-      res.push({name: f.name, file: r.file, title: r.title, existing: !!r.existing});
+      if (folderId && !tree) await api("/api/folders", {action: "add", id: folderId, files: [r.file]});
+      if (r.existing && f.session) {                         // a paper you already had is not filed again, so its details were not written: it still gets its session, unless it has one
+        try { const d0 = await api("/api/paper/details?file=" + encodeURIComponent(r.file)); if (!(d0.details || {}).session) await api("/api/paper/details", {file: r.file, fields: {session: f.session}}); } catch (e) { /* a book, or gone: nothing to note */ }
+      }
+      res.push({name: f.name, file: r.file, title: r.title, existing: !!r.existing, path: f.path || []});
     } catch (e) { res.push({name: f.name, error: e.message}); }
+  }
+  if (folderId && tree) {                      // the papers that came out of folders: into those folders (made inside the one you add to), or all into the one; one request
+    const groups = {}; res.filter(r => r.file).forEach(r => { (groups[r.path.join("\u0000")] = groups[r.path.join("\u0000")] || {path: r.path, files: []}).files.push(r.file); });
+    try { filed = await api("/api/folders", {action: "file", id: folderId, into: Object.values(groups)}); }
+    catch (e) { res.forEach(r => { if (r.file) { r.error = "added to your library, but not to the folder: " + e.message; } }); }
   }
   if (folderId) ls.set("jw-drop-last", folderId);
   if (stop) discard(items.slice(res.length).map(x => x.token));          // the ones not reached are forgotten
-  const ok = res.filter(r => r.file), isNew = ok.filter(r => !r.existing), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
-  const msg = (folderId ? (ok.length ? `Added ${plural(ok.length, noun)} to “${fname}”` : "Nothing was added") : (isNew.length ? `Added ${plural(isNew.length, noun)} to your library` : "Nothing new to add")) +
+  const ok = res.filter(r => r.file && !r.error), isNew = ok.filter(r => !r.existing), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
+  const nsub = filed ? Object.keys(filed.where || {}).filter(Boolean).length : 0;
+  const msg = (folderId ? (ok.length ? `Added ${plural(ok.length, noun)} to “${fname}”` + (nsub ? ` in ${plural(nsub, "folder")} inside it` : "") : "Nothing was added") : (isNew.length ? `Added ${plural(isNew.length, noun)} to your library` : "Nothing new to add")) +
     (had.length ? ` · ${had.length} already in your library` : "") + (bad.length ? ` · ${bad.length} failed` : "") + (left ? ` · stopped, ${left} left` : "");
   const detail = res.map(r => `<li class="${r.error ? "bad" : r.existing ? "had" : "new"}"><span>${esc(r.title || r.name)}</span><small>${r.error ? esc(r.error) : r.existing ? "already in your library" + (folderId ? " — added to the folder" : "") : "added"}</small></li>`).join("");
   s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div>${bad.length ? `<ul class="di-det">${detail}</ul>` : `<ul class="di-det hide">${detail}</ul>`}
@@ -360,11 +379,12 @@ async function run({items, dest, summarize}) {
     else if (k === "open") { s.remove(); ctx.go({j: "@" + folderId}); }
     else if (k === "undo") {
       try {
-        await api("/api/folders", {action: "remove", id: folderId, files: ok.map(r => r.file)});
+        if (filed) await api("/api/folders", {action: "unfile", groups: Object.entries(filed.where || {}).map(([k, id]) => ({id, files: ok.filter(r => r.path.join("/") === k).map(r => r.file)})), delete: filed.made || []});      // (each paper out of its own folder; the folders this drop made go if they are empty then)
+        else await api("/api/folders", {action: "remove", id: folderId, files: ok.map(r => r.file)});
         if (created) await api("/api/folders", {action: "delete", id: folderId});
         s.innerHTML = `<div class="di-msg"><b>Undone.</b> ${isNew.length ? plural(isNew.length, noun) + " stay" + (isNew.length === 1 ? "s" : "") + " in your library." : ""}</div>`; bye(s, 4000);
-        const inside = window.LibraryUI.currentFolder && window.LibraryUI.currentFolder() === folderId;
-        if (created && inside) { await ctx.reload(); ctx.go({j: null}); } else await refreshView();
+        const cur = window.LibraryUI.currentFolder && window.LibraryUI.currentFolder(), inside = cur === folderId, gone = filed && (filed.made || []).includes(cur);
+        if (created && (inside || gone)) { await ctx.reload(); ctx.go({j: null}); } else if (gone) { await window.LibraryUI.refreshFolders(); ctx.go({j: "@" + folderId}); } else await refreshView();
       } catch (er) { notifyError(er); }
     }
   };
@@ -389,12 +409,49 @@ const onBooksTab = () => visible($("#lib-books"));           // the Books tab is
 export async function handle(fileList, w, o = {}) {
   const files = [...fileList];              // copy now: the browser empties the live list after the event
   if (!files.length) return;
-  if (!files.some(isDoc)) return toast("Those aren’t PDFs or EPUBs — drop PDF files to add papers, or PDF and EPUB files to add books.");
+  if (!files.some(isDoc)) return toast(o.paths ? "There are no PDFs or EPUBs in what you dropped." : "Those aren’t PDFs or EPUBs — drop PDF files to add papers, or PDF and EPUB files to add books.");
   w = w || where(document.body);
   if (!w) return toast("Open the Library or a folder first, then drop the PDFs there.");
-  const job = await review(files, w, {book: o.book || onBooksTab()});
+  const job = await review(files, w, {book: o.book || onBooksTab(), paths: o.paths, top: o.top});
   if (!job) return;
   chain = chain.then(() => run(job)).catch(e => notifyError(e));
+}
+
+// ---- folders dropped from the desktop: every PDF and EPUB in them, each with the chain of folders it was in
+const hiddenName = n => !n || n[0] === "." || n === "__MACOSX" || n === "Thumbs.db" || n === "desktop.ini";      // (.DS_Store, "._paper.pdf" copies a Mac leaves on other disks, …)
+const readAll = dir => new Promise((ok, no) => { const rd = dir.createReader(), out = []; const more = () => rd.readEntries(es => { if (!es.length) return ok(out); out.push(...es); more(); }, no); more(); });      // (a folder is handed over in portions: ask until nothing comes)
+const fileOf = entry => new Promise((ok, no) => entry.file(ok, no));
+async function walk(entry, path, out) {
+  if (hiddenName(entry.name) || out.length >= MAX_TREE) return;
+  if (entry.isFile) { try { out.push({file: await fileOf(entry), path}); } catch (e) { /* a file that cannot be read is left out */ } return; }
+  if (!entry.isDirectory || path.length >= 12) return;
+  let kids = []; try { kids = await readAll(entry); } catch (e) { return; }
+  kids.sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
+  for (const k of kids) await walk(k, [...path, entry.name], out);
+}
+const MAX_TREE = 2000;
+// items: [{file, path: [the folders it was in, outermost first]}]. A single folder that only holds the others (you dropped "WITS26" with its session folders in it)
+// is not made a folder of its own: its name is offered for the new folder, and the folders inside it are what is kept.
+export async function handleItems(items, w, o = {}) {
+  items = items.filter(x => x && x.file && isDoc(x.file) && !hiddenName(x.file.name) && !(x.path || []).some(hiddenName)).map(x => ({file: x.file, path: x.path || []}));
+  if (!items.length) return toast("There are no PDFs or EPUBs in what you dropped.");
+  let top = "";
+  const firsts = new Set(items.map(x => x.path[0] || ""));
+  if (firsts.size === 1 && !firsts.has("") && items.some(x => x.path.length > 1)) { top = items[0].path[0]; items = items.map(x => ({file: x.file, path: x.path.slice(1)})); }
+  const paths = new Map(items.map(x => [x.file, x.path.map(norm).filter(Boolean)]));
+  if (items.length >= MAX_TREE) toast(`Only the first ${MAX_TREE} files are taken.`);
+  return handle(items.map(x => x.file), w, {...o, paths, top});
+}
+async function handleEntries(entries, w) {
+  const out = [];
+  for (const en of entries) if (en) await walk(en, [], out);
+  return handleItems(out, w);
+}
+// "A folder from my computer…" in an open folder's Add menu: for where dragging a folder does not work
+export function chooseFolder(folderId) {
+  const i = document.createElement("input"); i.type = "file"; i.multiple = true; i.webkitdirectory = true; i.style.display = "none"; document.body.append(i);
+  i.onchange = () => { handleItems([...i.files].map(f => ({file: f, path: String(f.webkitRelativePath || "").split("/").slice(0, -1)})), {kind: "open", id: folderId}); setTimeout(() => i.remove(), 0); };
+  i.click();
 }
 
 // "＋ Add papers" in an open folder, for when dragging isn't convenient
@@ -410,7 +467,8 @@ export function chooseBooks() {
   i.click();
 }
 export function pickFromLibrary(folderId) {
-  const rows = ctx.getLib().filter(r => !(r.folders || []).includes(folderId)), name = window.LibraryUI.folderName(folderId);
+  const rows = ctx.getLib().filter(r => !(r.folders || []).includes(folderId)), name      // (not in this folder itself: a paper in a folder inside it can be added here too)
+    = window.LibraryUI.folderName(folderId);
   $("#di-pick") && $("#di-pick").remove();
   const d = document.createElement("dialog"); d.id = "di-pick"; d.className = "card di-dlg";
   d.innerHTML = `<h2>Add papers from your library</h2><div class="pmeta" style="margin-bottom:8px">${plural(rows.length, "paper")} not yet in “${esc(name)}”</div>
@@ -452,9 +510,12 @@ function wire() {
     e.preventDefault(); const w = where(e.target); off();
     if (!w) return toast(onRunList() ? "Drop the PDF on its paper’s card: it is added to that paper. To add it as a new paper, open the Library and drop it there."
       : "Open the Library or a folder first, then drop the PDFs there.");
+    // a folder among what was dropped: its entries must be taken now, inside the event (afterwards the browser has let go of them)
+    const entries = [...(e.dataTransfer.items || [])].map(it => it.kind === "file" && it.webkitGetAsEntry ? it.webkitGetAsEntry() : null);
+    if (entries.some(en => en && en.isDirectory)) return handleEntries(entries, w);
     handle(e.dataTransfer.files, w);
   });
 }
 
-window.DropImport = {init(c) { ctx = c; }, handle, where, choosePdfs, chooseBooks, pickFromLibrary, off: () => D.off && D.off()};
+window.DropImport = {init(c) { ctx = c; }, handle, handleItems, where, choosePdfs, chooseFolder, chooseBooks, pickFromLibrary, off: () => D.off && D.off()};
 wire();

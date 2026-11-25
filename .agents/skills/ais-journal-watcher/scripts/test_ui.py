@@ -3967,6 +3967,92 @@ pl.FEED_HOST_PAUSE = 0                                                          
                   on_ and val_("authors") == "" and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_ai_ and val_("title") == "Reading Lists and What Students Open", str((on_, val_("authors"))))
             page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached"); api("/api/settings", {"prefs": {"details_ai": True}})
 
+            print("folders inside folders, and whole folders dropped from the desktop")
+            JS_TREE = """([w, items]) => { const mk = ([b64, name, path]) => { const bin = atob(b64 || ''), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+              return {file: new File([u], name, {type: /\\.pdf$/i.test(name) ? 'application/pdf' : 'text/csv'}), path}; }; window.DropImport.handleItems(items.map(mk), w); }"""
+            S1_, S2_ = "Session 1B - GenAI, Work & Labor Markets", "Session 2A - Human-AI Collaboration & Collective Judgment"
+            t1_ = ws_pdf("Agents That Negotiate Prices", [("Ana Ruiz", "Harbor College", "Lisbon, Portugal", "aruiz@harbor.example")])
+            t2_ = ws_pdf("Judging With a Machine Beside You", [("Ben Okafor", "University of Northfield", "Northfield, MN, USA", "bokafor@northfield.example")])
+            t3_ = ws_pdf("A Poster on Shared Attention", [("Cy Wu", "Lakeside Institute of Technology", "Austin, TX, USA", "cwu@lakeside.example")])
+            tree_ = [[t1_, "011-agents.pdf", [S1_]], [pb_, "044-hiring.pdf", [S1_]], [t2_, "052-judging.pdf", [S2_]], [t3_, "077-poster.pdf", [S2_, "Posters"]], ["", "_filename_map.csv", []], [t1_, "._011-agents.pdf", [S1_]], [t1_, "x.pdf", ["__MACOSX"]]]
+            wid_ = api("/api/folders", {"action": "create", "name": "WITS26"})["id"]
+            fol_ = lambda: {x["id"]: x for x in api("/api/folders")}          # noqa: E731
+            sub_ = lambda *names: next((x for x in api("/api/folders") if x["path"] == ["WITS26", *names]), None)          # noqa: E731
+            page.goto(base + "/#/folder/" + wid_); page.wait_for_selector("#fv-body")
+            page.evaluate(JS_TREE, [{"kind": "open", "id": wid_}, tree_]); page.wait_for_selector("#ir-dlg[open]")
+            for i_ in range(4):
+                page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
+            page.click("#ir-c0 .ir-more summary")
+            check("folders dropped from the desktop: every PDF in them is listed with the folder it came from; what is not a PDF, and the hidden copies a Mac leaves, are left out; the folder is filled in as each paper's session",
+                  page.locator("#ir-dlg .ir-card").count() == 4 and "from " + S1_ in page.inner_text("#ir-c0 .ir-h") and "from " + S2_ + " › Posters" in page.inner_text("#ir-c3 .ir-h")
+                  and page.input_value('#ir-c0 [data-d="session"]') == S1_ and "_filename_map" not in page.inner_text("#ir-dlg") and "WITS26" in page.inner_text("#ir-dlg .ir-dest"), page.inner_text("#ir-c0 .ir-h"))
+            check("…and you are asked whether to keep the folders (the default) or to put every paper straight into the one folder", "come from 3 folders" in page.inner_text("#ir-tree")
+                  and page.is_checked('#ir-tree input[value="keep"]') and page.locator('#ir-tree input[value="flat"]').count() == 1, page.inner_text("#ir-tree"))
+            page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
+            page.wait_for_function("document.querySelector('.di-snack') && /Added 4 papers/.test(document.querySelector('.di-snack').textContent)", timeout=60000)
+            F_ = fol_(); a_, b_, c_ = sub_(S1_[:60]), sub_(S2_[:60]), sub_(S2_[:60], "Posters")
+            lib_ = {r_["title"]: r_ for r_ in api("/api/library")}
+            det_ = lambda t: api("/api/paper/details?file=" + urllib.request.quote(lib_[t]["file"]))["details"]          # noqa: E731
+            check("keeping the folders: each becomes a folder inside the one you dropped on (a folder in a folder too), holding its own papers; the master shows them all, each once",
+                  a_ and b_ and c_ and c_["parent"] == b_["id"] and (F_[wid_]["count"], F_[wid_]["own"], F_[wid_]["children"]) == (4, 0, 2) and (a_["count"], a_["own"]) == (2, 2) and (b_["count"], b_["own"], b_["children"]) == (2, 1, 1)
+                  and lib_["Agents That Negotiate Prices"]["folders"] == [a_["id"]] and lib_["A Poster on Shared Attention"]["folders"] == [c_["id"]] and "in 3 folders inside it" in page.inner_text(".di-snack"),
+                  str((F_[wid_], a_, b_, c_))[:400])
+            check("each paper keeps the folder it came from as its session; a paper you already had is put into its folder and gets the session too (it had none)",
+                  det_("Agents That Negotiate Prices")["session"] == S1_ and det_("A Poster on Shared Attention")["session"] == "Posters" and det_("Hiring Screens and Algorithmic Shortlists").get("session") == S1_
+                  and lib_["Hiring Screens and Algorithmic Shortlists"]["folders"] == [a_["id"]], str(det_("Hiring Screens and Algorithmic Shortlists")))
+            page.wait_for_selector(".fv-subtile", timeout=15000)
+            check("the master folder's page lists the folders inside it as tiles, then every paper of all of them, and says how many it counts",
+                  page.locator(".fv-subtile").count() == 2 and page.locator("#fv-list .librow").count() == 4 and "4 papers in this folder and the 3 folders inside it" in page.inner_text("#libview .pagehead .meta")
+                  and "2 papers" in page.inner_text('.fv-subtile[data-sub="%s"]' % a_["id"]) and "1 folder" in page.inner_text('.fv-subtile[data-sub="%s"]' % b_["id"]), page.inner_text("#libview .pagehead .meta"))
+            page.click('.fv-subtile[data-sub="%s"]' % b_["id"]); page.wait_for_selector(".fv-crumbs")
+            check("a folder inside another opens from its tile: its page says where it is, shows its own papers and those under it, and the way back",
+                  "WITS26" in page.inner_text(".fv-crumbs") and page.locator("#fv-list .librow").count() == 2 and page.locator(".fv-subtile").count() == 1 and "Folders" in page.inner_text("#tbtitle") and "WITS26 › " + S2_[:20] in page.inner_text("#tbtitle"),
+                  page.inner_text("#tbtitle"))
+            page.click(".fv-crumbs [data-up]"); page.wait_for_function("document.querySelectorAll('.fv-subtile').length === 2", timeout=10000)
+            found_ = json.load(urllib.request.urlopen(base + "/api/library/search?folder=" + wid_)); bib_ = urllib.request.urlopen(base + "/api/export/bib?folder=" + wid_).read().decode()
+            mx_ = api("/api/folder/matrix?id=" + wid_)
+            check("searching, exporting and the folder tools on the master cover the papers of the folders inside it", len(found_) == 4 and bib_.count("\n@") + bib_.startswith("@") == 4 and len(mx_.get("rows") or mx_.get("papers") or []) == 4,
+                  str((len(found_), bib_.count("@"), list(mx_)[:8])))
+            page.click("#folditem"); page.wait_for_selector('.fp-tile[data-id="%s"]' % wid_)
+            check("the Folders page and the sidebar show the folders at the top only; the master's tile counts what is inside it; the pickers name a folder with where it is",
+                  page.locator('.fp-tile[data-id="%s"]' % a_["id"]).count() == 0 and page.locator('#sbfolders .sbf[data-fid="%s"]' % a_["id"]).count() == 0 and "4 papers" in page.inner_text('.fp-tile[data-id="%s"] .fp-meta' % wid_)
+                  and "2 folders inside" in page.inner_text('.fp-tile[data-id="%s"] .fp-meta' % wid_), page.inner_text('.fp-tile[data-id="%s"] .fp-meta' % wid_))
+            n_lib_ = len(api("/api/library"))
+            page.click('.di-snack [data-di="undo"]'); page.wait_for_function("document.querySelector('.di-snack') && /Undone/.test(document.querySelector('.di-snack').textContent)", timeout=15000)
+            F_ = fol_()
+            check("Undo takes each paper out of its folder again and removes the folders the drop made; the papers stay in your library, and the folder you dropped on stays",
+                  wid_ in F_ and (F_[wid_]["count"], F_[wid_]["children"]) == (0, 0) and not any(x["parent"] for x in F_.values()) and len(api("/api/library")) == n_lib_, str(F_.get(wid_)))
+            # the other answer: no folders, every paper straight into the one folder
+            page.goto(base + "/#/folder/" + wid_); page.wait_for_selector("#fv-body")
+            page.evaluate(JS_TREE, [{"kind": "open", "id": wid_}, tree_[:4]]); page.wait_for_selector("#ir-dlg[open]")
+            for i_ in range(4):
+                page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
+            page.check('#ir-tree input[value="flat"]'); page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
+            page.wait_for_function("document.querySelector('.di-snack') && /Added 4 papers/.test(document.querySelector('.di-snack').textContent)", timeout=60000)
+            F_ = fol_()
+            check("'No folders' puts every paper straight into the folder you dropped on, and makes no folder", (F_[wid_]["count"], F_[wid_]["own"], F_[wid_]["children"]) == (4, 4, 0) and "inside it" not in page.inner_text(".di-snack")
+                  and det_("Judging With a Machine Beside You")["session"] == S2_, str(F_[wid_]))
+            # a folder inside it made by hand; then one folder holding others, dropped on the Folders page: a new folder of its name, with the others inside
+            answers.append("Reading group"); page.wait_for_selector("#fv-sub"); page.click("#fv-sub"); page.wait_for_selector(".fv-subtile")
+            check("'New subfolder' makes a folder inside the one you are in", sub_("Reading group") is not None and "Reading group" in page.inner_text(".fv-subs"))
+            page.click("#folditem"); page.wait_for_selector(".fp-path")
+            page.evaluate(JS_TREE, [{"kind": "home"}, [[t1_, "a.pdf", ["ICIS26", "Track A"]], [t2_, "b.pdf", ["ICIS26", "Track B"]], [t3_, "c.pdf", ["ICIS26", "Track B"]]]]); page.wait_for_selector("#ir-dlg[open]")
+            for i_ in range(3):
+                page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
+            check("one folder that holds the others, dropped on the Folders page: a new folder of its name is offered, and the folders inside it are the ones kept",
+                  page.input_value("#ir-to") == "new" and page.input_value("#ir-name") == "ICIS26" and "from Track A" in page.inner_text("#ir-c0 .ir-h") and "come from 2 folders" in page.inner_text("#ir-tree"), page.input_value("#ir-name"))
+            page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
+            page.wait_for_function("document.querySelector('.di-snack') && /ICIS26/.test(document.querySelector('.di-snack').textContent)", timeout=60000)
+            ic_ = next(x for x in api("/api/folders") if x["name"] == "ICIS26"); tracks_ = sorted(x["name"] for x in api("/api/folders") if x["parent"] == ic_["id"])
+            check("…with the papers you already had put into them (nothing is added twice)", tracks_ == ["Track A", "Track B"] and (ic_["count"], ic_["own"]) == (3, 0) and len(api("/api/library")) == n_lib_, str((tracks_, ic_)))
+            page.goto(base + "/#/folder/" + ic_["id"]); page.wait_for_selector("#fv-del"); n_dlg = len(dialogs)
+            page.click("#fv-del"); page.wait_for_selector(".fp-path", timeout=15000)
+            check("deleting a folder with folders inside says so first, and takes them with it; the papers stay",
+                  len(dialogs) == n_dlg + 1 and "and the 2 folders inside it" in dialogs[-1] and "papers are not deleted" in dialogs[-1] and not any(x["name"] in ("ICIS26", "Track A", "Track B") for x in api("/api/folders"))
+                  and len(api("/api/library")) == n_lib_, dialogs[-1])
+            api("/api/folders", {"action": "delete", "id": wid_, "children": "delete"}); page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
+
             print("exports and the library layout")
             bib = urllib.request.urlopen(base + "/api/export/bib?file=" + urllib.request.quote(rows[0][3])).read().decode()
             check("BibTeX export works", "@article{" in bib and "Open Platforms" in bib)

@@ -4,6 +4,7 @@
 // browse and edit all of them, suspend or delete any. Saved in Papers/_flashcards.json. Server: GET /api/flashcards, POST /api/flashcards/{rate,add,update,delete,settings}, POST /api/ai/flashcards[/estimate].
 import {$, $$, esc, ico, api, toast, notifyError, errInline, debounce, progress, aboutCost, exactCost} from "./state.js";
 
+const inF = (r, id) => window.LibraryUI && window.LibraryUI.inFolder ? window.LibraryUI.inFolder(r, id) : (r.folders || []).includes(id);      // (in the folder or a folder inside it)
 let ctx = null;
 const R = {el: null, d: null, view: "study", queue: [], shown: false, done: 0, total: 0, folder: "", sel: new Set(), per: 8, q: "", showSusp: false, edit: null, busy: false, last: null};
 const money = aboutCost;
@@ -31,7 +32,7 @@ function draw() {
   R.el.innerHTML = `<div class="card rv-head" data-tool="review"><div class="dr-h"><span class="of-ico">${ico("review")}</span><div><div class="eyebrow t">Review</div><div class="of-title">${c.due + c.new_today ? `${c.due + c.new_today} card${c.due + c.new_today === 1 ? "" : "s"} for today` : "Nothing is due today"}</div></div></div>
     <div class="rv-stats"><span><b>${c.due}</b> due</span><span><b>${c.new_today}</b> new today <small>(of ${c.new} not yet seen)</small></span><span><b>${c.total}</b> cards</span><span><b>${c.learned}</b> learned</span>${c.suspended ? `<span>${c.suspended} suspended</span>` : ""}</div>
     <div class="row rv-bar"><div class="seg">${[["study", "Study"], ["browse", "Browse cards"], ["make", "Make cards from papers"], ["add", "＋ Add a card"]].map(([k, t]) => `<button class="${R.view === k ? "on" : ""}" data-rv="view" data-v="${k}">${t}</button>`).join("")}</div>
-      <label class="rv-scope">Cards from <select id="rv-folder"><option value="">all my papers</option>${folders.map(f => `<option value="${esc(f.id)}"${R.folder === f.id ? " selected" : ""}>📁 ${esc(f.name)}</option>`).join("")}</select></label></div></div>
+      <label class="rv-scope">Cards from <select id="rv-folder"><option value="">all my papers</option>${folders.slice().sort((a, b) => (a.path || [a.name]).join(" › ").toLowerCase().localeCompare((b.path || [b.name]).join(" › ").toLowerCase())).map(f => `<option value="${esc(f.id)}"${R.folder === f.id ? " selected" : ""}>📁 ${esc((f.path || [f.name]).join(" › "))}</option>`).join("")}</select></label></div></div>
     <div id="rv-body">${body()}</div>`;
   if (R.view === "make") estimate();
 }
@@ -70,7 +71,7 @@ function browse() {
 
 // ---------------------------------------------------------------- make and add
 function make() {
-  const L = ctx.getLib().filter(r => r.card && (!R.folder || (r.folders || []).includes(R.folder))), have = new Map();
+  const L = ctx.getLib().filter(r => r.card && (!R.folder || inF(r, R.folder))), have = new Map();
   (R.d.cards || []).forEach(c => have.set(c.file, (have.get(c.file) || 0) + 1));
   return `<div class="card rv-make"><div class="of-title">Make cards from papers</div><div class="pmeta">Only papers that have a card can be used (make cards in a folder’s Evidence tab, or the reader’s Card tab). The model sees the card’s notes, not the PDF; every flashcard has to rest on notes it was given and remembers the page.</div>
     <div class="dr-papers"><div class="eyebrow">Papers <small>${R.sel.size} ticked of ${L.length}</small> <button class="linkbtn" data-rv="selall">all without cards yet</button> · <button class="linkbtn" data-rv="selnone">none</button></div>
@@ -115,7 +116,7 @@ async function onClick(e) {
     if (a === "saveedit") { await api("/api/flashcards/update", {id, q: $("#rv-eq", R.el).value, a: $("#rv-ea", R.el).value}); R.edit = null; await load(); return draw(); }
     if (a === "susp") { const c = R.d.cards.find(x => x.id === id); await api("/api/flashcards/update", {id, suspended: !c.suspended}); await load(); return draw(); }
     if (a === "del") { if (!confirm("Delete this card? Its review history goes with it.")) return; await api("/api/flashcards/delete", {ids: [id]}); await load(); return draw(); }
-    if (a === "selall") { const have = new Set((R.d.cards || []).map(c => c.file)); ctx.getLib().filter(r => r.card && !have.has(r.file) && (!R.folder || (r.folders || []).includes(R.folder))).forEach(r => R.sel.add(r.file)); return draw(); }
+    if (a === "selall") { const have = new Set((R.d.cards || []).map(c => c.file)); ctx.getLib().filter(r => r.card && !have.has(r.file) && (!R.folder || inF(r, R.folder))).forEach(r => R.sel.add(r.file)); return draw(); }
     if (a === "selnone") { R.sel.clear(); return draw(); }
     if (a === "go") return generate();
     if (a === "addcard") { await api("/api/flashcards/add", {q: $("#rv-nq", R.el).value, a: $("#rv-na", R.el).value, file: $("#rv-nf", R.el).value}); toast("Card added."); await load(); R.view = "browse"; return draw(); }

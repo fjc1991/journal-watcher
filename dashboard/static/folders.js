@@ -20,7 +20,7 @@ const RAIL = {
 const ri = k => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${RAIL[k]}</svg>`;
 
 function stats(f) {
-  const rs = ctx.getLib().filter(r => (r.folders || []).includes(f.id));
+  const inF = window.LibraryUI && LibraryUI.inFolder, rs = ctx.getLib().filter(r => inF ? inF(r, f.id) : (r.folders || []).includes(f.id));      // (with the papers of the folders inside it)
   return {papers: rs.length, cards: rs.filter(r => r.card).length};
 }
 function ago(iso) {
@@ -31,7 +31,8 @@ function ago(iso) {
 }
 function shown() {
   const q = P.q.trim().toLowerCase();
-  const xs = P.folders.filter(f => !q || f.name.toLowerCase().includes(q)).map(f => ({...f, ...stats(f)}));
+  // the folders at the top; a folder inside another is reached through it (or found here by its name, shown with where it is)
+  const xs = P.folders.filter(f => q ? f.name.toLowerCase().includes(q) : !f.parent).map(f => ({...f, ...stats(f)}));
   const by = {name: (a, b) => a.name.localeCompare(b.name, undefined, {numeric: true, sensitivity: "base"}), "name-desc": (a, b) => b.name.localeCompare(a.name, undefined, {numeric: true, sensitivity: "base"}),
     papers: (a, b) => b.papers - a.papers || a.name.localeCompare(b.name), changed: (a, b) => (b.updated || "").localeCompare(a.updated || ""), created: (a, b) => (b.created || "").localeCompare(a.created || "")};
   return xs.sort(by[P.sort] || by.name);
@@ -52,7 +53,7 @@ function draw() {
       ${P.edit ? `<span class="fp-check" aria-hidden="true">${P.sel.has(f.id) ? "✓" : ""}</span>` : ""}
       <div class="fp-ico">${icon(f.papers)}</div>
       ${P.renaming === f.id ? `<input class="fp-rename" value="${esc(f.name)}" maxlength="60" aria-label="Folder name">` : `<div class="fp-name">${esc(f.name)}</div>`}
-      <div class="fp-meta">${f.papers} paper${f.papers === 1 ? "" : "s"}${f.cards ? ` · ${f.cards} with a card` : ""}</div><div class="fp-flags">${flags(f)}</div></div>`;
+      <div class="fp-meta">${f.papers} paper${f.papers === 1 ? "" : "s"}${f.cards ? ` · ${f.cards} with a card` : ""}${f.children ? ` · ${f.children} folder${f.children === 1 ? "" : "s"} inside` : ""}${f.parent ? ` · in ${esc((f.path || []).slice(0, -1).join(" › "))}` : ""}</div><div class="fp-flags">${flags(f)}</div></div>`;
   const row = f => `<div class="fp-row${P.sel.has(f.id) ? " sel" : ""}" data-id="${esc(f.id)}" role="button" tabindex="0" data-drop="${esc(f.id)}">
       ${P.edit ? `<span class="fp-check" aria-hidden="true">${P.sel.has(f.id) ? "✓" : ""}</span>` : ""}<span class="fp-mini">${icon()}</span>
       ${P.renaming === f.id ? `<input class="fp-rename" value="${esc(f.name)}" maxlength="60" aria-label="Folder name">` : `<span class="fp-name">${esc(f.name)}</span>`}
@@ -94,8 +95,10 @@ async function rename(id, name) {
 async function del() {
   const ids = [...P.sel]; if (!ids.length) return;
   const names = ids.map(i => (P.folders.find(f => f.id === i) || {}).name).filter(Boolean);
-  if (!confirm(`Delete ${ids.length === 1 ? "the folder “" + names[0] + "”" : ids.length + " folders"}?\n\nThe papers are not deleted. The folder’s Ideas Lab board, matrix and saved conversation are.`)) return;
-  for (const id of ids) { try { await api("/api/folders", {action: "delete", id}); } catch (e) { notifyError(e); } }
+  const under = id => { const out = new Set(); let grew = true; while (grew) { grew = false; for (const f of P.folders) if (f.parent && (f.parent === id || out.has(f.parent)) && !out.has(f.id)) { out.add(f.id); grew = true; } } return out; };
+  const inside = new Set(ids.flatMap(i => [...under(i)])), tops = ids.filter(i => !inside.has(i)), more = [...inside].filter(i => !ids.includes(i)).length;      // (a folder ticked together with the one it is in goes with that one)
+  if (!confirm(`Delete ${ids.length === 1 ? "the folder “" + names[0] + "”" : ids.length + " folders"}${more ? ` and the ${more} folder${more === 1 ? "" : "s"} inside` : ""}?\n\nThe papers are not deleted. The folder’s Ideas Lab board, matrix and saved conversation are.`)) return;
+  for (const id of tops) { try { await api("/api/folders", {action: "delete", id, children: "delete"}); } catch (e) { notifyError(e); } }
   P.sel.clear(); toast(`Deleted ${ids.length} folder${ids.length === 1 ? "" : "s"}.`); await refresh();
 }
 function wire(el) {

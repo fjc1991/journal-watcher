@@ -36,8 +36,8 @@ function build() {
     add("go", "Settings › " + name, "settings", "settings", async () => { await closeReader(); window.Settings && window.Settings.open(t); }, {hint: "settings", quick: t === "ai", hay: "settings preferences " + t + " " + hay}));
   add("go", "About Journal Watcher", "heart", "about", async () => { await closeReader(); window.About && window.About.open(); }, {hint: "page", hay: "about author made by support coffee tip donate ko-fi licence version", sub: "who makes it, and how to support it"});
   F.forEach(f => {
-    add("folder", f.name, "folders", "folders", () => nav({view: "lib", j: "@" + f.id, tab: "folders"}), {hint: "folder", sub: (f.count || 0) + " paper" + (f.count === 1 ? "" : "s"), boost: 2});
-    Object.entries(TABS).forEach(([t, name]) => t !== "papers" && add("folder", f.name + " › " + name, TICON[t], t === "lab" ? "ideas" : t, () => nav({view: "lib", j: "@" + f.id, tab: "folders", ftab: t}), {hint: "folder tool", hay: f.name + " " + name}));
+    add("folder", f.name, "folders", "folders", () => nav({view: "lib", j: "@" + f.id, tab: "folders"}), {hint: "folder", sub: (f.parent ? "in " + (f.path || []).slice(0, -1).join(" › ") + " · " : "") + (f.count || 0) + " paper" + (f.count === 1 ? "" : "s"), boost: f.parent ? 1 : 2});
+    if (!f.parent) Object.entries(TABS).forEach(([t, name]) => t !== "papers" && add("folder", f.name + " › " + name, TICON[t], t === "lab" ? "ideas" : t, () => nav({view: "lib", j: "@" + f.id, tab: "folders", ftab: t}), {hint: "folder tool", hay: f.name + " " + name}));
   });
   L.forEach(r => add("paper", r.title, "papers", "papers", () => readPaper(r), {sub: [(r.authors && (Array.isArray(r.authors) ? r.authors : String(r.authors).split(/;\s*/))[0]) || "", r.journal, r.year].filter(Boolean).join(" · "),
     hay: [Array.isArray(r.authors) ? r.authors.join(" ") : r.authors, r.journal, r.year, r.matched_topics].filter(Boolean).join(" "), hint: r.card ? "paper · card" : "paper", boost: (r.state || {}).status === "reading" ? 3 : 0, card: r}));

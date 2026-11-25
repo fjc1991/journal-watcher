@@ -42,7 +42,7 @@ async function fillSelects(S) {
   const js = [...new Map(L.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1])), ys = [...new Set(L.map(r => r.year).filter(Boolean))].sort().reverse();
   let folders = [], tags = [];
   try { folders = await api("/api/folders"); tags = (await api("/api/tags")).tags; } catch (e) { /* the filters are optional */ }
-  sel("folder").insertAdjacentHTML("beforeend", folders.map(f => opt(f.id, "📁 " + f.name + " (" + f.count + ")")).join(""));
+  sel("folder").insertAdjacentHTML("beforeend", folders.slice().sort((a, b) => (a.path || [a.name]).join(" › ").toLowerCase().localeCompare((b.path || [b.name]).join(" › ").toLowerCase())).map(f => opt(f.id, "📁 " + (f.path || [f.name]).join(" › ") + " (" + f.count + ")")).join(""));
   sel("journal").insertAdjacentHTML("beforeend", js.map(([a, n]) => opt(a, n)).join(""));
   sel("year").insertAdjacentHTML("beforeend", ys.map(y => opt(y, y)).join(""));
   sel("tag").insertAdjacentHTML("beforeend", tags.map(t => opt(t.id, (t.category ? t.category + ": " : "") + t.name)).join(""));

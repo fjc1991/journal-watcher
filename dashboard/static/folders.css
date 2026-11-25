@@ -103,6 +103,10 @@
 .ir-kind { display: inline-flex; gap: 10px; align-items: center; font-size: 13px; color: var(--ink-2); flex: none; } .ir-kind label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; } .ir-kind input { width: auto; margin: 0; }
 .dt-dlg { width: min(920px, 96vw); } .dt-h3 { font-size: 12px; color: var(--ink-3); margin: 10px 0 4px; } .dt-people { display: flex; flex-direction: column; gap: 4px; }
 .dt-person { display: grid; grid-template-columns: 1.3fr 2fr 1.2fr 1.6fr auto auto; gap: 6px; } .dr-row .pmeta { margin: 4px 0 0; } @media (max-width: 640px) { .dt-person { grid-template-columns: 1fr 1fr; } }
+.ir-tree { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 0 0 8px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; } .ir-tree legend { font-weight: 600; padding: 0 4px; } .ir-tree small { color: var(--ink-3); }
+.fv-crumbs { font-size: 13px; color: var(--ink-3); margin-bottom: 6px; } .fv-subs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.fv-subtile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); cursor: pointer; font: inherit; max-width: 320px; text-align: left; }
+.fv-subtile:hover, .fv-subtile.fp-over { border-color: var(--accent); } .fv-subtile small { color: var(--ink-3); font-size: 12px; } .fv-subtile .fp-name { font-weight: 600; overflow-wrap: anywhere; }
 .ir-more { margin-top: 8px; font-size: 13px; } .ir-more > summary { cursor: pointer; color: var(--ink-2); } .ir-more > summary small { color: var(--ink-3); }
 .ir-people { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; } .ir-person { display: grid; grid-template-columns: minmax(110px, 1fr) 2fr 1.3fr 1.6fr; gap: 6px; align-items: center; } .ir-person b { font-size: 12px; overflow-wrap: anywhere; }
 .ir-dfields .ir-f:nth-child(3) { grid-column: 1 / -1; } .ir-dfields textarea { width: 100%; font: inherit; resize: vertical; } .ir-read { font-size: 12px; }
