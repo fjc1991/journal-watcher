@@ -42,6 +42,7 @@ import authorcache as ac  # noqa: E402
 import bibimport  # noqa: E402
 import refextract  # noqa: E402
 import books  # noqa: E402
+import details  # noqa: E402
 import exports  # noqa: E402
 import folders as fo  # noqa: E402
 import importer  # noqa: E402
@@ -1154,6 +1155,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "no such folder"}, 404)
             dr = relatedwork.load(f["id"]) if relatedwork else None
             return self.send_json({"doc": claims.load(f["id"]), "papers": len(rows), "library": len(pl.library()), "draft": relatedwork.render(dr)["text"] if dr else "", "review": reviewer.load(f["id"]) if reviewer else None})
+        if path == "/api/paper/details":    # ?file=: one paper's details (title, authors with affiliations, abstract, keywords, conference, your note) for Edit details
+            try:
+                return self.send_json({"ok": True, **details.get(one("file"))})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 404)
         if path == "/api/book":         # ?file=: a book's details, its chapters as page ranges, and the printed-page offset
             info = books.info_of(one("file"))
             if not info:
@@ -2118,6 +2124,17 @@ class Handler(BaseHTTPRequestHandler):
             if not summaries.start([str(f) for f in files] if files is not None else None):
                 return self.send_json({"error": "Every one of these papers has a summary already."}, 400)
             return self.send_json({"ok": True, "status": summaries.status()})
+        if path == "/api/paper/details":         # {file, fields}: your corrections of one paper (kept beside its PDF; the index is not rewritten: details.py says why)
+            try:
+                return self.send_json({"ok": True, **details.save(str(b.get("file") or ""), b.get("fields"))})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+        if path == "/api/paper/details/read":    # {file, ai?}: what the PDF's first page says, beside what the library has; nothing is written
+            try:
+                use_ai = bool(b.get("ai")) and bool(prefs.get_settings().get("details_ai"))
+                return self.send_json({"ok": True, **details.read_again(str(b.get("file") or ""), use_ai)})
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
         if path == "/api/library/kind":          # {files: [...], kind, label?}: what these papers are (journal article, preprint, conference paper, other): only <stem>.paper.json is written
             import kinds
             k = str(b.get("kind") or "")
@@ -2200,6 +2217,8 @@ class Handler(BaseHTTPRequestHandler):
                     for p in papers:
                         if gone.get("kind"):
                             p["kind"], p["kind_label"] = gone["kind"], gone.get("label") or ""        # (a conference paper stays one)
+                            if gone.get("details"):
+                                p["details"] = gone["details"]                                      # (and keeps its affiliations, abstract, keywords and your note)
                         run.add_paper(p)
                     run.stage, run.status = "ready", "stopped"
                     run.save(force=True)

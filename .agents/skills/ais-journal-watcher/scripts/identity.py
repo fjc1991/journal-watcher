@@ -295,6 +295,12 @@ def audit(progress=None, use_kept=False):
         else:
             with open(f, "rb") as fh:
                 data = fh.read()
+            try:                                   # the title, authors and DOI as you corrected them (details.py), not as the paper was first filed
+                import details as _dt, kinds as _kn, download as _dl
+                r = _dt.shown(dict(r), _kn.read_sidecar(f, _dl.index_key(r)).get("details"))
+                item.update(title=r.get("title", ""), doi=r.get("doi", ""))
+            except Exception:  # noqa: BLE001
+                pass
             v, why, ev = check({"title": r.get("title"), "doi": r.get("doi"), "authors": r.get("authors")}, data)
             item.update(verdict=v, reason=why, pdf_says=ev["pdf_says"])
         out.append(item)
@@ -354,8 +360,15 @@ def _remove(file):
         w.writerows(rows)
     os.replace(tmp, idx)
     m = re.match(r"Papers/(\d{4}-\d{2})/", file)
+    det = side.get("details") if isinstance(side.get("details"), dict) else {}
+    try:
+        import details as _dt
+        row = _dt.shown(dict(row), det)                  # (the new download looks for the paper by its corrected title and DOI)
+    except Exception:  # noqa: BLE001
+        pass
     return {"title": row.get("title", ""), "doi": row.get("doi", ""), "authors": [a for a in (row.get("authors") or "").split("; ") if a], "journal": row.get("journal", ""),
-            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, root), "files": moved, "kind": side.get("kind") or "", "label": side.get("label") or ""}
+            "date": m.group(1) if m else "", "moved_to": os.path.relpath(dest_root, root), "files": moved, "kind": side.get("kind") or "", "label": side.get("label") or "",
+            "details": {k: v for k, v in det.items() if k not in ("title", "doi")}}
 
 
 def main(argv=None):

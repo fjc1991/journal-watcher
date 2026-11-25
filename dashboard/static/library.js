@@ -2,6 +2,7 @@
 // exports (BibTeX / RIS / notes / annotated PDF), the highlights hub and the library-wide tag manager.
 // index.html calls window.LibraryUI.init({...}) once and delegates the Library's rows and home page here.
 import {notifyError, $, $$, esc, api, fileUrl, debounce, toast, COLORS, colorOf, ico, pageHead, md, progress, BOOK_HOW, BOOK_STALE, bookEmpty, aboutCost, aboutRange, exactCost, budgetOk} from "./state.js";
+import {editDetails, readMany} from "./details.js";
 
 let ctx = null;
 const F = {q: "", status: "", star: false, folder: "", journal: "", year: "", tag: "", kind: "", notes: false, sort: "", list: false, tab: "papers"};
@@ -68,6 +69,7 @@ function rowMenu(r, i) {
           <a target="_blank" href="${fileUrl(r.file)}" role="menuitem">${ico("papers", "sm")} Open the PDF</a>
           <button data-fold="${esc(r.file)}" role="menuitem">${ico("folders", "sm")} Folders…</button>
           <button data-take="${esc(r.file)}" role="menuitem">${ico("notes", "sm")} One-line takeaway…</button>
+          ${r.book ? "" : `<button data-details="${esc(r.file)}" role="menuitem">${ico("papers", "sm")} Edit details…</button>`}
           ${r.book ? "" : `<button data-setkind="${esc(r.file)}" role="menuitem">${ico("papers", "sm")} Type: ${esc((KINDS.find(k => k[0] === (r.kind || "journal")) || KINDS[0])[2])}…</button>`}
           <button data-delitem="${esc(r.file)}" role="menuitem" class="danger">${ico("x", "sm")} Delete this ${r.book ? "book" : "paper"}…</button>`;
 }
@@ -563,6 +565,8 @@ function wireRows() {
     const star = e.target.closest("[data-star]"), fold = e.target.closest("[data-fold]"), take = e.target.closest("[data-take]"), of = e.target.closest("[data-openfolder]"), cd = e.target.closest("[data-card]"), del = e.target.closest("[data-delitem]");
     const sk = e.target.closest("[data-setkind]");
     if (sk) { setKind([sk.dataset.setkind]); return; }
+    const ed = e.target.closest("[data-details]");
+    if (ed) { editDetails(ed.dataset.details, refreshList); return; }
     if (del) deleteItems([del.dataset.delitem]);
     else if (cd) { const i = byFile(cd.dataset.card); if (i >= 0) ctx.readPaper(lib()[i], {tab: "card"}); }
     else if (star) { const r = lib()[byFile(star.dataset.star)]; setState(star.dataset.star, {star: !(r.state || {}).star}).catch(er => notifyError(er)); }
@@ -618,13 +622,16 @@ function actionbar() {
   bar.classList.toggle("hide", !SEL.size);
   if (!SEL.size) return;
   bar.innerHTML = `<b>${SEL.size} selected</b><span class="menuwrap"><button class="btn small" id="ab-fold">📁 Add to folder ▾</button></span>
-    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small" id="ab-kind" title="Say what these papers are: journal articles, preprints, conference papers, or reports, theses and other">Set type…</button><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
+    <span class="menuwrap"><button class="btn small" id="ab-exp">Export ▾</button><div class="menu card hide" id="ab-expmenu"></div></span><button class="btn small" id="ab-kind" title="Say what these papers are: journal articles, preprints, conference papers, or reports, theses and other">Set type…</button><button class="btn small" id="ab-read" title="Read the authors, affiliations, conference, abstract and keywords from each PDF’s first page. You see what would be added before anything is changed.">Read details from the PDFs…</button><button class="btn small danger" id="ab-del">Delete…</button><button class="btn small" id="ab-clear">Clear</button>`;
   $("#ab-kind").onclick = () => setKind([...SEL]);
+  $("#ab-read").onclick = () => readMany([...SEL].filter(f => { const r = lib()[byFile(f)]; return r && !r.book; }), refreshList);
   $("#ab-del").onclick = () => deleteItems([...SEL]);
   $("#ab-clear").onclick = () => { SEL.clear(); $$(".rsel").forEach(c => c.checked = false); actionbar(); };
   $("#ab-fold").onclick = e => { e.stopPropagation(); folderPop(e.currentTarget, [...SEL], true); };
   $("#ab-exp").onclick = e => { e.stopPropagation(); exportMenu($("#ab-expmenu"), {files: [...SEL]}); };
 }
+
+const refreshList = async () => { await ctx.reload(); results(TOP && TOP.opts); };       // after details were saved: the list shows them
 
 // ---------------------------------------------------------------- what kind of work papers are: a journal article, a preprint, a conference paper, or other (kinds.py)
 function setKind(files) {

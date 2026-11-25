@@ -85,6 +85,41 @@ const isbnOk = s => {           // an ISBN-10 or ISBN-13 with a correct check di
   return false;
 };
 
+// ---- more details of a paper (pdfmeta.py reads them from the first page; you can correct them): who is where, the conference in full, abstract, keywords, your note
+const DET = [["conference", "Conference or workshop, in full", "e.g. Workshop on Information Technology and Systems"], ["paper_type", "Kind of submission", "e.g. Regular Paper"], ["session", "Session", "e.g. Session 1B - GenAI, Work & Labor Markets"],
+  ["keywords", "Keywords (separate with ;)", ""], ["volume", "Volume", ""], ["issue", "Issue", ""], ["pages", "Pages", "e.g. 101-130"]];
+const pkey = n => norm(n).toLowerCase();
+const loose = n => { const t = pkey(n).normalize("NFKD").replace(/[^a-z ]/g, "").split(" ").filter(Boolean); return t.length ? t[0][0] + " " + t[t.length - 1] : ""; };      // first initial and family name: "J. Smith" is "John Smith"
+const personOf = (c, n) => c.det.people[pkey(n)] || (() => { const hit = Object.keys(c.det.people).filter(k => loose(k) && loose(k) === loose(n)); return hit.length === 1 ? c.det.people[hit[0]] : null; })() || {};
+const namesOf = c => String(c.fields.authors || "").split(";").map(norm).filter(Boolean);
+function detOf(a) {                     // a card's details, from what the PDF's first page says
+  const p = (a && a.pdf && a.pdf.details) || {}, people = {};
+  (p.people || []).forEach(x => { people[pkey(x.name)] = {affiliation: x.affiliation || "", place: x.place || "", email: x.email || ""}; });
+  return {people, conference: p.conference || "", paper_type: p.paper_type || "", session: "", keywords: (p.keywords || []).join("; "), volume: "", issue: "", pages: "", abstract: p.abstract || "", note: ""};
+}
+function readSay(a) {                   // one line: what was read from the first page, and how
+  const p = (a && a.pdf && a.pdf.details) || {}; if (!p.authors) return "";
+  const n = p.authors.length, withAff = (p.people || []).filter(x => x.affiliation || x.email).length;
+  const got = [n ? plural(n, "author") + (withAff ? " with " + (withAff === n ? "" : withAff + " ") + "affiliation" + (n === 1 ? "" : "s") : "") : "", p.conference ? "the conference" : "", p.year ? "the year" : "", p.paper_type ? "the kind of submission" : "",
+    p.abstract ? "the abstract" : "", (p.keywords || []).length ? "keywords" : ""].filter(Boolean);
+  const how = /ai/.test(p.by || "") && p.ai ? ` The AI read the page too (${esc(p.ai.model || "")}${p.ai.cost != null ? ", $" + Number(p.ai.cost).toFixed(4) : ""}).` : "";
+  const sure = n && p.sure !== "high" ? " Please check the names." : "";
+  return (got.length ? "Read from the PDF’s first page: " + got.join(", ") + "." + sure + how : "") + (p.ai_note ? " The AI was not used: " + esc(p.ai_note) : "");
+}
+const peopleHtml = c => namesOf(c).map((n, k) => { const p = personOf(c, n); return `<div class="ir-person"><b>${esc(n)}</b>${[["affiliation", "Affiliation"], ["place", "City, country"], ["email", "E-mail"]].map(([f, ph]) =>
+  `<input type="text" data-p="${f}" data-pn="${k}" data-i="${c.i}" value="${esc(p[f] || "")}" placeholder="${ph}" aria-label="${ph} of ${esc(n)}" autocomplete="off" spellcheck="false">`).join("")}</div>`; }).join("") || `<p class="hint">Type the authors above; each gets a line here.</p>`;
+function moreHtml(c, many) {
+  const d = c.det, n = namesOf(c).filter(x => { const p = personOf(c, x); return p.affiliation || p.email || p.place; }).length;
+  const has = [n ? plural(n, "affiliation") : "", d.abstract ? "abstract" : "", norm(d.keywords) ? "keywords" : "", d.conference ? "conference" : "", d.session ? "session" : ""].filter(Boolean).join(", ");
+  return `<details class="ir-more" data-more="${c.i}"${c.moreOpen ? " open" : ""}><summary>More details${has ? ` <small>(${esc(has)})</small>` : " <small>(affiliations, abstract, keywords, your note)</small>"}</summary>
+    <div class="ir-people" id="ir-pp${c.i}">${peopleHtml(c)}</div>
+    <div class="ir-fields ir-dfields">${DET.map(([k, label, ph]) => `<label class="ir-f${k === "conference" || k === "keywords" || k === "session" ? " wide" : ""}"><span>${label}</span><input type="text" data-d="${k}" data-i="${c.i}" value="${esc(d[k] || "")}" placeholder="${esc(ph)}" autocomplete="off"></label>`).join("")}
+      <label class="ir-f wide"><span>Abstract</span><textarea data-d="abstract" data-i="${c.i}" rows="4">${esc(d.abstract || "")}</textarea></label>
+      <label class="ir-f wide"><span>Your note (only for you)</span><textarea data-d="note" data-i="${c.i}" rows="2" placeholder="e.g. discussant: me">${esc(d.note || "")}</textarea></label></div>
+    ${many ? `<button type="button" class="linkbtn" data-spread="${c.i}">Use this venue, date, type and conference for the other papers here that have none</button>` : ""}</details>`;
+}
+const detailsOf = c => ({authors: namesOf(c).map(n => ({name: n, ...personOf(c, n)})), ...Object.fromEntries(DET.map(([k]) => [k, c.det[k] || ""])), abstract: c.det.abstract || "", note: c.det.note || ""});
+
 async function analyse(file, kind) {
   const x = await fetch("/api/import/analyse", {method: "POST", headers: {"Content-Type": isEpub(file) ? "application/epub+zip" : "application/pdf", "X-Filename": encodeURIComponent(file.name), ...(kind === "book" ? {"X-Kind": "book"} : {})}, body: file});
   const j = await x.json().catch(() => ({}));
@@ -107,9 +142,10 @@ function cardHtml(c) {
       <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${!book && TYPEWORD[k.kind] ? " · " + esc(TYPEWORD[k.kind]) : ""}${book ? (k.publisher ? " · " + esc(k.publisher) : "") : k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${book && k.isbn ? " · ISBN " + esc(k.isbn) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
       <small class="ir-why">${esc(why(k))}${k.doi_printed && k.verdict === "match" && k.authors_found ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
   const f = c.fields, fld = (k, label, ph, wide) => `<label class="ir-f${wide ? " wide" : ""}"><span>${label}</span><input type="text" data-k="${k}" data-i="${c.i}" value="${esc(f[k])}" placeholder="${esc(ph || "")}" autocomplete="off" spellcheck="false"></label>`;
-  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}<div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
+  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}${!book && readSay(a) ? `<div class="ir-st ir-hint ir-read">${readSay(a)}</div>` : ""}<div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
     ${cands.length ? `<div class="ir-cands" role="radiogroup" aria-label="Records found for ${esc(c.file.name)}">${opts}<label class="ir-cand"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="-1"${c.sel === -1 ? " checked" : ""}><span><b>None of these</b><small>I will type the details myself</small></span></label></div>` : ""}
     <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors or editors (separate with ;)", "Jane Doe; John Smith", true)}${book ? fld("publisher", "Publisher", "") + fld("pub_date", "Year", "YYYY") + fld("isbn", "ISBN", "978…") + fld("doi", "DOI (if it has one)", "10.…") : ptypeSel(c, c.file.name) + fld("journal", VENUE[c.ptype || "journal"][0], VENUE[c.ptype || "journal"][1]) + fld("pub_date", "Date", "YYYY or YYYY-MM-DD") + fld("doi", "DOI", "10.…")}</div>
+    ${book ? "" : moreHtml(c, c.many)}
     <div class="ir-err" id="ir-e${c.i}" role="alert"></div>`;
 }
 
@@ -119,7 +155,7 @@ async function review(files, w, o = {}) {
   const fixed = w.kind === "folder" || w.kind === "open" ? w.id : null, fixedName = fixed ? (w.name || folderName(fs, fixed)) : "";
   const today = new Date().toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
   const last = fs.find(f => f.id === ls.get("jw-drop-last")), first = w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
-  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: ""}));
+  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: "", det: detOf(null), moreOpen: false, many: pdfs.length > 1}));
   return new Promise(resolve => {
     $("#ir-dlg") && $("#ir-dlg").remove();
     const d = document.createElement("dialog"); d.id = "ir-dlg"; d.className = "card ir-dlg"; d.setAttribute("aria-labelledby", "ir-h");
@@ -147,6 +183,7 @@ async function review(files, w, o = {}) {
     if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
     cards.forEach(draw); status();
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
+      c.prevNames = null;
       if (c.sel >= 0) {
         const cand = c.a.candidates[c.sel]; c.fields = fieldsOf(cand, c.kind);
         if (c.kind !== "book" && !c.ptypeTouched && !c.ptypeAll) { c.ptype = cand.kind || "journal"; c.label = cand.label || ""; }
@@ -154,6 +191,8 @@ async function review(files, w, o = {}) {
         const typed = c.kind !== "book" && c.fields && c.fields.journal;     // (a venue you typed stays; else what the PDF itself says, if anything)
         c.fields = blank(c.kind, c.a.pdf.title);
         if (c.kind !== "book") {
+          const pd = c.a.pdf.details || {};                                // no record: who the first page says wrote it, and when
+          c.fields.authors = (pd.authors || []).join("; "); c.fields.pub_date = pd.year || "";
           c.fields.journal = typed || c.a.pdf.venue || "";
           if (!c.ptypeTouched && !c.ptypeAll) { c.ptype = c.a.pdf.kind || "journal"; c.label = c.a.pdf.label || ""; }
         }
@@ -187,6 +226,7 @@ async function review(files, w, o = {}) {
       try {
         c.a = await analyse(c.file, c.kind); c.state = "ok"; c.sel = c.a.pick; c.existing = c.a.existing || ""; c.kind = c.a.type === "book" ? "book" : "paper";
         if (closed) { discard([c.a.token]); return false; }
+        c.det = detOf(c.a);
         take(c);
       } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
       if (!closed) { draw(c); status(); }
@@ -212,13 +252,35 @@ async function review(files, w, o = {}) {
       if (t.dataset.kind !== undefined) {                          // paper <-> book: the old look is thrown away and the file is looked at again
         if (c.a) discard([c.a.token]); c.kind = t.value; c.a = null; c.state = "reading"; c.sel = -1; c.existing = ""; c.fields = blank(c.kind); draw(c); status(); look(c);
       } else if (t.dataset.inc !== undefined) { c.include = t.checked; $("#ir-c" + i, d).classList.toggle("off", !c.include); }
-      else { c.sel = +t.value; take(c); sync(c); relabel(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }
+      else { c.sel = +t.value; take(c); sync(c); relabel(c); const pp = $("#ir-pp" + i, d); if (pp) pp.innerHTML = peopleHtml(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }      // (the authors changed with the record: so do their lines under More details)
       status();
     });
+    d.addEventListener("toggle", e => { const m = e.target.dataset && e.target.dataset.more; if (m !== undefined) cards[+m].moreOpen = e.target.open; }, true);
+    d.addEventListener("click", e => {                             // one paper's venue, date, type and conference for the others of this drop that have none
+      const b = e.target.closest("[data-spread]"); if (!b) return; const src = cards[+b.dataset.spread]; let n = 0;
+      cards.forEach(c => {
+        if (c === src || c.state !== "ok" || c.kind === "book") return; let did = false;
+        if (!norm(c.fields.journal) && norm(src.fields.journal)) { c.fields.journal = src.fields.journal; did = true; }
+        if (!norm(c.fields.pub_date) && norm(src.fields.pub_date)) { c.fields.pub_date = src.fields.pub_date; did = true; }
+        if (!c.ptypeTouched && c.ptype === "journal" && src.ptype !== "journal" && did) { c.ptype = src.ptype; c.label = src.label; }
+        if (!c.det.conference && src.det.conference) { c.det.conference = src.det.conference; did = true; }
+        if (did) { n++; draw(c); }
+      });
+      b.textContent = n ? `Done: ${plural(n, "paper")} filled in.` : "The other papers already have theirs.";
+    });
     d.addEventListener("input", e => {
-      const t = e.target; if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
+      const t = e.target;
+      if (t.dataset.d !== undefined) { cards[+t.dataset.i].det[t.dataset.d] = t.value; return; }
+      if (t.dataset.p !== undefined) { const c = cards[+t.dataset.i], n = namesOf(c)[+t.dataset.pn]; if (n) (c.det.people[pkey(n)] = c.det.people[pkey(n)] || {...personOf(c, n)})[t.dataset.p] = t.value; return; }
+      if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
+      if (t.dataset.k === "authors") {                           // a name whose spelling you correct keeps what stands under it
+        const was = c.prevNames || namesOf(c), now = String(t.value || "").split(";").map(norm).filter(Boolean);      // (the names as they last stood: a box that is emptied and filled in one go passes through nothing)
+        if (now.length) c.prevNames = now;
+        if (was.length === now.length) was.forEach((w, k) => { if (pkey(w) !== pkey(now[k]) && !c.det.people[pkey(now[k])] && !now.some(x => pkey(x) === pkey(w))) { const p = personOf(c, w); if (p.affiliation || p.place || p.email) c.det.people[pkey(now[k])] = {...p}; } });
+      }
       c.fields[t.dataset.k] = t.value; $("#ir-e" + c.i, d).textContent = ""; $("#ir-err", d).textContent = "";
       if (t.dataset.k === "title" || t.dataset.k === "doi") recheck(c);
+      if (t.dataset.k === "authors") { const pp = $("#ir-pp" + c.i, d); if (pp) pp.innerHTML = peopleHtml(c); }       // (each author has a line under More details)
     });
     const finish = v => { if (closed) return; closed = true; resolve(v); d.close(); };
     const go = () => {
@@ -240,13 +302,13 @@ async function review(files, w, o = {}) {
       const extra = c => {                                       // a paper's type; the record's Crossref type and ISSN (only while its venue is the record's)
         if (c.kind === "book") return {kind: "book"};
         const cand = c.sel >= 0 ? c.a.candidates[c.sel] : null, sameVenue = cand && norm(cand.journal || "") === norm(c.fields.journal || "");
-        return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : []};
+        return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : [], details: detailsOf(c)};
       };
       finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked});
     };
     $("#ir-go", d).onclick = go;
     $("#ir-cancel", d).onclick = () => d.close();
-    d.onkeydown = e => { if (e.key === "Enter" && e.target.matches("input[type=text]") && !$("#ir-go", d).disabled) { e.preventDefault(); go(); } };
+    d.onkeydown = e => { if (e.key === "Enter" && e.target.matches("input[type=text]") && !e.target.closest(".ir-more") && !$("#ir-go", d).disabled) { e.preventDefault(); go(); } };
     d.addEventListener("close", () => {
       if (!closed) { closed = true; discard(cards.filter(c => c.a).map(c => c.a.token)); resolve(null); }
       d.remove();

@@ -4,7 +4,7 @@
     kinds.from_text(text)            (kind, venue, label) from what a PDF prints on its first page, or (None, "", "") when it says nothing clear
     kinds.clean_venue(name, kind)    a venue name that is safe as one folder name (Papers/YYYY-MM/<venue>/), or the kind's own folder when there is none
     kinds.venue_abbr(name, kind, taken)   a short abbreviation for a venue that is not a watched journal (ICIS, HICSS, SSRN…), never one already used by another venue
-    kinds.read_sidecar(pdf, key) / kinds.write_sidecar(pdf, …)   <stem>.paper.json next to the PDF: {kind, venue, label, crossref_type, for}
+    kinds.read_sidecar(pdf, key) / kinds.write_sidecar(pdf, …)   <stem>.paper.json next to the PDF: {kind, venue, label, crossref_type, for, details}
     kinds.of_row(row, sidecar)       the kind of a library row: its sidecar, else what its DOI or journal says (a book; a preprint series), else a journal article
 
 Why a file next to the PDF and not a column of Papers/_index.csv: versions of the app before this one write the index with a fixed list of columns and stop with an
@@ -76,7 +76,10 @@ def from_crossref(meta):
 # conference footers that name the conference (AIS conferences have no Crossref DOI): "Forty-Fourth International Conference on Information Systems, Hyderabad 2023"
 _CONF_NAMES = [(re.compile(r"international conference on information systems", re.I), "ICIS"), (re.compile(r"hawaii international conference on system sciences", re.I), "HICSS"),
                (re.compile(r"european conference on information systems", re.I), "ECIS"), (re.compile(r"pacific asia conference on information systems", re.I), "PACIS"),
-               (re.compile(r"americas conference on information systems", re.I), "AMCIS"), (re.compile(r"\bCHI Conference on Human Factors in Computing Systems", re.I), "CHI")]
+               (re.compile(r"americas conference on information systems", re.I), "AMCIS"), (re.compile(r"\bCHI Conference on Human Factors in Computing Systems", re.I), "CHI"),
+               (re.compile(r"workshop on information technolog(y|ies) and systems", re.I), "WITS"), (re.compile(r"workshop on information systems and economics", re.I), "WISE"),
+               (re.compile(r"conference on information systems and technology", re.I), "CIST"), (re.compile(r"statistical challenges in e(lectronic)?-?\s?commerce research", re.I), "SCECR"),
+               (re.compile(r"design science research in information systems and technology", re.I), "DESRIST"), (re.compile(r"china summer workshop on information management", re.I), "CSWIM")]
 
 
 def from_text(text):
@@ -202,10 +205,16 @@ def read_sidecar(pdf, key=None, refused=None):
     return d
 
 
-def write_sidecar(pdf, kind, venue="", label="", key="", crossref_type=""):
-    """Write (or replace) the sidecar of the PDF: {kind, venue, label, crossref_type, for}. Written for journal articles too, so an old one at the same place never stays."""
+def write_sidecar(pdf, kind, venue="", label="", key="", crossref_type="", details=None):
+    """Write (or replace) the sidecar of the PDF: {kind, venue, label, crossref_type, for, details?}. Written for journal articles too, so an old one at the same place
+    never stays. details (pdfmeta.clean: affiliations, abstract, keywords, your note…): None keeps the ones the sidecar already holds for this same paper (changing a
+    paper's type must not drop them); a dict replaces them."""
     kind = kind if kind in PAPER_KINDS else "journal"
     d = {"kind": kind, "venue": str(venue or "")[:200], "label": label if label in LABELS else "", "crossref_type": str(crossref_type or "")[:40], "for": str(key or "")}
+    if details is None:
+        details = read_sidecar(pdf, key).get("details")
+    if isinstance(details, dict) and details:
+        d["details"] = details
     tmp = sidecar_path(pdf) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False)

@@ -607,13 +607,14 @@ function renderReader(body) {
       <p class="hint">In the reader's Summary tab you can generate a paper with any template without touching the saved summary. Placeholders: <code>{{interests}}</code> <code>{{title}}</code> <code>{{journal}}</code> <code>{{doi}}</code>.</p>
       <div id="sl">${editor(D.summaries, "summary")}</div><button class="btn" id="sa">＋ Add a template</button></div>
     <div class="card st-card"><h2>Other</h2><label class="chk">Reading speed <input type="number" id="wpm" min="80" max="600" value="${P.wpm}" style="width:80px"> words per minute (for “time left”)</label>
-      <label class="chk">Export folder <input type="text" id="xdir" value="${esc(P.export_dir || "")}" placeholder="e.g. /Users/you/Dropbox/Research notes" style="flex:1"> <small>where “Save to my export folder” in the Ideas Lab writes (e.g. a Dropbox folder)</small></label></div>
+      <label class="chk">Export folder <input type="text" id="xdir" value="${esc(P.export_dir || "")}" placeholder="e.g. /Users/you/Dropbox/Research notes" style="flex:1"> <small>where “Save to my export folder” in the Ideas Lab writes (e.g. a Dropbox folder)</small></label>
+      <label class="chk"><input type="checkbox" id="detai"${P.details_ai === false ? "" : " checked"}> When a PDF you add is not on Crossref and its first page does not say clearly who wrote it, let the AI read that page <small>(one short call, counted in your monthly budget; only names, affiliations and addresses that are printed on the page are kept)</small></label></div>
     <div class="st-actions"><button class="btn primary" id="st-save">Save</button> <span id="st-msg" class="st-msg"></span></div>`;
     $("#sa", body).onclick = () => { D.summaries.push({id: "", name: "New template", prompt: "Read this paper and write a markdown note about {{title}}."}); draw(); };
     $("#st-save", body).onclick = async () => {
       const legend = {}; $$(".legend input", body).forEach(i => { if (i.value.trim()) legend[i.dataset.c] = i.value.trim(); });
       try {
-        const r = await api("/api/settings", {summaries: collect(body, "summary", "#sl"), prefs: {legend, summary_template: $("#sdef", body).value, wpm: +$("#wpm", body).value, export_dir: $("#xdir", body).value}});
+        const r = await api("/api/settings", {summaries: collect(body, "summary", "#sl"), prefs: {legend, summary_template: $("#sdef", body).value, wpm: +$("#wpm", body).value, export_dir: $("#xdir", body).value, details_ai: $("#detai", body).checked}});
         D.prefs = r.prefs; D.summaries = r.summaries; note($("#st-msg", body), "Saved."); window.dispatchEvent(new Event("jw-settings-changed"));
       } catch (e) { note($("#st-msg", body), e.message, true); }
     };
