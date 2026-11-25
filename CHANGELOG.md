@@ -2,6 +2,19 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.4.0
+
+The details of the papers you add yourself:
+
+- **A PDF you add is read for its own details.** For a paper Crossref does not know (a workshop or conference submission, a working paper, a draft), the app now reads the first page: the title, every author in order with the affiliation, place and e-mail printed under the name, the conference and year in the page's footer, the kind of submission ("Regular Paper"), the abstract and the keywords. Until now only the title was read. The author name stored inside the file is not used: it is often the person who made the template.
+- **The AI helps only where the page is unclear.** When the first page does not say clearly who wrote the paper, the AI reads that one page. Only names, affiliations and addresses that are printed on the page are kept, so it cannot add an author. It counts in your monthly budget and can be switched off in Settings → Reader & summaries.
+- **More details per paper.** Each paper can hold its authors' affiliations and e-mails, the conference in full, the kind of submission, a session, volume, issue and pages, keywords, an abstract and a note of your own. They are under "More details" when you add a PDF.
+- **One paper's conference for the whole drop.** When you add several PDFs at once and only some name the conference, one click gives the others the same venue, date and type.
+- **Edit details.** In a paper's ⋯ menu. Correct the title, the authors or anything else at any time; "Read from the PDF" fills the boxes from the first page again. The paper stays where it is, in its folders and with your notes.
+- **Read details from the PDFs.** Tick papers in the Library (or "Select all" in a folder) and press this: each first page is read, you see what it would add, and nothing changes until you press Apply.
+- **Exports carry them.** BibTeX and RIS include the paper's own keywords and abstract, and a conference paper is exported as one, with its conference.
+- More conferences are known by their short name: WITS, WISE, CIST, SCECR, DESRIST, CSWIM.
+
 ## 1.3.0
 
 Everything since 1.2.9, in one release.
