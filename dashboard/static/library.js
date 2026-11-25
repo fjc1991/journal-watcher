@@ -700,10 +700,16 @@ function folderPop(anchor, target, bulk) {
 // the line under a folder's name: how many papers it shows (its own and those of the folders inside it, each once)
 const headMeta = (id, rows) => { const inside = famOf(id).size - 1; return `${rows.length} paper${rows.length === 1 ? "" : "s"}${inside ? ` in this folder and the ${inside} folder${inside === 1 ? "" : "s"} inside it` : ""} · ${rows.filter(r => r.card).length} with a card · papers stay where they are; a folder is just a list`; };
 let FV = {box: null, id: null, tab: "papers"}, pendingFT = null;
+let missed = null;                       // the folder last looked for and not found (asked for again once, not for ever)
 const FVT = {};                       // remembers which tab each folder was left on
 function folderView(box, id) {
   const f = FOLDERS.find(x => x.id === id);
-  if (!f) { box.innerHTML = `<div class="card empty"><h2>Folder not found</h2></div>`; return; }
+  if (!f) {                             // not in the list this page holds: it may have been made a moment ago (a drop that made it is still refreshing the page), so the list is asked for once more
+    box.innerHTML = `<div class="card empty" data-miss="${esc(id)}"><h2>Folder not found</h2></div>`;
+    if (missed !== id) { missed = id; loadFolders().then(() => { if (FOLDERS.some(x => x.id === id) && box.isConnected && $(`[data-miss="${CSS.escape(id)}"]`, box)) { folderView(box, id); ctx.renderNav?.(); } }); }
+    return;
+  }
+  missed = null;
   ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "DraftUI", "ClaimsUI", "SynthUI", "WorkspaceUI"].forEach(n => window[n] && window[n].init(ctx));
   if (pendingFT) { FVT[id] = pendingFT; pendingFT = null; }
   FV = {box, id, tab: window.IdeasUI ? (FVT[id] || "papers") : "papers"};
