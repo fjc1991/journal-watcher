@@ -248,9 +248,14 @@ def add_pdf(data, filename="paper.pdf", doi=""):
         p, note = _paper(meta, kind), "added by you (metadata from Crossref)"
         return _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), meta.get("type") or ""))
     else:
-        got = pdfmeta.read(data)                           # no record anywhere: what the first page itself prints (the rules only; nothing is sent to an AI here)
+        got = pdfmeta.read(data)                           # no record anywhere: what the first page itself prints
+        if pdfmeta.needs_ai(got) and prefs.get_settings().get("details_ai"):      # the rules are not sure: the AI reads the page too, as in the review dialog (same switch, same budget)
+            try:
+                got, _ = pdfmeta.with_ai(data, got)
+            except ImportError:
+                pass
         title = title or got["title"] or re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(filename))[0]).strip() or "Untitled paper"
-        names = [a["name"] for a in got["authors"]] if got["sure"] == "high" else []
+        names = [a["name"] for a in got["authors"]] if got["sure"] == "high" else []      # (nobody checks this add in a dialog: only a reading that is sure is filed)
         kind = got["kind"] or "journal"
         p = _paper({"title": title, "authors": names, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "container": got["venue"], "issn": [], "pub_date": got["year"]}, kind)
         note = "added by you (details read from the PDF’s first page: please check)" if names else "added by you (no metadata found: check the title)"

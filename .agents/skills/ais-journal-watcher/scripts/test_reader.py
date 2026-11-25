@@ -6028,6 +6028,18 @@ print("OK")
                 assert wrong["verdict"] == "mismatch" and right["verdict"] == "match" and right["title"] == TITLE[0], (wrong["verdict"], right["verdict"], right["title"])
                 bib3 = ex_.bibtex([pl.library_row(third["file"])])
                 assert "abstract = {Sets x and  a stray  brace.}" in bib3, bib3              # (a brace in an abstract cannot end the field early)
+                # a PDF added without the dialog (/api/import/pdf) gets the same second reader: asked when the rules are unsure and the switch is on; only a sure reading is filed
+                unsure = [("Mira Okonkwo", "University of Northfield", "New York", ""), ("Tao Lindqvist", "", "Hong Kong", "")]
+                agree = {"title": "", "conference": "", "year": "", "paper_type": "", "keywords": [], "authors": [{"name": n_, "affiliation": "", "place": "", "email": ""} for n_ in ("Mira Okonkwo", "Tao Lindqvist")]}
+                pf.save_settings({"details_ai": False}); ai.chat = answer(agree); n = len(asked)
+                off = importer.add_pdf(workshop(unsure, title="Added Without The Dialog While Switched Off", bold=False, foot=""), "off.pdf")
+                assert len(asked) == n and pl.library_row(off["file"])["authors"] == "", "the AI was asked although it is switched off"
+                pf.save_settings({"details_ai": True})
+                on = importer.add_pdf(workshop(unsure, title="Added Without The Dialog While Switched On", bold=False, foot=""), "on.pdf")
+                assert len(asked) == n + 1 and pl.library_row(on["file"])["authors"] == "Mira Okonkwo; Tao Lindqvist", (len(asked) - n, pl.library_row(on["file"])["authors"])
+                ai.chat = answer(dict(agree, authors=agree["authors"][:1]))             # the two readers disagree: not sure, so no author is filed unseen
+                no = importer.add_pdf(workshop(unsure, title="Added Without The Dialog And The Readers Disagree", bold=False, foot=""), "no.pdf")
+                assert pl.library_row(no["file"])["authors"] == "" and "check the title" in no["note"], pl.library_row(no["file"])["authors"]
                 fo.delete(fid)
             finally:
                 importer.crossref_meta, importer.crossref_search = saved
