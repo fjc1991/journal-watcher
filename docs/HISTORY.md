@@ -1154,6 +1154,30 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Tests.** Offline: `t_pdfmeta`, with made-up papers in several layouts, the AI as a fake, the route through the dialog, and the details module. Eighteen single-rule mutations of the first version, all caught. After the review, its scenarios were added to the same check; with any one of the five fixed modules put back to its version before the review the check fails. Browser: 16 checks (the drop dialog, More details, one paper's conference for the others, Edit details, Read details from the PDFs, the AI and its switch). Not tested in a browser: picking another Crossref record redraws the author lines. Not tested at all: a real AI call (none was made), a scanned first page, right-to-left scripts.
 
+### Item 51. Folders inside folders, and whole folders dropped from the desktop (2026-11-25)
+
+**Asked.** The author keeps a conference's papers in one folder per session ("Session 1B - GenAI, Work & Labor Markets", 27 of them) and wanted to make a master folder, drag all of those folders onto it, and be asked: add them as sub-folders (each with its papers), or put every PDF straight into the master. Answers to the questions put: a master folder lists the folders inside it and then every paper in all of them; the folder tools on a master cover the papers of the folders inside it; folders nest to any depth; the name of the folder a paper came from is kept as the paper's "Session" either way; the `_filename_map.csv` beside the folders is not used.
+
+**How it was built.** A mapping pass first: four readers listed every place that uses a folder (188 sites) and a critic named what they had missed. That map decided the design, and is why several things were done that a first sketch would not have had.
+
+**The design.**
+- *A folder still is a list file, and the files stay side by side* (`Papers/_folders/<id>.json`); a folder inside another carries the other's id as `parent`. Nothing that knows the directory (sync, backup, the library cache) had to learn a new layout.
+- *What a folder owns and what it shows are two things.* It owns the papers in its file; it shows those and the papers of every folder under it, each once. Everything that puts a paper in or takes it out (the tick boxes, a drop, Undo, the undo of a deletion) works on what a folder owns; everything that reads a folder (its page, its count, the search filter, exports, every tool, through `server.folder_rows`) works on what it shows.
+- *A name is taken once per place*, not once in the library: a conference drop makes many folders called alike under different masters.
+- *The id of a folder inside another is made from its name and its parent*, the same on every computer. With the name alone, two computers making "Session 1" under two masters would write one file, and the sync would join two folders into one.
+- *A damaged tree hides nothing.* A parent that is not there, or a loop of parents (two computers each moved one folder into the other, with no conflict for the sync to see), is read as "at the top" for the folders on the loop only.
+- *Dropped folders.* The browser hands over folders only inside the drop event, so their entries are taken there and walked afterwards. Each PDF keeps the chain of folders it was in. The dialog that checks the details asks the one question (keep the folders, or not). Filing is one request for the whole tree, and Undo is its mirror.
+
+**Decisions that are not obvious.**
+- One folder around everything: on the Folders page (where the dialog asks for the place) its name is offered for the new folder; dropped onto a folder it stays a folder inside that one. A folder that holds papers and a folder is left whole.
+- A paper already in the library is not filed again, so its details were never written: it gets its session in a second step, unless it has one.
+- Deleting from the pages takes the folders inside with it and says how many. Elsewhere (the server's default) they move up one level, and one that would land beside its namesake gets the deleted folder's name after its own.
+- No page for moving an existing folder into another yet: the server can (`move`), the pages cannot.
+
+**Review.** Four reviewers (the tree; the server routes; the pages; the drop), each finding checked by a second reader told to refute it: 24 findings, 20 confirmed, 4 refuted. All 20 are fixed. The ones that mattered: exports of two folders with one name wrote over each other; a session folder that held papers and one folder inside was taken apart on the Folders page, its own papers losing their session; one folder around the others, dropped onto a folder, lost its name; the pickers showed a folder under the wrong parent when another top folder's name began like it. A fault the first browser run found by itself: a folder opened the moment a drop had made it said "Folder not found", because the page's list was still being refreshed.
+
+**Tests.** Offline: `t_subfolders` (the tree, names, moving, a damaged tree, deleting, renaming). Fourteen single-rule mutations: thirteen caught, the fourteenth after the test was made to use a parent that is a list. After the review the check fails with `folders.py` put back to its version before it. Browser: 19 checks (a dropped tree, both answers, Undo, the master's page, a folder inside it, the tools' reach, exports, the Folders page, one folder around others in each place, deleting). Not tested: a real folder dragged from Finder (a test cannot make one: the tests enter at `DropImport.handleItems`, after the walk), the Mac app's web view, the join of two copies of a folder file after a sync conflict, an author's folder beside a folder of the same name inside another. "A folder from my computer…" in a folder's Add menu is there for where dragging a folder does not work.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
