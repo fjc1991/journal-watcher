@@ -76,7 +76,10 @@ def from_crossref(meta):
 # conference footers that name the conference (AIS conferences have no Crossref DOI): "Forty-Fourth International Conference on Information Systems, Hyderabad 2023"
 _CONF_NAMES = [(re.compile(r"international conference on information systems", re.I), "ICIS"), (re.compile(r"hawaii international conference on system sciences", re.I), "HICSS"),
                (re.compile(r"european conference on information systems", re.I), "ECIS"), (re.compile(r"pacific asia conference on information systems", re.I), "PACIS"),
-               (re.compile(r"americas conference on information systems", re.I), "AMCIS"), (re.compile(r"\bCHI Conference on Human Factors in Computing Systems", re.I), "CHI")]
+               (re.compile(r"americas conference on information systems", re.I), "AMCIS"), (re.compile(r"\bCHI Conference on Human Factors in Computing Systems", re.I), "CHI"),
+               (re.compile(r"workshop on information technolog(y|ies) and systems", re.I), "WITS"), (re.compile(r"workshop on information systems and economics", re.I), "WISE"),
+               (re.compile(r"conference on information systems and technology", re.I), "CIST"), (re.compile(r"statistical challenges in e(lectronic)?-?\s?commerce research", re.I), "SCECR"),
+               (re.compile(r"design science research in information systems and technology", re.I), "DESRIST"), (re.compile(r"china summer workshop on information management", re.I), "CSWIM")]
 
 
 def from_text(text):
