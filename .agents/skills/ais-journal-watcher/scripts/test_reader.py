@@ -5743,6 +5743,218 @@ print("OK")
                 pass
         sid = items[0]["id"]
         assert sm.rename(sid, "Platforms")[0]["name"] == "Platforms" and sm.delete(sid) == [] and not os.path.exists(sm.PATH)
+    def t_pdfmeta():
+        """A PDF's own first page: who wrote it (with the affiliation, place and address under each name), the conference in its footer, the kind of submission, abstract
+        and keywords; the AI as a second reader that cannot add what the page does not print; and the details kept beside the PDF, corrected later without touching
+        what names the paper in the index."""
+        import csv, pymupdf, pdfmeta, details as dt, kinds as kn, prefs as pf, pipeline as pl, folders as fo
+        BODY = "We study how workers and firms adjust when a new general purpose technology arrives in the workplace and changes which skills are asked for. " * 6
+
+        def page(doc, foot=""):
+            pg = doc.new_page(width=612, height=792)
+            if foot:
+                pg.insert_text((72, 716), foot, fontsize=9, fontname="heit")
+            return pg
+
+        def pad(doc, foot=""):                                   # (a PDF under 40 kB is not taken for a complete one; the second page repeats the footer)
+            pg = page(doc, foot); pg.insert_textbox(pymupdf.Rect(72, 80, 540, 700), BODY * 3, fontsize=11)
+            for _ in range(40):
+                doc.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 780), "\n".join(os.urandom(20).hex() for _ in range(60)), fontsize=8)
+            data = doc.tobytes(); doc.close(); return data
+
+        def workshop(people, title="Skill Demand After the Arrival of Writing Machines", foot="Workshop on Information Technology and Systems, 2026", kind_line="Regular Paper", bold=True):
+            d = pymupdf.open(); d.set_metadata({"author": "Template Maker", "title": ""}); pg = page(d, foot)
+            pg.insert_text((108, 96), title, fontsize=20, fontname="hebo")
+            if kind_line:
+                pg.insert_text((270, 138), kind_line, fontsize=12, fontname="heit")
+            for i, (name, aff, place, mail) in enumerate(people):
+                x, y = (130, 350)[i % 2], 172 + 70 * (i // 2)
+                pg.insert_text((x, y), name, fontsize=12, fontname="hebo" if bold else "helv")
+                for k, t in enumerate((aff, place, mail)):
+                    if t:
+                        pg.insert_text((x - 10, y + 14 * (k + 1)), t, fontsize=12, fontname="helv")
+            pg.insert_text((72, 330), "Introduction", fontsize=13, fontname="hebo")
+            pg.insert_textbox(pymupdf.Rect(72, 345, 540, 700), BODY, fontsize=12)
+            return pad(d, foot)
+        four = [("Mira Okonkwo", "University of Northfield", "Northfield, MN, USA", "okon0180@northfield.example"), ("Tao Lindqvist", "Lakeside Institute of Technology", "Austin, TX, USA", "Tao.Lindqvist@lakeside.example"),
+                ("Ines Varga", "Lakeside Institute of Technology", "Austin, TX, USA", "ivarga_liz0119@lakeside.example"), ("Jonas de Almeida", "University of Northfield", "Northfield, MN, USA", "jalmeida@northfield.example")]
+        w = workshop(four)
+        r = pdfmeta.read(w)
+        assert r["title"] == "Skill Demand After the Arrival of Writing Machines", r["title"]
+        assert [a["name"] for a in r["authors"]] == [p[0] for p in four], [a["name"] for a in r["authors"]]           # (in reading order: along each row of names)
+        assert [(a["affiliation"], a["place"], a["email"]) for a in r["authors"]] == [p[1:] for p in four], r["authors"]
+        assert (r["kind"], r["venue"], r["conference"], r["year"], r["paper_type"]) == ("conference", "WITS 2026", "Workshop on Information Technology and Systems", "2026", "Regular Paper"), r
+        assert r["sure"] == "high" and r["by"] == "layout" and "Template Maker" not in json.dumps(r), "the file's own author field (the template's maker) is not an author"
+        assert not pdfmeta.needs_ai(r)
+        # a conference this app has no short name for: its name as printed, with the year; a conference only mentioned in a footnote is not the venue
+        r2 = pdfmeta.read(workshop(four[:2], foot="Proceedings of the 12th Symposium on Applied Platform Studies (SAPS 2025), Lisbon"))
+        assert (r2["kind"], r2["venue"], r2["year"]) == ("conference", "Symposium on Applied Platform Studies 2025", "2025"), (r2["venue"], r2["year"])
+        r3 = pdfmeta.read(workshop(four[:2], foot="An earlier version was presented at the Workshop on Information Technology and Systems, 2024"))
+        assert r3["kind"] is None and r3["venue"] == "" and [a["name"] for a in r3["authors"]] == [four[0][0], four[1][0]], r3
+        # names in the same face as what stands under them: a place is not a person, and the reading is sure only where an address or an affiliation backs each name
+        r4 = pdfmeta.read(workshop([("Mira Okonkwo", "University of Northfield", "New York", ""), ("Tao Lindqvist", "", "Hong Kong", "")], bold=False, foot=""))
+        assert [a["name"] for a in r4["authors"]] == ["Mira Okonkwo", "Tao Lindqvist"] and r4["authors"][0]["place"] == "New York" and r4["sure"] == "check" and pdfmeta.needs_ai(r4), r4
+
+        def inline(names, lines, abstract=True, date="March 3, 2024"):
+            d = pymupdf.open(); pg = page(d)
+            pg.insert_textbox(pymupdf.Rect(72, 70, 540, 130), "Machines That Write and the Market for Skills", fontsize=18, fontname="hebo", align=1)
+            pg.insert_textbox(pymupdf.Rect(72, 138, 540, 162), names, fontsize=12, align=1)
+            y = 165
+            for t in lines:
+                pg.insert_textbox(pymupdf.Rect(72, y, 540, y + 20), t, fontsize=11, align=1); y += 18
+            if date:
+                pg.insert_textbox(pymupdf.Rect(72, y + 6, 540, y + 28), date, fontsize=11, align=1)
+            if abstract:
+                pg.insert_textbox(pymupdf.Rect(72, 284, 540, 308), "Abstract", fontsize=12, fontname="hebo", align=1)
+                pg.insert_textbox(pymupdf.Rect(90, 310, 522, 420), "We measure how the demand for skills changed after firms took up machines that write. Using postings from many firms we find that requests for "
+                                  "editing and judgement rose while requests for drafting fell, and that the change is larger in firms that adopted early.", fontsize=11)
+                pg.insert_textbox(pymupdf.Rect(90, 425, 522, 460), "Keywords: skill demand; generative AI; job postings; technology adoption", fontsize=11)
+                pg.insert_text((72, 480), "1 Introduction", fontsize=13, fontname="hebo")
+                pg.insert_textbox(pymupdf.Rect(72, 495, 540, 700), BODY, fontsize=11)
+            else:
+                pg.insert_textbox(pymupdf.Rect(72, 300, 540, 700), BODY, fontsize=11)
+            return pad(d)
+        m = pdfmeta.read(inline("Mira Okonkwo1, Tao Lindqvist1,2, and Ines Varga3", ["1 University of Northfield", "2Lakeside Institute of Technology", "3 Harbor College", "{okonkwo, lindqvist}@northfield.example, ines@harbor.example"]))
+        assert [a["name"] for a in m["authors"]] == ["Mira Okonkwo", "Tao Lindqvist", "Ines Varga"], m["authors"]
+        assert m["authors"][0]["affiliation"] == "University of Northfield" and m["authors"][1]["affiliation"] == "University of Northfield; Lakeside Institute of Technology" and m["authors"][2]["affiliation"] == "Harbor College", m["authors"]
+        assert [a["email"] for a in m["authors"]] == ["okonkwo@northfield.example", "lindqvist@northfield.example", "ines@harbor.example"], m["authors"]      # (each address goes to the name it fits)
+        assert m["abstract"].startswith("We measure how the demand for skills") and m["abstract"].endswith("adopted early.") and "Keywords" not in m["abstract"], m["abstract"]
+        assert m["keywords"] == ["skill demand", "generative AI", "job postings", "technology adoption"] and m["year"] == "2024" and m["sure"] == "high", (m["keywords"], m["year"], m["sure"])
+        none = pdfmeta.read(inline("", [], abstract=False, date=""))
+        assert none["authors"] == [] and none["sure"] == "" and none["title"].startswith("Machines That Write") and pdfmeta.needs_ai(none), none
+        assert pdfmeta.read(b"not a pdf")["title"] == "" and not pdfmeta.needs_ai(pdfmeta.read(b"not a pdf"))
+        for good in ("Daniel A. McFarland", "Jean-Luc van der Berg", "Łukasz Kaiser", "MIRA OKONKWO"):
+            assert pdfmeta.is_name(good), good
+        for bad in ("New York", "Hong Kong", "Regular Paper", "University of Northfield", "Working Paper Series", "Mira", "Mira Okonkwo 2024", "The Market for Skills"):
+            assert not pdfmeta.is_name(bad), bad
+        assert pdfmeta.email_fits("okon0180@x.example", "Mira Okonkwo") and pdfmeta.email_fits("jchancf@x.example", "Jason Chan") and not pdfmeta.email_fits("info@x.example", "Mira Okonkwo")
+        # what is kept: only the known fields, of the right shape
+        c = pdfmeta.clean({"authors": [{"name": " Mira  Okonkwo ", "affiliation": "U", "email": "not an address"}, {"name": ""}, "Tao Lindqvist", 7], "keywords": "a; b;; a", "abstract": " x ", "note": "n", "pages": 12,
+                           "volume": ["x"], "evil": "<script>"})
+        assert c == {"authors": [{"name": "Mira Okonkwo", "affiliation": "U", "place": "", "email": ""}, {"name": "Tao Lindqvist", "affiliation": "", "place": "", "email": ""}], "keywords": ["a", "b"], "abstract": "x", "note": "n", "pages": "12"}, c
+        assert pdfmeta.clean({"authors": ["Tao Lindqvist"]}) == {} and pdfmeta.clean({"authors": ["Tao Lindqvist"]}, keep_names=True)["authors"][0]["name"] == "Tao Lindqvist"
+
+        # ---- the AI as a second reader: one call through ai.chat, and only what the page prints is kept
+        class R:
+            def __init__(self, text):
+                self.text, self.cost, self.provider, self.model = text, 0.0021, "fake", "m1"
+        asked = []
+        keep_chat = ai.chat
+
+        def answer(obj):
+            def chat(feature, messages, system=None, schema=None, max_tokens=4000, **kw):
+                asked.append((feature, messages[0]["content"], schema))
+                if isinstance(obj, Exception):
+                    raise obj
+                return R(obj if isinstance(obj, str) else json.dumps(obj))
+            return chat
+        plain = inline("by mira okonkwo & tao lindqvist (northfield)", [], abstract=False, date="")        # (no capitals: the rules read no name)
+        got0 = pdfmeta.read(plain)
+        assert got0["authors"] == [] and pdfmeta.needs_ai(got0)
+        try:
+            ai.chat = answer({"title": "Machines That Write and the Market for Skills", "conference": "Workshop on Information Technology and Systems", "year": "2026", "paper_type": "", "keywords": ["invented"],
+                              "authors": [{"name": "Mira Okonkwo", "affiliation": "Northfield", "place": "Paris", "email": "mira@invented.example"},
+                                          {"name": "Ada Lovelace", "affiliation": "", "place": "", "email": ""}, {"name": "tao lindqvist", "affiliation": "", "place": "", "email": ""}]})
+            g, note = pdfmeta.with_ai(plain, got0)
+            assert asked[-1][0] == "details" and "mira okonkwo" in asked[-1][1] and asked[-1][2] == pdfmeta.AI_SCHEMA and len(asked) == 1
+            assert [a["name"] for a in g["authors"]] == ["Mira Okonkwo", "tao lindqvist"], "an author the page does not print was kept: %s" % g["authors"]
+            assert g["authors"][0] == {"name": "Mira Okonkwo", "affiliation": "Northfield", "place": "", "email": ""}, g["authors"][0]       # (a place and an address the page does not print are dropped)
+            assert g["sure"] == "check" and g["by"] == "ai" and g["venue"] == "" and g["keywords"] == [] and g["ai"]["cost"] == 0.0021 and note == "", (g["sure"], g["by"], g["venue"], g["keywords"], note)
+            # both readers find the same people: sure; the AI fills what the rules left empty, never the other way
+            ai.chat = answer({"title": "", "conference": "", "year": "", "paper_type": "", "keywords": [], "authors": [{"name": "Mira Okonkwo", "affiliation": "University of Northfield", "place": "New York", "email": ""},
+                                                                                                                 {"name": "Tao Lindqvist", "affiliation": "Somewhere Else", "place": "Hong Kong", "email": ""}]})
+            g2, _ = pdfmeta.with_ai(b"", r4)
+            assert g2["sure"] == "high" and g2["by"] == "layout+ai" and g2["authors"][1] == {"name": "Tao Lindqvist", "affiliation": "", "place": "Hong Kong", "email": ""}, g2["authors"]
+            # an answer that is not JSON, and an AI that may not be asked (budget, local-only, no key): the rules' reading stands, with the reason
+            ai.chat = answer("I think the authors are…")
+            g3, note3 = pdfmeta.with_ai(plain, got0)
+            assert g3["authors"] == [] and "could not be read" in note3
+            ai.chat = answer(ai.Blocked("This month’s AI budget ($1.00) is used up."))
+            g4, note4 = pdfmeta.with_ai(plain, got0)
+            assert g4["authors"] == [] and "budget" in note4
+
+            # ---- through the dialog's route: read, shown, filed with its details, corrected later
+            saved = (importer.crossref_meta, importer.crossref_search)
+            importer.crossref_meta, importer.crossref_search = (lambda d: None), (lambda t, rows=4, strict=False: [])
+            keep_set = pf.get_settings().get("details_ai")
+            keep_pl = (pl.PAPERS, pl.ROOT); pl.PAPERS, pl.ROOT = dl.PAPERS, dl.ROOT          # (the library is listed from where the importer files)
+            try:
+                n = len(asked)
+                a = importer.analyse_pdf(w, "013-skill-demand.pdf")
+                d = a["pdf"]["details"]
+                assert len(asked) == n, "the AI was asked although the rules were sure"
+                assert a["candidates"] == [] and a["pdf"]["title"].startswith("Skill Demand After") and a["pdf"]["kind"] == "conference" and a["pdf"]["venue"] == "WITS 2026" and a["kind"] == "conference", a["pdf"]
+                assert d["authors"] == [p[0] for p in four] and d["people"][1]["email"] == four[1][3] and d["year"] == "2026" and d["paper_type"] == "Regular Paper" and d["sure"] == "high" and "page_text" not in d, d
+                ai.chat = answer({"title": "", "conference": "", "year": "", "paper_type": "", "keywords": [], "authors": [{"name": "mira okonkwo", "affiliation": "", "place": "", "email": ""}]})
+                b = importer.analyse_pdf(plain, "p.pdf")
+                assert len(asked) == n + 1 and b["pdf"]["details"]["authors"] == ["mira okonkwo"] and b["pdf"]["details"]["by"] == "ai" and b["pdf"]["details"]["ai"]["model"] == "m1", b["pdf"]["details"]
+                importer.discard([b["token"]])
+                b2 = importer.analyse_pdf(plain, "p.pdf", use_ai=False)
+                pf.save_settings({"details_ai": False})
+                b3 = importer.analyse_pdf(plain, "p.pdf")
+                assert len(asked) == n + 1 and b2["pdf"]["details"]["authors"] == [] == b3["pdf"]["details"]["authors"], "the AI was asked although it is switched off"
+                importer.discard([b2["token"], b3["token"]])
+                res = importer.confirm(a["token"], {"title": a["pdf"]["title"], "authors": "; ".join(d["authors"]), "journal": "WITS 2026", "pub_date": "2026", "kind": "conference", "source": "hand",
+                                                    "details": {"authors": d["people"], "conference": d["conference"], "paper_type": d["paper_type"], "session": "Session 1B - Work", "note": "discussant: me", "bogus": 1}})
+                pdf_path = os.path.join(TMP, res["file"])
+                side = kn.read_sidecar(pdf_path)
+                assert res["file"].startswith("Papers/2026-01/WITS 2026/") and side["kind"] == "conference", (res, side)
+                assert side["details"] == {"authors": [dict(zip(("name", "affiliation", "place", "email"), p)) for p in four], "conference": "Workshop on Information Technology and Systems", "paper_type": "Regular Paper",
+                                           "session": "Session 1B - Work", "note": "discussant: me"}, side["details"]
+                row = pl.library_row(res["file"])
+                key = row["key"]
+                fid = fo.create("Details test")["id"]; fo.add(fid, [key])
+                assert row["authors"] == "; ".join(p[0] for p in four) and row["session"] == "Session 1B - Work" and row["kind"] == "conference"
+                g = dt.get(res["file"])
+                assert g["people"][3]["email"] == four[3][3] and g["details"]["note"] == "discussant: me" and g["index"]["title"] == g["title"], g
+                # changing the paper's type keeps its details (only a dict replaces them)
+                kn.write_sidecar(pdf_path, "other", "WITS 2026", "Report", key)
+                assert kn.read_sidecar(pdf_path)["details"]["session"] == "Session 1B - Work" and kn.read_sidecar(pdf_path)["label"] == "Report"
+                kn.write_sidecar(pdf_path, "conference", "WITS 2026", "", key)
+                # a corrected title and author list are shown everywhere, while the index (which names the paper for folders and reading status) stays as it was
+                idx_before = [r_ for r_ in csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))) if r_["file"] == res["file"]][0]
+                g = dt.save(res["file"], {"title": "Skill Demand after the Arrival of Writing Machines: Evidence", "authors": [{"name": "Mira Okonkwo", "affiliation": "University of Northfield"}, {"name": "Tao Lindqvist"}],
+                                          "keywords": "skills; machines", "abstract": "A corrected abstract."})
+                row = pl.library_row(res["file"])
+                idx_after = [r_ for r_ in csv.DictReader(open(os.path.join(PAPERS, "_index.csv"))) if r_["file"] == res["file"]][0]
+                assert row["title"].endswith(": Evidence") and row["authors"] == "Mira Okonkwo; Tao Lindqvist" and row["key"] == key and fid in row["folders"] and idx_after == idx_before, (row["title"], row["authors"], row["folders"])
+                assert g["details"] == {"keywords": ["skills", "machines"], "abstract": "A corrected abstract.", "conference": "Workshop on Information Technology and Systems", "paper_type": "Regular Paper",
+                                        "session": "Session 1B - Work", "note": "discussant: me"} and g["authors"] == ["Mira Okonkwo", "Tao Lindqvist"], g       # (what the dialog did not send stays)
+                assert kn.read_sidecar(pdf_path)["kind"] == "conference", "saving details changed the paper's type"
+                g = dt.save(res["file"], {"doi": "https://doi.org/10.5555/Late.DOI", "note": ""})
+                assert pl.library_row(res["file"])["doi"] == "10.5555/Late.DOI" and "note" not in g["details"] and pl.library_row(res["file"])["key"] == key
+                for bad, words in (({"title": "  "}, "title is empty"), ({"doi": "not a doi"}, "DOI")):
+                    try:
+                        dt.save(res["file"], bad); raise AssertionError("accepted %r" % bad)
+                    except ValueError as e:
+                        assert words in str(e), e
+                a2 = importer.analyse_pdf(workshop(four[:2], title="Another Study That Was Filed With Its DOI"), "d.pdf", use_ai=False)
+                with_doi = importer.confirm(a2["token"], {"title": a2["pdf"]["title"], "authors": "Mira Okonkwo", "journal": "WITS 2026", "pub_date": "2026", "kind": "conference", "doi": "10.5555/filed", "source": "hand"})
+                try:
+                    dt.save(with_doi["file"], {"doi": "10.5555/another"}); raise AssertionError("the DOI a paper is filed under was changed")
+                except ValueError as e:
+                    assert "cannot be changed" in str(e), e
+                try:
+                    dt.get("Papers/nowhere/x.pdf"); raise AssertionError("a paper that is not there has details")
+                except ValueError:
+                    pass
+                # reading the PDF again proposes; it writes nothing
+                side_before = open(kn.sidecar_path(pdf_path)).read()
+                n = len(asked)
+                ra = dt.read_again(res["file"])
+                assert ra["found"]["authors"] == [p[0] for p in four] and "authors" in ra["changes"] and "title" in ra["changes"] and "conference" not in ra["changes"] and len(asked) == n, ra["changes"]
+                assert open(kn.sidecar_path(pdf_path)).read() == side_before
+                fo.delete(fid)
+            finally:
+                importer.crossref_meta, importer.crossref_search = saved
+                pf.save_settings({"details_ai": bool(keep_set)})
+                pl.PAPERS, pl.ROOT = keep_pl
+        finally:
+            ai.chat = keep_chat
+    check("a paper's details from its own first page: the authors in reading order with affiliation, place and address, the conference and year in the footer (not one only mentioned), the kind of submission, abstract and keywords; "
+          "the file's own author field is not used; the AI is asked only when the rules are not sure, only when it is switched on, and cannot add what the page does not print; details are kept beside the PDF, survive a change "
+          "of type, and a corrected title or author list is shown without rewriting what names the paper in the index", t_pdfmeta)
+
     def t_watchlist():
         """Settings → Journals & interests: the shipped list, adding what your list lacks without touching yours, the two switches, and topics checked before they are written."""
         import watchlist as wl, re as _re

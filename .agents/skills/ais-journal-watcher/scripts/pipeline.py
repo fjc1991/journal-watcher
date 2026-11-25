@@ -336,6 +336,9 @@ def _lib_row(b, state, member, dirs):
         r["book"] = copy.deepcopy(_lib_file(stem + ".book.json", lambda p: dl.load_json(p, {}), {})) if has(".book.json") else {}
     side = _lib_file(stem + ".paper.json", lambda p: kinds.read_sidecar(pdf, key, _LIB_UNREAD), {}, key) if has(".paper.json") else {}
     r["kind"], r["kind_label"] = kinds.of_row(r, side)     # journal article, preprint, conference paper, other (kinds.py)
+    if side.get("details"):                      # your corrections of the title, the authors or a missing DOI are shown in place of the index's (details.py says why)
+        import details as _details
+        _details.shown(r, side["details"])
     r["year"] = year
     return r
 

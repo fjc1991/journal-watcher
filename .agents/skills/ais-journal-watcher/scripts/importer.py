@@ -23,6 +23,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import download as dl  # noqa: E402
 import kinds  # noqa: E402
+import pdfmeta  # noqa: E402
+import prefs  # noqa: E402
 import fetch_new as fx  # noqa: E402
 import identity  # noqa: E402
 
@@ -238,11 +240,14 @@ def add_pdf(data, filename="paper.pdf", doi=""):
         p, note = _paper(meta, kind), "added by you (metadata from Crossref)"
         return _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), meta.get("type") or ""))
     else:
-        title = title or re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(filename))[0]).strip() or "Untitled paper"
-        p = {"title": title, "authors": [], "doi": doi, "url": "https://doi.org/" + doi if doi else "", "journal": "Other", "abbr": "OTH",
-             "pub_date": datetime.now().strftime("%Y-%m-%d"), "topics": []}
-        note = "added by you (no metadata found: check the title)"
-    return _file(p, data, note)
+        got = pdfmeta.read(data)                           # no record anywhere: what the first page itself prints (the rules only; nothing is sent to an AI here)
+        title = title or got["title"] or re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(filename))[0]).strip() or "Untitled paper"
+        names = [a["name"] for a in got["authors"]] if got["sure"] == "high" else []
+        kind = got["kind"] or "journal"
+        p = _paper({"title": title, "authors": names, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "container": got["venue"], "issn": [], "pub_date": got["year"]}, kind)
+        note = "added by you (details read from the PDF’s first page: please check)" if names else "added by you (no metadata found: check the title)"
+        det = pdfmeta.clean(dict(got, authors=got["authors"] if names else []))
+        return _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], "", dl.index_key(p), "", det))
 
 
 def add_doi(doi):
@@ -416,8 +421,19 @@ def _read(data):
     kind, venue, label = kinds.from_text(first) if first else (None, "", "")
     if kind is None and kinds.thesis_in(r["text"][:6000]):
         kind, label = "other", "Thesis"
-    return {"dois": dois[:4], "title": re.sub(r"\s+", " ", title or "").strip(), "pages": r["pages_read"], "scan": bool(r["pages_read"] and r["scans"] * 2 >= r["pages_read"] and r["words"] < 60),
-            "kind": kind, "venue": venue, "label": label}
+    got = pdfmeta.read(data)                        # what the first page prints: the authors with their affiliations, the conference in the footer…
+    if kind is None and got["kind"]:
+        kind, venue = got["kind"], got["venue"]
+    return {"dois": dois[:4], "title": re.sub(r"\s+", " ", title or got["title"] or "").strip(), "pages": r["pages_read"], "scan": bool(r["pages_read"] and r["scans"] * 2 >= r["pages_read"] and r["words"] < 60),
+            "kind": kind, "venue": venue, "label": label, "got": got}
+
+
+def page_details(got, note=""):
+    """What the review dialog is told of a first page's reading (pdfmeta.read / with_ai): the names for the authors box, the people with what stands under each name,
+    and how it was read. The page's text itself is not sent."""
+    return {"authors": [a["name"] for a in got.get("authors") or []], "people": got.get("authors") or [], "abstract": got.get("abstract") or "", "keywords": got.get("keywords") or [],
+            "conference": got.get("conference") or "", "year": got.get("year") or "", "paper_type": got.get("paper_type") or "", "sure": got.get("sure") or "", "by": got.get("by") or "",
+            "ai": got.get("ai") or None, "ai_note": note}
 
 
 def _candidate(meta, source, data, printed):
@@ -436,13 +452,14 @@ def _strong(c):
     return c["verdict"] == "match" and (c["authors_found"] or c["doi_printed"])
 
 
-def analyse_pdf(data, filename="paper.pdf"):
+def analyse_pdf(data, filename="paper.pdf", use_ai=None):
     """Look at a PDF and stage it; files nothing. Returns {"token", "name", "pdf": {title, dois, pages, scan}, "candidates": [up to 3 records, best first], "pick": index of the
     best one or -1, "confidence": "high" (the title, and the authors if known, are on the PDF's first pages) | "check" | "none", "existing": path of the paper if you already have it}."""
     if not dl.is_pdf(data):
         raise ValueError("That doesn’t look like a complete PDF.")
     info = _read(data)
     guess = info["title"] or re.sub(r"\s*\(\d+\)$", "", re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(filename))[0])).strip())      # (the "(3)" a browser adds to a second download is not part of the title)
+    guess_from_pdf = bool(info["title"])
     cands, seen = [], set()
 
     def add(meta, source):
@@ -460,6 +477,18 @@ def analyse_pdf(data, filename="paper.pdf"):
             add(m, "title")
     cands.sort(key=lambda c: (c["verdict"] == "match", c["verdict"] != "mismatch", c["doi_printed"], c["title_score"]), reverse=True)
     cands = cands[:3]
+    got, ai_note = info["got"], ""
+    if use_ai is None:
+        use_ai = bool(prefs.get_settings().get("details_ai"))
+    if use_ai and not any(_strong(c) for c in cands) and pdfmeta.needs_ai(got):      # no record the PDF backs up, and the rules are not sure who wrote it: the AI reads the first page
+        try:
+            got, ai_note = pdfmeta.with_ai(data, got)
+        except ImportError:
+            ai_note = "The AI backend isn’t installed."
+        if info["kind"] is None and got.get("kind"):
+            info["kind"], info["venue"] = got["kind"], got["venue"]
+        if not guess_from_pdf and got.get("title"):
+            guess = got["title"]
     pick = 0 if cands and cands[0]["verdict"] != "mismatch" else -1
     hint = ""
     if pick == 0 and info["kind"] == "preprint" and cands[0]["kind"] == "journal" and cands[0]["source"] == "title" and not cands[0]["doi_printed"]:
@@ -477,7 +506,8 @@ def analyse_pdf(data, filename="paper.pdf"):
             hint = "The PDF says it is %s." % ("an %s preprint" % info["venue"] if info["kind"] == "preprint" and info["venue"] in ("arXiv",) else "a %s working paper" % info["venue"].replace(" Working Papers", "") if info["kind"] == "preprint" and info["venue"] else
                                              "a preprint" if info["kind"] == "preprint" else "a conference paper" if info["kind"] == "conference" else "a " + (info["label"] or "report").lower())
     ex = _existing({"doi": top.get("doi"), "title": top.get("title")})
-    return {"token": _stage(data), "name": filename, "pdf": {"title": guess, "dois": info["dois"], "pages": info["pages"], "scan": info["scan"], "kind": info["kind"], "venue": info["venue"], "label": info["label"]},
+    return {"token": _stage(data), "name": filename, "pdf": {"title": guess, "dois": info["dois"], "pages": info["pages"], "scan": info["scan"], "kind": info["kind"], "venue": info["venue"], "label": info["label"],
+                                                             "details": page_details(got, ai_note)},
             "candidates": cands, "pick": pick, "kind": kind or "journal", "kind_hint": hint,
             "confidence": "none" if not cands else "high" if pick == 0 and _strong(cands[0]) else "check", "existing": ex or ""}
 
@@ -523,6 +553,7 @@ def confirm(token, fields):
     issn = [str(x)[:12] for x in (f.get("issn") or []) if isinstance(x, str)][:4] if isinstance(f.get("issn"), list) else []
     meta = {"title": title, "authors": authors, "doi": doi, "url": "https://doi.org/" + doi if doi else "", "container": _clean_text(f.get("journal"), 120), "issn": issn, "pub_date": date}
     label = f.get("label") if f.get("label") in kinds.LABELS and kind == "other" else ""
+    det = pdfmeta.clean(f.get("details"))               # affiliations and e-mails, abstract, keywords, the conference in full, your note (kept beside the PDF)
     note = {"crossref": "added by you (metadata from Crossref, confirmed by you)", "edited": "added by you (metadata from Crossref, edited by you)"}.get(f.get("source"), "added by you (details typed by you)")
     claimed = path + ".claimed"
     try:
@@ -533,7 +564,7 @@ def confirm(token, fields):
         with open(claimed, "rb") as fh:
             data = fh.read()
         p = _paper(meta, kind)
-        res = _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), f.get("type") or ""))
+        res = _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), f.get("type") or "", det))
     except Exception:
         try:
             os.replace(claimed, path)                    # filing failed: the PDF waits again

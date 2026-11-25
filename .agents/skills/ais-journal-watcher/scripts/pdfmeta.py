@@ -39,7 +39,6 @@ journal review article study evidence introduction keywords university departmen
 comments welcome forthcoming accepted revised received published copyright rights reserved all email e-mail corresponding author authors affiliation
 january february march april may june july august september october november december""".split())
 MARK = re.compile(r"^[\s,;]*(?:\d{1,2}|[*†‡§¶#∗˚]+|[a-f])(?:\s*[,;]?\s*(?:\d{1,2}|[*†‡§¶#∗˚]+|[a-f]))*[\s,;]*$")
-TRAILING_MARK = re.compile(r"(?<=[^\W\d_])\s*(?:\d{1,2}(?:\s*,\s*\d{1,2})*|[*†‡§¶#∗]+)+\s*$")
 LEADING_MARK = re.compile(r"^\s*(\d{1,2}|[*†‡§¶#∗]|[a-f](?=\s))\s*")
 YEAR = re.compile(r"\b(19[5-9]\d|20\d{2})\b")
 TOLD = re.compile(r"presented|earlier version|previous version|based on|accepted|forthcoming|appeared", re.I)
@@ -153,7 +152,7 @@ def _name_tokens(s):
 def is_name(s):
     """Whether these words read as one person's name: two to five words, each beginning with a capital (or a particle such as "van", or an initial), none of them a
     word that belongs to a place, an institution or the furniture of a title page."""
-    s = _sp(TRAILING_MARK.sub("", s)).strip(" ,;")
+    s = _sp(s).strip(" ,;")
     if not 3 <= len(s) <= 60 or re.search(r"[\d@:/\\|()\[\]{}!?]|\.{2}", s):
         return False
     toks = _name_tokens(s)
@@ -191,13 +190,11 @@ def _split_names(line):
         return at
     for at, _, mk in sorted(((back(at), i, mk) for i, (at, mk) in enumerate(line.sups)), reverse=True):      # the raised marks go back to where they stood, fenced
         text = text[:at] + "\x01" + re.sub(r"[,;]", "\x07", mk) + "\x02" + text[at:]
-    found = []
 
     def fence(m):
-        if m.group(1):
-            found.append(1)
-            return " \x03" + m.group(1) + "\x04 , "
-        return " \x05" + m.group(2) + "\x06"
+        if m.group(1):                                   # (a comma between two marks is not one between two names)
+            return " \x03" + re.sub(r"[,;]", "\x07", m.group(1)) + "\x04 , "
+        return " \x05" + re.sub(r"[,;]", "\x07", m.group(2)) + "\x06"
     text = INLINE_MARKS.sub(fence, text)
     pieces, pos = [], 0
     for m in re.finditer(r"\s*(?:,\s*(?:and|&)\s+|\s+(?:and|&)\s+|[,;·•])\s*", text + ","):
@@ -228,16 +225,18 @@ def _emails(text):
 
 
 def email_fits(email, name):
-    """Whether an address looks like this person's: its part before the @ holds the family name, the given name, or the initials with one of them."""
+    """Whether an address looks like this person's: its part before the @ holds the family name or the given name (their first four letters), or is the initials, or
+    begins with an initial and the start of the other name ("jchancf" for Jason Chan)."""
     local = _fold(email.split("@")[0]).replace(" ", "")
     toks = [t for t in _fold(name).split() if t not in PARTICLES]
-    if not local or not toks:
+    if not local or len(toks) < 2:
         return False
     first, last = toks[0], toks[-1]
-    if (len(last) >= 3 and last[:5] in local) or (len(first) >= 3 and first[:5] in local):
+    if (len(last) >= 3 and last[:4] in local) or (len(first) >= 3 and first[:4] in local):
         return True
+    base = re.sub(r"\d+$", "", local)
     ini = "".join(t[0] for t in toks)
-    return len(ini) >= 2 and (ini in local or ini[::-1] in local or (first[0] + last)[:4] in local or (last + first[0])[:4] in local)
+    return base in (ini, ini[::-1]) or (len(base) >= 3 and (base.startswith(first[0] + last[:3]) or base.startswith(last[:3] + first[0]) or base.startswith(first[:3] + last[0])))
 
 
 def _is_place(s):
@@ -266,7 +265,7 @@ def _front(lines, height, width):
             break
         if STOP.match(l.text) and len(l.text) < 60:
             break
-        if l.x1 - l.x0 > 0.62 * width and len(l.text) > 90 and not EMAIL.search(l.text) and not _split_names(l):      # (the text has begun)
+        if l.x1 - l.x0 > 0.62 * width and len(l.text) >= 60 and not EMAIL.search(l.text) and not AFFIL.search(l.text[:40]) and not _split_names(l):      # (the text has begun)
             break
         zone.append(l)
     return title, zone[:80]
@@ -580,9 +579,10 @@ def with_ai(data, got=None):
 FIELDS = {"abstract": MAX_ABSTRACT, "conference": 200, "paper_type": 60, "session": 200, "volume": 20, "issue": 20, "pages": 30, "note": 2000}
 
 
-def clean(d):
+def clean(d, keep_names=False):
     """Details as they are kept beside the PDF: {authors: [{name, affiliation, place, email}], keywords: [...], abstract, conference, paper_type, session, volume, issue,
-    pages, note}; anything else, and anything of the wrong shape, is left out. Empty values are not stored."""
+    pages, note}; anything else, and anything of the wrong shape, is left out. Empty values are not stored. The authors are kept when one of them has an affiliation,
+    a place or an address (the names alone are in the index already), or always with keep_names (a correction of the names)."""
     d = d if isinstance(d, dict) else {}
     out = {}
     people = []
@@ -594,7 +594,8 @@ def clean(d):
         mail = _sp(a.get("email"))[:120]
         row = {"name": _sp(a.get("name"))[:120], "affiliation": _sp(a.get("affiliation"))[:200], "place": _sp(a.get("place"))[:120], "email": mail if EMAIL.fullmatch(mail) else ""}
         people.append(row)
-    if any(a["affiliation"] or a["place"] or a["email"] for a in people):
+    people = people[:MAX_AUTHORS + 40]
+    if people and (keep_names or any(a["affiliation"] or a["place"] or a["email"] for a in people)):
         out["authors"] = people
     kw = d.get("keywords")
     kw = re.split(r"\s*[;\n]\s*", kw) if isinstance(kw, str) else kw if isinstance(kw, list) else []

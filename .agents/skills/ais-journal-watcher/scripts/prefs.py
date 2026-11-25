@@ -19,7 +19,7 @@ PROMPTS = os.path.join(dl.BASE, "prompts.json")
 SETTINGS = os.path.join(dl.BASE, "settings.json")
 COLORS = ("yellow", "green", "blue", "pink", "orange", "purple", "red", "gray")
 SCOPES = ("selection", "area", "paper")
-DEFAULT_SETTINGS = {"legend": {}, "summary_template": "is_brief", "export_dir": "", "wpm": 230, "background_index": True}
+DEFAULT_SETTINGS = {"legend": {}, "summary_template": "is_brief", "export_dir": "", "wpm": 230, "background_index": True, "details_ai": True}
 
 
 def _write(path, obj):
@@ -109,5 +109,7 @@ def save_settings(patch):
         cur["wpm"] = max(80, min(600, int(patch["wpm"])))
     if "background_index" in patch:
         cur["background_index"] = bool(patch["background_index"])
+    if "details_ai" in patch:                      # let the AI read a PDF's first page when the rules cannot tell who wrote it (pdfmeta.py)
+        cur["details_ai"] = bool(patch["details_ai"])
     _write(SETTINGS, cur)
     return cur
