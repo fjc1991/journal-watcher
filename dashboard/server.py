@@ -652,10 +652,10 @@ class Handler(BaseHTTPRequestHandler):
         """Library rows picked by ?folder=<id> or one-or-more ?file=<Papers/…pdf>; no selector = the whole library."""
         rows = pl.library()
         if q.get("folder"):
-            f = fo.get(q["folder"][0])
-            if not f:
+            keys = fo.all_papers(q["folder"][0])          # (the folder's own papers and those of the folders inside it)
+            if keys is None:
                 return None
-            keys = set(f["papers"])
+            keys = set(keys)
             return [r for r in rows if r["key"] in keys]
         if q.get("file"):
             want = set(q["file"])
@@ -714,10 +714,11 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "run": run.to_dict(full=False), "folder": fid})
 
     def folder_rows(self, fid):
-        f = fo.get(fid)
+        """(the folder, the library rows it shows: its own papers and those of every folder inside it). The folder tools all work on these rows."""
+        f = fo.get(fid) if isinstance(fid, str) else None
         if not f:
             return None, None
-        keys = set(f["papers"])
+        keys = set(fo.all_papers(fid) or [])
         return f, [r for r in pl.library() if r["key"] in keys]
 
     def scope_rows(self, s):
@@ -726,10 +727,10 @@ class Handler(BaseHTTPRequestHandler):
         if s.get("folder") == ls.NO_FOLDER:                     # ("Not in any folder" in the Library's filters)
             rows = [r for r in rows if not r.get("folders")]
         elif s.get("folder"):
-            f = fo.get(str(s["folder"]))
-            if not f:
+            keys = fo.all_papers(str(s["folder"]))
+            if keys is None:
                 return None
-            keys = set(f["papers"])
+            keys = set(keys)
             rows = [r for r in rows if r["key"] in keys]
         if any(s.get(k) for k in ("journal", "year", "tag", "status", "star")):
             keep = {h["file"] for h in ls.search(rows, "", str(s.get("status") or ""), bool(s.get("star")), "", str(s.get("journal") or ""), str(s.get("year") or ""), str(s.get("tag") or ""))}
@@ -1133,10 +1134,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/flashcards" and flashcards:   # ?folder=&all=1: today's queue (with what each answer would mean), the counts, and with all=1 every card
             files = None
             if one("folder"):
-                f = fo.get(one("folder"))
-                if not f:
+                keys = fo.all_papers(one("folder"))
+                if keys is None:
                     return self.send_json({"error": "no such folder"}, 404)
-                keys = set(f["papers"])
+                keys = set(keys)
                 files = {r["file"] for r in pl.library() if r["key"] in keys}
             doc = flashcards.load()
             qu = [{**c, "preview": flashcards.preview(c)} for c in flashcards.queue(doc, files)]
@@ -1393,25 +1394,52 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "changed": ns.retag(b["from"], b.get("into") or None)})
             except ns.Unreadable as e:
                 return self.send_json({"error": str(e)}, 423)
-        if path == "/api/folders":      # {action: create|rename|delete|add|remove, id, name, files:[Papers/…pdf]}
+        if path == "/api/folders":      # {action: create|rename|delete|add|remove|move|ensure|file, id, name, parent?, children?, files:[Papers/…pdf]}
             act, fid = b.get("action"), b.get("id")
-            keys = [r["key"] for r in pl.library() if r["file"] in set(b.get("files") or [])]
+            fid = fid if isinstance(fid, str) else ""
+            by_file = {r["file"]: r["key"] for r in pl.library()} if b.get("files") or b.get("into") or b.get("groups") else {}
+            keys = [by_file[x] for x in (b.get("files") or []) if isinstance(x, str) and x in by_file]
+            extra = {}
             try:
-                if act == "create":
-                    f = fo.create(b.get("name"))
+                if act == "create":                  # (parent: the folder to make it in)
+                    f = fo.create(b.get("name"), str(b.get("parent") or ""))
+                    extra["id"] = f["id"]
                     if keys:
                         fo.add(f["id"], keys)
                 elif act == "rename":
                     fo.rename(fid, b.get("name"))
-                elif act == "delete":
-                    fo.delete(fid)
+                elif act == "delete":                # (children: "delete" = with the folders inside it; else they move up one level)
+                    fo.delete(fid, "delete" if b.get("children") == "delete" else "lift")
                 elif act in ("add", "remove"):
                     (fo.add if act == "add" else fo.remove)(fid, keys)
+                elif act == "move":                  # {id, parent}: put a folder inside another ("" = at the top)
+                    fo.move(fid, str(b.get("parent") or ""))
+                elif act == "file":                  # {id, into: [{path: [names…], files: [...]}]}: papers into folders under `id`, made where they are not there (a dropped folder of folders); one request for all
+                    if not fo.get(fid):
+                        raise KeyError("no such folder")
+                    made, where = [], {}
+                    for g in (b.get("into") or [])[:2000]:
+                        names = [str(n) for n in (g.get("path") or []) if isinstance(n, str)][:12] if isinstance(g, dict) else []
+                        at, new = fo.ensure(fid, names)
+                        made += new
+                        ks = [by_file[x] for x in (g.get("files") or []) if isinstance(x, str) and x in by_file]
+                        if ks:
+                            fo.add(at, ks)
+                        where["/".join(names)] = at
+                    extra.update(made=made, where=where)
+                elif act == "unfile":                # {groups: [{id, files}], delete: [ids]}: take papers out of folders again and delete folders that are empty then (the Undo of a drop)
+                    for g in (b.get("groups") or [])[:2000]:
+                        if isinstance(g, dict) and isinstance(g.get("id"), str) and fo.get(g["id"]):
+                            fo.remove(g["id"], [by_file[x] for x in (g.get("files") or []) if isinstance(x, str) and x in by_file])
+                    for d_ in reversed([x for x in (b.get("delete") or []) if isinstance(x, str)][:2000]):      # (innermost first)
+                        f_ = fo.get(d_)
+                        if f_ and not f_["papers"] and not any(x["parent"] == d_ for x in fo.list_all()):
+                            fo.delete(d_)
                 else:
                     return self.send_json({"error": "unknown action"}, 400)
             except (ValueError, KeyError) as e:
                 return self.send_json({"error": str(e.args[0] if e.args else e)}, 400)
-            return self.send_json({"ok": True, "folders": fo.list_all()})
+            return self.send_json({"ok": True, "folders": fo.list_all(), **extra})
         if path == "/api/paper/state":  # {file, status?, star?, takeaway?, page?, total?, opened?}
             row = pl.library_row(b.get("file"))
             if not row:

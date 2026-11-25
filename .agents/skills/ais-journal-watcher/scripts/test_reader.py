@@ -2277,6 +2277,73 @@ print("JSON" + json.dumps(out))
         fo.delete(f["id"]); assert fo.list_all() == [] and not os.path.exists(os.path.join(fo.DIR, f["id"] + ".json"))
     check("folders: create, duplicate name, add/remove, rename, delete", t_folders)
 
+    def t_subfolders():
+        """Folders inside folders: a folder shows its own papers and those of every folder under it, each once; names are taken once per place; a folder cannot go into
+        itself; a damaged tree hides nothing; deleting a folder lifts or takes the folders inside it."""
+        m = fo.create("WITS26"); a = fo.create("Session 1B", m["id"]); b = fo.create("Session 2A", m["id"]); deep = fo.create("Posters", a["id"])
+        assert m["id"] == "wits26" and "parent" not in m and a["parent"] == m["id"] and a["id"].startswith("session-1b-") and a["id"] != "session-1b" and fo.get(a["id"])["parent"] == m["id"], (m, a)
+        top = fo.create("Session 1B"); other = fo.create("ICIS26"); twin = fo.create("session 1b", other["id"])        # the same name at the top and under another master: three folders
+        assert top["id"] == "session-1b" and len({a["id"], top["id"], twin["id"]}) == 3, (a["id"], top["id"], twin["id"])
+        for name, parent in (("SESSION 1B", m["id"]), ("wits26", ""), ("Posters", a["id"])):
+            try:
+                fo.create(name, parent); raise AssertionError("two folders called %r in one place" % name)
+            except ValueError as e:
+                assert str(e) == "a folder with that name exists", e
+        try:
+            fo.create("Orphan", "no-such-folder"); raise AssertionError("made in a folder that is not there")
+        except ValueError:
+            pass
+        fo.add(m["id"], ["k0"]); fo.add(a["id"], ["k1", "k2"]); fo.add(deep["id"], ["k2", "k3"]); fo.add(b["id"], ["k4"])
+        assert fo.all_papers(m["id"]) == ["k0", "k1", "k2", "k3", "k4"] and fo.all_papers(a["id"]) == ["k1", "k2", "k3"] and fo.all_papers(deep["id"]) == ["k2", "k3"] and fo.all_papers("nope") is None
+        by = {x["id"]: x for x in fo.list_all()}
+        assert (by[m["id"]]["count"], by[m["id"]]["own"], by[m["id"]]["children"], by[m["id"]]["parent"], by[m["id"]]["depth"]) == (5, 1, 2, "", 0), by[m["id"]]       # (k2 is in two folders under it: counted once)
+        assert (by[a["id"]]["count"], by[a["id"]]["own"], by[a["id"]]["path"], by[a["id"]]["depth"]) == (3, 2, ["WITS26", "Session 1B"], 1) and by[deep["id"]]["path"] == ["WITS26", "Session 1B", "Posters"], by[a["id"]]
+        assert by[top["id"]]["count"] == by[top["id"]]["own"] == 0 and [x["name"].lower() for x in fo.list_all()] == sorted(x["name"].lower() for x in fo.list_all())
+        assert set(fo.membership()["k2"]) == {a["id"], deep["id"]} and fo.membership()["k0"] == [m["id"]], "membership is what each folder itself lists"
+        assert fo.family(m["id"]) == [m["id"], a["id"], deep["id"], b["id"]] and ls._family(m["id"]) == {m["id"], a["id"], b["id"], deep["id"]} and fo.family("nope") == [] and ls._family("~none") == set()
+        assert fo.path(deep["id"]) == ["WITS26", "Session 1B", "Posters"]
+        # moving: not into itself or under itself, not where its name is taken
+        for target in (m["id"], deep["id"], a["id"]):
+            try:
+                fo.move(m["id"], target); raise AssertionError("a folder was put inside itself (%s)" % target)
+            except ValueError as e:
+                assert "inside itself" in str(e), e
+        try:
+            fo.move(top["id"], m["id"]); raise AssertionError("moved to where its name is taken")
+        except ValueError as e:
+            assert "name exists" in str(e), e
+        fo.move(b["id"], a["id"]); assert fo.path(b["id"]) == ["WITS26", "Session 1B", "Session 2A"] and fo.all_papers(a["id"]) == ["k1", "k2", "k3", "k4"]
+        fo.move(b["id"], ""); assert fo.path(b["id"]) == ["Session 2A"] and "parent" not in fo.get(b["id"]) and fo.all_papers(m["id"]) == ["k0", "k1", "k2", "k3"]
+        fo.move(b["id"], m["id"])
+        # a chain of folders by name, made where it is not there (a dropped folder of folders); a second time makes nothing
+        end, made = fo.ensure(m["id"], ["Day 1", "Session 9"])
+        again, made2 = fo.ensure(m["id"], ["day 1", "SESSION 9"])
+        assert len(made) == 2 and end == made[1] == again and made2 == [] and fo.path(end) == ["WITS26", "Day 1", "Session 9"] and fo.ensure(m["id"], []) == (m["id"], []), (made, made2)
+        # a tree damaged on disk (two computers each put one folder into the other; a parent that was deleted): every folder is still listed, at the top
+        def set_parent(fid, parent):
+            d = json.load(open(os.path.join(fo.DIR, fid + ".json"))); d["parent"] = parent; json.dump(d, open(os.path.join(fo.DIR, fid + ".json"), "w"))
+        set_parent(m["id"], deep["id"])
+        by = {x["id"]: x for x in fo.list_all()}
+        assert len(by) == 9 and by[m["id"]]["parent"] == by[a["id"]]["parent"] == by[deep["id"]]["parent"] == "" and fo.all_papers(m["id"]) is not None, {k: v["parent"] for k, v in by.items()}
+        set_parent(m["id"], "gone-folder"); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == "" and fo.all_papers(m["id"])[:1] == ["k0"]
+        set_parent(m["id"], 7); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == ""
+        d = json.load(open(os.path.join(fo.DIR, m["id"] + ".json"))); d.pop("parent"); json.dump(d, open(os.path.join(fo.DIR, m["id"] + ".json"), "w"))
+        # deleting: the folders inside move up one level, or go with it (each with what was made in it)
+        open(os.path.join(fo.DIR, deep["id"] + ".matrix.json"), "w").write("{}")
+        fo.delete(a["id"])
+        assert fo.get(a["id"]) is None and fo.get(deep["id"])["parent"] == m["id"] and fo.all_papers(m["id"]) == ["k0", "k2", "k3", "k4"] and os.path.exists(os.path.join(fo.DIR, deep["id"] + ".matrix.json"))
+        fo.delete(m["id"], "delete")
+        left = {x["id"] for x in fo.list_all()}
+        assert left == {top["id"], other["id"], twin["id"]} and not os.path.exists(os.path.join(fo.DIR, deep["id"] + ".matrix.json")) and not os.path.exists(os.path.join(fo.DIR, end + ".json")), left
+        fo.delete(other["id"]); assert "parent" not in fo.get(twin["id"])                                    # (lifted to the top)
+        try:
+            fo.delete("nope"); raise AssertionError("deleted a folder that is not there")
+        except KeyError:
+            pass
+        fo.delete(top["id"]); fo.delete(twin["id"]); assert fo.list_all() == []
+    check("folders inside folders: a folder shows its own papers and those of every folder under it, each once; a name is taken once per place, and the same name under two masters is two folders; "
+          "a folder cannot go into itself; a damaged tree hides nothing; deleting a folder lifts the folders inside it or takes them with it", t_subfolders)
+
     def t_state():
         assert rs.touch_open("k1", 3, 10)["status"] == "reading"
         assert rs.update("k1", {"status": "read", "star": True, "takeaway": "x" * 500})["status"] == "read"
