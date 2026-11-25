@@ -130,7 +130,13 @@ class Fake(BaseHTTPRequestHandler):
         parts = [] if isinstance(last, str) else last
         text = last if isinstance(last, str) else " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
         has_img = any(p.get("type") == "image_url" for p in parts)
-        if body.get("response_format"):
+        if system.startswith("You read the first page of a research paper"):
+            import re as _re
+            by = _re.search(r"^by (.+)$", text, _re.M)
+            names = _re.split(r"\s+and\s+", by.group(1).strip()) if by else []
+            out = json.dumps({"title": "", "conference": "", "year": "", "paper_type": "", "keywords": [],
+                              "authors": [{"name": n, "affiliation": "", "place": "", "email": ""} for n in names] + [{"name": "Invented Person", "affiliation": "Nowhere University", "place": "", "email": "x@nowhere.example"}]})
+        elif body.get("response_format"):
             out = json.dumps({"questions": ["What is the sample?", "What is the main finding?", "What are the limits?", "What next?"]})
         elif has_img:
             out = "FIGURE: this box shows a table of numbers."
@@ -3840,6 +3846,118 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("only the journals whose feed has no abstracts are said to need the OpenAlex key; of a journal read through Crossref it is said that some papers come without one",
                   abs_ == [["JMIS", "NBER"], ["JFE", "RFS"]] and "The abstracts of JMIS need a free OpenAlex key" in est_ and "Some papers of JFE come without an abstract" in est_, str((abs_, est_)))
             json.dump(jall_, open(jfile, "w"))          # (the later sections see the shipped list)
+
+            print("a paper's details: read from the first page when it is added, corrected in the dialog, edited later, read again for many")
+            import pymupdf as _pmD, base64 as _b64D, csv as _csvD
+
+            def ws_pdf(title, people, foot="Workshop on Information Technology and Systems, 2026", lower=""):
+                d_ = _pmD.open(); d_.set_metadata({"author": "Template Maker"})
+                for n_ in range(2):
+                    pg_ = d_.new_page(width=612, height=792)
+                    if foot:
+                        pg_.insert_text((72, 716), foot, fontsize=9, fontname="heit")
+                    if n_ == 0:
+                        pg_.insert_text((90, 96), title, fontsize=18, fontname="hebo"); pg_.insert_text((270, 138), "Regular Paper", fontsize=12, fontname="heit")
+                        for i_, (nm_, aff_, pl_, em_) in enumerate(people):
+                            x_ = (130, 350)[i_ % 2]
+                            pg_.insert_text((x_, 172), nm_, fontsize=12, fontname="hebo")
+                            for k_, t_ in enumerate((aff_, pl_, em_)):
+                                pg_.insert_text((x_ - 10, 186 + 14 * k_), t_, fontsize=12, fontname="helv")
+                        if lower:
+                            pg_.insert_text((150, 172), lower, fontsize=12, fontname="helv")
+                        pg_.insert_text((72, 330), "Introduction", fontsize=13, fontname="hebo")
+                    pg_.insert_textbox(_pmD.Rect(72, 345, 540, 700), "We study how firms change the skills they ask for when machines that write arrive at work. " * 12, fontsize=11)
+                d_.embfile_add("padding", os.urandom(45000)); out_ = _b64D.b64encode(d_.tobytes()).decode(); d_.close(); return out_
+            two_ = [("Mira Okonkwo", "University of Northfield", "Northfield, MN, USA", "okon0180@northfield.example"), ("Tao Lindqvist", "Lakeside Institute of Technology", "Austin, TX, USA", "Tao.Lindqvist@lakeside.example")]
+            pa_ = ws_pdf("Skill Demand After Writing Machines", two_)
+            pb_ = ws_pdf("Hiring Screens and Algorithmic Shortlists", [("Ines Varga", "Harbor College", "Lisbon, Portugal", "ivarga@harbor.example")], foot="")
+            val_ = lambda k, i=0: page.input_value('#ir-dlg [data-k="%s"][data-i="%d"]' % (k, i))          # noqa: E731
+            page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-path")
+            n_ai_ = len([1 for _p, b_ in SEEN if b_.get("messages")])
+            page.evaluate(JS_DROP, [".fp-path", [[pa_, "013-skill-demand.pdf", "application/pdf"], [pb_, "044-hiring.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]")
+            page.wait_for_selector("#ir-c0 .ir-f", timeout=30000); page.wait_for_selector("#ir-c1 .ir-f", timeout=30000)
+            read_ = page.inner_text("#ir-c0 .ir-read")
+            check("a workshop paper Crossref does not know is filled in from its own first page: the title, the authors in order, the conference and year from its footer, and the type",
+                  val_("title") == "Skill Demand After Writing Machines" and val_("authors") == "Mira Okonkwo; Tao Lindqvist" and val_("journal") == "WITS 2026" and val_("pub_date") == "2026"
+                  and page.eval_on_selector('[data-ptype="0"]', "e => e.value") == "conference", str([val_(k) for k in ("title", "authors", "journal", "pub_date")]))
+            check("…and it says what it read and from where; the name in the file's own author field (the template's maker) is nowhere; the AI was not asked, because every name is backed by its address",
+                  "Read from the PDF’s first page: 2 authors with affiliations" in read_ and "the conference" in read_ and "The AI" not in read_ and "Template Maker" not in page.inner_text("#ir-dlg")
+                  and "Template Maker" not in page.content() and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_ai_, read_)
+            page.click("#ir-c0 .ir-more summary")
+            check("More details holds each author's affiliation, place and e-mail, the conference in full and the kind of submission",
+                  page.input_value('#ir-c0 [data-p="email"][data-pn="1"]') == "Tao.Lindqvist@lakeside.example" and page.input_value('#ir-c0 [data-p="affiliation"][data-pn="0"]') == "University of Northfield"
+                  and page.input_value('#ir-c0 [data-p="place"][data-pn="0"]') == "Northfield, MN, USA" and page.input_value('#ir-c0 [data-d="conference"]') == "Workshop on Information Technology and Systems"
+                  and page.input_value('#ir-c0 [data-d="paper_type"]') == "Regular Paper")
+            before_ = (val_("journal", 1), val_("pub_date", 1), val_("authors", 1))
+            page.click('#ir-c0 [data-spread="0"]'); page.wait_for_function("""document.querySelector('#ir-dlg [data-k="journal"][data-i="1"]').value === 'WITS 2026'""", timeout=5000)
+            check("a paper of the same drop whose pages do not name the conference gets it from the one that does, on request (venue, date, type and the conference in full); its own authors stay",
+                  before_ == ("", "", "Ines Varga") and val_("pub_date", 1) == "2026" and page.eval_on_selector('[data-ptype="1"]', "e => e.value") == "conference" and val_("authors", 1) == "Ines Varga"
+                  and "Done: 1 paper" in page.inner_text('#ir-c0 [data-spread="0"]'), str(before_))
+            page.fill('#ir-c0 [data-d="session"]', "Session 1B - GenAI, Work & Labor Markets"); page.fill('#ir-c0 [data-d="note"]', "discussant: me")
+            page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist; Zed Extra"); page.wait_for_selector('#ir-c0 [data-p="email"][data-pn="2"]')
+            check("an author typed into the authors box gets a line of their own under More details, and the others keep theirs", page.input_value('#ir-c0 [data-p="email"][data-pn="2"]') == "" and page.input_value('#ir-c0 [data-p="email"][data-pn="0"]') == "okon0180@northfield.example")
+            page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist")
+            page.select_option("#ir-to", "lib"); page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=30000)
+            page.wait_for_function("document.querySelector('.di-snack') && /Added|added/.test(document.querySelector('.di-snack').textContent)", timeout=30000)
+            la_ = next(r_ for r_ in api("/api/library") if r_["title"] == "Skill Demand After Writing Machines"); lb_ = next(r_ for r_ in api("/api/library") if r_["title"].startswith("Hiring Screens"))
+            da_ = api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))
+            check("both are filed as conference papers under WITS 2026 with their authors, and the first keeps who is where, the conference in full, its session and your note",
+                  la_["kind"] == lb_["kind"] == "conference" and la_["journal"] == lb_["journal"] == "WITS 2026" and la_["authors"] == "Mira Okonkwo; Tao Lindqvist" and lb_["authors"] == "Ines Varga" and la_["year"] == "2026"
+                  and da_["people"][0] == {"name": "Mira Okonkwo", "affiliation": "University of Northfield", "place": "Northfield, MN, USA", "email": "okon0180@northfield.example"}
+                  and da_["details"] == {"conference": "Workshop on Information Technology and Systems", "paper_type": "Regular Paper", "session": "Session 1B - GenAI, Work & Labor Markets", "note": "discussant: me"}, str((la_["authors"], da_["details"])))
+            page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click('.libtabs [data-tab="papers"]'); page.fill("#lf-q", "Skill Demand After"); page.wait_for_selector('#lib-results .librow:has-text("Skill Demand After")', timeout=10000)
+            page.click('#lib-results .librow:has-text("Skill Demand After") [data-more]'); page.click('#lib-results .librow:has-text("Skill Demand After") [data-details]'); page.wait_for_selector("#dt-dlg[open]")
+            check("Edit details (in a paper's ⋯ menu) shows what is kept: the title, each author with affiliation, place and e-mail, the conference, the session, your note; a paper filed without a DOI can be given one",
+                  page.input_value("#dt-title") == "Skill Demand After Writing Machines" and page.locator("#dt-people .dt-person").count() == 2 and page.input_value('#dt-people .dt-person >> nth=1 >> [data-pf="email"]') == "Tao.Lindqvist@lakeside.example"
+                  and page.input_value('#dt-dlg [data-d="session"]').startswith("Session 1B") and page.input_value('#dt-dlg [data-d="note"]') == "discussant: me" and page.is_enabled("#dt-doi") and "WITS 2026" in page.inner_text("#dt-dlg .pmeta"))
+            page.fill("#dt-title", "Skill Demand after Writing Machines: Evidence from Postings"); page.fill('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]', "Northfield Business School")
+            page.fill('#dt-dlg [data-d="keywords"]', "skills; job postings"); page.click('#dt-people .dt-person >> nth=1 >> [data-up]')
+            page.click("#dt-pdf"); page.wait_for_function("/Nothing is kept until you press Save/.test(document.querySelector('#dt-read').textContent)", timeout=15000)
+            check("'Read from the PDF' fills the boxes from the first page again (the authors as printed) and offers the page's title; nothing is kept yet",
+                  page.input_value('#dt-people .dt-person >> nth=0 >> [data-pf="name"]') == "Mira Okonkwo" and page.input_value('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]') == "University of Northfield"
+                  and "The first page’s title is “Skill Demand After Writing Machines”" in page.inner_text("#dt-tsug") and "From the first page: 2 authors" in page.inner_text("#dt-read")
+                  and api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))["title"] == "Skill Demand After Writing Machines", page.inner_text("#dt-read"))
+            page.fill('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]', "Northfield Business School"); page.click("#dt-add"); page.fill('#dt-people .dt-person >> nth=2 >> [data-pf="name"]', "Zed Extra")
+            page.fill("#dt-doi", "10.5555/wits.13"); page.click("#dt-go"); page.wait_for_selector("#dt-dlg", state="detached", timeout=10000)
+            page.fill("#lf-q", "Evidence from Postings"); page.wait_for_selector('#lib-results .librow:has-text("Evidence from Postings")', timeout=10000)
+            la2_ = next(r_ for r_ in api("/api/library") if r_["file"] == la_["file"]); da2_ = api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))
+            idx_ = next(r_ for r_ in _csvD.DictReader(open(os.path.join(TMP, "Papers", "_index.csv"), encoding="utf-8")) if r_["file"] == la_["file"])
+            check("saving shows the corrected title, authors and DOI in the library at once; the paper keeps its place, its key, its type and what the dialog did not touch, and the index still names it as it was filed",
+                  la2_["title"].endswith("Evidence from Postings") and la2_["authors"] == "Mira Okonkwo; Tao Lindqvist; Zed Extra" and la2_["doi"] == "10.5555/wits.13" and la2_["key"] == la_["key"] and la2_["kind"] == "conference"
+                  and da2_["people"][0]["affiliation"] == "Northfield Business School" and da2_["details"]["keywords"] == ["skills", "job postings"] and da2_["details"]["note"] == "discussant: me"
+                  and idx_["title"] == "Skill Demand After Writing Machines" and idx_["doi"] == "", str((la2_["title"], la2_["authors"], la2_["doi"], idx_["title"])))
+            # many at once: what each first page would add is listed first; only the ticked ones are changed
+            api("/api/paper/details", {"file": lb_["file"], "fields": {"authors": [{"name": "Ines Varga"}], "conference": ""}})
+            page.fill("#lf-q", "WITS 2026"); page.wait_for_selector('#lib-results .librow:has-text("Hiring Screens")', timeout=10000); page.wait_for_selector("#lr-selall"); page.click("#lr-selall")
+            page.click("#ab-read"); page.wait_for_selector("#dr-dlg[open]"); page.click("#dr-run")
+            page.wait_for_function("/^Read 2 papers/.test(document.querySelector('#dr-prog').textContent)", timeout=30000)
+            rows_ = {("Hiring" if "Hiring" in r_.inner_text() else "Skill"): r_ for r_ in page.locator("#dr-list .dr-row").all()}
+            check("'Read details from the PDFs' (for the ticked papers) lists what each first page would add and changes nothing yet: the paper that lost its affiliation would get it back; a title you corrected is only offered, not ticked",
+                  len(rows_) == 2 and "Would add: 1 author (all with affiliation or e-mail)" in rows_["Hiring"].inner_text() and rows_["Hiring"].locator("[data-use]").is_checked()
+                  and rows_["Skill"].locator("[data-title]").count() == 1 and not rows_["Skill"].locator("[data-title]").is_checked() and "Apply to" in page.inner_text("#dr-go")
+                  and api("/api/paper/details?file=" + urllib.request.quote(lb_["file"]))["people"][0]["affiliation"] == "", str({k_: v_.inner_text()[:160] for k_, v_ in rows_.items()}))
+            if rows_["Skill"].locator("[data-use]").is_checked():
+                rows_["Skill"].locator("[data-use]").uncheck()
+            page.click("#dr-go"); page.wait_for_selector("#dr-dlg", state="detached", timeout=15000)
+            db_ = api("/api/paper/details?file=" + urllib.request.quote(lb_["file"])); da3_ = api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))
+            check("Apply writes it for the ticked paper only", db_["people"][0] == {"name": "Ines Varga", "affiliation": "Harbor College", "place": "Lisbon, Portugal", "email": "ivarga@harbor.example"}
+                  and da3_["title"].endswith("Evidence from Postings") and da3_["authors"] == ["Mira Okonkwo", "Tao Lindqvist", "Zed Extra"], str((db_["people"], da3_["authors"])))
+            # a first page the rules cannot read: the AI is asked once, and only the names the page prints are taken
+            pc_ = ws_pdf("Reading Lists and What Students Open", [], foot="", lower="by ana ruiz and ben okafor")
+            page.fill("#lf-q", ""); page.click("#folditem"); page.wait_for_selector(".fp-path"); n_ai_ = len([1 for _p, b_ in SEEN if b_.get("messages")])
+            page.evaluate(JS_DROP, [".fp-path", [[pc_, "reading-lists.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=30000)
+            sent_ = [b_ for _p, b_ in SEEN if b_.get("messages")][n_ai_:]
+            check("where the rules cannot tell who wrote a paper the AI reads the first page (one call, with the page's text only), and an author the page does not print is not taken",
+                  val_("authors") == "ana ruiz; ben okafor" and "The AI read the page too" in page.inner_text("#ir-c0 .ir-read") and "Please check the names" in page.inner_text("#ir-c0 .ir-read")
+                  and "Invented" not in page.inner_text("#ir-dlg") and len(sent_) == 1 and "by ana ruiz and ben okafor" in json.dumps(sent_[0]["messages"]), str((val_("authors"), len(sent_))))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.evaluate("Settings.open('reader')"); page.wait_for_selector("#detai"); on_ = page.is_checked("#detai"); page.uncheck("#detai"); page.click("#st-save")
+            page.wait_for_function("/Saved/.test(document.querySelector('#st-msg').textContent)", timeout=10000); page.click("#st-back"); page.wait_for_selector(".fp-path")
+            n_ai_ = len([1 for _p, b_ in SEEN if b_.get("messages")])
+            page.evaluate(JS_DROP, [".fp-path", [[pc_, "reading-lists.pdf", "application/pdf"]], False]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=30000)
+            check("the switch in Settings → Reader & summaries is on to begin with; with it off the AI is not asked and the authors are left for you to type",
+                  on_ and val_("authors") == "" and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_ai_ and val_("title") == "Reading Lists and What Students Open", str((on_, val_("authors"))))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached"); api("/api/settings", {"prefs": {"details_ai": True}})
 
             print("exports and the library layout")
             bib = urllib.request.urlopen(base + "/api/export/bib?file=" + urllib.request.quote(rows[0][3])).read().decode()

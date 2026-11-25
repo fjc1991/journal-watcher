@@ -67,9 +67,12 @@ def entries(rows):
         c = cr.get(r.get("doi", ""), {})
         names = [split_name(a) for a in re.split(r";\s*", r.get("authors", "")) if a.strip()]
         year = (c.get("pub_date") or "")[:4] or r.get("year", "")
+        det = _details(r)                           # what is kept beside the PDF (details.py): the paper's own keywords, its abstract, the conference in full…
+        topics = [t for t in re.split(r";\s*", r.get("matched_topics", "")) if t]
         out.append({"row": r, "authors": names, "title": r.get("title", ""), "journal": c.get("container") or r.get("journal", ""), "year": year,
-                    "volume": c.get("volume", ""), "issue": c.get("issue", ""), "pages": c.get("pages", ""), "doi": r.get("doi", ""),
-                    "url": r.get("url", ""), "keywords": [t for t in re.split(r";\s*", r.get("matched_topics", "")) if t]})
+                    "volume": c.get("volume", "") or det.get("volume", ""), "issue": c.get("issue", "") or det.get("issue", ""), "pages": c.get("pages", "") or det.get("pages", ""), "doi": r.get("doi", ""),
+                    "url": r.get("url", ""), "keywords": list(dict.fromkeys(list(det.get("keywords") or []) + topics)), "abstract": det.get("abstract", ""),
+                    "kind": r.get("kind") or "journal", "booktitle": det.get("conference", "")})
     keys = set()
     for e in out:
         fam = re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", e["authors"][0][0] if e["authors"] else "anon").encode("ascii", "ignore").decode().lower()) or "anon"
@@ -82,6 +85,16 @@ def entries(rows):
     return out
 
 
+def _details(row):
+    """The details kept beside a paper's PDF ({} when there are none, or the row is not a filed paper)."""
+    try:
+        import kinds
+        pdf = ns.pdf_path(row.get("file") or "")
+        return (kinds.read_sidecar(pdf, row.get("key")).get("details") or {}) if pdf else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 # ---------------------------------------------------------------- BibTeX / RIS
 def _tex(s):
     return re.sub(r"([&%$#_])", r"\\\1", s or "")
@@ -90,18 +103,22 @@ def _tex(s):
 def bibtex(rows):
     out = []
     for e in entries(rows):
+        conf = e.get("kind") == "conference"            # a conference paper: @inproceedings, with the conference (in full, when known) as its booktitle
         f = [("author", " and ".join("%s, %s" % (a, g) if g else a for a, g in e["authors"])), ("title", "{%s}" % _tex(e["title"])),
-             ("journal", _tex(e["journal"])), ("year", e["year"]), ("volume", e["volume"]), ("number", e["issue"]),
+             ("booktitle" if conf else "journal", _tex(e.get("booktitle") or e["journal"]) if conf else _tex(e["journal"])), ("year", e["year"]), ("volume", e["volume"]), ("number", e["issue"]),
              ("pages", e["pages"].replace("-", "--") if "--" not in e["pages"] else e["pages"]), ("doi", e["doi"]), ("url", e["url"]),
-             ("keywords", ", ".join(e["keywords"]))]
-        out.append("@article{%s,\n%s\n}\n" % (e["key"], ",\n".join("  %s = {%s}" % (k, v) for k, v in f if v)))
+             ("keywords", ", ".join(_tex(k) for k in e["keywords"])), ("abstract", _tex(e.get("abstract") or ""))]
+        out.append("@%s{%s,\n%s\n}\n" % ("inproceedings" if conf else "article", e["key"], ",\n".join("  %s = {%s}" % (k, v) for k, v in f if v)))
     return "\n".join(out)
 
 
 def ris(rows):
     out = []
     for e in entries(rows):
-        L = ["TY  - JOUR"] + ["AU  - %s%s" % (a, ", " + g if g else "") for a, g in e["authors"]] + ["TI  - " + e["title"], "JO  - " + e["journal"]]
+        conf = e.get("kind") == "conference"
+        L = ["TY  - CONF" if conf else "TY  - JOUR"] + ["AU  - %s%s" % (a, ", " + g if g else "") for a, g in e["authors"]] + ["TI  - " + e["title"], ("T2  - " + (e.get("booktitle") or e["journal"])) if conf else "JO  - " + e["journal"]]
+        if e.get("abstract"):
+            L.append("AB  - " + re.sub(r"\s+", " ", e["abstract"]))
         for tag, v in (("PY", e["year"]), ("VL", e["volume"]), ("IS", e["issue"]), ("DO", e["doi"]), ("UR", e["url"])):
             if v:
                 L.append("%s  - %s" % (tag, v))

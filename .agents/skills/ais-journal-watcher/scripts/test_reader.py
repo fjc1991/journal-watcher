@@ -5921,6 +5921,10 @@ print("OK")
                 assert g["details"] == {"keywords": ["skills", "machines"], "abstract": "A corrected abstract.", "conference": "Workshop on Information Technology and Systems", "paper_type": "Regular Paper",
                                         "session": "Session 1B - Work", "note": "discussant: me"} and g["authors"] == ["Mira Okonkwo", "Tao Lindqvist"], g       # (what the dialog did not send stays)
                 assert kn.read_sidecar(pdf_path)["kind"] == "conference", "saving details changed the paper's type"
+                import exports as ex_
+                bib, ris_ = ex_.bibtex([row]), ex_.ris([row])                # the exports carry them: a conference paper with its conference in full, its own keywords, its abstract
+                assert bib.startswith("@inproceedings{okonkwo") and "booktitle = {Workshop on Information Technology and Systems}" in bib and "keywords = {skills, machines}" in bib and "abstract = {A corrected abstract.}" in bib, bib
+                assert ris_.startswith("TY  - CONF") and "T2  - Workshop on Information Technology and Systems" in ris_ and "AB  - A corrected abstract." in ris_ and "AU  - Lindqvist, Tao" in ris_, ris_
                 g = dt.save(res["file"], {"doi": "https://doi.org/10.5555/Late.DOI", "note": ""})
                 assert pl.library_row(res["file"])["doi"] == "10.5555/Late.DOI" and "note" not in g["details"] and pl.library_row(res["file"])["key"] == key
                 for bad, words in (({"title": "  "}, "title is empty"), ({"doi": "not a doi"}, "DOI")):
