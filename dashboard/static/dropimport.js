@@ -89,6 +89,8 @@ const isbnOk = s => {           // an ISBN-10 or ISBN-13 with a correct check di
 const DET = [["conference", "Conference or workshop, in full", "e.g. Workshop on Information Technology and Systems"], ["paper_type", "Kind of submission", "e.g. Regular Paper"], ["session", "Session", "e.g. Session 1B - GenAI, Work & Labor Markets"],
   ["keywords", "Keywords (separate with ;)", ""], ["volume", "Volume", ""], ["issue", "Issue", ""], ["pages", "Pages", "e.g. 101-130"]];
 const pkey = n => norm(n).toLowerCase();
+const loose = n => { const t = pkey(n).normalize("NFKD").replace(/[^a-z ]/g, "").split(" ").filter(Boolean); return t.length ? t[0][0] + " " + t[t.length - 1] : ""; };      // first initial and family name: "J. Smith" is "John Smith"
+const personOf = (c, n) => c.det.people[pkey(n)] || (() => { const hit = Object.keys(c.det.people).filter(k => loose(k) && loose(k) === loose(n)); return hit.length === 1 ? c.det.people[hit[0]] : null; })() || {};
 const namesOf = c => String(c.fields.authors || "").split(";").map(norm).filter(Boolean);
 function detOf(a) {                     // a card's details, from what the PDF's first page says
   const p = (a && a.pdf && a.pdf.details) || {}, people = {};
@@ -104,10 +106,10 @@ function readSay(a) {                   // one line: what was read from the firs
   const sure = n && p.sure !== "high" ? " Please check the names." : "";
   return (got.length ? "Read from the PDF’s first page: " + got.join(", ") + "." + sure + how : "") + (p.ai_note ? " The AI was not used: " + esc(p.ai_note) : "");
 }
-const peopleHtml = c => namesOf(c).map((n, k) => { const p = c.det.people[pkey(n)] || {}; return `<div class="ir-person"><b>${esc(n)}</b>${[["affiliation", "Affiliation"], ["place", "City, country"], ["email", "E-mail"]].map(([f, ph]) =>
+const peopleHtml = c => namesOf(c).map((n, k) => { const p = personOf(c, n); return `<div class="ir-person"><b>${esc(n)}</b>${[["affiliation", "Affiliation"], ["place", "City, country"], ["email", "E-mail"]].map(([f, ph]) =>
   `<input type="text" data-p="${f}" data-pn="${k}" data-i="${c.i}" value="${esc(p[f] || "")}" placeholder="${ph}" aria-label="${ph} of ${esc(n)}" autocomplete="off" spellcheck="false">`).join("")}</div>`; }).join("") || `<p class="hint">Type the authors above; each gets a line here.</p>`;
 function moreHtml(c, many) {
-  const d = c.det, n = namesOf(c).filter(x => { const p = d.people[pkey(x)] || {}; return p.affiliation || p.email || p.place; }).length;
+  const d = c.det, n = namesOf(c).filter(x => { const p = personOf(c, x); return p.affiliation || p.email || p.place; }).length;
   const has = [n ? plural(n, "affiliation") : "", d.abstract ? "abstract" : "", norm(d.keywords) ? "keywords" : "", d.conference ? "conference" : "", d.session ? "session" : ""].filter(Boolean).join(", ");
   return `<details class="ir-more" data-more="${c.i}"${c.moreOpen ? " open" : ""}><summary>More details${has ? ` <small>(${esc(has)})</small>` : " <small>(affiliations, abstract, keywords, your note)</small>"}</summary>
     <div class="ir-people" id="ir-pp${c.i}">${peopleHtml(c)}</div>
@@ -116,7 +118,7 @@ function moreHtml(c, many) {
       <label class="ir-f wide"><span>Your note (only for you)</span><textarea data-d="note" data-i="${c.i}" rows="2" placeholder="e.g. discussant: me">${esc(d.note || "")}</textarea></label></div>
     ${many ? `<button type="button" class="linkbtn" data-spread="${c.i}">Use this venue, date, type and conference for the other papers here that have none</button>` : ""}</details>`;
 }
-const detailsOf = c => ({authors: namesOf(c).map(n => ({name: n, ...(c.det.people[pkey(n)] || {})})), ...Object.fromEntries(DET.map(([k]) => [k, c.det[k] || ""])), abstract: c.det.abstract || "", note: c.det.note || ""});
+const detailsOf = c => ({authors: namesOf(c).map(n => ({name: n, ...personOf(c, n)})), ...Object.fromEntries(DET.map(([k]) => [k, c.det[k] || ""])), abstract: c.det.abstract || "", note: c.det.note || ""});
 
 async function analyse(file, kind) {
   const x = await fetch("/api/import/analyse", {method: "POST", headers: {"Content-Type": isEpub(file) ? "application/epub+zip" : "application/pdf", "X-Filename": encodeURIComponent(file.name), ...(kind === "book" ? {"X-Kind": "book"} : {})}, body: file});
@@ -249,7 +251,7 @@ async function review(files, w, o = {}) {
       if (t.dataset.kind !== undefined) {                          // paper <-> book: the old look is thrown away and the file is looked at again
         if (c.a) discard([c.a.token]); c.kind = t.value; c.a = null; c.state = "reading"; c.sel = -1; c.existing = ""; c.fields = blank(c.kind); draw(c); status(); look(c);
       } else if (t.dataset.inc !== undefined) { c.include = t.checked; $("#ir-c" + i, d).classList.toggle("off", !c.include); }
-      else { c.sel = +t.value; take(c); sync(c); relabel(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }
+      else { c.sel = +t.value; take(c); sync(c); relabel(c); const pp = $("#ir-pp" + i, d); if (pp) pp.innerHTML = peopleHtml(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }      // (the authors changed with the record: so do their lines under More details)
       status();
     });
     d.addEventListener("toggle", e => { const m = e.target.dataset && e.target.dataset.more; if (m !== undefined) cards[+m].moreOpen = e.target.open; }, true);
@@ -268,8 +270,12 @@ async function review(files, w, o = {}) {
     d.addEventListener("input", e => {
       const t = e.target;
       if (t.dataset.d !== undefined) { cards[+t.dataset.i].det[t.dataset.d] = t.value; return; }
-      if (t.dataset.p !== undefined) { const c = cards[+t.dataset.i], n = namesOf(c)[+t.dataset.pn]; if (n) (c.det.people[pkey(n)] = c.det.people[pkey(n)] || {})[t.dataset.p] = t.value; return; }
+      if (t.dataset.p !== undefined) { const c = cards[+t.dataset.i], n = namesOf(c)[+t.dataset.pn]; if (n) (c.det.people[pkey(n)] = c.det.people[pkey(n)] || {...personOf(c, n)})[t.dataset.p] = t.value; return; }
       if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
+      if (t.dataset.k === "authors") {                           // a name whose spelling you correct keeps what stands under it
+        const was = namesOf(c), now = String(t.value || "").split(";").map(norm).filter(Boolean);
+        if (was.length === now.length) was.forEach((w, k) => { if (pkey(w) !== pkey(now[k]) && !c.det.people[pkey(now[k])] && !now.some(x => pkey(x) === pkey(w))) { const p = personOf(c, w); if (p.affiliation || p.place || p.email) c.det.people[pkey(now[k])] = {...p}; } });
+      }
       c.fields[t.dataset.k] = t.value; $("#ir-e" + c.i, d).textContent = ""; $("#ir-err", d).textContent = "";
       if (t.dataset.k === "title" || t.dataset.k === "doi") recheck(c);
       if (t.dataset.k === "authors") { const pp = $("#ir-pp" + c.i, d); if (pp) pp.innerHTML = peopleHtml(c); }       // (each author has a line under More details)

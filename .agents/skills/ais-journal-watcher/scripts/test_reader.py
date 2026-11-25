@@ -5823,10 +5823,53 @@ print("OK")
         none = pdfmeta.read(inline("", [], abstract=False, date=""))
         assert none["authors"] == [] and none["sure"] == "" and none["title"].startswith("Machines That Write") and pdfmeta.needs_ai(none), none
         assert pdfmeta.read(b"not a pdf")["title"] == "" and not pdfmeta.needs_ai(pdfmeta.read(b"not a pdf"))
-        for good in ("Daniel A. McFarland", "Jean-Luc van der Berg", "Łukasz Kaiser", "MIRA OKONKWO"):
-            assert pdfmeta.is_name(good), good
-        for bad in ("New York", "Hong Kong", "Regular Paper", "University of Northfield", "Working Paper Series", "Mira", "Mira Okonkwo 2024", "The Market for Skills"):
+        for good in ("Daniel A. McFarland", "Jean-Luc van der Berg", "Łukasz Kaiser", "MIRA OKONKWO", "Yili Hong", "Joel West", "James March", "Jisun An", "May Chen", "Francisco Lopez"):
+            assert pdfmeta.is_name(good), good                   # (a family name that is also a place or a month is a name)
+        for bad in ("New York", "Hong Kong", "San Francisco", "Regular Paper", "University of Northfield", "Working Paper Series", "Mira", "Mira Okonkwo 2024", "The Market for Skills", "The Hague", "In Memoriam"):
             assert not pdfmeta.is_name(bad), bad
+
+        # ---- what a reviewer found: readings that were wrong and still called sure
+        def sheet(rows, tail=(), later=()):
+            """A title page from (text, size, bold) rows set one under the other from the top, lines at the foot of the first page (y, text, size), and of the second."""
+            d = pymupdf.open(); pg = page(d); y = 80
+            for text, size, bold in rows:
+                pg.insert_text((90, y), text, fontsize=size, fontname="hebo" if bold else "helv"); y += size * 1.5
+            pg.insert_text((72, 400), "Introduction", fontsize=13, fontname="hebo")
+            pg.insert_textbox(pymupdf.Rect(72, 415, 540, 680), BODY, fontsize=11)
+            for yy, text, size in tail:
+                pg.insert_text((72, yy), text, fontsize=size, fontname="helv")
+            p2 = d.new_page(width=612, height=792); p2.insert_textbox(pymupdf.Rect(72, 90, 540, 680), BODY * 2, fontsize=11)
+            for yy, text, size in later:
+                p2.insert_text((72, yy), text, fontsize=size, fontname="helv")
+            for _ in range(40):
+                d.new_page().insert_textbox(pymupdf.Rect(60, 60, 540, 780), "\n".join(os.urandom(20).hex() for _ in range(60)), fontsize=8)
+            data = d.tobytes(); d.close(); return data
+        TITLE = ("Who Governs the Platform and Why", 20, True)
+        s1 = pdfmeta.read(sheet([TITLE, ("Ann Lee", 11, False), ("University of Northfield", 11, False), ("ann.lee@northfield.example", 11, False),
+                                 ("Yili Hong", 11, False), ("Harbor College", 11, False), ("y.hong@harbor.example", 11, False)]))
+        assert [(a["name"], a["affiliation"], a["place"], a["email"]) for a in s1["authors"]] == [("Ann Lee", "University of Northfield", "", "ann.lee@northfield.example"), ("Yili Hong", "Harbor College", "", "y.hong@harbor.example")], s1["authors"]
+        s2 = pdfmeta.read(sheet([TITLE, ("Digital Platform Governance", 14, True), ("Ann Lee", 11, False), ("University of Northfield", 11, False), ("ann.lee@northfield.example", 11, False),
+                                 ("Bob Ray", 11, False), ("Harbor College", 11, False), ("bob.ray@harbor.example", 11, False)]))
+        assert [a["name"] for a in s2["authors"]] == ["Ann Lee", "Bob Ray"] and "Digital" not in json.dumps(s2["authors"]), "a subtitle in a face of its own was read as the author: %s" % s2["authors"]
+        s3 = pdfmeta.read(sheet([("MIS Quarterly", 30, True), TITLE[:1] + (18, True), ("Ann Lee", 11, False), ("University of Northfield", 11, False), ("ann.lee@northfield.example", 11, False)]))
+        assert s3["title"] == TITLE[0] and [a["name"] for a in s3["authors"]] == ["Ann Lee"], (s3["title"], s3["authors"])           # (a journal's masthead in larger type is not the title)
+        one = [TITLE, ("Ann Lee", 11, False), ("University of Northfield", 11, False), ("ann.lee@northfield.example", 11, False)]
+        for what, tail, later in (("a footnote that cites a conference", [(720, "1 See Smith and Jones (2019) in the Proceedings of the 40th International Conference on Information Systems.", 8)], []),
+                                  ("the second line of a footnote of thanks", [(710, "We thank the participants of seminars at two universities and the audience at the 2022 meeting of the", 8), (720, "Workshop on Information Systems and Economics 2022 and the INFORMS annual meeting for comments.", 8)], []),
+                                  ("a journal's running head", [(40, "Proceedings of the National Academy of Sciences, Vol. 120, 2023", 9)], [(40, "Proceedings of the National Academy of Sciences, Vol. 120, 2023", 9)]),
+                                  ("a magazine with Conference in its name", [(40, "The Conference Board Review, Spring 2021", 9)], [(40, "The Conference Board Review, Spring 2021", 9)])):
+            v = pdfmeta.read(sheet(one, tail, later))
+            assert v["kind"] is None and v["venue"] == "" and [a["name"] for a in v["authors"]] == ["Ann Lee"], "%s was read as the paper's conference: %r" % (what, v["venue"])
+        v = pdfmeta.read(sheet(one, [(730, "12th Symposium on Applied Platform Studies (SAPS 2025), Lisbon, Portugal.", 9)]))       # (printed under the first page only, alone: the paper's own)
+        assert (v["kind"], v["venue"]) == ("conference", "Symposium on Applied Platform Studies 2025"), v["venue"]
+        import time as _tm
+        t0 = _tm.time()
+        for text in ("Sample 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 +", "Year 2015 2016 2017 2018 2019 2020 2021 (est.)", "Manuscript 20240117000345678901234567890123-R2", "Ann Lee 1 * Bob Ray 2"):
+            got_ = pdfmeta._split_names(pdfmeta._Line(0, 0, 300, 12, 11, False, text, [], 0))
+            assert (len(got_) == 2) == text.startswith("Ann"), (text, got_)
+        assert _tm.time() - t0 < 2, "a row of numbers took %.1f s to rule out as a list of names" % (_tm.time() - t0)
+        fold_ = pdfmeta._fold("optimal governance and a plan submitted in 2019")
+        assert not pdfmeta.printed("Al Go", fold_) and not pdfmeta.printed("MIT", fold_) and pdfmeta.printed("Optimal  Governance", fold_)       # (whole words)
         assert pdfmeta.email_fits("okon0180@x.example", "Mira Okonkwo") and pdfmeta.email_fits("jchancf@x.example", "Jason Chan") and not pdfmeta.email_fits("info@x.example", "Mira Okonkwo")
         # what is kept: only the known fields, of the right shape
         c = pdfmeta.clean({"authors": [{"name": " Mira  Okonkwo ", "affiliation": "U", "email": "not an address"}, {"name": ""}, "Tao Lindqvist", 7], "keywords": "a; b;; a", "abstract": " x ", "note": "n", "pages": 12,
@@ -5869,6 +5912,17 @@ print("OK")
             ai.chat = answer("I think the authors are…")
             g3, note3 = pdfmeta.with_ai(plain, got0)
             assert g3["authors"] == [] and "could not be read" in note3
+            ai.chat = answer({"title": "", "conference": "", "year": "", "paper_type": "", "keywords": 5, "authors": 5})          # (a model that does not keep to the form)
+            g3, note3 = pdfmeta.with_ai(plain, got0)
+            assert g3["authors"] == [] and "could not be read" in note3
+            # one word is not a person; a conference the page only mentions is not the paper's, one it states is
+            told_ = dict(pdfmeta.empty(), page_text="Machines That Write\nmira okonkwo\nAn earlier version was presented at the\nInternational Conference on Information Systems 2019.\nWe study skills in 2021.")
+            ai.chat = answer({"title": "", "conference": "International Conference on Information Systems", "year": "2021", "paper_type": "", "keywords": [], "authors": [{"name": "mira", "affiliation": "", "place": "", "email": ""}]})
+            g5, _ = pdfmeta.with_ai(b"", told_)
+            assert g5["authors"] == [] and g5["venue"] == "" and g5["kind"] is None, (g5["authors"], g5["venue"])
+            ai.chat = answer({"title": "", "conference": "Symposium on Applied Platform Studies", "year": "2025", "paper_type": "", "keywords": [], "authors": []})
+            g6, _ = pdfmeta.with_ai(b"", dict(pdfmeta.empty(), page_text="Machines That Write\nSubmitted to the Symposium on Applied Platform Studies 2025\nmira okonkwo"))
+            assert (g6["kind"], g6["venue"], g6["year"]) == ("conference", "Symposium on Applied Platform Studies 2025", "2025"), g6["venue"]
             ai.chat = answer(ai.Blocked("This month’s AI budget ($1.00) is used up."))
             g4, note4 = pdfmeta.with_ai(plain, got0)
             assert g4["authors"] == [] and "budget" in note4
@@ -5946,8 +6000,34 @@ print("OK")
                 side_before = open(kn.sidecar_path(pdf_path)).read()
                 n = len(asked)
                 ra = dt.read_again(res["file"])
-                assert ra["found"]["authors"] == [p[0] for p in four] and "authors" in ra["changes"] and "title" in ra["changes"] and "conference" not in ra["changes"] and len(asked) == n, ra["changes"]
+                assert ra["found"]["authors"] == [p[0] for p in four] and "title" in ra["changes"] and "conference" not in ra["changes"] and len(asked) == n, ra["changes"]
+                assert "authors" not in ra["changes"] and ra["found"]["names_differ"] and [a["name"] for a in ra["found"]["people_apply"]] == ["Mira Okonkwo", "Tao Lindqvist"], "an author list you have would be replaced by the page's"
                 assert open(kn.sidecar_path(pdf_path)).read() == side_before
+                # the same people as the page: what you typed under a name stays, what is missing is filled in
+                dt.save(res["file"], {"authors": [{"name": "Mira Okonkwo", "affiliation": "Typed University", "email": "typed@typed.example"}] + [{"name": p[0].upper()} for p in four[1:]]})
+                ra = dt.read_again(res["file"]); ap = ra["found"]["people_apply"]
+                assert "authors" in ra["changes"] and ap[0] == {"name": "Mira Okonkwo", "affiliation": "Typed University", "place": four[0][2], "email": "typed@typed.example"}, ap[0]
+                assert ap[1] == {"name": four[1][0].upper(), "affiliation": four[1][1], "place": four[1][2], "email": four[1][3]}, ap[1]
+                # a paper is known by its corrected title and DOI: it is not added a second time, and no second paper gets the same DOI
+                assert importer.check_existing("", "Skill Demand after the Arrival of Writing Machines: Evidence") == res["file"] and importer.check_existing("10.5555/late.doi", "") == res["file"]
+                a3 = importer.analyse_pdf(sheet(one), "scan0001.pdf", use_ai=False)
+                third = importer.confirm(a3["token"], {"title": "scan0001 final v2", "authors": "", "journal": "", "pub_date": "2026", "kind": "journal", "source": "hand"})
+                try:
+                    dt.save(third["file"], {"doi": "10.5555/LATE.doi"}); raise AssertionError("two papers were given the same DOI")
+                except ValueError as e:
+                    assert "already has that DOI" in str(e), e
+                # Check my PDFs judges a paper by its corrected title, not by the name it was filed under
+                import identity as idy
+                keep_id = (idy.paths.ROOT, idy.paths.PAPERS); idy.paths.ROOT, idy.paths.PAPERS = dl.ROOT, dl.PAPERS
+                try:
+                    wrong = [x for x in idy.audit() if x["file"] == third["file"]][0]
+                    dt.save(third["file"], {"title": TITLE[0], "authors": [{"name": "Ann Lee"}], "abstract": "Sets {x} and } a stray \\ brace."})
+                    right = [x for x in idy.audit() if x["file"] == third["file"]][0]
+                finally:
+                    idy.paths.ROOT, idy.paths.PAPERS = keep_id
+                assert wrong["verdict"] == "mismatch" and right["verdict"] == "match" and right["title"] == TITLE[0], (wrong["verdict"], right["verdict"], right["title"])
+                bib3 = ex_.bibtex([pl.library_row(third["file"])])
+                assert "abstract = {Sets x and  a stray  brace.}" in bib3, bib3              # (a brace in an abstract cannot end the field early)
                 fo.delete(fid)
             finally:
                 importer.crossref_meta, importer.crossref_search = saved

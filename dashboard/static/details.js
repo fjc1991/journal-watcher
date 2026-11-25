@@ -54,7 +54,12 @@ export async function editDetails(file, done) {
     const b = e.currentTarget, say = $("#dt-read", d); b.disabled = true; say.textContent = "Reading the first page…";
     try {
       const r = await api("/api/paper/details/read", {file, ai: true}), f = r.found;
-      if (f.people.length) setPeople(f.people);
+      // the authors: with none in the dialog, the page's; with the same people, only what is missing under a name is filled; with other names, yours stay
+      const have = people(), fold = s => norm(s).normalize("NFKD").replace(/[^A-Za-z0-9]+/g, " ").trim().toLowerCase(), page = Object.fromEntries(f.people.map(p => [fold(p.name), p]));
+      let kept = "";
+      if (!have.length) setPeople(f.people);
+      else if (f.people.length && have.map(p => fold(p.name)).sort().join("|") === Object.keys(page).sort().join("|")) setPeople(have.map(p => ({name: p.name, affiliation: p.affiliation || page[fold(p.name)].affiliation, place: p.place || page[fold(p.name)].place, email: p.email || page[fold(p.name)].email})));
+      else if (f.people.length) kept = " The page names other authors (" + f.authors.join("; ") + "); yours were left as they are.";
       for (const k of ["conference", "paper_type", "abstract"]) { const el = $(`[data-d="${k}"]`, d); if (el && !norm(el.value) && f[k]) el.value = f[k]; }
       const kw = $('[data-d="keywords"]', d); if (kw && !norm(kw.value) && (f.keywords || []).length) kw.value = f.keywords.join("; ");
       const sug = $("#dt-tsug", d), cur = norm($("#dt-title", d).value);
@@ -62,7 +67,7 @@ export async function editDetails(file, done) {
         sug.innerHTML = `The first page’s title is “${esc(f.title)}”. <button type="button" class="linkbtn" id="dt-tuse">Use it</button>`; sug.classList.remove("hide");
         $("#dt-tuse", d).onclick = () => { $("#dt-title", d).value = f.title; sug.classList.add("hide"); };
       } else sug.classList.add("hide");
-      say.textContent = (foundSay(f) ? "From the first page: " + foundSay(f) + "." : "The first page gave nothing to add.") + (f.sure && f.sure !== "high" && f.people.length ? " Please check the names." : "") + (f.ai_note ? " The AI was not used: " + f.ai_note : "") + " Nothing is kept until you press Save.";
+      say.textContent = (foundSay(f) ? "From the first page: " + foundSay(f) + "." : "The first page gave nothing to add.") + (f.sure && f.sure !== "high" && f.people.length ? " Please check the names." : "") + (f.ai_note ? " The AI was not used: " + f.ai_note : "") + kept + " Nothing is kept until you press Save.";
     } catch (er) { say.textContent = ""; $("#dt-err", d).textContent = er.message; }
     b.disabled = false;
   };
@@ -84,7 +89,7 @@ export async function readMany(files, done) {
   $("#dr-dlg") && $("#dr-dlg").remove();
   const d = document.createElement("dialog"); d.id = "dr-dlg"; d.className = "card ir-dlg dt-dlg"; d.setAttribute("aria-labelledby", "dr-h");
   d.innerHTML = `<h2 id="dr-h">Read details from ${plural(files.length, "PDF")}</h2>
-    <p class="pmeta">Each paper’s first page is read for its authors (with affiliation and e-mail), conference, kind of submission, abstract and keywords. Nothing is changed until you press Apply, and only for the papers you leave ticked. What you typed yourself is kept: only empty details are filled, and the author list is replaced only where the page gives more.</p>
+    <p class="pmeta">Each paper’s first page is read for its authors (with affiliation and e-mail), conference, kind of submission, abstract and keywords. Nothing is changed until you press Apply, and only for the papers you leave ticked. What you have is kept: only empty details are filled. An author list you already have is never replaced; where the page names the same people, the affiliations and addresses missing under their names are filled in.</p>
     <label class="chk"><input type="checkbox" id="dr-ai" checked> Where the rules are not sure who wrote a paper, let the AI read its first page (a fraction of a cent each, counted in your monthly budget; never when it is switched off in Settings → Reader & summaries)</label>
     <div class="row di-btns" id="dr-start"><button class="btn" id="dr-no0">Cancel</button><button class="btn primary" id="dr-run">Read</button></div>
     <div class="ir-st ir-hint hide" id="dr-prog" role="status"></div>
@@ -95,7 +100,10 @@ export async function readMany(files, done) {
   d.addEventListener("close", () => { closed = true; d.remove(); }, {once: true});
   $("#dr-no0", d).onclick = () => d.close(); $("#dr-no", d).onclick = () => d.close();
   const count = () => { const n = $$("[data-use]:checked", d).length; $("#dr-go", d).disabled = !n; $("#dr-go", d).textContent = n ? "Apply to " + plural(n, "paper") : "Apply"; };
-  d.addEventListener("change", e => { if (e.target.dataset.use !== undefined) count(); });
+  d.addEventListener("change", e => {
+    if (e.target.dataset.title !== undefined && e.target.checked) { const u = $(`[data-use="${e.target.dataset.title}"]`, d); if (u && !u.disabled) u.checked = true; }      // (the title is applied with its paper)
+    if (e.target.dataset.use !== undefined || e.target.dataset.title !== undefined) count();
+  });
   $("#dr-run", d).onclick = async () => {
     const ai = $("#dr-ai", d).checked; $("#dr-start", d).classList.add("hide"); $("#dr-ai", d).disabled = true;
     const prog = $("#dr-prog", d), list = $("#dr-list", d); prog.classList.remove("hide"); list.classList.remove("hide"); $("#dr-foot", d).classList.remove("hide");
@@ -106,10 +114,11 @@ export async function readMany(files, done) {
       if (closed) return;
       out.push(r); const f = r.found || {}, ch = r.changes || [], k = out.length - 1;
       if (f.ai) { asked++; cost += Number(f.ai.cost) || 0; }
-      const adds = ch.filter(x => x !== "title");
-      list.insertAdjacentHTML("beforeend", `<section class="ir-card dr-row"><div class="ir-h"><label class="ir-inc"><input type="checkbox" data-use="${k}"${adds.length ? " checked" : " disabled"} aria-label="Apply to ${esc(r.title)}"><b>${esc(r.title)}</b></label></div>
-        <div class="ir-st ${r.error ? "bad" : adds.length ? "ok" : "ir-hint"}">${r.error ? esc(r.error) : adds.length ? "Would add: " + esc(foundSay(Object.fromEntries(Object.entries(f).filter(([key]) => ch.includes(key) || (key === "people" && ch.includes("authors")))))) : "Nothing to add: the library already has what the first page says" + (f.authors && !f.authors.length ? " (no author could be read)" : "") + "."}${f.sure && f.sure !== "high" && ch.includes("authors") ? " Please check the names." : ""}${f.ai_note ? " The AI was not used: " + esc(f.ai_note) : ""}</div>
-        ${ch.includes("authors") ? `<div class="pmeta">${esc(f.authors.join("; "))}</div>` : ""}
+      const adds = ch.filter(x => x !== "title"), ap = f.people_apply || [];
+      const show = {...Object.fromEntries(Object.entries(f).filter(([key]) => ch.includes(key))), ...(ch.includes("authors") ? {authors: ap.map(x => x.name), people: ap} : {})};
+      list.insertAdjacentHTML("beforeend", `<section class="ir-card dr-row"><div class="ir-h"><label class="ir-inc"><input type="checkbox" data-use="${k}"${adds.length ? " checked" : ch.length ? "" : " disabled"} aria-label="Apply to ${esc(r.title)}"><b>${esc(r.title)}</b></label></div>
+        <div class="ir-st ${r.error ? "bad" : adds.length ? "ok" : "ir-hint"}">${r.error ? esc(r.error) : adds.length ? "Would add: " + esc(foundSay(show)) : ch.length ? "Only the title differs." : "Nothing to add: the library already has what the first page says" + (f.authors && !f.authors.length ? " (no author could be read)" : "") + "."}${f.sure && f.sure !== "high" && ch.includes("authors") ? " Please check the names." : ""}${f.names_differ ? " The page names other authors (" + esc(f.authors.join("; ")) + "); yours are left as they are." : ""}${f.ai_note ? " The AI was not used: " + esc(f.ai_note) : ""}</div>
+        ${ch.includes("authors") ? `<div class="pmeta">${esc(ap.map(x => x.name + (x.affiliation ? " (" + x.affiliation + ")" : "")).join("; "))}</div>` : ""}
         ${ch.includes("title") ? `<label class="chk"><input type="checkbox" data-title="${k}"> Also use the first page’s title: “${esc(f.title)}”</label>` : ""}</section>`);
       count();
     }
@@ -119,7 +128,7 @@ export async function readMany(files, done) {
     const go = $("#dr-go", d); go.disabled = true; let n = 0; const bad = [];
     for (const el of $$("[data-use]:checked", d)) {
       const r = out[+el.dataset.use], f = r.found, ch = r.changes, fields = {};
-      if (ch.includes("authors")) fields.authors = f.people;
+      if (ch.includes("authors")) fields.authors = f.people_apply;
       for (const k of ["abstract", "keywords", "conference", "paper_type"]) if (ch.includes(k)) fields[k] = f[k];
       const t = $(`[data-title="${el.dataset.use}"]`, d); if (t && t.checked) fields.title = f.title;
       try { await api("/api/paper/details", {file: r.file, fields}); n++; el.checked = false; el.disabled = true; } catch (er) { bad.push(r.title + ": " + er.message); }

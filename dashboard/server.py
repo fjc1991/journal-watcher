@@ -2217,6 +2217,8 @@ class Handler(BaseHTTPRequestHandler):
                     for p in papers:
                         if gone.get("kind"):
                             p["kind"], p["kind_label"] = gone["kind"], gone.get("label") or ""        # (a conference paper stays one)
+                            if gone.get("details"):
+                                p["details"] = gone["details"]                                      # (and keeps its affiliations, abstract, keywords and your note)
                         run.add_paper(p)
                     run.stage, run.status = "ready", "stopped"
                     run.save(force=True)

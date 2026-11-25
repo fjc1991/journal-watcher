@@ -32,12 +32,17 @@ PAPER_TYPE = re.compile(r"^(regular|short|full|long|complete[d]?|completed resea
 PLACES = set("""usa us uk china india germany france canada australia singapore japan korea netherlands switzerland italy spain israel taiwan brazil mexico sweden norway denmark
 finland austria belgium ireland portugal greece turkey poland russia egypt nigeria kenya ghana chile argentina colombia peru qatar emirates arabia pakistan bangladesh
 indonesia malaysia thailand vietnam philippines zealand states kingdom united hong kong new york san francisco los angeles saint st city republic province state county
-north south east west central upon the of and""".split())
+north south east west central upon the of and carolina dakota virginia hampshire jersey island islands rhode britain england scotland wales europe asia africa america
+texas california florida ohio michigan illinois london paris berlin tokyo beijing shanghai seoul sydney toronto boston chicago""".split())
 PARTICLES = set("van von de der den del della di da dos das du la le el al bin ibn ben ter ten zu y e".split())
 NOT_NAMES = set("""the a an of for and in on at to by with from paper papers research working draft abstract version preliminary submitted submission proceedings conference workshop
 journal review article study evidence introduction keywords university department school college institute this is are do not please cite quote circulate
 comments welcome forthcoming accepted revised received published copyright rights reserved all email e-mail corresponding author authors affiliation
 january february march april may june july august september october november december""".split())
+SOFT = set("the a an of for and in on at to by with from this is are do not all january february march april may june july august september october november december".split())
+HARD = NOT_NAMES - SOFT                  # words that are never part of a person's name on a title page
+NOT_FIRST = SOFT - set("an january february march april may june july august september october november december".split())      # ("An Li" and "May Chen" are people; "The Hague" is not)
+JOURNALISH = re.compile(r"\bvol(?:ume)?\.?\s*\d|\b\d+\s*\(\d+\)|\b(?:journal|review|academy|society|transactions|letters|quarterly|magazine)\b", re.I)
 MARK = re.compile(r"^[\s,;]*(?:\d{1,2}|[*†‡§¶#∗˚]+|[a-f])(?:\s*[,;]?\s*(?:\d{1,2}|[*†‡§¶#∗˚]+|[a-f]))*[\s,;]*$")
 LEADING_MARK = re.compile(r"^\s*(\d{1,2}|[*†‡§¶#∗]|[a-f](?=\s))\s*")
 YEAR = re.compile(r"\b(19[5-9]\d|20\d{2})\b")
@@ -100,7 +105,7 @@ def _lines(page, n):
                     if prev is not None and text and not text.endswith(" ") and not t.startswith(" ") and s["bbox"][0] - prev["bbox"][2] > 0.18 * main:
                         text += " "                      # (each word is a piece of its own in some PDFs, with the space left out)
                     prev = s
-                    raised = (s.get("flags", 0) & 1 or s["size"] < 0.8 * main) and MARK.match(t)
+                    raised = (s.get("flags", 0) & 1 or s["size"] < 0.8 * main) and len(t) <= 12 and MARK.match(t)
                     if raised and text.strip():
                         sups.append((len(text.rstrip()), re.sub(r"\s+", "", t).strip(",;")))
                     else:
@@ -121,11 +126,20 @@ def _lines(page, n):
 
 def _venue(pages):
     """(kind, venue, year, full name) from the lines in the top and bottom margins of the first pages: "Workshop on Information Technology and Systems, 2026" under
-    every page is the paper's own venue, while a conference named in a footnote ("presented at…") is not. (None, "", "", "") when no margin says it."""
-    for lines, height in pages:
-        edge = [l for l in lines if l.y1 <= 0.11 * height or l.y0 >= 0.88 * height]
+    every page is the paper's own venue. A margin line counts when it runs (the same words, page numbers aside, in the margin of another page) or stands alone there;
+    not a footnote (it begins with its mark, or is one of several lines), not a conference only mentioned ("presented at…"), not a journal's running head
+    ("Proceedings of the National Academy of Sciences, Vol. 120"). (None, "", "", "") when no margin says it."""
+    norm = lambda l: re.sub(r"\d+", "", _fold(l.text))        # noqa: E731
+    margins = [[l for l in lines if l.y1 <= 0.11 * height or l.y0 >= 0.88 * height] for lines, height in pages]
+    for i, edge in enumerate(margins):
+        others = {norm(l) for k, m in enumerate(margins) if k != i for l in m}
         for l in edge:
-            if TOLD.search(l.text) or not kinds.CONF_WORDS.search(l.text) and not any(rx.search(l.text) for rx, _ in kinds._CONF_NAMES):
+            if TOLD.search(l.text) or JOURNALISH.search(l.text) or not kinds.CONF_WORDS.search(l.text) and not any(rx.search(l.text) for rx, _ in kinds._CONF_NAMES):
+                continue
+            runs = bool(norm(l)) and norm(l) in others
+            alone = (len(l.text) <= 120 and not re.match(r"^\s*(?:\d{1,2}|[*†‡§¶#∗])\s*[A-Z]", l.text)
+                     and not any(o is not l and len(o.text) > 40 and abs(o.y0 - l.y0) < 1.8 * max(l.size, 8) for o in edge))
+            if not (runs or alone):
                 continue
             y = YEAR.search(l.text)
             full = _sp(re.sub(r"^\W*(?:in:?\s+)?(?:the\s+)?(?:proceedings of\s+)?(?:the\s+)?", "", re.split(r"[|•·]", l.text)[0], flags=re.I))
@@ -158,22 +172,26 @@ def is_name(s):
     toks = _name_tokens(s)
     if not 2 <= len(toks) <= 5 or AFFIL.search(s):
         return False
-    caps = 0
+    caps = soft = 0
+    if toks[0].lower().strip(".,") in NOT_FIRST:
+        return False
     for t in toks:
         low = t.lower().strip(".,")
         if low in PARTICLES:
             continue
         if re.fullmatch(r"(?:[^\W\d_]\.-?){1,3}", t):          # an initial: "A.", "J.-P."
             continue
-        if low in NOT_NAMES or low in PLACES:
+        if low in HARD:
             return False
+        if low in SOFT or low in PLACES:                         # "Hong" in "Yili Hong" is a family name; "Hong Kong" is only a place
+            soft += 1
         core = t.strip(".,'’-")
         if not core or not core[0].isalpha() or not core[0].isupper():
             return False
         if not re.fullmatch(r"[^\W\d_](?:[^\W\d_]|[.'’\-])*", t.rstrip(",")):
             return False
         caps += 1
-    return caps >= 2
+    return caps >= 2 and soft < caps
 
 
 _ONE_MARK = r"(?:\d{1,2}|[*†‡§¶#∗˚]|\x01[^\x02]*\x02)"
@@ -184,6 +202,8 @@ def _split_names(line):
     """The names on one line, each with the marks set after (or before) it: "Ann Lee¹, Bob Ray² and Cy Wu¹*" -> [("Ann Lee", ["1"]), ("Bob Ray", ["2"]),
     ("Cy Wu", ["1", "*"])]; also "Ann Lee 1 * Bob Ray 2", where the marks are all that parts the names. [] when any part of the line is not a name."""
     text = line.text
+    if len(text) > 400 or len(re.findall(r"\d", text)) > 12 or re.search(r"\d{3,}", text):      # (names carry marks of one or two digits; a row of numbers is no list of names)
+        return []
     def back(at):                                        # ("Ann Lee,¹ Bob Ray": the mark belongs before the comma)
         while at > 0 and line.text[at - 1] in ",; ":
             at -= 1
@@ -256,6 +276,15 @@ def _front(lines, height, width):
     first = tl[0]
     tl = [l for l in tl if l.y0 - first.y0 < 6 * big * max(1, len(tl))]
     title = _sp(" ".join(l.text for l in tl))
+    if len(title.split()) <= 3:                         # two or three words in the largest type, and a longer line in large type under it: a journal's masthead above the title
+        sizes = sorted((round(l.size) for l in top), key=lambda z: sum(1 for l in top if round(l.size) == z))
+        body = sizes[-1] if sizes else big
+        under = [l for l in top if l.y0 > max(x.y1 for x in tl) - 1 and l.size < big - 0.6 and l.size >= 1.25 * body]
+        if under:
+            big2 = max(l.size for l in under)
+            t2 = [l for l in under if l.size >= big2 - 0.6]
+            if len(_sp(" ".join(l.text for l in t2)).split()) >= 4 and len(t2) <= 5:
+                tl, title = t2, _sp(" ".join(l.text for l in t2))
     bottom = max(l.y1 for l in tl)
     zone = []
     for l in lines:
@@ -293,9 +322,15 @@ def _authors(zone, width):
     lead = names[0][0].style
     if lead not in detail_styles and detail_styles:
         moved = [(l, g) for l, g in names if l.style in detail_styles]
-        names = [(l, g) for l, g in names if l.style not in detail_styles]
-        details += [l for l, _ in moved]
-        details.sort(key=lambda l: (l.y0, l.x0))
+        ahead = [(l, g) for l, g in names if l.style not in detail_styles]
+        mails = [m for l in details for m in _emails(l.text)]
+        fits = lambda group: any(email_fits(m, nm) for _, got in group for nm, _ in got for m in mails)      # noqa: E731
+        if moved and fits(moved) and not fits(ahead):       # the addresses fit the names in the plain face: the line in a face of its own above them was a subtitle or a track
+            names = moved
+        else:
+            names = ahead
+            details += [l for l, _ in moved]
+            details.sort(key=lambda l: (l.y0, l.x0))
     distinct = lead not in detail_styles and bool(detail_styles)
     authors, anchors = [], []
     for l, got in sorted(names, key=lambda x: (round(x[0].y0 / 4), x[0].x0)):
@@ -333,7 +368,7 @@ def _authors(zone, width):
         kind = "affiliation" if AFFIL.search(text) else "place" if _is_place(text) else ""
         if not kind:                                     # the first short line under a name, with no word that says what it is ("Stanford & NBER", "OpenAI")
             plain = not DATED.search(text) and not YEAR.search(text) and not re.search(r"[.!?:]$", text) and len(text) <= 60 and len(text.split()) <= 7 and not PAPER_TYPE.match(text)
-            kind = "affiliation" if plain and not owner[0]["affiliation"] and not owner[0]["place"] and not any(t in NOT_NAMES - {"of", "and", "for", "the", "at", "in"} for t in _fold(text).split()) else ""
+            kind = "affiliation" if plain and not is_name(text) and not owner[0]["affiliation"] and not owner[0]["place"] and not any(t in NOT_NAMES - {"of", "and", "for", "the", "at", "in"} for t in _fold(text).split()) else ""
         if not kind or len(text) > 160:
             continue
         if len(owner) > 1:
@@ -366,6 +401,8 @@ def _authors(zone, width):
     if loose_mail and len(loose_mail) == len(free) == len(authors):       # as many addresses as authors, none placed by its words: in the order printed
         for a, m in zip(free, loose_mail):
             a["email"] = m
+        loose_mail = []
+    unplaced = bool(loose_mail) and len(loose_mail) >= len([a for a in authors if not a["email"]]) > 0      # (an address for every author still without one, and none fits: a name was probably missed or misread)
     # a line in the face of the names that is no person: when every other author has an address that fits and this one, set under the names, has none, it is their
     # shared affiliation ("Google AI Language")
     with_mail = [a for a in authors if a["email"] and email_fits(a["email"], a["name"])]
@@ -384,7 +421,7 @@ def _authors(zone, width):
             uniq.append(a)
     uniq = uniq[:MAX_AUTHORS]
     backed = [a for a in uniq if (a["email"] and email_fits(a["email"], a["name"])) or a["affiliation"] or (distinct and a["email"])]
-    sure = "high" if uniq and len(backed) == len(uniq) else "check"
+    sure = "high" if uniq and len(backed) == len(uniq) and not unplaced else "check"
     return uniq, sure, ptype
 
 
@@ -500,7 +537,7 @@ AI_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["titl
 def printed(value, page_fold):
     """Whether these words stand on the page, in this order (accents, case and punctuation aside)."""
     v = _fold(value)
-    return bool(v) and v in page_fold
+    return bool(v) and (" " + v + " ") in (" " + page_fold + " ")          # (whole words: "MIT" is not printed where the page says "submitted")
 
 
 def ai_estimate(got):
@@ -531,13 +568,13 @@ def with_ai(data, got=None):
         return got, str(e)
     except ValueError:
         return got, "The AI’s answer could not be read."
-    if not isinstance(d, dict):
+    if not isinstance(d, dict) or not isinstance(d.get("authors") or [], list) or not isinstance(d.get("keywords") or [], list):
         return got, "The AI’s answer could not be read."
     fold = _fold(page)
     fold_tight = fold.replace(" ", "")
     authors = []
     for a in d.get("authors") or []:
-        if not isinstance(a, dict) or not printed(a.get("name"), fold) or not 3 <= len(_sp(a.get("name"))) <= 80:
+        if not isinstance(a, dict) or not printed(a.get("name"), fold) or not 3 <= len(_sp(a.get("name"))) <= 80 or len(_fold(a.get("name")).split()) < 2:
             continue
         mail = _sp(a.get("email"))
         mail = mail if EMAIL.fullmatch(mail) and _fold(mail).replace(" ", "") in fold_tight else ""
@@ -562,8 +599,10 @@ def with_ai(data, got=None):
     if not out.get("title") and printed(d.get("title"), fold) and len(_sp(d.get("title"))) >= 8:
         out["title"] = _sp(d.get("title"))
     conf, yr = _sp(d.get("conference")), _sp(d.get("year"))
-    if not out.get("venue") and printed(conf, fold) and kinds.CONF_WORDS.search(conf) and not TOLD.search(conf):
-        yr = yr if re.fullmatch(r"(19[5-9]\d|20\d{2})", yr) and yr in page else ""
+    lines = [ln for ln in page.splitlines() if ln.strip()]
+    stated = any(_fold(conf) in _fold(ln) and not TOLD.search(ln) and not (k and TOLD.search(lines[k - 1]) and not re.search(r"[.!?]\s*$", lines[k - 1])) for k, ln in enumerate(lines)) if _fold(conf) else False
+    if not out.get("venue") and printed(conf, fold) and stated and kinds.CONF_WORDS.search(conf) and not TOLD.search(conf) and not JOURNALISH.search(conf):      # (not a conference the page only mentions: "presented at…")
+        yr = yr if re.fullmatch(r"(19[5-9]\d|20\d{2})", yr) and re.search(r"\b%s\b" % yr, page) else ""
         short = next((name for rx, name in kinds._CONF_NAMES if rx.search(conf)), "")
         out.update(kind="conference", conference=conf, venue=_sp("%s %s" % (short or conf, yr)), year=out.get("year") or yr)
     if not out.get("paper_type") and printed(d.get("paper_type"), fold) and len(_sp(d.get("paper_type"))) <= 60:

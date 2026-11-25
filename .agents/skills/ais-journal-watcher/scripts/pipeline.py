@@ -1745,7 +1745,7 @@ def _write_kind(p, path):
     """A paper that knows its kind (an author's working or conference paper, a re-download from Check my PDFs) gets its sidecar next to the PDF (kinds.py)."""
     if p.get("kind") in kinds.PAPER_KINDS:
         try:
-            kinds.write_sidecar(path, p["kind"], p.get("journal") or "", p.get("kind_label") or "", dl.index_key(p))
+            kinds.write_sidecar(path, p["kind"], p.get("journal") or "", p.get("kind_label") or "", dl.index_key(p), details=p.get("details") if isinstance(p.get("details"), dict) and p.get("details") else None)
         except OSError:
             pass
 

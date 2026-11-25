@@ -3896,6 +3896,8 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.fill('#ir-c0 [data-d="session"]', "Session 1B - GenAI, Work & Labor Markets"); page.fill('#ir-c0 [data-d="note"]', "discussant: me")
             page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist; Zed Extra"); page.wait_for_selector('#ir-c0 [data-p="email"][data-pn="2"]')
             check("an author typed into the authors box gets a line of their own under More details, and the others keep theirs", page.input_value('#ir-c0 [data-p="email"][data-pn="2"]') == "" and page.input_value('#ir-c0 [data-p="email"][data-pn="0"]') == "okon0180@northfield.example")
+            page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindquist")
+            check("a name whose spelling you correct keeps the affiliation and e-mail under it", page.input_value('#ir-c0 [data-p="email"][data-pn="1"]') == "Tao.Lindqvist@lakeside.example" and page.input_value('#ir-c0 [data-p="affiliation"][data-pn="1"]') == "Lakeside Institute of Technology")
             page.fill('#ir-dlg [data-k="authors"][data-i="0"]', "Mira Okonkwo; Tao Lindqvist")
             page.select_option("#ir-to", "lib"); page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=30000)
             page.wait_for_function("document.querySelector('.di-snack') && /Added|added/.test(document.querySelector('.di-snack').textContent)", timeout=30000)
@@ -3911,13 +3913,14 @@ pl.FEED_HOST_PAUSE = 0                                                          
                   page.input_value("#dt-title") == "Skill Demand After Writing Machines" and page.locator("#dt-people .dt-person").count() == 2 and page.input_value('#dt-people .dt-person >> nth=1 >> [data-pf="email"]') == "Tao.Lindqvist@lakeside.example"
                   and page.input_value('#dt-dlg [data-d="session"]').startswith("Session 1B") and page.input_value('#dt-dlg [data-d="note"]') == "discussant: me" and page.is_enabled("#dt-doi") and "WITS 2026" in page.inner_text("#dt-dlg .pmeta"))
             page.fill("#dt-title", "Skill Demand after Writing Machines: Evidence from Postings"); page.fill('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]', "Northfield Business School")
-            page.fill('#dt-dlg [data-d="keywords"]', "skills; job postings"); page.click('#dt-people .dt-person >> nth=1 >> [data-up]')
+            page.fill('#dt-dlg [data-d="keywords"]', "skills; job postings"); page.fill('#dt-people .dt-person >> nth=1 >> [data-pf="place"]', "")
             page.click("#dt-pdf"); page.wait_for_function("/Nothing is kept until you press Save/.test(document.querySelector('#dt-read').textContent)", timeout=15000)
-            check("'Read from the PDF' fills the boxes from the first page again (the authors as printed) and offers the page's title; nothing is kept yet",
-                  page.input_value('#dt-people .dt-person >> nth=0 >> [data-pf="name"]') == "Mira Okonkwo" and page.input_value('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]') == "University of Northfield"
+            check("'Read from the PDF' fills what is missing from the first page (a place you emptied comes back), keeps what you typed under a name, and offers the page's title; nothing is kept yet",
+                  page.input_value('#dt-people .dt-person >> nth=0 >> [data-pf="name"]') == "Mira Okonkwo" and page.input_value('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]') == "Northfield Business School"
+                  and page.input_value('#dt-people .dt-person >> nth=1 >> [data-pf="place"]') == "Austin, TX, USA"
                   and "The first page’s title is “Skill Demand After Writing Machines”" in page.inner_text("#dt-tsug") and "From the first page: 2 authors" in page.inner_text("#dt-read")
                   and api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))["title"] == "Skill Demand After Writing Machines", page.inner_text("#dt-read"))
-            page.fill('#dt-people .dt-person >> nth=0 >> [data-pf="affiliation"]', "Northfield Business School"); page.click("#dt-add"); page.fill('#dt-people .dt-person >> nth=2 >> [data-pf="name"]', "Zed Extra")
+            page.click("#dt-add"); page.fill('#dt-people .dt-person >> nth=2 >> [data-pf="name"]', "Zed Extra")
             page.fill("#dt-doi", "10.5555/wits.13"); page.click("#dt-go"); page.wait_for_selector("#dt-dlg", state="detached", timeout=10000)
             page.fill("#lf-q", "Evidence from Postings"); page.wait_for_selector('#lib-results .librow:has-text("Evidence from Postings")', timeout=10000)
             la2_ = next(r_ for r_ in api("/api/library") if r_["file"] == la_["file"]); da2_ = api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))
@@ -3932,12 +3935,16 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.click("#ab-read"); page.wait_for_selector("#dr-dlg[open]"); page.click("#dr-run")
             page.wait_for_function("/^Read 2 papers/.test(document.querySelector('#dr-prog').textContent)", timeout=30000)
             rows_ = {("Hiring" if "Hiring" in r_.inner_text() else "Skill"): r_ for r_ in page.locator("#dr-list .dr-row").all()}
-            check("'Read details from the PDFs' (for the ticked papers) lists what each first page would add and changes nothing yet: the paper that lost its affiliation would get it back; a title you corrected is only offered, not ticked",
+            check("'Read details from the PDFs' (for the ticked papers) lists what each first page would add and changes nothing yet: the paper that lost its affiliation would get it back; an author list that names other people "
+                  "than the page is left alone and said so; a title you corrected is only offered, not ticked",
                   len(rows_) == 2 and "Would add: 1 author (all with affiliation or e-mail)" in rows_["Hiring"].inner_text() and rows_["Hiring"].locator("[data-use]").is_checked()
+                  and "Only the title differs." in rows_["Skill"].inner_text() and "The page names other authors (Mira Okonkwo; Tao Lindqvist); yours are left as they are." in rows_["Skill"].inner_text()
+                  and not rows_["Skill"].locator("[data-use]").is_checked() and rows_["Skill"].locator("[data-use]").is_enabled() and page.inner_text("#dr-go") == "Apply to 1 paper"
                   and rows_["Skill"].locator("[data-title]").count() == 1 and not rows_["Skill"].locator("[data-title]").is_checked() and "Apply to" in page.inner_text("#dr-go")
                   and api("/api/paper/details?file=" + urllib.request.quote(lb_["file"]))["people"][0]["affiliation"] == "", str({k_: v_.inner_text()[:160] for k_, v_ in rows_.items()}))
-            if rows_["Skill"].locator("[data-use]").is_checked():
-                rows_["Skill"].locator("[data-use]").uncheck()
+            rows_["Skill"].locator("[data-title]").check()
+            check("ticking 'Also use the first page's title' ticks its paper (the title alone can be applied)", rows_["Skill"].locator("[data-use]").is_checked() and page.inner_text("#dr-go") == "Apply to 2 papers")
+            rows_["Skill"].locator("[data-title]").uncheck(); rows_["Skill"].locator("[data-use]").uncheck()
             page.click("#dr-go"); page.wait_for_selector("#dr-dlg", state="detached", timeout=15000)
             db_ = api("/api/paper/details?file=" + urllib.request.quote(lb_["file"])); da3_ = api("/api/paper/details?file=" + urllib.request.quote(la_["file"]))
             check("Apply writes it for the ticked paper only", db_["people"][0] == {"name": "Ines Varga", "affiliation": "Harbor College", "place": "Lisbon, Portugal", "email": "ivarga@harbor.example"}

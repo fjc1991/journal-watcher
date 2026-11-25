@@ -122,8 +122,9 @@ def save(file, fields):
             new["doi"] = was["doi"]
         if new.get("doi") and not idx.get("doi"):
             import importer
+            import pipeline as pl
             other = importer.check_existing(new["doi"], "")
-            if other and other != file:
+            if (other and other != file) or any(x.get("file") != file and (x.get("doi") or "").lower() == new["doi"].lower() for x in pl.library()):      # (also a DOI another paper was given here)
                 raise ValueError("Another paper in your library already has that DOI.")
         kind, label = kinds.of_row(r, side)
         kinds.write_sidecar(pdf, kind if kind in kinds.PAPER_KINDS else "journal", side.get("venue") or r.get("journal") or "", label, r.get("key") or dl.index_key(idx),
@@ -145,13 +146,22 @@ def read_again(file, use_ai=False):
         except ImportError:
             note = "The AI backend isn’t installed."
     found = dict(importer.page_details(got, note), title=got.get("title") or "", venue=got.get("venue") or "", kind=got.get("kind"))
-    norm = lambda s: re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()        # noqa: E731
+    norm = pdfmeta._fold                                # (accents, case and punctuation aside)
     changes = []
     if found["title"] and norm(found["title"]) != norm(have["title"]):
         changes.append("title")
-    had = {norm(a["name"]): a for a in have["people"]}
-    if found["people"] and ([norm(a["name"]) for a in found["people"]] != [norm(a["name"]) for a in have["people"]]
-                            or any(a.get(k) and not (had.get(norm(a["name"])) or {}).get(k) for a in found["people"] for k in ("affiliation", "place", "email"))):
+    # the authors: a list you have is never replaced by the page's. Without one, the page's is proposed; with the same people, only what is missing under a name
+    # (affiliation, place, address) is filled in; with other names, nothing is proposed (found.people still shows what the page says).
+    page = {norm(a["name"]): a for a in found["people"]}
+    if not have["people"]:
+        apply = [dict(a) for a in found["people"]]
+    elif sorted(page) == sorted(norm(a["name"]) for a in have["people"]):
+        apply = [{k: a.get(k) or (page[norm(a["name"])].get(k) if k != "name" else "") or "" for k in ("name", "affiliation", "place", "email")} for a in have["people"]]
+    else:
+        apply = [dict(a) for a in have["people"]]
+    found["people_apply"] = apply
+    found["names_differ"] = bool(found["people"]) and bool(have["people"]) and sorted(page) != sorted(norm(a["name"]) for a in have["people"])
+    if apply != [{k: a.get(k) or "" for k in ("name", "affiliation", "place", "email")} for a in have["people"]]:
         changes.append("authors")
     for k in ("abstract", "keywords", "conference", "paper_type"):
         if found.get(k) and not have["details"].get(k):

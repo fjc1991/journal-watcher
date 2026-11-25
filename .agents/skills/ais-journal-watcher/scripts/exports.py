@@ -107,7 +107,7 @@ def bibtex(rows):
         f = [("author", " and ".join("%s, %s" % (a, g) if g else a for a, g in e["authors"])), ("title", "{%s}" % _tex(e["title"])),
              ("booktitle" if conf else "journal", _tex(e.get("booktitle") or e["journal"]) if conf else _tex(e["journal"])), ("year", e["year"]), ("volume", e["volume"]), ("number", e["issue"]),
              ("pages", e["pages"].replace("-", "--") if "--" not in e["pages"] else e["pages"]), ("doi", e["doi"]), ("url", e["url"]),
-             ("keywords", ", ".join(_tex(k) for k in e["keywords"])), ("abstract", _tex(e.get("abstract") or ""))]
+             ("keywords", ", ".join(_tex(re.sub(r"[{}\\]", "", k)) for k in e["keywords"])), ("abstract", _tex(re.sub(r"[{}\\]", "", e.get("abstract") or "")))]      # (a brace in an abstract would end the field early)
         out.append("@%s{%s,\n%s\n}\n" % ("inproceedings" if conf else "article", e["key"], ",\n".join("  %s = {%s}" % (k, v) for k, v in f if v)))
     return "\n".join(out)
 

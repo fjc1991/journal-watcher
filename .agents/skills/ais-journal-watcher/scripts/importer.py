@@ -163,6 +163,14 @@ def _existing(p):
             for r in csv.DictReader(f):
                 if r["status"] == "ok" and r["file"] and _same(r, p) and os.path.exists(os.path.join(dl.ROOT, r["file"])):
                     return r["file"]
+    try:                                               # a title or DOI you corrected (details.py keeps it beside the PDF, not in the index): the library's rows carry it
+        import pipeline as pl
+        if os.path.realpath(pl.PAPERS) == os.path.realpath(dl.PAPERS):
+            for r in pl.library():
+                if r.get("file") and r.get("journal") != "Books" and _same({"doi": r.get("doi"), "title": r.get("title")}, p):
+                    return r["file"]
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
