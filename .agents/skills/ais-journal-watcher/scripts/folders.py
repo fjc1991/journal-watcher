@@ -72,7 +72,7 @@ def _parents(every):
         while p and p not in seen:
             seen.add(p)
             p = raw[p]
-        out[i] = "" if p else raw[i]                      # (p is non-empty only when the chain looped)
+        out[i] = "" if p == i else raw[i]                 # (the chain came back to this folder: it is on the loop, and goes to the top. A folder that only leads INTO a loop keeps its parent)
     return out
 
 
@@ -220,10 +220,16 @@ def _edit(fid, fn):
 
 
 def rename(fid, name):
-    name = re.sub(r"\s+", " ", str(name or "")).strip()[:60]
+    name = _clean_name(name)
     if not name:
         raise ValueError("a folder needs a name")
-    return _edit(fid, lambda f: f.update(name=name))
+    with _lock:
+        every = _read_all()
+        if fid not in every:
+            raise KeyError("no such folder")
+        if any(f["id"] != fid and f["name"].lower() == name.lower() for f in _siblings(_parents(every)[fid], every)):      # (a dropped folder is filed by its name: two of one name in one place could not be told apart)
+            raise ValueError("a folder with that name exists")
+        return _edit(fid, lambda f: f.update(name=name))
 
 
 def add(fid, keys):
@@ -247,9 +253,17 @@ def delete(fid, children="lift"):
             for sub in reversed(_below(fid, kids)):
                 _remove_files(sub)
         else:
-            for sub in kids.get(fid, []):
-                up = parents[fid]
-                _edit(sub, lambda f: f.update(parent=up) if up else f.pop("parent", None))
+            up = parents[fid]
+            taken = {f["name"].lower() for f in _siblings(up, every) if f["id"] != fid}
+            for sub in kids.get(fid, []):                   # a folder that moves up to where its name is taken gets the deleted folder's name after its own: "Session 1 (WITS26)"
+                name, n = every[sub]["name"], 2
+                while name.lower() in taken:
+                    tail = " (%s)" % every[fid]["name"] if n == 2 else " (%s %d)" % (every[fid]["name"], n - 1)
+                    name, n = (every[sub]["name"][:max(1, 60 - len(tail))] + tail)[:60], n + 1
+                    if n > 50:
+                        break
+                taken.add(name.lower())
+                _edit(sub, lambda f, name=name: (f.update(name=name), f.update(parent=up) if up else f.pop("parent", None)))
         _remove_files(fid)
 
 

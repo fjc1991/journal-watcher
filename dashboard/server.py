@@ -1616,7 +1616,7 @@ class Handler(BaseHTTPRequestHandler):
             f, rows = self.folder_rows(str(b.get("folder") or ""))
             if not d or not f:
                 return self.send_json({"error": "Choose an export folder in Settings → Reader first." if not d else "no such folder"}, 400)
-            safe = re.sub(r"[\\/:*?\"<>|]+", "-", f["name"]).strip(" .") or "folder"
+            safe = re.sub(r"[\\/:*?\"<>|]+", "-", " - ".join(fo.path(f["id"])) or f["name"]).strip(" .") or "folder"      # (with the folders it is inside: two "Session 1" of two conferences are two directories)
             dest = os.path.join(d, safe)
             n = skipped = 0
             try:
@@ -1645,34 +1645,35 @@ class Handler(BaseHTTPRequestHandler):
             if not d or not f:
                 return self.send_json({"error": "Choose an export folder in Settings → Reader first." if not d else "no such folder"}, 400)
             what, fmt = b.get("what"), b.get("fmt") or "md"
+            stem = " - ".join(fo.path(f["id"])) or f["name"]            # (the file's name says where the folder is: "WITS26 - Session 1-ideas.md")
             try:
                 if what == "workspace":
                     wd, wrows = workspace.load(f["id"]), self.folder_rows(f["id"])[1]
                     if not (wd["cards"] or wd["frames"]):
                         return self.send_json({"error": "the workspace is empty"}, 400)
-                    data, name = (workspace.docx(wd, f["name"], wrows), f["name"] + "-workspace.docx") if fmt == "docx" else (workspace.markdown(wd, f["name"], wrows).encode(), f["name"] + "-workspace.md")
+                    data, name = (workspace.docx(wd, f["name"], wrows), stem + "-workspace.docx") if fmt == "docx" else (workspace.markdown(wd, f["name"], wrows).encode(), stem + "-workspace.md")
                 elif what == "synthesis":
                     sd = synthesis.load(f["id"])
                     if not sd:
                         return self.send_json({"error": "make the synthesis first"}, 400)
-                    data, name = (synthesis.docx(sd, f["name"]), f["name"] + "-synthesis.docx") if fmt == "docx" else (synthesis.markdown(sd, f["name"]).encode(), f["name"] + "-synthesis.md")
+                    data, name = (synthesis.docx(sd, f["name"]), stem + "-synthesis.docx") if fmt == "docx" else (synthesis.markdown(sd, f["name"]).encode(), stem + "-synthesis.md")
                 elif what == "claims":
                     cd = claims.load(f["id"])
                     if not cd:
                         return self.send_json({"error": "check some claims first"}, 400)
-                    data, name = (claims.docx(cd, f["name"]), f["name"] + "-claim-check.docx") if fmt == "docx" else (claims.markdown(cd, f["name"]).encode(), f["name"] + "-claim-check.md")
+                    data, name = (claims.docx(cd, f["name"]), stem + "-claim-check.docx") if fmt == "docx" else (claims.markdown(cd, f["name"]).encode(), stem + "-claim-check.md")
                 elif what == "draft":
                     dr = relatedwork.load(f["id"])
                     if not dr:
                         return self.send_json({"error": "write the related-work draft first"}, 400)
-                    data, name = (relatedwork.docx(dr, f["name"]), f["name"] + "-related-work.docx") if fmt == "docx" else (relatedwork.markdown(dr, f["name"]).encode(), f["name"] + "-related-work.md")
+                    data, name = (relatedwork.docx(dr, f["name"]), stem + "-related-work.docx") if fmt == "docx" else (relatedwork.markdown(dr, f["name"]).encode(), stem + "-related-work.md")
                 elif what == "ideas":
-                    data, name = (ideas.docx(f["id"]), f["name"] + "-ideas.docx") if fmt == "docx" else (ideas.markdown(f["id"]).encode(), f["name"] + "-ideas.md")
+                    data, name = (ideas.docx(f["id"]), stem + "-ideas.docx") if fmt == "docx" else (ideas.markdown(f["id"]).encode(), stem + "-ideas.md")
                 elif what == "matrix" and fmt in ("csv", "md", "tex", "docx"):
                     rows = self.folder_rows(f["id"])[1]
                     data = {"csv": lambda: matrix.csv_bytes(f["id"], rows), "md": lambda: matrix.markdown(f["id"], rows).encode(), "tex": lambda: matrix.latex(f["id"], rows).encode(),
                             "docx": lambda: matrix.docx_bytes(f["id"], rows)}[fmt]()
-                    name = "%s-comparison.%s" % (f["name"], fmt)
+                    name = "%s-comparison.%s" % (stem, fmt)
                 else:
                     return self.send_json({"error": "unknown export"}, 400)
                 os.makedirs(d, exist_ok=True)

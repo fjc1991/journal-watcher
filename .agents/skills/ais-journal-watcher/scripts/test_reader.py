@@ -2312,6 +2312,12 @@ print("JSON" + json.dumps(out))
             fo.move(top["id"], m["id"]); raise AssertionError("moved to where its name is taken")
         except ValueError as e:
             assert "name exists" in str(e), e
+        for fid, name in ((b["id"], "session 1b"), (top["id"], "ICIS26")):               # renaming: not to a name that is taken in the same place
+            try:
+                fo.rename(fid, name); raise AssertionError("renamed to a name that is taken there (%s)" % name)
+            except ValueError as e:
+                assert "name exists" in str(e), e
+        assert fo.rename(twin["id"], "Session 1B")["name"] == "Session 1B" and fo.rename(twin["id"], "session 1b")["name"] == "session 1b"      # (its own name in another case, or a name taken elsewhere, is fine)
         fo.move(b["id"], a["id"]); assert fo.path(b["id"]) == ["WITS26", "Session 1B", "Session 2A"] and fo.all_papers(a["id"]) == ["k1", "k2", "k3", "k4"]
         fo.move(b["id"], ""); assert fo.path(b["id"]) == ["Session 2A"] and "parent" not in fo.get(b["id"]) and fo.all_papers(m["id"]) == ["k0", "k1", "k2", "k3"]
         fo.move(b["id"], m["id"])
@@ -2325,6 +2331,8 @@ print("JSON" + json.dumps(out))
         set_parent(m["id"], deep["id"])
         by = {x["id"]: x for x in fo.list_all()}
         assert len(by) == 9 and by[m["id"]]["parent"] == by[a["id"]]["parent"] == by[deep["id"]]["parent"] == "" and fo.all_papers(m["id"]) is not None, {k: v["parent"] for k, v in by.items()}
+        # …and only the folders ON the loop go to the top: one that merely leads into it keeps its place (b is inside m; "Day 1" and "Session 9" too)
+        assert by[b["id"]]["parent"] == m["id"] and by[end]["path"][-2:] == ["Day 1", "Session 9"] and by[end]["depth"] == 2, (by[b["id"]]["parent"], by[end]["path"])
         set_parent(m["id"], "gone-folder"); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == "" and fo.all_papers(m["id"])[:1] == ["k0"]
         for odd in (7, ["wits26"], {"id": "x"}):          # (a file edited by hand, or damaged: a parent that is no name of a folder)
             set_parent(m["id"], odd); assert {x["id"]: x for x in fo.list_all()}[m["id"]]["parent"] == "", odd
@@ -2336,7 +2344,8 @@ print("JSON" + json.dumps(out))
         fo.delete(m["id"], "delete")
         left = {x["id"] for x in fo.list_all()}
         assert left == {top["id"], other["id"], twin["id"]} and not os.path.exists(os.path.join(fo.DIR, deep["id"] + ".matrix.json")) and not os.path.exists(os.path.join(fo.DIR, end + ".json")), left
-        fo.delete(other["id"]); assert "parent" not in fo.get(twin["id"])                                    # (lifted to the top)
+        fo.delete(other["id"])                                                                              # lifted to the top, where "Session 1B" is taken: it gets the deleted folder's name after its own
+        assert "parent" not in fo.get(twin["id"]) and fo.get(twin["id"])["name"] == "session 1b (ICIS26)" and len({x["name"].lower() for x in fo.list_all()}) == 2, fo.get(twin["id"])
         try:
             fo.delete("nope"); raise AssertionError("deleted a folder that is not there")
         except KeyError:

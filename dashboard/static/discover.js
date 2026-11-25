@@ -87,7 +87,7 @@ async function fill(S) {
   const L = ctx.getLib(), sel = k => $(`[data-s="${k}"]`, S.el), opt = (v, t) => `<option value="${esc(v)}">${esc(t)}</option>`;
   const js = [...new Map(L.map(r => [r.abbr, r.journal])).entries()].sort((a, b) => a[1].localeCompare(b[1])), ys = [...new Set(L.map(r => r.year).filter(Boolean))].sort().reverse();
   let folders = []; try { folders = await api("/api/folders"); } catch (e) { /* optional */ }
-  sel("folder").insertAdjacentHTML("beforeend", folders.slice().sort((a, b) => (a.path || [a.name]).join(" › ").toLowerCase().localeCompare((b.path || [b.name]).join(" › ").toLowerCase())).map(f => opt(f.id, "📁 " + (f.path || [f.name]).join(" › "))).join(""));
+  sel("folder").insertAdjacentHTML("beforeend", (window.LibraryUI && window.LibraryUI.folderTree && window.LibraryUI.folderTree().length ? window.LibraryUI.folderTree() : folders).map(f => opt(f.id, "📁 " + (f.path || [f.name]).join(" › "))).join(""));
   sel("journal").insertAdjacentHTML("beforeend", js.map(([a, n]) => opt(a, n)).join("")); sel("year").insertAdjacentHTML("beforeend", ys.map(y => opt(y, y)).join(""));
 }
 async function find(S) {

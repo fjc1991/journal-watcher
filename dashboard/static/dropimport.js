@@ -131,7 +131,7 @@ const discard = tokens => tokens.length ? fetch("/api/import/discard", {method: 
 function cardHtml(c) {
   const book = c.kind === "book", epub = isEpub(c.file);
   const kindSel = epub ? `<span class="ir-kind"><b>Book</b> (EPUB)</span>` : `<span class="ir-kind" role="radiogroup" aria-label="What is ${esc(c.file.name)}?"><label><input type="radio" name="ir-k${c.i}" data-kind="${c.i}" value="paper"${book ? "" : " checked"}> Paper</label><label><input type="radio" name="ir-k${c.i}" data-kind="${c.i}" value="book"${book ? " checked" : ""}> Book</label></span>`;
-  const head = `<div class="ir-h"><label class="ir-inc"><input type="checkbox" data-inc="${c.i}"${c.include ? " checked" : ""} aria-label="Add ${esc(c.file.name)}"><b>${esc(c.file.name)}</b></label>${kindSel}<small>${c.dir && c.dir.length ? "from " + esc(c.dir.join(" › ")) + " · " : ""}${size(c.file.size)}${c.a ? " · " + plural(c.a.pdf.pages, "page") + (book && c.a.pdf.chapters ? ", outline of " + plural(c.a.pdf.chapters, "item") : "") : ""}</small></div>`;
+  const head = `<div class="ir-h"><label class="ir-inc"><input type="checkbox" data-inc="${c.i}"${c.include ? " checked" : ""} aria-label="Add ${esc(c.file.name)}"><b>${esc(c.file.name)}</b></label>${kindSel}<small>${c.dir && c.dir.length ? "from " + esc(c.dir.join(" › ")) + " · " : c.from ? "from " + esc(c.from) + " · " : ""}${size(c.file.size)}${c.a ? " · " + plural(c.a.pdf.pages, "page") + (book && c.a.pdf.chapters ? ", outline of " + plural(c.a.pdf.chapters, "item") : "") : ""}</small></div>`;
   if (c.state === "reading") return `${head}<div class="ir-st">${epub ? "Opening the EPUB, making its pages" : "Reading the " + (book ? "book" : "PDF")} and looking it up…</div>`;
   if (c.state === "error") return `${head}<div class="ir-st bad">${esc(c.error)}</div>`;
   const a = c.a, cands = a.candidates;
@@ -155,9 +155,9 @@ async function review(files, w, o = {}) {
   const fixed = w.kind === "folder" || w.kind === "open" ? w.id : null, fixedName = fixed ? (w.name || folderName(fs, fixed)) : "";
   const today = new Date().toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
   const last = fs.find(f => f.id === ls.get("jw-drop-last")), first = w.kind === "library" ? "lib" : last ? "f:" + last.id : "new";
-  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: "", det: detOf(null), moreOpen: false, many: pdfs.length > 1, dir: (o.paths && o.paths.get(f)) || []}));
+  const cards = pdfs.map((f, i) => ({i, file: f, kind: isEpub(f) || o.book ? "book" : "paper", ptype: "journal", ptypeTouched: false, label: "", state: "reading", include: true, sel: -1, a: null, existing: "", fields: blank("paper"), error: "", det: detOf(null), moreOpen: false, many: pdfs.length > 1, dir: (o.paths && o.paths.get(f)) || [], from: (o.sessions && o.sessions.get(f)) || ""}));
   const dirs = [...new Set(cards.filter(c => c.dir.length).map(c => c.dir.join("/")))], hasTree = dirs.length > 0;      // the PDFs came out of dropped folders
-  cards.forEach(c => { c.det.session = c.dir.length ? c.dir[c.dir.length - 1] : ""; });
+  cards.forEach(c => { c.det.session = c.from; });
   return new Promise(resolve => {
     $("#ir-dlg") && $("#ir-dlg").remove();
     const d = document.createElement("dialog"); d.id = "ir-dlg"; d.className = "card ir-dlg"; d.setAttribute("aria-labelledby", "ir-h");
@@ -186,9 +186,10 @@ async function review(files, w, o = {}) {
       $("#ir-go", d).disabled = busy || !n; $("#ir-go", d).textContent = busy ? "Reading…" : n ? "Add " + (nb === n ? plural(n, "book") : nb ? plural(n, "item") : plural(n, "paper")) : "Add";
     };
     const to = $("#ir-to", d), nm = $("#ir-name", d);
-    if (to && o.top && w.kind !== "library") { to.value = "new"; nm.value = o.top.slice(0, 60); nm.classList.remove("hide"); }      // (one folder holding the others was dropped: a new folder of its name is the natural place)
-    else if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); }
-    if (to) { to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); if (to.value === "new") { nm.focus(); nm.select(); } }; }
+    if (to && o.top && w.kind !== "library") { to.value = "new"; nm.value = o.top.slice(0, 60); nm.classList.remove("hide"); }      // (one folder around everything was dropped: a new folder of its name is the natural place)
+    else if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); if (o.top) nm.value = o.top.slice(0, 60); }
+    const treeBox = () => { const t = $("#ir-tree", d); if (t && to) t.classList.toggle("hide", to.value === "lib"); };      // (without a folder to add to there are no folders to keep)
+    if (to) { to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); treeBox(); if (to.value === "new") { nm.focus(); nm.select(); } }; treeBox(); }
     cards.forEach(draw); status();
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
       c.prevNames = null;
@@ -235,7 +236,7 @@ async function review(files, w, o = {}) {
         c.a = await analyse(c.file, c.kind); c.state = "ok"; c.sel = c.a.pick; c.existing = c.a.existing || ""; c.kind = c.a.type === "book" ? "book" : "paper";
         if (closed) { discard([c.a.token]); return false; }
         c.det = detOf(c.a);
-        if (c.dir.length) c.det.session = c.dir[c.dir.length - 1];      // (the folder it was in on your disk: "Session 1B - GenAI, Work & Labor Markets")
+        if (c.from) c.det.session = c.from;      // (the folder it was in on your disk: "Session 1B - GenAI, Work & Labor Markets")
         take(c);
       } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
       if (!closed) { draw(c); status(); }
@@ -335,7 +336,7 @@ function snack() {
 function bye(s, ms) { clearTimeout(D.timer); if (ms) D.timer = setTimeout(() => { s.classList.add("gone"); setTimeout(() => s.remove(), 300); }, ms); }
 
 async function run({items, dest, summarize, tree}) {
-  const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false, filed = null;
+  const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false, filed = null, fileErr = "";
   const paint = (n, msg) => { s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div><div class="di-bar"><i style="width:${Math.round(100 * n / total)}%"></i></div><div class="row"><button class="btn small" data-di="stop">Stop</button></div>`; };
   s.onclick = e => { if (e.target.closest("[data-di=stop]")) stop = true; };
   const noun = items.every(x => x.kind === "book") ? "book" : items.some(x => x.kind === "book") ? "item" : "paper";
@@ -361,17 +362,19 @@ async function run({items, dest, summarize, tree}) {
   if (folderId && tree) {                      // the papers that came out of folders: into those folders (made inside the one you add to), or all into the one; one request
     const groups = {}; res.filter(r => r.file).forEach(r => { (groups[r.path.join("\u0000")] = groups[r.path.join("\u0000")] || {path: r.path, files: []}).files.push(r.file); });
     try { filed = await api("/api/folders", {action: "file", id: folderId, into: Object.values(groups)}); }
-    catch (e) { res.forEach(r => { if (r.file) { r.error = "added to your library, but not to the folder: " + e.message; } }); }
+    catch (e) { fileErr = e.message; }                     // (the papers are in your library all the same: said so below)
   }
+  if (fileErr && created) { try { await api("/api/folders", {action: "delete", id: folderId}); } catch (e) { /* it stays, empty */ } }
   if (folderId) ls.set("jw-drop-last", folderId);
   if (stop) discard(items.slice(res.length).map(x => x.token));          // the ones not reached are forgotten
   const ok = res.filter(r => r.file && !r.error), isNew = ok.filter(r => !r.existing), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
-  const nsub = filed ? Object.keys(filed.where || {}).filter(Boolean).length : 0;
-  const msg = (folderId ? (ok.length ? `Added ${plural(ok.length, noun)} to “${fname}”` + (nsub ? ` in ${plural(nsub, "folder")} inside it` : "") : "Nothing was added") : (isNew.length ? `Added ${plural(isNew.length, noun)} to your library` : "Nothing new to add")) +
+  const nsub = filed ? new Set(Object.entries(filed.where || {}).filter(([k]) => k).map(([, id]) => id)).size : 0;      // (two folders whose names are the same in their first 60 characters became one)
+  const msg = (fileErr ? (ok.length ? `Added ${plural(ok.length, noun)} to your library, but not to “${fname}”: ${fileErr}` : "Nothing was added")
+    : folderId ? (ok.length ? `Added ${plural(ok.length, noun)} to “${fname}”` + (nsub ? ` in ${plural(nsub, "folder")} inside it` : "") : "Nothing was added") : (isNew.length ? `Added ${plural(isNew.length, noun)} to your library` : "Nothing new to add")) +
     (had.length ? ` · ${had.length} already in your library` : "") + (bad.length ? ` · ${bad.length} failed` : "") + (left ? ` · stopped, ${left} left` : "");
   const detail = res.map(r => `<li class="${r.error ? "bad" : r.existing ? "had" : "new"}"><span>${esc(r.title || r.name)}</span><small>${r.error ? esc(r.error) : r.existing ? "already in your library" + (folderId ? " — added to the folder" : "") : "added"}</small></li>`).join("");
   s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div>${bad.length ? `<ul class="di-det">${detail}</ul>` : `<ul class="di-det hide">${detail}</ul>`}
-    <div class="row">${folderId && ok.length ? `<button class="btn small" data-di="open">Open folder</button><button class="btn small" data-di="undo">Undo</button>` : ""}<button class="btn small" data-di="det">Details</button><button class="btn small" data-di="x">Close</button></div>`;
+    <div class="row">${folderId && ok.length && !fileErr ? `<button class="btn small" data-di="open">Open folder</button><button class="btn small" data-di="undo">Undo</button>` : ""}<button class="btn small" data-di="det">Details</button><button class="btn small" data-di="x">Close</button></div>`;
   s.onclick = async e => {
     const a = e.target.closest("[data-di]"); if (!a) return; const k = a.dataset.di;
     if (k === "x") s.remove();
@@ -412,7 +415,7 @@ export async function handle(fileList, w, o = {}) {
   if (!files.some(isDoc)) return toast(o.paths ? "There are no PDFs or EPUBs in what you dropped." : "Those aren’t PDFs or EPUBs — drop PDF files to add papers, or PDF and EPUB files to add books.");
   w = w || where(document.body);
   if (!w) return toast("Open the Library or a folder first, then drop the PDFs there.");
-  const job = await review(files, w, {book: o.book || onBooksTab(), paths: o.paths, top: o.top});
+  const job = await review(files, w, {book: o.book || onBooksTab(), paths: o.paths, sessions: o.sessions, top: o.top});
   if (!job) return;
   chain = chain.then(() => run(job)).catch(e => notifyError(e));
 }
@@ -422,8 +425,12 @@ const hiddenName = n => !n || n[0] === "." || n === "__MACOSX" || n === "Thumbs.
 const readAll = dir => new Promise((ok, no) => { const rd = dir.createReader(), out = []; const more = () => rd.readEntries(es => { if (!es.length) return ok(out); out.push(...es); more(); }, no); more(); });      // (a folder is handed over in portions: ask until nothing comes)
 const fileOf = entry => new Promise((ok, no) => entry.file(ok, no));
 async function walk(entry, path, out) {
-  if (hiddenName(entry.name) || out.length >= MAX_TREE) return;
-  if (entry.isFile) { try { out.push({file: await fileOf(entry), path}); } catch (e) { /* a file that cannot be read is left out */ } return; }
+  if (hiddenName(entry.name)) return;
+  if (entry.isFile) {
+    if (!/\.(pdf|epub)$/i.test(entry.name)) return;                 // (only what can be added is read and counted)
+    if (out.length >= MAX_TREE) { out.cut = true; return; }
+    try { out.push({file: await fileOf(entry), path}); } catch (e) { /* a file that cannot be read is left out */ } return;
+  }
   if (!entry.isDirectory || path.length >= 12) return;
   let kids = []; try { kids = await readAll(entry); } catch (e) { return; }
   kids.sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
@@ -435,22 +442,27 @@ const MAX_TREE = 2000;
 export async function handleItems(items, w, o = {}) {
   items = items.filter(x => x && x.file && isDoc(x.file) && !hiddenName(x.file.name) && !(x.path || []).some(hiddenName)).map(x => ({file: x.file, path: x.path || []}));
   if (!items.length) return toast("There are no PDFs or EPUBs in what you dropped.");
+  items.forEach(x => { x.path = x.path.map(norm).filter(Boolean); x.session = x.path[x.path.length - 1] || ""; });      // (the folder a file is in is its session, whatever becomes of the folder below)
+  // One folder around everything. Where you choose the place in the dialog (the Folders page, the Library), it is not made a folder inside the new one: its name is
+  // offered for the new folder itself. On a folder you dropped onto it stays a folder inside that one, except the folder picked through "A folder from my computer…"
+  // when it only holds other folders (o.strip): then those are what you meant.
   let top = "";
-  const firsts = new Set(items.map(x => x.path[0] || ""));
-  if (firsts.size === 1 && !firsts.has("") && items.some(x => x.path.length > 1)) { top = items[0].path[0]; items = items.map(x => ({file: x.file, path: x.path.slice(1)})); }
-  const paths = new Map(items.map(x => [x.file, x.path.map(norm).filter(Boolean)]));
-  if (items.length >= MAX_TREE) toast(`Only the first ${MAX_TREE} files are taken.`);
-  return handle(items.map(x => x.file), w, {...o, paths, top});
+  const firsts = new Set(items.map(x => x.path[0] || "")), one = firsts.size === 1 && !firsts.has(""), fixed = w && (w.kind === "folder" || w.kind === "open");
+  const onlyFolders = items.every(x => x.path.length > 1), onlyFiles = items.every(x => x.path.length === 1);
+  if (one && ((!fixed && (onlyFolders || onlyFiles)) || (fixed && o.strip && onlyFolders))) { top = fixed ? "" : items[0].path[0]; items.forEach(x => { x.path = x.path.slice(1); }); }
+  const paths = new Map(items.map(x => [x.file, x.path])), sessions = new Map(items.map(x => [x.file, x.session]));
+  if (o.cut || items.length >= MAX_TREE) toast(`Only the first ${MAX_TREE} PDFs and EPUBs are taken.`);
+  return handle(items.map(x => x.file), w, {...o, paths, sessions, top});
 }
 async function handleEntries(entries, w) {
   const out = [];
   for (const en of entries) if (en) await walk(en, [], out);
-  return handleItems(out, w);
+  return handleItems(out, w, {cut: !!out.cut});
 }
 // "A folder from my computer…" in an open folder's Add menu: for where dragging a folder does not work
 export function chooseFolder(folderId) {
   const i = document.createElement("input"); i.type = "file"; i.multiple = true; i.webkitdirectory = true; i.style.display = "none"; document.body.append(i);
-  i.onchange = () => { handleItems([...i.files].map(f => ({file: f, path: String(f.webkitRelativePath || "").split("/").slice(0, -1)})), {kind: "open", id: folderId}); setTimeout(() => i.remove(), 0); };
+  i.onchange = () => { handleItems([...i.files].map(f => ({file: f, path: String(f.webkitRelativePath || "").split("/").slice(0, -1)})), {kind: "open", id: folderId}, {strip: true}); setTimeout(() => i.remove(), 0); };
   i.click();
 }
 

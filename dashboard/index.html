@@ -1100,7 +1100,7 @@ async function folderDialog() {
   const pre = (RUN.params || {}).folder;
   d.innerHTML = `<h2 id="rf-h">Add this run's papers to a folder</h2>
     <p class="pmeta">${esc(RUN.title)}. Papers stay where they are: a folder is just a list.</p>
-    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center"><label for="rf-to">Folder</label><select id="rf-to">${fs.slice().sort((a, b) => (a.path || [a.name]).join(" › ").toLowerCase().localeCompare((b.path || [b.name]).join(" › ").toLowerCase())).map(f => `<option value="${esc(f.id)}"${f.id === pre ? " selected" : ""}>${esc((f.path || [f.name]).join(" › "))}</option>`).join("")}<option value="~new"${fs.length ? "" : " selected"}>New folder…</option></select>
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center"><label for="rf-to">Folder</label><select id="rf-to">${(LibraryUI.folderTree ? LibraryUI.folderTree() : fs).map(f => `<option value="${esc(f.id)}"${f.id === pre ? " selected" : ""}>${esc((f.path || [f.name]).join(" › "))}</option>`).join("")}<option value="~new"${fs.length ? "" : " selected"}>New folder…</option></select>
       <input id="rf-name" class="${fs.length ? "hide" : ""}" placeholder="Name of the new folder" maxlength="60" aria-label="Name of the new folder"></div>
     <label class="di-opt"><input type="checkbox" id="rf-now" checked disabled> The ${nIn} paper${nIn === 1 ? "" : "s"} of this run in your library</label>
     ${nLater ? `<label class="di-opt"><input type="checkbox" id="rf-later" checked> Also the ${nLater} still to download: each goes in when it arrives (a download, a retry, or a PDF you add)</label>` : ""}

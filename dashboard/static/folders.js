@@ -49,20 +49,20 @@ export async function mount(el) {
 function draw() {
   const el = P.el; if (!el) return;
   const xs = shown(), grid = P.view === "grid";
-  const tile = f => `<div class="fp-tile${P.sel.has(f.id) ? " sel" : ""}" data-id="${esc(f.id)}" role="button" tabindex="0" aria-label="${esc(f.name)}, ${f.papers} papers" data-drop="${esc(f.id)}">
+  const tile = f => `<div class="fp-tile${P.sel.has(f.id) ? " sel" : ""}" data-id="${esc(f.id)}" role="button" tabindex="0" aria-label="${esc((f.path || [f.name]).join(" › "))}, ${f.papers} papers" data-drop="${esc(f.id)}">
       ${P.edit ? `<span class="fp-check" aria-hidden="true">${P.sel.has(f.id) ? "✓" : ""}</span>` : ""}
       <div class="fp-ico">${icon(f.papers)}</div>
       ${P.renaming === f.id ? `<input class="fp-rename" value="${esc(f.name)}" maxlength="60" aria-label="Folder name">` : `<div class="fp-name">${esc(f.name)}</div>`}
       <div class="fp-meta">${f.papers} paper${f.papers === 1 ? "" : "s"}${f.cards ? ` · ${f.cards} with a card` : ""}${f.children ? ` · ${f.children} folder${f.children === 1 ? "" : "s"} inside` : ""}${f.parent ? ` · in ${esc((f.path || []).slice(0, -1).join(" › "))}` : ""}</div><div class="fp-flags">${flags(f)}</div></div>`;
   const row = f => `<div class="fp-row${P.sel.has(f.id) ? " sel" : ""}" data-id="${esc(f.id)}" role="button" tabindex="0" data-drop="${esc(f.id)}">
       ${P.edit ? `<span class="fp-check" aria-hidden="true">${P.sel.has(f.id) ? "✓" : ""}</span>` : ""}<span class="fp-mini">${icon()}</span>
-      ${P.renaming === f.id ? `<input class="fp-rename" value="${esc(f.name)}" maxlength="60" aria-label="Folder name">` : `<span class="fp-name">${esc(f.name)}</span>`}
+      ${P.renaming === f.id ? `<input class="fp-rename" value="${esc(f.name)}" maxlength="60" aria-label="Folder name">` : `<span class="fp-name">${esc(f.name)}</span>`}${f.parent ? `<span class="fp-c">in ${esc((f.path || []).slice(0, -1).join(" › "))}</span>` : ""}
       <span class="fp-flags">${flags(f)}</span><span class="fp-c">${f.papers} paper${f.papers === 1 ? "" : "s"}</span><span class="fp-c">${f.cards} with a card</span><span class="fp-c fp-when">${esc(ago(f.updated))}</span></div>`;
   const add = P.adding ? (grid ? `<div class="fp-tile fp-newtile"><div class="fp-ico">${icon("")}</div><input class="fp-newinput" placeholder="Folder name" maxlength="60" aria-label="New folder name"><div class="fp-meta">Enter to create · Esc to cancel</div></div>`
       : `<div class="fp-row fp-newtile"><span class="fp-mini">${icon()}</span><input class="fp-newinput" placeholder="Folder name" maxlength="60" aria-label="New folder name"></div>`)
     : (grid ? `<div class="fp-tile fp-add" data-fp="new" role="button" tabindex="0"><div class="fp-ico">${icon("＋")}</div><div class="fp-name">New folder</div><div class="fp-meta">Papers stay where they are</div></div>` : "");
   el.innerHTML = `<div class="fp">
-    <div class="fp-bar"><div class="fp-title">Folders <small>${P.folders.length}</small></div><div class="fp-tools">
+    <div class="fp-bar"><div class="fp-title">Folders <small>${P.folders.filter(f => !f.parent).length}</small></div><div class="fp-tools">
       <button class="fp-btn${P.edit ? " on" : ""}" data-fp="edit" title="Select folders to rename or delete">${P.edit ? "Done" : "Edit"}</button>
       <select class="fp-sort" aria-label="Sort folders">${SORTS.map(([k, t]) => `<option value="${k}"${P.sort === k ? " selected" : ""}>${t}</option>`).join("")}</select>
       <button class="fp-btn fp-ic${grid ? "" : " on"}" data-fp="view" title="${grid ? "Show as a list" : "Show as tiles"}" aria-label="Toggle tiles and list">${grid
@@ -99,7 +99,7 @@ async function del() {
   const inside = new Set(ids.flatMap(i => [...under(i)])), tops = ids.filter(i => !inside.has(i)), more = [...inside].filter(i => !ids.includes(i)).length;      // (a folder ticked together with the one it is in goes with that one)
   if (!confirm(`Delete ${ids.length === 1 ? "the folder “" + names[0] + "”" : ids.length + " folders"}${more ? ` and the ${more} folder${more === 1 ? "" : "s"} inside` : ""}?\n\nThe papers are not deleted. The folder’s Ideas Lab board, matrix and saved conversation are.`)) return;
   for (const id of tops) { try { await api("/api/folders", {action: "delete", id, children: "delete"}); } catch (e) { notifyError(e); } }
-  P.sel.clear(); toast(`Deleted ${ids.length} folder${ids.length === 1 ? "" : "s"}.`); await refresh();
+  P.sel.clear(); toast(`Deleted ${ids.length + more} folder${ids.length + more === 1 ? "" : "s"}.`); await refresh();
 }
 function wire(el) {
   el.addEventListener("click", e => {
@@ -127,7 +127,7 @@ function wire(el) {
   });
   el.addEventListener("focusout", e => { const inp = e.target.closest && e.target.closest(".fp-newinput, .fp-rename"); if (inp && el.contains(inp)) setTimeout(() => { if (!document.body.contains(inp)) return; inp.classList.contains("fp-newinput") ? create(inp.value) : rename(P.renaming, inp.value); }, 120); });
   el.addEventListener("change", e => { if (e.target.matches(".fp-sort")) { P.sort = e.target.value; ls.set("jw-fp-sort", P.sort); draw(); } });
-  el.addEventListener("input", debounce(e => { if (e.target.matches(".fp-find")) { P.q = e.target.value; const pos = e.target.selectionStart; draw(); const f = $(".fp-find", el); f.focus(); f.setSelectionRange(pos, pos); } }, 160));
+  el.addEventListener("input", debounce(e => { if (e.target.matches(".fp-find")) { P.q = e.target.value; const vis = new Set(shown().map(x => x.id)); [...P.sel].forEach(id => vis.has(id) || P.sel.delete(id)); if (P.renaming && !vis.has(P.renaming)) P.renaming = null;      /* (what is no longer listed is no longer ticked) */ const pos = e.target.selectionStart; draw(); const f = $(".fp-find", el); f.focus(); f.setSelectionRange(pos, pos); } }, 160));
   // (PDFs dropped from your desktop onto a tile, or on this page, are handled by dropimport.js)
 }
 

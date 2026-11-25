@@ -4004,6 +4004,10 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("the master folder's page lists the folders inside it as tiles, then every paper of all of them, and says how many it counts",
                   page.locator(".fv-subtile").count() == 2 and page.locator("#fv-list .librow").count() == 4 and "4 papers in this folder and the 3 folders inside it" in page.inner_text("#libview .pagehead .meta")
                   and "2 papers" in page.inner_text('.fv-subtile[data-sub="%s"]' % a_["id"]) and "1 folder" in page.inner_text('.fv-subtile[data-sub="%s"]' % b_["id"]), page.inner_text("#libview .pagehead .meta"))
+            exp2_ = os.path.join(TMP, "exported-tree"); api("/api/settings", {"prefs": {"export_dir": exp2_}}); api("/api/export/folderdir", {"folder": a_["id"]}); api("/api/settings", {"prefs": {"export_dir": ""}})
+            check("a folder inside another is exported under a name that says where it is (two 'Session 1' of two conferences do not write over each other); the count beside 'Folders' is of the folders at the top",
+                  os.path.isdir(exp2_) and [n_ for n_ in os.listdir(exp2_) if n_.startswith("WITS26 - Session 1B")] != [] and page.inner_text("#foldcount").strip() == str(len([x for x in api("/api/folders") if not x["parent"]])),
+                  str(os.listdir(exp2_) if os.path.isdir(exp2_) else "no directory"))
             page.click('.fv-subtile[data-sub="%s"]' % b_["id"]); page.wait_for_selector(".fv-crumbs")
             check("a folder inside another opens from its tile: its page says where it is, shows its own papers and those under it, and the way back",
                   "WITS26" in page.inner_text(".fv-crumbs") and page.locator("#fv-list .librow").count() == 2 and page.locator(".fv-subtile").count() == 1 and "Folders" in page.inner_text("#tbtitle") and "WITS26 › " + S2_[:20] in page.inner_text("#tbtitle"),
@@ -4033,14 +4037,31 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("'No folders' puts every paper straight into the folder you dropped on, and makes no folder", (F_[wid_]["count"], F_[wid_]["own"], F_[wid_]["children"]) == (4, 4, 0) and "inside it" not in page.inner_text(".di-snack")
                   and det_("Judging With a Machine Beside You")["session"] == S2_, str(F_[wid_]))
             # a folder inside it made by hand; then one folder holding others, dropped on the Folders page: a new folder of its name, with the others inside
+            # one folder around the others, dropped ON a folder: it stays a folder inside that one (its name is not thrown away)
+            page.evaluate(JS_TREE, [{"kind": "open", "id": wid_}, [[t1_, "a.pdf", ["ICIS26", "Track A"]], [t2_, "b.pdf", ["ICIS26", "Track B"]]]]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c1 .ir-f", timeout=40000)
+            check("a folder that holds other folders, dropped on a folder, is kept as a folder inside it", "from ICIS26 › Track A" in page.inner_text("#ir-c0 .ir-h") and "come from 2 folders" in page.inner_text("#ir-tree"), page.inner_text("#ir-c0 .ir-h"))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
             answers.append("Reading group"); page.wait_for_selector("#fv-sub"); page.click("#fv-sub"); page.wait_for_selector(".fv-subtile")
             check("'New subfolder' makes a folder inside the one you are in", sub_("Reading group") is not None and "Reading group" in page.inner_text(".fv-subs"))
             page.click("#folditem"); page.wait_for_selector(".fp-path")
+            # one folder of PDFs on the Folders page: a new folder of its name, and nothing to ask about folders; a session folder that also holds a folder is not taken apart
+            page.evaluate(JS_TREE, [{"kind": "home"}, [[t1_, "a.pdf", ["Platform papers"]], [t2_, "b.pdf", ["Platform papers"]]]]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c1 .ir-f", timeout=40000)
+            page.click("#ir-c0 .ir-more summary")
+            one_ = (page.input_value("#ir-to"), page.input_value("#ir-name"), page.locator("#ir-tree").count(), page.input_value('#ir-c0 [data-d="session"]'), "from Platform papers" in page.inner_text("#ir-c0 .ir-h"))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.evaluate(JS_TREE, [{"kind": "home"}, [[t1_, "a.pdf", ["Session 9"]], [t2_, "b.pdf", ["Session 9", "Slides"]]]]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c1 .ir-f", timeout=40000)
+            page.click("#ir-c0 .ir-more summary")
+            two_ = (page.input_value("#ir-name") != "Session 9", "from Session 9 ·" in page.inner_text("#ir-c0 .ir-h"), "from Session 9 › Slides" in page.inner_text("#ir-c1 .ir-h"), page.input_value('#ir-c0 [data-d="session"]'))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            check("one folder of PDFs dropped on the Folders page: a new folder of its name is offered and each paper keeps that name as its session; a folder with papers AND a folder inside is left whole",
+                  one_ == ("new", "Platform papers", 0, "Platform papers", True) and two_ == (True, True, True, "Session 9"), str((one_, two_)))
             page.evaluate(JS_TREE, [{"kind": "home"}, [[t1_, "a.pdf", ["ICIS26", "Track A"]], [t2_, "b.pdf", ["ICIS26", "Track B"]], [t3_, "c.pdf", ["ICIS26", "Track B"]]]]); page.wait_for_selector("#ir-dlg[open]")
             for i_ in range(3):
                 page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
             check("one folder that holds the others, dropped on the Folders page: a new folder of its name is offered, and the folders inside it are the ones kept",
                   page.input_value("#ir-to") == "new" and page.input_value("#ir-name") == "ICIS26" and "from Track A" in page.inner_text("#ir-c0 .ir-h") and "come from 2 folders" in page.inner_text("#ir-tree"), page.input_value("#ir-name"))
+            page.select_option("#ir-to", "lib"); hid_ = not page.is_visible("#ir-tree"); page.select_option("#ir-to", "new")
+            check("the question about keeping the folders is only shown while there is a folder to add to", hid_ and page.is_visible("#ir-tree") and page.input_value("#ir-name") == "ICIS26")
             page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
             page.wait_for_function("document.querySelector('.di-snack') && /ICIS26/.test(document.querySelector('.di-snack').textContent)", timeout=60000)
             ic_ = next(x for x in api("/api/folders") if x["name"] == "ICIS26"); tracks_ = sorted(x["name"] for x in api("/api/folders") if x["parent"] == ic_["id"])

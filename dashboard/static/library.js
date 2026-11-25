@@ -31,7 +31,9 @@ async function loadTags() { try { TAGS = (await api("/api/tags")).tags; } catch 
 const folderName = id => id === "~none" ? "not in any folder" : (FOLDERS.find(f => f.id === id) || {}).name || id;
 // ---- folders inside folders: a folder shows its own papers and those of every folder under it
 const folderLabel = f => ((f && f.path) || [f ? f.name : ""]).join(" › ");                      // "WITS26 › Session 1B"
-const folderTree = () => FOLDERS.slice().sort((a, b) => folderLabel(a).toLowerCase().localeCompare(folderLabel(b).toLowerCase()));      // a folder, then what is inside it
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, {numeric: true, sensitivity: "base"});
+// a folder, then what is inside it, then the next (walked through the tree itself: sorting the written-out paths would put "WITS26 - posters" between WITS26 and its own folders)
+const folderTree = () => { const ids = new Set(FOLDERS.map(f => f.id)), walk = p => FOLDERS.filter(f => ((f.parent && ids.has(f.parent)) ? f.parent : "") === p).sort(byName).flatMap(f => [f, ...walk(f.id)]); return walk(""); };
 const folderRoots = () => FOLDERS.filter(f => !f.parent);
 const folderKids = id => FOLDERS.filter(f => f.parent === id);
 let famMemo = {of: null, by: {}};
@@ -746,7 +748,7 @@ function showFolderTab() {
   if (FV.tab === "papers") {
     const rows = lib().map((r, i) => [r, i]).filter(([r]) => inFolder(r, FV.id)), kids = folderKids(FV.id).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase(), undefined, {numeric: true}));
     // the folders inside this one, as tiles you can open or drop PDFs on; then every paper of this folder and of the folders under it (each paper's own folder is the tag on its row)
-    body.innerHTML = (kids.length ? `<div class="fv-subs" role="list" aria-label="Folders inside this one">${kids.map(k => `<button type="button" class="fv-subtile" role="listitem" data-sub="${esc(k.id)}" data-drop="${esc(k.id)}" title="${esc(folderLabel(k))}"><span class="fp-name">📁 ${esc(k.name)}</span><small>${k.count} paper${k.count === 1 ? "" : "s"}${k.children ? " · " + k.children + " folder" + (k.children === 1 ? "" : "s") : ""}</small></button>`).join("")}</div>` : "") +
+    body.innerHTML = (kids.length ? `<div class="fv-subs" role="group" aria-label="Folders inside this one">${kids.map(k => `<button type="button" class="fv-subtile" data-sub="${esc(k.id)}" data-drop="${esc(k.id)}" title="${esc(folderLabel(k))}"><span class="fp-name">📁 ${esc(k.name)}</span><small>${k.count} paper${k.count === 1 ? "" : "s"}${k.children ? " · " + k.children + " folder" + (k.children === 1 ? "" : "s") : ""}</small></button>`).join("")}</div>` : "") +
       (rows.length ? `<div class="reshead">${readyKey(rows.map(([r]) => r))}</div>` : "") + `<div class="papers" id="fv-list">${rows.map(([r, i]) => row(r, i)).join("") || `<div class="card empty"><h2>${kids.length ? "No papers in this folder or the folders inside it yet" : "This folder is empty"}</h2>Drop PDFs here, use <b>＋ Add papers</b>, or use the 📁 button on any paper in the Library.</div>`}</div>`;
     $$(".fv-subtile", body).forEach(b => b.onclick = () => ctx.go({j: "@" + b.dataset.sub}));
     bindRows(body);
@@ -855,7 +857,7 @@ window.LibraryUI = {
   init(c) { ctx = c; const wire = () => ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "FoldersUI", "DropImport", "Palette", "Activity", "DraftUI", "ClaimsUI", "SynthUI", "ReviewUI", "WorkspaceUI", "BibImport"].forEach(n => window[n] && window[n].init(c)); wire(); addEventListener("load", wire, {once: true});   /* the other tab modules may still be loading */ wireRows(); return Promise.all([loadFolders(), loadTags()]); },
   row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab, bookSummaryHtml, showChapters, summarised,
   refreshFolders: loadFolders, state: F,
-  folderCount: () => FOLDERS.length, folders: () => FOLDERS,
+  folderCount: () => FOLDERS.filter(f => !f.parent).length, folders: () => FOLDERS,                 // (the folders at the top: what the sidebar and the Folders page list)
   inFolder, folderLabel, folderTree, folderRoots, folderIndent: indent, folderPath: id => { const f = FOLDERS.find(x => x.id === id); return f ? folderLabel(f) : folderName(id); },                          // folders inside folders: the other pages list and count with these
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added
     if (!FV.id || !$("#libview:not(.hide) #fv-body")) return; const rows = lib().filter(r => inFolder(r, FV.id)), m = $("#libview .pagehead .meta");
