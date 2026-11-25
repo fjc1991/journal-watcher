@@ -3978,7 +3978,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             wid_ = api("/api/folders", {"action": "create", "name": "WITS26"})["id"]
             fol_ = lambda: {x["id"]: x for x in api("/api/folders")}          # noqa: E731
             sub_ = lambda *names: next((x for x in api("/api/folders") if x["path"] == ["WITS26", *names]), None)          # noqa: E731
-            page.goto(base + "/#/folder/" + wid_); page.wait_for_selector("#fv-body")
+            page.goto("about:blank"); page.goto(base + "/#/folder/" + wid_); page.wait_for_selector("#fv-body")          # (loaded anew: the folder was made behind the page's back)
             page.evaluate(JS_TREE, [{"kind": "open", "id": wid_}, tree_]); page.wait_for_selector("#ir-dlg[open]")
             for i_ in range(4):
                 page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
