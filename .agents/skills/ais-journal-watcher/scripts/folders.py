@@ -153,7 +153,7 @@ def _siblings(parent, every=None):
 
 def create(name, parent=None):
     """A new folder, at the top or inside `parent`. A name is taken once among the folders of the same place (two masters may each have a "Session 1"). The id of a
-    folder inside another is made from its name AND its parent, the same on every computer: two computers that each make "Session 1" under different masters get two
+    folder inside another is made from its name AND its parent (a short hash of both), the same on every computer: two computers that each make "Session 1" under different masters get two
     files, which a sync cannot mistake for one folder."""
     name = _clean_name(name)
     if not name:
@@ -165,7 +165,7 @@ def create(name, parent=None):
             raise ValueError("the folder to put it in is not there")
         if any(f["name"].lower() == name.lower() for f in _siblings(parent, every)):
             raise ValueError("a folder with that name exists")
-        base = fid = _slug(name) if not parent else "%s-%s" % (_slug(name)[:30].strip("-") or "folder", hashlib.sha1(parent.encode()).hexdigest()[:6])
+        base = fid = _slug(name) if not parent else "%s-%s" % (_slug(name)[:30].strip("-") or "folder", hashlib.sha1((parent + "\0" + name.lower()).encode()).hexdigest()[:6])      # (the whole name too: "Session 1" and "Session-1" read alike once made into an id, and long names are cut)
         n = 2
         while get(fid):
             fid = "%s-%d" % (base, n); n += 1

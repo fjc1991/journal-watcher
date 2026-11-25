@@ -2282,6 +2282,10 @@ print("JSON" + json.dumps(out))
         itself; a damaged tree hides nothing; deleting a folder lifts or takes the folders inside it."""
         m = fo.create("WITS26"); a = fo.create("Session 1B", m["id"]); b = fo.create("Session 2A", m["id"]); deep = fo.create("Posters", a["id"])
         assert m["id"] == "wits26" and "parent" not in m and a["parent"] == m["id"] and a["id"].startswith("session-1b-") and a["id"] != "session-1b" and fo.get(a["id"])["parent"] == m["id"], (m, a)
+        near = fo.create("Session-1B", m["id"]); far = fo.create("Session 1B - GenAI, Work and Labor Markets in Year One", m["id"]); far2 = fo.create("Session 1B - GenAI, Work and Labor Markets in Year Two", m["id"])
+        assert len({a["id"], near["id"], far["id"], far2["id"]}) == 4 and near["id"].startswith("session-1b-") and far["id"][:-6] == far2["id"][:-6], "two names that read alike as an id, or agree in their first letters, got one id (two computers would write one file): %s" % [a["id"], near["id"], far["id"], far2["id"]]
+        for x in (near, far, far2):
+            fo.delete(x["id"])
         top = fo.create("Session 1B"); other = fo.create("ICIS26"); twin = fo.create("session 1b", other["id"])        # the same name at the top and under another master: three folders
         assert top["id"] == "session-1b" and len({a["id"], top["id"], twin["id"]}) == 3, (a["id"], top["id"], twin["id"])
         for name, parent in (("SESSION 1B", m["id"]), ("wits26", ""), ("Posters", a["id"])):

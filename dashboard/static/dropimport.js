@@ -431,12 +431,13 @@ async function walk(entry, path, out) {
     if (out.length >= MAX_TREE) { out.cut = true; return; }
     try { out.push({file: await fileOf(entry), path}); } catch (e) { /* a file that cannot be read is left out */ } return;
   }
-  if (!entry.isDirectory || path.length >= 12) return;
+  if (!entry.isDirectory) return;
+  if (path.length >= MAX_DEPTH) { out.deep = true; return; }       // (said afterwards: nothing is left out without a word)
   let kids = []; try { kids = await readAll(entry); } catch (e) { return; }
   kids.sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
   for (const k of kids) await walk(k, [...path, entry.name], out);
 }
-const MAX_TREE = 2000;
+const MAX_TREE = 2000, MAX_DEPTH = 12;
 // items: [{file, path: [the folders it was in, outermost first]}]. A single folder that only holds the others (you dropped "WITS26" with its session folders in it)
 // is not made a folder of its own: its name is offered for the new folder, and the folders inside it are what is kept.
 export async function handleItems(items, w, o = {}) {
@@ -457,6 +458,7 @@ export async function handleItems(items, w, o = {}) {
 async function handleEntries(entries, w) {
   const out = [];
   for (const en of entries) if (en) await walk(en, [], out);
+  if (out.deep) { const m = `Folders more than ${MAX_DEPTH} levels deep were left out: add what is in them by dropping those folders themselves.`; window.toast ? window.toast(m, true) : toast(m); }      // (it stays until closed)
   return handleItems(out, w, {cut: !!out.cut});
 }
 // "A folder from my computer…" in an open folder's Add menu: for where dragging a folder does not work
