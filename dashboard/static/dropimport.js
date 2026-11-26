@@ -164,6 +164,7 @@ async function review(files, w, o = {}) {
     d.innerHTML = `<h2 id="ir-h">Check the details of ${plural(pdfs.length, pdfs.every(isEpub) ? "EPUB" : pdfs.some(isEpub) ? "file" : "PDF")}</h2>
       <p class="pmeta">Nothing is filed until you press Add. Each file is read and looked up online (Crossref for papers; Open Library and Crossref for books); fix anything that is wrong. Say what each file is: a paper (a journal article, a preprint or working paper, a conference paper, or a report, thesis or other) or a book.</p>
       ${pdfs.length > 1 ? `<div class="row ir-all"><label>Set every paper's type to <select id="ir-all" aria-label="Set the type of every paper you have not set yourself"><option value="">(as each one says)</option>${PTYPES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>` : ""}
+      <div class="ir-batch hide" id="ir-batch" role="status" aria-live="polite"></div>
       <div class="ir-list">${cards.map(c => `<section class="ir-card" id="ir-c${c.i}"></section>`).join("")}${skipped.slice(0, 3).map(f => `<div class="ir-skip">${esc(f.name)} — not a PDF or EPUB, skipped</div>`).join("")}</div>
       <div class="ir-foot">
         ${fixed ? `<div class="ir-dest">Adding to the folder <b>“${esc(fixedName)}”</b></div>` : `<div class="ir-dest"><label for="ir-to">Add to</label><select id="ir-to"><option value="lib">Library only (no folder)</option>${fs.map(f => `<option value="f:${esc(f.id)}">Folder: ${esc((f.path || [f.name]).join(" › "))} (${plural(f.count, "paper")})</option>`).join("")}<option value="new">A new folder…</option></select>
@@ -242,7 +243,58 @@ async function review(files, w, o = {}) {
       if (!closed) { draw(c); status(); }
       return !closed;
     };
-    (async () => { for (const c of cards) { if (closed) break; if (!(await look(c)) && closed) break; } })();
+    // ---- what most of this drop says, offered for the papers that say nothing: "14 of 17 papers say WITS 2026 (conference paper). 3 say nothing: use it for them?"
+    // Asked when at least 3 papers agree and they are more than half of those with something in that box; only empty boxes are filled, and only when you say so.
+    const BATCH = [["journal", "venue", c => c.fields.journal, (c, v) => { c.fields.journal = v; }],
+      ["pub_date", "date", c => c.fields.pub_date, (c, v) => { c.fields.pub_date = v; }],
+      ["conference", "conference", c => c.det.conference, (c, v) => { c.det.conference = v; }],
+      ["paper_type", "kind of submission", c => c.det.paper_type, (c, v) => { c.det.paper_type = v; }]];
+    const said = new Set();                                         // suggestions you answered No to (by box and value): not asked again
+    let sugs = [];
+    const papersNow = () => cards.filter(c => c.include && c.state === "ok" && c.kind !== "book");
+    const batch = () => {
+      const box = $("#ir-batch", d); if (!box) return;
+      if (cards.some(c => c.include && c.state === "reading")) { box.classList.add("hide"); return; }      // (once every PDF is read)
+      const ps = papersNow(); sugs = [];
+      for (const [k, word, get] of BATCH) {
+        const have = ps.filter(c => norm(get(c))), tally = new Map();
+        have.forEach(c => { const v = norm(get(c)), key = v.toLowerCase(); tally.set(key, [(tally.get(key) || [0])[0] + 1, (tally.get(key) || [0, v])[1]]); });
+        const [key, [n, v]] = [...tally.entries()].sort((a, b) => b[1][0] - a[1][0])[0] || ["", [0, ""]];
+        const empty = ps.filter(c => !norm(get(c)));
+        if (n < 3 || n * 2 <= have.length || !empty.length || said.has(k + "\u0000" + key)) continue;
+        let extra = "";
+        if (k === "journal") {                                       // the venue comes with the type most of those papers have
+          const agree = have.filter(c => norm(get(c)).toLowerCase() === key), types = new Map();
+          agree.forEach(c => types.set(c.ptype, (types.get(c.ptype) || 0) + 1));
+          const [t] = [...types.entries()].sort((a, b) => b[1] - a[1])[0] || ["journal"];
+          extra = t;
+        }
+        sugs.push({k, word, v, n, of: ps.length, empty, extra});
+      }
+      box.innerHTML = sugs.map((s, j) => `<div class="ir-sug" data-sug="${j}"><span>${s.n} of ${s.of} papers say <b>${esc(s.v)}</b>${s.extra && s.extra !== "journal" ? " (" + esc(TYPEWORD[s.extra] || s.extra) + ")" : ""} as their ${s.word}. ${plural(s.empty.length, "paper")} say${s.empty.length === 1 ? "s" : ""} nothing: use it for ${s.empty.length === 1 ? "it" : "them"}?</span>
+        <button type="button" class="btn small" data-sugyes="${j}">Use for ${plural(s.empty.length, "paper")}</button><button type="button" class="btn small" data-sugno="${j}">No</button></div>`).join("");
+      box.classList.toggle("hide", !sugs.length);
+    };
+    d.addEventListener("click", e => {
+      const y = e.target.closest("[data-sugyes]"), no = e.target.closest("[data-sugno]"); if (!y && !no) return;
+      const s = sugs[+(y || no).dataset[y ? "sugyes" : "sugno"]]; if (!s) return;
+      said.add(s.k + "\u0000" + s.v.toLowerCase());
+      if (y) {
+        const set = BATCH.find(x => x[0] === s.k)[3];
+        s.empty.forEach(c => {
+          if (norm((BATCH.find(x => x[0] === s.k)[2])(c))) return;          // (typed into meanwhile: yours stays)
+          set(c, s.v);
+          if (s.k === "journal" && s.extra && !c.ptypeTouched && c.ptype === "journal") { c.ptype = s.extra; c.label = ""; }
+          c.batched = true; draw(c);
+        });
+        status();
+      }
+      batch();
+    });
+    let batchT = 0;
+    const batchSoon = () => { clearTimeout(batchT); batchT = setTimeout(batch, 300); };
+    d.addEventListener("input", batchSoon); d.addEventListener("change", batchSoon);
+    (async () => { for (const c of cards) { if (closed) break; if (!(await look(c)) && closed) break; } if (!closed) batch(); })();
     d.addEventListener("change", e => {
       if (e.target.id === "ir-all") {                              // every paper whose type you have not set yourself
         const v = e.target.value;

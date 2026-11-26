@@ -3967,6 +3967,29 @@ pl.FEED_HOST_PAUSE = 0                                                          
                   on_ and val_("authors") == "" and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_ai_ and val_("title") == "Reading Lists and What Students Open", str((on_, val_("authors"))))
             page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached"); api("/api/settings", {"prefs": {"details_ai": True}})
 
+            # what most of a drop says, offered for the papers that say nothing
+            bw_ = [ws_pdf("Batch Paper %s About Labour Markets" % x, [("Ana %s" % y, "Harbor College", "Lisbon, Portugal", "ana.%s@harbor.example" % y.lower())]) for x, y in (("One", "Ruiz"), ("Two", "Costa"), ("Three", "Silva"))]
+            bn_ = ws_pdf("Batch Paper Four Without A Footer", [("Ben Okafor", "University of Northfield", "Northfield, MN, USA", "bokafor@northfield.example")], foot="")
+            page.goto("about:blank"); page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-path")
+            page.evaluate(JS_DROP, [".fp-path", [[bw_[0], "b1.pdf", "application/pdf"], [bw_[1], "b2.pdf", "application/pdf"], [bw_[2], "b3.pdf", "application/pdf"], [bn_, "b4.pdf", "application/pdf"]], False])
+            page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c3 .ir-f", timeout=60000); page.wait_for_selector("#ir-batch:not(.hide) .ir-sug", timeout=10000)
+            sug_ = [x.inner_text() for x in page.locator("#ir-batch .ir-sug").all()]
+            check("when most papers of a drop say the same and some say nothing, the dialog asks whether to use it for those: the venue (with its type), the date and the conference; not the kind of submission, which all of them have",
+                  len(sug_) == 3 and "3 of 4 papers say WITS 2026 (conference paper) as their venue. 1 paper says nothing" in sug_[0] and "say 2026 as their date" in sug_[1]
+                  and "Workshop on Information Technology and Systems as their conference" in sug_[2] and val_("journal", 3) == "" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "journal", str(sug_))
+            page.click('#ir-batch [data-sugyes="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 2", timeout=5000)
+            check("'Use' fills that box of the papers that had nothing, with the type the others have; the papers that had it are not touched",
+                  val_("journal", 3) == "WITS 2026" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "conference" and val_("journal", 0) == "WITS 2026" and val_("pub_date", 3) == "", val_("journal", 3))
+            page.click('#ir-batch [data-sugno="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 1", timeout=5000)
+            page.fill('#ir-dlg [data-k="title"][data-i="3"]', "Batch Paper Four Without A Footer (checked)"); page.wait_for_timeout(500)
+            check("'No' takes the question away for good (typing elsewhere does not bring it back); the papers stay as they were",
+                  page.locator("#ir-batch .ir-sug").count() == 1 and "conference" in page.inner_text("#ir-batch") and val_("pub_date", 3) == "", page.inner_text("#ir-batch"))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.evaluate(JS_DROP, [".fp-path", [[bw_[0], "b1.pdf", "application/pdf"], [bw_[1], "b2.pdf", "application/pdf"], [bn_, "b4.pdf", "application/pdf"]], False])
+            page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c2 .ir-f", timeout=60000); page.wait_for_timeout(700)
+            check("two papers that agree are not enough to ask", page.locator("#ir-batch .ir-sug").count() == 0 and not page.is_visible("#ir-batch"))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+
             print("folders inside folders, and whole folders dropped from the desktop")
             JS_TREE = """([w, items]) => { const mk = ([b64, name, path]) => { const bin = atob(b64 || ''), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
               return {file: new File([u], name, {type: /\\.pdf$/i.test(name) ? 'application/pdf' : 'text/csv'}), path}; }; window.DropImport.handleItems(items.map(mk), w); }"""
