@@ -1178,6 +1178,16 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Tests.** Offline: `t_subfolders` (the tree, names, moving, a damaged tree, deleting, renaming). Fourteen single-rule mutations: thirteen caught, the fourteenth after the test was made to use a parent that is a list. After the review the check fails with `folders.py` put back to its version before it. Browser: 19 checks (a dropped tree, both answers, Undo, the master's page, a folder inside it, the tools' reach, exports, the Folders page, one folder around others in each place, deleting). Not tested: a real folder dragged from Finder (a test cannot make one: the tests enter at `DropImport.handleItems`, after the walk), the Mac app's web view, the join of two copies of a folder file after a sync conflict, an author's folder beside a folder of the same name inside another. "A folder from my computer…" in a folder's Add menu is there for where dragging a folder does not work.
 
+### Item 52. Authors and their university on one line; what most of a drop says (2026-11-26)
+
+**Asked.** A WITS paper showed no authors: its title page gives each one as "Ziyu Wang, University of Warwick". And: when many papers of one drop share a value (WITS 2026), ask whether it applies to the ones that lack it. Answers to the questions put: for the venue with its type, the date, the conference in full and the kind of submission; ask when at least 3 papers agree and they are more than half of those that say anything in that box; fill only empty boxes; ask in a line at the top of the dialog.
+
+**Why the authors were missed.** The reader took a line as names only when every comma-separated part was a name; "University of Warwick" is not, so the whole line was dropped, and a line that names an institution was never tried as names at all. Now such a line is cut where the names end (the first cut after which what follows is not a name and says it is an institution) and each name gets what follows as its affiliation. "Ann Lee, Bob Ray, Harbor College" gives two authors; "Department of X, University Y" and "Okonkwo, University of Northfield" (one word is not a name) give none. Why the AI did not fill it in is not known from here: the line under the card says whether it was asked (it is not asked when it is switched off, when no key is set, or when the month's budget is used up).
+
+**The suggestion.** Computed in the page once every PDF of the drop is read, again after each edit; a "No" is remembered for that box and value while the dialog is open. The venue suggestion brings the type most of the agreeing papers have, for a paper whose type you have not set. The per-paper button from item 50 ("Use this venue… for the other papers here that have none") stays.
+
+**Tests.** Offline: the one-line forms and three lines that must not be read as names; the check fails with the reader as it was. Browser: four checks (the three suggestions and the one not made, Use, No, two papers not being enough). Not tried: the paper's own first page beyond this one, and drops larger than four.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`
