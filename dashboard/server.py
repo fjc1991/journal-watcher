@@ -1454,6 +1454,7 @@ class Handler(BaseHTTPRequestHandler):
                     st = rs.update(row["key"], patch)
             except (ValueError, TypeError) as e:
                 return self.send_json({"error": str(e)[:100]}, 400)
+            HUB.emit("paperstate", {"file": b.get("file"), "state": st})      # every open page (the sidebar's reading-status counts, a second window) follows
             return self.send_json({"ok": True, "state": st})
         if path == "/api/doc/skim":   # {file, dismissed: [ids]}: the proposals you said no to
             pdf = ns.pdf_path(b.get("file"))

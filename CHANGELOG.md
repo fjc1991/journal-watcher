@@ -2,6 +2,12 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.4.2
+
+- **What most papers of a drop say is now filled in for the others, without asking.** Some PDFs carry no running footer and say nothing about where they were presented. When you add several PDFs at once and at least three agree on a venue, a date or a conference (more than half of those that say something), the papers that say nothing get it as soon as every PDF is read; the venue brings its type ("WITS 2026", conference paper). Each card filled this way says so, a line at the top of the dialog lists what was filled, and one Undo takes it all back. A box you empty after it was filled stays empty. This replaces the question asked in 1.4.1.
+- **Reading status in the sidebar.** To read, Reading and Read now sit in the sidebar above your folders, each with its count. One click opens the Library filtered to that status. The counts follow every change at once, also one made in the reader (opening a paper marks it Reading) or in a second window.
+- **Fixed:** "Use this venue… for the other papers" only set the type of a paper whose type was Journal article; it now sets it for any paper whose type you did not choose yourself.
+
 ## 1.4.1
 
 - **Authors written with their university on one line are read.** A title page that gives each author as "Ziyu Wang, University of Warwick" (or "Ann Lee and Bob Ray, Harbor College", or "Ann Lee (Harbor College)") showed no author at all; each author now comes with that affiliation.

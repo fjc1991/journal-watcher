@@ -118,6 +118,13 @@ function moreHtml(c, many) {
       <label class="ir-f wide"><span>Your note (only for you)</span><textarea data-d="note" data-i="${c.i}" rows="2" placeholder="e.g. discussant: me">${esc(d.note || "")}</textarea></label></div>
     ${many ? `<button type="button" class="linkbtn" data-spread="${c.i}">Use this venue, date, type and conference for the other papers here that have none</button>` : ""}</details>`;
 }
+// boxes filled from what most of the drop says (see batch() in review): their words, and how to read each box back
+const FILLW = {journal: "venue", pub_date: "date", conference: "conference", paper_type: "kind of submission"};
+const FILLGET = {journal: c => c.fields.journal, pub_date: c => c.fields.pub_date, conference: c => c.det.conference, paper_type: c => c.det.paper_type};
+const filledNote = c => {                 // "Filled in from the other papers of this drop: venue (WITS 2026), conference.": only boxes that still hold what was filled
+  const f = c.filled || {}, ks = Object.keys(f).filter(k => f[k].on && norm(FILLGET[k](c)) === norm(f[k].v));
+  return ks.length ? "Filled in from the other papers of this drop: " + ks.map(k => FILLW[k] + (k === "journal" ? " (" + esc(f[k].v) + (f[k].ptype !== null ? ", " + esc(TYPEWORD[c.ptype] || "journal article") : "") + ")" : "")).join(", ") + ". This PDF does not say it; please check." : "";
+};
 const detailsOf = c => ({authors: namesOf(c).map(n => ({name: n, ...personOf(c, n)})), ...Object.fromEntries(DET.map(([k]) => [k, c.det[k] || ""])), abstract: c.det.abstract || "", note: c.det.note || ""});
 
 async function analyse(file, kind) {
@@ -142,7 +149,7 @@ function cardHtml(c) {
       <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${!book && TYPEWORD[k.kind] ? " · " + esc(TYPEWORD[k.kind]) : ""}${book ? (k.publisher ? " · " + esc(k.publisher) : "") : k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${book && k.isbn ? " · ISBN " + esc(k.isbn) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
       <small class="ir-why">${esc(why(k))}${k.doi_printed && k.verdict === "match" && k.authors_found ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
   const f = c.fields, fld = (k, label, ph, wide) => `<label class="ir-f${wide ? " wide" : ""}"><span>${label}</span><input type="text" data-k="${k}" data-i="${c.i}" value="${esc(f[k])}" placeholder="${esc(ph || "")}" autocomplete="off" spellcheck="false"></label>`;
-  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}${!book && readSay(a) ? `<div class="ir-st ir-hint ir-read">${readSay(a)}</div>` : ""}<div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
+  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}${!book && readSay(a) ? `<div class="ir-st ir-hint ir-read">${readSay(a)}</div>` : ""}${!book && filledNote(c) ? `<div class="ir-st warn ir-filled">${filledNote(c)}</div>` : ""}<div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
     ${cands.length ? `<div class="ir-cands" role="radiogroup" aria-label="Records found for ${esc(c.file.name)}">${opts}<label class="ir-cand"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="-1"${c.sel === -1 ? " checked" : ""}><span><b>None of these</b><small>I will type the details myself</small></span></label></div>` : ""}
     <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors or editors (separate with ;)", "Jane Doe; John Smith", true)}${book ? fld("publisher", "Publisher", "") + fld("pub_date", "Year", "YYYY") + fld("isbn", "ISBN", "978…") + fld("doi", "DOI (if it has one)", "10.…") : ptypeSel(c, c.file.name) + fld("journal", VENUE[c.ptype || "journal"][0], VENUE[c.ptype || "journal"][1]) + fld("pub_date", "Date", "YYYY or YYYY-MM-DD") + fld("doi", "DOI", "10.…")}</div>
     ${book ? "" : moreHtml(c, c.many)}
@@ -236,23 +243,50 @@ async function review(files, w, o = {}) {
       try {
         c.a = await analyse(c.file, c.kind); c.state = "ok"; c.sel = c.a.pick; c.existing = c.a.existing || ""; c.kind = c.a.type === "book" ? "book" : "paper";
         if (closed) { discard([c.a.token]); return false; }
-        c.det = detOf(c.a);
+        c.det = detOf(c.a); c.filled = {};
         if (c.from) c.det.session = c.from;      // (the folder it was in on your disk: "Session 1B - GenAI, Work & Labor Markets")
         take(c);
       } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
       if (!closed) { draw(c); status(); }
       return !closed;
     };
-    // ---- what most of this drop says, offered for the papers that say nothing: "14 of 17 papers say WITS 2026 (conference paper). 3 say nothing: use it for them?"
-    // Asked when at least 3 papers agree and they are more than half of those with something in that box; only empty boxes are filled, and only when you say so.
-    const BATCH = [["journal", "venue", c => c.fields.journal, (c, v) => { c.fields.journal = v; }],
-      ["pub_date", "date", c => c.fields.pub_date, (c, v) => { c.fields.pub_date = v; }],
-      ["conference", "conference", c => c.det.conference, (c, v) => { c.det.conference = v; }],
-      ["paper_type", "kind of submission", c => c.det.paper_type, (c, v) => { c.det.paper_type = v; }]];
-    const said = new Set();                                         // suggestions you answered No to (by box and value): not asked again
-    let sugs = [];
+    // ---- what most of this drop says, for the papers that say nothing: "3 of 4 papers say WITS 2026 (conference paper)". A paper whose PDF carries no venue at all (no running
+    // footer, as some templates have) gets it from the papers it came with. Counted when at least 3 papers agree and they are more than half of those with something in that box.
+    // Once every PDF is read, the empty boxes are filled at once (each card says so, and one Undo takes it back); what changes later (you type into a box) is only asked.
+    // A box filled for you once is never filled again, even if you empty it: emptying it is an answer.
+    const BATCH = [["journal", "venue", FILLGET.journal, (c, v) => { c.fields.journal = v; }],
+      ["pub_date", "date", FILLGET.pub_date, (c, v) => { c.fields.pub_date = v; }],
+      ["conference", "conference", FILLGET.conference, (c, v) => { c.det.conference = v; }],
+      ["paper_type", "kind of submission", FILLGET.paper_type, (c, v) => { c.det.paper_type = v; }]];
+    const said = new Set();                                         // suggestions you answered No (or Undo) to, by box and value: not made again
+    let sugs = [], applied = [];
     const papersNow = () => cards.filter(c => c.include && c.state === "ok" && c.kind !== "book");
-    const batch = () => {
+    const fill = s => {                                             // fill the empty boxes of s.empty with s.v; the venue brings its type, unless you chose one or the PDF named one (a thesis, a report)
+      const [, , get, set] = BATCH.find(x => x[0] === s.k), did = [];
+      s.empty.forEach(c => {
+        if (norm(get(c))) return;                                   // (typed into meanwhile: yours stays)
+        const f = (c.filled = c.filled || {})[s.k] = {v: s.v, on: true, ptype: null};
+        set(c, s.v);
+        if (s.k === "journal" && s.extra && !c.ptypeTouched && !c.ptypeAll && !c.label && c.ptype !== s.extra) { f.ptype = c.ptype; c.ptype = s.extra; }
+        c.batched = true; did.push(c); draw(c);
+      });
+      if (did.length) applied.push({...s, cards: did});
+      status();
+    };
+    const undo = s => {                                             // empty again what was filled (only boxes that still hold it) and put the type back
+      const [, , get, set] = BATCH.find(x => x[0] === s.k);
+      s.cards.forEach(c => {
+        const f = (c.filled || {})[s.k]; if (!f || !f.on) return;
+        f.on = false;
+        if (f.ptype !== null && !c.ptypeTouched && !c.ptypeAll && c.ptype === s.extra) c.ptype = f.ptype;      // (the type the venue brought goes with it, even if you emptied the venue yourself)
+        if (norm(get(c)) === norm(f.v)) set(c, "");                 // (you changed it since: yours stays)
+        draw(c);
+      });
+      applied = applied.filter(x => x !== s);
+      said.add(s.k + "\u0000" + s.v.toLowerCase());
+      status();
+    };
+    const batch = (auto = false) => {
       const box = $("#ir-batch", d); if (!box) return;
       if (cards.some(c => c.include && c.state === "reading")) { box.classList.add("hide"); return; }      // (once every PDF is read)
       const ps = papersNow(); sugs = [];
@@ -260,7 +294,7 @@ async function review(files, w, o = {}) {
         const have = ps.filter(c => norm(get(c))), tally = new Map();
         have.forEach(c => { const v = norm(get(c)), key = v.toLowerCase(); tally.set(key, [(tally.get(key) || [0])[0] + 1, (tally.get(key) || [0, v])[1]]); });
         const [key, [n, v]] = [...tally.entries()].sort((a, b) => b[1][0] - a[1][0])[0] || ["", [0, ""]];
-        const empty = ps.filter(c => !norm(get(c)));
+        const empty = ps.filter(c => !norm(get(c)) && !(c.filled && c.filled[k]));
         if (n < 3 || n * 2 <= have.length || !empty.length || said.has(k + "\u0000" + key)) continue;
         let extra = "";
         if (k === "journal") {                                       // the venue comes with the type most of those papers have
@@ -271,30 +305,28 @@ async function review(files, w, o = {}) {
         }
         sugs.push({k, word, v, n, of: ps.length, empty, extra});
       }
-      box.innerHTML = sugs.map((s, j) => `<div class="ir-sug" data-sug="${j}"><span>${s.n} of ${s.of} papers say <b>${esc(s.v)}</b>${s.extra && s.extra !== "journal" ? " (" + esc(TYPEWORD[s.extra] || s.extra) + ")" : ""} as their ${s.word}. ${plural(s.empty.length, "paper")} say${s.empty.length === 1 ? "s" : ""} nothing: use it for ${s.empty.length === 1 ? "it" : "them"}?</span>
+      if (auto) { sugs.forEach(fill); sugs = []; }
+      const typeOf = s => s.extra && s.extra !== "journal" ? " (" + esc(TYPEWORD[s.extra] || s.extra) + ")" : "";
+      const live = applied.filter(s => s.cards.some(c => c.filled[s.k].on && norm(FILLGET[s.k](c)) === norm(s.v))),       // (what still stands: a box you emptied or changed is not claimed)
+        who = new Set(live.flatMap(s => s.cards.filter(c => c.filled[s.k].on && norm(FILLGET[s.k](c)) === norm(s.v))));
+      box.innerHTML = (live.length ? `<div class="ir-sug" data-done="1"><span>Filled in from what most of this drop says, for ${plural(who.size, "paper")} whose PDF does not say it: ${live.map(s => `${s.word} <b>${esc(s.v)}</b>${typeOf(s)}`).join(", ")}.</span>
+        <button type="button" class="btn small" data-sugundo="1">Undo</button></div>` : "") +
+        sugs.map((s, j) => `<div class="ir-sug" data-sug="${j}"><span>${s.n} of ${s.of} papers say <b>${esc(s.v)}</b>${typeOf(s)} as their ${s.word}. ${plural(s.empty.length, "paper")} say${s.empty.length === 1 ? "s" : ""} nothing: use it for ${s.empty.length === 1 ? "it" : "them"}?</span>
         <button type="button" class="btn small" data-sugyes="${j}">Use for ${plural(s.empty.length, "paper")}</button><button type="button" class="btn small" data-sugno="${j}">No</button></div>`).join("");
-      box.classList.toggle("hide", !sugs.length);
+      box.classList.toggle("hide", !live.length && !sugs.length);
     };
     d.addEventListener("click", e => {
-      const y = e.target.closest("[data-sugyes]"), no = e.target.closest("[data-sugno]"); if (!y && !no) return;
+      const y = e.target.closest("[data-sugyes]"), no = e.target.closest("[data-sugno]"), un = e.target.closest("[data-sugundo]"); if (!y && !no && !un) return;
+      if (un) { [...applied].forEach(undo); batch(); return; }
       const s = sugs[+(y || no).dataset[y ? "sugyes" : "sugno"]]; if (!s) return;
-      if (no) said.add(s.k + "\u0000" + s.v.toLowerCase());          // (only No ends the question: after Use it goes by itself, and comes back if you empty a box again)
-      if (y) {
-        const set = BATCH.find(x => x[0] === s.k)[3];
-        s.empty.forEach(c => {
-          if (norm((BATCH.find(x => x[0] === s.k)[2])(c))) return;          // (typed into meanwhile: yours stays)
-          set(c, s.v);
-          if (s.k === "journal" && s.extra && !c.ptypeTouched && !c.ptypeAll && c.ptype === "journal") { c.ptype = s.extra; c.label = ""; }      // (a type you chose, for this paper or for all, stays)
-          c.batched = true; draw(c);
-        });
-        status();
-      }
+      if (no) said.add(s.k + "\u0000" + s.v.toLowerCase());          // (only No ends the question)
+      if (y) fill(s);
       batch();
     });
     let batchT = 0;
     const batchSoon = () => { clearTimeout(batchT); batchT = setTimeout(batch, 300); };
     d.addEventListener("input", batchSoon); d.addEventListener("change", batchSoon);
-    (async () => { for (const c of cards) { if (closed) break; if (!(await look(c)) && closed) break; } if (!closed) batch(); })();
+    (async () => { for (const c of cards) { if (closed) break; if (!(await look(c)) && closed) break; } if (!closed) batch(true); })();
     d.addEventListener("change", e => {
       if (e.target.id === "ir-all") {                              // every paper whose type you have not set yourself
         const v = e.target.value;
@@ -322,9 +354,10 @@ async function review(files, w, o = {}) {
       const b = e.target.closest("[data-spread]"); if (!b) return; const src = cards[+b.dataset.spread]; let n = 0;
       cards.forEach(c => {
         if (c === src || c.state !== "ok" || c.kind === "book") return; let did = false;
-        if (!norm(c.fields.journal) && norm(src.fields.journal)) { c.fields.journal = src.fields.journal; did = true; }
+        let venue = false;
+        if (!norm(c.fields.journal) && norm(src.fields.journal)) { c.fields.journal = src.fields.journal; did = venue = true; }
         if (!norm(c.fields.pub_date) && norm(src.fields.pub_date)) { c.fields.pub_date = src.fields.pub_date; did = true; }
-        if (!c.ptypeTouched && c.ptype === "journal" && src.ptype !== "journal" && did) { c.ptype = src.ptype; c.label = src.label; }
+        if (venue && !c.ptypeTouched && !c.ptypeAll && !c.label) { c.ptype = src.ptype; c.label = src.label; }      // (the venue brings its type, unless you chose one or the PDF named one: a thesis, a report)
         if (!c.det.conference && src.det.conference) { c.det.conference = src.det.conference; did = true; }
         if (did) { n++; draw(c); }
       });
