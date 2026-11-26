@@ -5901,6 +5901,12 @@ print("OK")
         assert [a["email"] for a in m["authors"]] == ["okonkwo@northfield.example", "lindqvist@northfield.example", "ines@harbor.example"], m["authors"]      # (each address goes to the name it fits)
         assert m["abstract"].startswith("We measure how the demand for skills") and m["abstract"].endswith("adopted early.") and "Keywords" not in m["abstract"], m["abstract"]
         assert m["keywords"] == ["skill demand", "generative AI", "job postings", "technology adoption"] and m["year"] == "2024" and m["sure"] == "high", (m["keywords"], m["year"], m["sure"])
+        # the names and their institution on one line each ("Ziyu Wang, University of Warwick"): a WITS paper read with no author at all before
+        one_line = pdfmeta.read(inline("", ["Mira Okonkwo, University of Northfield", "Tao Lindqvist and Ines Varga, Lakeside Institute of Technology", "Jonas de Almeida (Harbor College)"], abstract=False, date=""))
+        assert [(a["name"], a["affiliation"]) for a in one_line["authors"]] == [("Mira Okonkwo", "University of Northfield"), ("Tao Lindqvist", "Lakeside Institute of Technology"), ("Ines Varga", "Lakeside Institute of Technology"),
+                                                                              ("Jonas de Almeida", "Harbor College")] and one_line["sure"] == "high", one_line["authors"]
+        for t in ("Department of Information Systems, University of Northfield", "Mira Okonkwo, Tao Lindqvist", "Okonkwo, University of Northfield, Northfield, MN"):
+            assert pdfmeta._name_then_affil(pdfmeta._Line(0, 0, 300, 12, 12, False, t, [], 0)) is None, t
         none = pdfmeta.read(inline("", [], abstract=False, date=""))
         assert none["authors"] == [] and none["sure"] == "" and none["title"].startswith("Machines That Write") and pdfmeta.needs_ai(none), none
         assert pdfmeta.read(b"not a pdf")["title"] == "" and not pdfmeta.needs_ai(pdfmeta.read(b"not a pdf"))

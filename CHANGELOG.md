@@ -2,6 +2,11 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.4.1
+
+- **Authors written with their university on one line are read.** A title page that gives each author as "Ziyu Wang, University of Warwick" (or "Ann Lee and Bob Ray, Harbor College", or "Ann Lee (Harbor College)") showed no author at all; each author now comes with that affiliation.
+- **What most papers of a drop say is offered for the others.** When you add several PDFs at once and at least three agree on a venue, a date, a conference or a kind of submission, while some say nothing, a line at the top of the dialog asks whether to use it for those: for example "14 of 17 papers say WITS 2026 (conference paper) as their venue. 3 papers say nothing: use it for them?". Only empty boxes are filled, and only when you press Use. No takes the question away.
+
 ## 1.4.0
 
 The details of the papers you add yourself:

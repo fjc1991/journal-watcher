@@ -235,6 +235,29 @@ def _split_names(line):
     return out
 
 
+def _name_then_affil(line):
+    """A line that gives the names and then where they work: "Ziyu Wang, University of Warwick", "Ann Lee and Bob Ray, Harbor College", "Ann Lee (Harbor College)",
+    "Ann Lee – Harbor College, ann@harbor.edu". Returns (names as _split_names gives them, {"affiliation", "email"}) or None. The names are the longest beginning that
+    reads as names and is followed by something that is not a name; what follows must say it is an institution."""
+    text = line.text
+    if len(text) > 220:
+        return None
+    mails = _emails(text)
+    cuts = [m.start() for m in re.finditer(r",|\s[–—|·]\s|\s\(", text)]
+    best = None
+    for at in cuts:
+        head, tail = text[:at], text[at:].lstrip(" ,–—|·(").rstrip(" )")
+        tail = _sp(EMAIL.sub("", EMAIL_GROUP.sub("", tail))).strip(" ,;()")
+        first = re.split(r"\s*,\s*", tail)[0] if tail else ""
+        if not tail or not AFFIL.search(tail) or is_name(first):
+            continue
+        got = _split_names(_Line(line.x0, line.y0, line.x1, line.y1, line.size, line.bold, head, [x for x in line.sups if x[0] <= len(head)], line.page))
+        if got:
+            best = (got, {"affiliation": tail[:200], "email": mails[0] if len(mails) == 1 and len(got) == 1 else ""})
+            break                                         # (the first cut that works: the names end there)
+    return best
+
+
 def _emails(text):
     out = []
     for m in EMAIL_GROUP.finditer(text):
@@ -303,12 +326,16 @@ def _front(lines, height, width):
 def _authors(zone, width):
     """The authors of the title page, in reading order, each {name, affiliation, place, email}, and how sure the reading is ("high" | "check" | "")."""
     names, details, ptype = [], [], ""
-    styles = {}
+    styles, inline = {}, {}
     for l in zone:
         if PAPER_TYPE.match(l.text) and not ptype:
             ptype = l.text
             continue
         got = _split_names(l) if not EMAIL.search(l.text) and not AFFIL.search(l.text) else []
+        if not got and AFFIL.search(l.text):              # the names and their institution on one line: "Ziyu Wang, University of Warwick"
+            na = _name_then_affil(l)
+            if na:
+                got, inline[id(l)] = na
         if got:
             names.append((l, got))
             styles.setdefault(l.style, 0)
@@ -321,8 +348,8 @@ def _authors(zone, width):
     detail_styles = {l.style for l in details if AFFIL.search(l.text) or EMAIL.search(l.text)}
     lead = names[0][0].style
     if lead not in detail_styles and detail_styles:
-        moved = [(l, g) for l, g in names if l.style in detail_styles]
-        ahead = [(l, g) for l, g in names if l.style not in detail_styles]
+        moved = [(l, g) for l, g in names if l.style in detail_styles and id(l) not in inline]      # (a line that names its institution itself is a line of names whatever its face)
+        ahead = [(l, g) for l, g in names if l.style not in detail_styles or id(l) in inline]
         mails = [m for l in details for m in _emails(l.text)]
         fits = lambda group: any(email_fits(m, nm) for _, got in group for nm, _ in got for m in mails)      # noqa: E731
         if moved and fits(moved) and not fits(ahead):       # the addresses fit the names in the plain face: the line in a face of its own above them was a subtitle or a track
@@ -335,8 +362,9 @@ def _authors(zone, width):
     authors, anchors = [], []
     for l, got in sorted(names, key=lambda x: (round(x[0].y0 / 4), x[0].x0)):
         group = []
+        own = inline.get(id(l)) or {}
         for nm, marks in got:
-            a = {"name": nm, "affiliation": "", "place": "", "email": "", "_marks": marks}
+            a = {"name": nm, "affiliation": own.get("affiliation", ""), "place": "", "email": own.get("email", ""), "_marks": marks}
             authors.append(a)
             group.append(a)
         anchors.append((l, group))
