@@ -1807,6 +1807,10 @@ pl.FEED_HOST_PAUSE = 0                                                          
                 if os.path.exists(marker): break
                 page.wait_for_timeout(250)
             fids_ = open(marker).read().split(",") if os.path.exists(marker) else []
+            try:                                   # (the run's header says "followed" once the page has asked for the run again: the download may start before that)
+                page.wait_for_function("/followed/.test(document.querySelector('#runmeta').textContent)", timeout=15000)
+            except Exception:  # noqa: BLE001
+                pass
             check("…Follow downloads all their works now, as Download all does, and notes what was listed (only newer works are new)",
                   len(fids_) == 45 and ann().get("follow") is True and len(ann().get("follow_known") or []) == 45 and "followed" in page.inner_text("#runmeta"), "%d ids, %s" % (len(fids_), {k_: (v_ if not isinstance(v_, list) else len(v_)) for k_, v_ in ann().items()}))
             page.wait_for_function("document.querySelector('#statustext').textContent === 'Idle'", timeout=20000)
