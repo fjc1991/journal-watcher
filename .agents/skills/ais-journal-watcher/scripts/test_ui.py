@@ -669,16 +669,23 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.click('#lf-chips [data-unf="status"]'); page.wait_for_timeout(400)
             check("clicking the chip removes the filter", page.locator("#lf-chips .chip").count() == 0 and page.locator("#lib-results .librow").count() == 3)
             sst_ = lambda k: page.inner_text('#sbstatus [data-sst="%s"] .nn' % k).strip()          # noqa: E731
-            check("the sidebar lists To read, Reading and Read with their counts", page.locator("#sbstatus [data-sst]").count() == 3 and sst_("toread") == "1" and sst_("reading") == "" and sst_("read") == "", str([sst_(k) for k in ("toread", "reading", "read")]))
+            # what the library holds now (a paper opened in the reader above is "Reading" by itself): the sidebar must show the same
+            n0_ = {k: sum(1 for r in api("/api/library") if (r.get("state") or {}).get("status") == k) for k in ("toread", "reading", "read")}
+            shown_ = lambda n: str(n) if n else ""          # noqa: E731
+            check("the sidebar lists To read, Reading and Read with their counts", page.locator("#sbstatus [data-sst]").count() == 3 and n0_["toread"] == 1 and all(sst_(k) == shown_(n0_[k]) for k in n0_),
+                  str(([sst_(k) for k in ("toread", "reading", "read")], n0_)))
             f_ = next(r["file"] for r in api("/api/library") if r["journal"] != "Books" and not (r.get("state") or {}).get("status"))      # (a paper with no status yet)
             api("/api/paper/state", {"file": f_, "status": "reading"})          # as the reader or a second window does: this page hears of it
-            page.wait_for_function("""(document.querySelector('#sbstatus [data-sst="reading"] .nn') || {}).textContent === '1'""", timeout=5000)
-            check("a status set elsewhere (the reader, another window) updates the sidebar's counts and the row on screen", sst_("reading") == "1" and sst_("toread") == "1"
+            page.wait_for_function("""(document.querySelector('#sbstatus [data-sst="reading"] .nn') || {}).textContent === '%d'""" % (n0_["reading"] + 1), timeout=5000)
+            check("a status set elsewhere (the reader, another window) updates the sidebar's counts and the row on screen", sst_("reading") == str(n0_["reading"] + 1) and sst_("toread") == "1"
                   and any(t.strip() == "Reading" for t in page.locator("#lib-results .librow .tag.stt").all_inner_texts()))
-            page.click('#sbstatus [data-sst="reading"]'); page.wait_for_selector("#lf-chips .chip"); page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === 1")
+            page.click('#sbstatus [data-sst="reading"]'); page.wait_for_selector("#lf-chips .chip"); page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === %d" % (n0_["reading"] + 1))
             check("clicking one opens the Library filtered to that status, and it is marked in the sidebar", "Status: Reading" in page.inner_text("#lf-chips") and page.locator('#sbstatus [data-sst="reading"].on').count() == 1)
-            api("/api/paper/state", {"file": f_, "status": ""}); page.wait_for_function("""(document.querySelector('#sbstatus [data-sst="reading"] .nn') || {}).textContent === ''""", timeout=5000)
-            page.click('#lf-chips [data-unf="status"]'); page.wait_for_timeout(400); page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === 3")
+            api("/api/paper/state", {"file": f_, "status": ""}); page.wait_for_function("""(document.querySelector('#sbstatus [data-sst="reading"] .nn') || {}).textContent === '%s'""" % shown_(n0_["reading"]), timeout=5000)
+            page.click('#lf-chips [data-unf="status"]'); page.wait_for_timeout(400)
+            if page.locator("#lib-results .librow").count() != 3:          # (the sidebar's filter starts from a plain Library: "List all" is off again)
+                page.click("#lf-list")
+            page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === 3")
             page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.keyboard.press("Escape"); page.wait_for_timeout(150)
             check("Escape closes the Filters popover", page.locator("#lf-pop.hide").count() == 1)
             check("folders: create via API, library rows carry membership",
