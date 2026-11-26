@@ -3980,6 +3980,11 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.click('#ir-batch [data-sugyes="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 2", timeout=5000)
             check("'Use' fills that box of the papers that had nothing, with the type the others have; the papers that had it are not touched",
                   val_("journal", 3) == "WITS 2026" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "conference" and val_("journal", 0) == "WITS 2026" and val_("pub_date", 3) == "", val_("journal", 3))
+            page.fill('#ir-dlg [data-k="journal"][data-i="3"]', ""); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 3", timeout=5000)
+            back_ = "as their venue" in page.inner_text("#ir-batch .ir-sug >> nth=0")
+            page.select_option("#ir-all", "journal"); page.click('#ir-batch [data-sugyes="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 2", timeout=5000)
+            check("after Use, emptying the box again brings the question back; and Use keeps a type you set for every paper at the top",
+                  back_ and val_("journal", 3) == "WITS 2026" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "journal", str((back_, val_("journal", 3), page.eval_on_selector('[data-ptype="3"]', "e => e.value"))))
             page.click('#ir-batch [data-sugno="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 1", timeout=5000)
             page.fill('#ir-dlg [data-k="title"][data-i="3"]', "Batch Paper Four Without A Footer (checked)"); page.wait_for_timeout(500)
             check("'No' takes the question away for good (typing elsewhere does not bring it back); the papers stay as they were",

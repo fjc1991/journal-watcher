@@ -278,13 +278,13 @@ async function review(files, w, o = {}) {
     d.addEventListener("click", e => {
       const y = e.target.closest("[data-sugyes]"), no = e.target.closest("[data-sugno]"); if (!y && !no) return;
       const s = sugs[+(y || no).dataset[y ? "sugyes" : "sugno"]]; if (!s) return;
-      said.add(s.k + "\u0000" + s.v.toLowerCase());
+      if (no) said.add(s.k + "\u0000" + s.v.toLowerCase());          // (only No ends the question: after Use it goes by itself, and comes back if you empty a box again)
       if (y) {
         const set = BATCH.find(x => x[0] === s.k)[3];
         s.empty.forEach(c => {
           if (norm((BATCH.find(x => x[0] === s.k)[2])(c))) return;          // (typed into meanwhile: yours stays)
           set(c, s.v);
-          if (s.k === "journal" && s.extra && !c.ptypeTouched && c.ptype === "journal") { c.ptype = s.extra; c.label = ""; }
+          if (s.k === "journal" && s.extra && !c.ptypeTouched && !c.ptypeAll && c.ptype === "journal") { c.ptype = s.extra; c.label = ""; }      // (a type you chose, for this paper or for all, stays)
           c.batched = true; draw(c);
         });
         status();
