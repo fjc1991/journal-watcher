@@ -668,6 +668,24 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("Filters ▾ holds status, folder, journal, year, tag and notes; an active filter shows as a chip and on the button", "Status: To read" in page.inner_text("#lf-chips") and page.inner_text("#lf-nf").strip() == "1" and page.locator("#lib-results .librow").count() == 1, "%r | %r | %d" % (page.inner_text("#lf-chips"), page.inner_text("#lf-nf"), page.locator("#lib-results .librow").count()))
             page.click('#lf-chips [data-unf="status"]'); page.wait_for_timeout(400)
             check("clicking the chip removes the filter", page.locator("#lf-chips .chip").count() == 0 and page.locator("#lib-results .librow").count() == 3)
+            sst_ = lambda k: page.inner_text('#sbstatus [data-sst="%s"] .nn' % k).strip()          # noqa: E731
+            # what the library holds now (a paper opened in the reader above is "Reading" by itself): the sidebar must show the same
+            n0_ = {k: sum(1 for r in api("/api/library") if (r.get("state") or {}).get("status") == k) for k in ("toread", "reading", "read")}
+            shown_ = lambda n: str(n) if n else ""          # noqa: E731
+            check("the sidebar lists To read, Reading and Read with their counts", page.locator("#sbstatus [data-sst]").count() == 3 and n0_["toread"] == 1 and all(sst_(k) == shown_(n0_[k]) for k in n0_),
+                  str(([sst_(k) for k in ("toread", "reading", "read")], n0_)))
+            f_ = next(r["file"] for r in api("/api/library") if r["journal"] != "Books" and not (r.get("state") or {}).get("status"))      # (a paper with no status yet)
+            api("/api/paper/state", {"file": f_, "status": "reading"})          # as the reader or a second window does: this page hears of it
+            page.wait_for_function("""(document.querySelector('#sbstatus [data-sst="reading"] .nn') || {}).textContent === '%d'""" % (n0_["reading"] + 1), timeout=5000)
+            check("a status set elsewhere (the reader, another window) updates the sidebar's counts and the row on screen", sst_("reading") == str(n0_["reading"] + 1) and sst_("toread") == "1"
+                  and any(t.strip() == "Reading" for t in page.locator("#lib-results .librow .tag.stt").all_inner_texts()))
+            page.click('#sbstatus [data-sst="reading"]'); page.wait_for_selector("#lf-chips .chip"); page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === %d" % (n0_["reading"] + 1))
+            check("clicking one opens the Library filtered to that status, and it is marked in the sidebar", "Status: Reading" in page.inner_text("#lf-chips") and page.locator('#sbstatus [data-sst="reading"].on').count() == 1)
+            api("/api/paper/state", {"file": f_, "status": ""}); page.wait_for_function("""(document.querySelector('#sbstatus [data-sst="reading"] .nn') || {}).textContent === '%s'""" % shown_(n0_["reading"]), timeout=5000)
+            page.click('#lf-chips [data-unf="status"]'); page.wait_for_timeout(400)
+            if page.locator("#lib-results .librow").count() != 3:          # (the sidebar's filter starts from a plain Library: "List all" is off again)
+                page.click("#lf-list")
+            page.wait_for_function("document.querySelectorAll('#lib-results .librow').length === 3")
             page.click("#lf-filters"); page.wait_for_selector("#lf-pop:not(.hide)"); page.keyboard.press("Escape"); page.wait_for_timeout(150)
             check("Escape closes the Filters popover", page.locator("#lf-pop.hide").count() == 1)
             check("folders: create via API, library rows carry membership",
@@ -3971,32 +3989,33 @@ pl.FEED_HOST_PAUSE = 0                                                          
                   on_ and val_("authors") == "" and len([1 for _p, b_ in SEEN if b_.get("messages")]) == n_ai_ and val_("title") == "Reading Lists and What Students Open", str((on_, val_("authors"))))
             page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached"); api("/api/settings", {"prefs": {"details_ai": True}})
 
-            # what most of a drop says, offered for the papers that say nothing
+            # what most of a drop says, filled in for the papers that say nothing (a PDF with no running footer: "Who Fits Where?" at WITS 2026)
             bw_ = [ws_pdf("Batch Paper %s About Labour Markets" % x, [("Ana %s" % y, "Harbor College", "Lisbon, Portugal", "ana.%s@harbor.example" % y.lower())]) for x, y in (("One", "Ruiz"), ("Two", "Costa"), ("Three", "Silva"))]
             bn_ = ws_pdf("Batch Paper Four Without A Footer", [("Ben Okafor", "University of Northfield", "Northfield, MN, USA", "bokafor@northfield.example")], foot="")
+            ptype_ = lambda i: page.eval_on_selector('[data-ptype="%d"]' % i, "e => e.value")          # noqa: E731
             page.goto("about:blank"); page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q"); page.click("#folditem"); page.wait_for_selector(".fp-path")
             page.evaluate(JS_DROP, [".fp-path", [[bw_[0], "b1.pdf", "application/pdf"], [bw_[1], "b2.pdf", "application/pdf"], [bw_[2], "b3.pdf", "application/pdf"], [bn_, "b4.pdf", "application/pdf"]], False])
-            page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c3 .ir-f", timeout=60000); page.wait_for_selector("#ir-batch:not(.hide) .ir-sug", timeout=10000)
-            sug_ = [x.inner_text() for x in page.locator("#ir-batch .ir-sug").all()]
-            check("when most papers of a drop say the same and some say nothing, the dialog asks whether to use it for those: the venue (with its type), the date and the conference; not the kind of submission, which all of them have",
-                  len(sug_) == 3 and "3 of 4 papers say WITS 2026 (conference paper) as their venue. 1 paper says nothing" in sug_[0] and "say 2026 as their date" in sug_[1]
-                  and "Workshop on Information Technology and Systems as their conference" in sug_[2] and val_("journal", 3) == "" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "journal", str(sug_))
-            page.click('#ir-batch [data-sugyes="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 2", timeout=5000)
-            check("'Use' fills that box of the papers that had nothing, with the type the others have; the papers that had it are not touched",
-                  val_("journal", 3) == "WITS 2026" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "conference" and val_("journal", 0) == "WITS 2026" and val_("pub_date", 3) == "", val_("journal", 3))
-            page.fill('#ir-dlg [data-k="journal"][data-i="3"]', ""); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 3", timeout=5000)
-            back_ = "as their venue" in page.inner_text("#ir-batch .ir-sug >> nth=0")
-            page.select_option("#ir-all", "journal"); page.click('#ir-batch [data-sugyes="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 2", timeout=5000)
-            check("after Use, emptying the box again brings the question back; and Use keeps a type you set for every paper at the top",
-                  back_ and val_("journal", 3) == "WITS 2026" and page.eval_on_selector('[data-ptype="3"]', "e => e.value") == "journal", str((back_, val_("journal", 3), page.eval_on_selector('[data-ptype="3"]', "e => e.value"))))
-            page.click('#ir-batch [data-sugno="0"]'); page.wait_for_function("document.querySelectorAll('#ir-batch .ir-sug').length === 1", timeout=5000)
+            page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c3 .ir-f", timeout=60000); page.wait_for_selector("#ir-batch:not(.hide) [data-done]", timeout=10000)
+            bt_ = page.inner_text("#ir-batch")
+            check("when most papers of a drop say the same and one says nothing, its empty boxes are filled at once: the venue (with its type), the date and the conference; one line says so, with Undo",
+                  page.locator("#ir-batch .ir-sug").count() == 1 and "for 1 paper whose PDF does not say it" in bt_ and "venue WITS 2026 (conference paper)" in bt_ and "date 2026" in bt_
+                  and "conference Workshop on Information Technology and Systems" in bt_ and "kind of submission" not in bt_ and page.locator("#ir-batch [data-sugundo]").count() == 1, bt_)
+            check("…the paper gets them, and its card says they came from the other papers; the papers that had them are not touched",
+                  val_("journal", 3) == "WITS 2026" and ptype_(3) == "conference" and val_("pub_date", 3) == "2026" and page.locator("#ir-c3 .ir-filled").count() == 1
+                  and "does not say it" in page.inner_text("#ir-c3 .ir-filled") and val_("journal", 0) == "WITS 2026" and page.locator("#ir-c0 .ir-filled").count() == 0, str((val_("journal", 3), ptype_(3), val_("pub_date", 3))))
+            page.fill('#ir-dlg [data-k="journal"][data-i="3"]', ""); page.wait_for_timeout(600)
+            bt_ = page.inner_text("#ir-batch")
+            check("a box you empty after it was filled stays empty: it is not filled again nor asked about, and the line no longer claims it",
+                  val_("journal", 3) == "" and "venue" not in bt_ and "date 2026" in bt_ and page.locator("#ir-batch [data-sugyes]").count() == 0, bt_)
+            page.click("#ir-batch [data-sugundo]"); page.wait_for_timeout(300)
+            check("Undo empties what was filled and puts the type back (also the type that came with a venue you emptied); the line goes",
+                  val_("pub_date", 3) == "" and ptype_(3) == "journal" and page.locator("#ir-c3 .ir-filled").count() == 0 and not page.is_visible("#ir-batch"), str((val_("pub_date", 3), ptype_(3))))
             page.fill('#ir-dlg [data-k="title"][data-i="3"]', "Batch Paper Four Without A Footer (checked)"); page.wait_for_timeout(500)
-            check("'No' takes the question away for good (typing elsewhere does not bring it back); the papers stay as they were",
-                  page.locator("#ir-batch .ir-sug").count() == 1 and "conference" in page.inner_text("#ir-batch") and val_("pub_date", 3) == "", page.inner_text("#ir-batch"))
+            check("after Undo nothing is filled again or asked (typing elsewhere does not bring it back)", val_("pub_date", 3) == "" and not page.is_visible("#ir-batch"))
             page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
             page.evaluate(JS_DROP, [".fp-path", [[bw_[0], "b1.pdf", "application/pdf"], [bw_[1], "b2.pdf", "application/pdf"], [bn_, "b4.pdf", "application/pdf"]], False])
             page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c2 .ir-f", timeout=60000); page.wait_for_timeout(700)
-            check("two papers that agree are not enough to ask", page.locator("#ir-batch .ir-sug").count() == 0 and not page.is_visible("#ir-batch"))
+            check("two papers that agree are not enough: nothing is filled", page.locator("#ir-batch .ir-sug").count() == 0 and not page.is_visible("#ir-batch") and val_("journal", 2) == "")
             page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
 
             print("folders inside folders, and whole folders dropped from the desktop")

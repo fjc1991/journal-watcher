@@ -856,7 +856,7 @@ function openTab(t) { F.tab = t; if (ctx.go && t === "folders") return ctx.go({v
 window.LibraryUI = {
   init(c) { ctx = c; const wire = () => ["IdeasUI", "AskUI", "MatrixUI", "DiscoverUI", "FoldersUI", "DropImport", "Palette", "Activity", "DraftUI", "ClaimsUI", "SynthUI", "ReviewUI", "WorkspaceUI", "BibImport"].forEach(n => window[n] && window[n].init(c)); wire(); addEventListener("load", wire, {once: true});   /* the other tab modules may still be loading */ wireRows(); return Promise.all([loadFolders(), loadTags()]); },
   row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab, bookSummaryHtml, showChapters, summarised,
-  refreshFolders: loadFolders, state: F,
+  refreshFolders: loadFolders, state: F, redrawRow,
   folderCount: () => FOLDERS.filter(f => !f.parent).length, folders: () => FOLDERS,                 // (the folders at the top: what the sidebar and the Folders page list)
   inFolder, folderLabel, folderTree, folderRoots, folderIndent: indent, folderPath: id => { const f = FOLDERS.find(x => x.id === id); return f ? folderLabel(f) : folderName(id); },                          // folders inside folders: the other pages list and count with these
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added

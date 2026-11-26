@@ -1188,6 +1188,18 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Tests.** Offline: the one-line forms and three lines that must not be read as names; the check fails with the reader as it was. Browser: four checks (the three suggestions and the one not made, Use, No, two papers not being enough). Not tried: the paper's own first page beyond this one, and drops larger than four.
 
+### Item 53. A drop fills in what most of it says; reading status in the sidebar (2026-11-26)
+
+**Asked.** After a WITS26 drop, one of four papers ("Who Fits Where?", Session 1B) came in as a journal article with no venue. And: reading statuses as entries in the sidebar that stay current.
+
+**Why.** That PDF has no running footer and names no conference anywhere (made with WPS; the other three print "Workshop on Information Technology and Systems, 2026" under every page), so no rule in `pdfmeta._venue` could find it. The import was done with the installed 1.4.0, which has no suggestion from item 52. Answers to the questions put: fill without asking (with a note on the card and Undo); the sidebar entries open the Library filtered, not a folder page; To read, Reading and Read (not "No status").
+
+**The fill.** `batch(true)` runs once every PDF is read and fills what it would have asked; later recomputations (after an edit) still only ask. A box filled once is marked on its card (`c.filled[k]`) and never filled or asked about again, even when emptied. The venue's type is set unless you chose one (on the card or for all) or the PDF named one (a label: thesis, report); the 1.4.1 rule, "only when the type is journal", was also in the per-paper spread button and is gone from both. Undo restores the type the venue brought even when you had emptied the venue. The banner is one line for everything that still stands.
+
+**The sidebar.** `renderSideStatus()` in `index.html` counts from `LIB`; `/api/paper/state` emits `paperstate` on the event stream, so the reader's own writes (it posts with `keepalive`, outside `library.js`) and other windows update `LIB`, the counts and the row on screen (`LibraryUI.redrawRow`). A list filtered by status is not redrawn when a row leaves it, so the page does not jump.
+
+**Tests.** Browser: the batch block of `test_ui.py` rewritten (fill, the card note, emptying, Undo with the type, nothing after Undo, two papers not enough) and four sidebar checks (counts, a change from elsewhere, the filtered Library, the mark). Before the commit the fill was run in jsdom on what `pdfmeta.read` gives for the four real WITS26 PDFs, and the sidebar on a fake event stream; the full browser suite was not run in that session.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

@@ -1445,13 +1445,15 @@ class Handler(BaseHTTPRequestHandler):
             if not row:
                 return self.send_json({"error": "no such paper"}, 404)
             try:
-                if b.get("opened"):
-                    st = rs.touch_open(row["key"], b.get("page"), b.get("total"))
-                else:
-                    patch = {k: b[k] for k in ("status", "star", "skip", "takeaway", "page", "progress") if k in b}
-                    if b.get("page") and b.get("total"):
-                        patch["progress"] = b["page"] / b["total"]
-                    st = rs.update(row["key"], patch)
+                with rs._lock:                   # the change and its announcement together: two changes at once reach every window in the order they were saved
+                    if b.get("opened"):
+                        st = rs.touch_open(row["key"], b.get("page"), b.get("total"))
+                    else:
+                        patch = {k: b[k] for k in ("status", "star", "skip", "takeaway", "page", "progress") if k in b}
+                        if b.get("page") and b.get("total"):
+                            patch["progress"] = b["page"] / b["total"]
+                        st = rs.update(row["key"], patch)
+                    HUB.emit("paperstate", {"file": b.get("file"), "state": st})      # every open page (the sidebar's reading-status counts, a second window) follows
             except (ValueError, TypeError) as e:
                 return self.send_json({"error": str(e)[:100]}, 400)
             return self.send_json({"ok": True, "state": st})
