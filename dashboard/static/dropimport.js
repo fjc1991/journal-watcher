@@ -206,7 +206,13 @@ async function review(files, w, o = {}) {
     const destId = () => fixed || (to && to.value.startsWith("f:") ? to.value.slice(2) : "");
     let monthTouched = false;
     const month = () => MON && monthOk(norm(MON.value)) ? norm(MON.value) : "";
-    const putMonth = c => { const m = month(); if (!m || c.kind === "book" || c.state !== "ok" || c.dateTouched) return; c.fields.pub_date = m; const el = $(`[data-k="pub_date"][data-i="${c.i}"]`, d); if (el) el.value = m; };
+    const putMonth = c => {      // (the month, or, the box empty, the paper's own date again: from its PDF or the record you picked)
+      if (c.kind === "book" || c.state !== "ok" || c.dateTouched) return;
+      const m = month();
+      if (c.fields.pub_date !== c.monthSet) c.ownDate = c.fields.pub_date;
+      c.monthSet = m || undefined; c.fields.pub_date = m || c.ownDate || "";
+      const el = $(`[data-k="pub_date"][data-i="${c.i}"]`, d); if (el) el.value = c.fields.pub_date;
+    };
     const loadMonth = () => { if (!MON || monthTouched) return; MON.value = destId() ? ls.get("jw-month:" + destId()) : ""; cards.forEach(putMonth); };
     if (MON) {
       MON.oninput = () => { monthTouched = true; MON.classList.toggle("bad", !!norm(MON.value) && !monthOk(norm(MON.value))); cards.forEach(putMonth); };
@@ -419,7 +425,7 @@ async function review(files, w, o = {}) {
         return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : [], details: detailsOf(c), replace: !!c.existing && c.dup === "replace"};
       };
       const tree = hasTree && dest.mode !== "lib" ? (($("#ir-tree input:checked", d) || {}).value || "keep") : "";      // (without a folder to add to there is nothing to make folders in)
-      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, path: tree === "keep" ? c.dir : [], session: c.kind === "book" ? "" : c.det.session || "", fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked, tree, month: month()});
+      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, path: tree === "keep" ? c.dir : [], session: c.kind === "book" ? "" : c.det.session || "", fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked, tree, month: month(), forgetMonth: monthTouched && !month()});
     };
     $("#ir-go", d).onclick = go;
     $("#ir-cancel", d).onclick = () => d.close();
@@ -439,7 +445,7 @@ function snack() {
 }
 function bye(s, ms) { clearTimeout(D.timer); if (ms) D.timer = setTimeout(() => { s.classList.add("gone"); setTimeout(() => s.remove(), 300); }, ms); }
 
-async function run({items, dest, summarize, tree, month}) {
+async function run({items, dest, summarize, tree, month, forgetMonth}) {
   const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false, filed = null, fileErr = "";
   const paint = (n, msg) => { s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div><div class="di-bar"><i style="width:${Math.round(100 * n / total)}%"></i></div><div class="row"><button class="btn small" data-di="stop">Stop</button></div>`; };
   s.onclick = e => { if (e.target.closest("[data-di=stop]")) stop = true; };
@@ -471,6 +477,7 @@ async function run({items, dest, summarize, tree, month}) {
   if (fileErr && created) { try { await api("/api/folders", {action: "delete", id: folderId, children: "delete", quiet: true}); } catch (e) { /* it stays, empty */ } }
   if (folderId) ls.set("jw-drop-last", folderId);
   if (folderId && month) ls.set("jw-month:" + folderId, month);      // (the next drop into this folder starts with this month)
+  else if (folderId && forgetMonth) { try { localStorage.removeItem("jw-month:" + folderId); } catch (e) { /* private window */ } }      // (you emptied the box: no month for it from now on)
   if (stop) discard(items.slice(res.length).map(x => x.token));          // the ones not reached are forgotten
   const ok = res.filter(r => r.file && !r.error), isNew = ok.filter(r => !r.existing && !r.replaced), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
   const nsub = filed ? new Set(Object.entries(filed.where || {}).filter(([k]) => k).map(([, id]) => id)).size : 0;      // (two folders whose names are the same in their first 60 characters became one)

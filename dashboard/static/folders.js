@@ -99,7 +99,7 @@ async function del() {
   const how = window.LibraryUI && LibraryUI.askDeleteFolders ? await LibraryUI.askDeleteFolders(tops) : (confirm("Delete these folders?") ? {papers: false} : null);
   if (!how) return;
   let nf = 0, np = 0;
-  for (const id of tops) { try { const r = await api("/api/folders", {action: "delete", id, children: "delete", papers: how.papers}); nf += r.folders || 1; np += r.papers || 0; } catch (e) { notifyError(e); } }
+  for (const id of tops) { try { const r = await api("/api/folders", {action: "delete", id, children: "delete", papers: how.papers}); nf += r.count || 1; np += r.papers || 0; } catch (e) { notifyError(e); } }
   P.sel.clear(); toast(`Moved to the Bin: ${nf} folder${nf === 1 ? "" : "s"}${np ? ` and ${np} paper${np === 1 ? "" : "s"}` : ""}.`); await refresh();
   if (np && window.LibraryUI) await ctx.reload();
 }

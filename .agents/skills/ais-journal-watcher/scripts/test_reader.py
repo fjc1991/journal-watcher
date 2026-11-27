@@ -2123,7 +2123,7 @@ out["keep_days"] = deletion.KEEP_DAYS
 # 1. the folder only: both folders go to the bin, every paper stays
 r1 = deletion.delete_folder(W, papers=False)
 bin1 = deletion.recently_deleted()
-out["folder_only"] = [r1["folders"], r1["papers"], fo.get(W) is None, fo.get(S) is None, os.path.exists(os.path.join(fo.DIR, S + ".matrix.json")), all(P[x] in lib() for x in "ABCDE"),
+out["folder_only"] = [r1["count"], r1["papers"], fo.get(W) is None, fo.get(S) is None, os.path.exists(os.path.join(fo.DIR, S + ".matrix.json")), all(P[x] in lib() for x in "ABCDE"),
                       [(b["kind"], b["title"], b["folders"], b["papers"]) for b in bin1]]
 deletion.restore(r1["undo"])
 out["folder_back"] = [fo.get(S)["parent"] == W, sorted(fo.all_papers(W)) == sorted([k["A"], k["B"], k["C"]]), open(os.path.join(fo.DIR, S + ".matrix.json")).read() == '{"cells": {"x": 1}}', deletion.recently_deleted() == []]
@@ -2197,6 +2197,111 @@ print("JSON" + json.dumps(out))
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("the bin: deleted things wait 7 days and come back as they were; a folder goes with the folders inside it and, if you say so, with the papers only it holds (a paper "
           "also in another folder stays); Delete now empties it at once; a newer copy of a PDF replaces the old one, which waits in the bin and swaps back; without Replace nothing changes", t_bin)
+
+    def t_bin_edges():
+        """The bin when things change meanwhile: a folder made again under the same name, a paper added again, a paper put back before its folder, a replaced
+        paper's details, a paper whose PDF is missing, a book, a damaged record, and the Undo of a drop."""
+        import subprocess
+        home, loc = tempfile.mkdtemp(prefix="jw-home-"), tempfile.mkdtemp(prefix="jw-local-")
+        try:
+            child = r"""
+import json, os, sys, time
+sys.path.insert(0, %r)
+import paths
+paths.seed_home()
+import download as dl, deletion, pipeline as pl, folders as fo, readstate as rs, notes_store as ns, importer, details
+ROOT = paths.ROOT
+out = {}
+def put(rel, data):
+    p = os.path.join(ROOT, rel); os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "wb").write(data); return p
+pdf = lambda tag: b"%%PDF-1.4\n" + tag.encode() + b"\n" + b"0" * 41000 + b"\n%%%%EOF\n"
+P, k = {}, {}
+for x in "ABCDEFGH":
+    P[x] = "Papers/2026-12/WITS 2026/" + x + ".pdf"; k[x] = "10.5555/" + x.lower()
+    put(P[x], pdf(x)); dl.save_index({"doi": k[x], "title": "Paper " + x, "journal": "WITS 2026", "abbr": "WITS"}, P[x], "ok")
+lib = lambda: {r["file"] for r in pl.library()}
+listed = lambda: {b["token"]: b for b in deletion.recently_deleted()}
+# 1. the folder is made again under the same name before it is put back: its papers come back into the new one; the old one's own files wait in the bin
+W = fo.create("Reading")["id"]; fo.add(W, [k["A"], k["B"]])
+open(os.path.join(fo.DIR, W + ".ideas.json"), "w").write('{"board": 1}')
+r = deletion.delete_folder(W, papers=True)
+W2 = fo.create("Reading")["id"]
+back = deletion.restore(r["undo"])
+out["clash"] = [r["count"], W2 == W, P["A"] in lib() and P["B"] in lib(), sorted(fo.get(W)["papers"]) == sorted([k["A"], k["B"]]), r["undo"] in listed(),
+                bool(back["errors"]) and "same name and place" in back["errors"][0], os.path.exists(os.path.join(fo.DIR, W + ".ideas.json"))]
+fo.delete(W, "delete"); back2 = deletion.restore(r["undo"])
+out["clash_then"] = [back2["errors"], json.load(open(os.path.join(fo.DIR, W + ".ideas.json"))) == {"board": 1}, r["undo"] not in listed()]
+# 2. a paper added again while its folder is in the bin: the folder comes back without it, and its kept copy is listed on its own (not lost, not hidden)
+X = fo.create("Session")["id"]; fo.add(X, [k["C"], k["D"]])
+r = deletion.delete_folder(X, papers=True)
+put(P["C"], pdf("C again")); dl.save_index({"doi": k["C"], "title": "Paper C", "journal": "WITS 2026", "abbr": "WITS"}, P["C"], "ok")
+back = deletion.restore(r["undo"])
+alone = [b for b in listed().values() if b["title"] == "Paper C"]
+out["readded"] = [P["D"] in lib(), len(back["errors"]), "again already" in back["errors"][0], len(alone), r["undo"] not in listed()]
+# 3. a paper deleted, then its folder; the paper put back first, then the folder: the paper is in the folder again
+Y = fo.create("Later")["id"]; fo.add(Y, [k["E"]])
+re_ = deletion.delete_item(P["E"]); ry = deletion.delete_folder(Y)
+deletion.restore(re_["undo"]); deletion.restore(ry["undo"])
+out["order"] = [k["E"] in fo.get(Y)["papers"]]
+# 4. a replaced paper: the details you corrected come back with the old PDF
+details.save(P["F"], {"title": "My corrected title"})
+tok = importer._stage(pdf("F new"))
+res = importer.confirm(tok, {"title": "Title from the new PDF", "authors": "Ana Ruiz", "journal": "WITS 2026", "pub_date": "2026-12", "doi": k["F"], "kind": "conference", "source": "hand", "replace": True})
+t1 = pl.library_row(P["F"])["title"]
+deletion.restore(res["undo"])
+out["details_back"] = [t1, pl.library_row(P["F"])["title"], b"F\n" in open(os.path.join(ROOT, P["F"]), "rb").read()[:20]]
+# 5. a paper whose PDF is missing: Replace brings the PDF back (nothing to keep in the bin)
+os.remove(os.path.join(ROOT, P["G"]))
+tok = importer._stage(pdf("G found"))
+res = importer.confirm(tok, {"title": "Paper G", "authors": "", "journal": "WITS 2026", "pub_date": "2026-12", "doi": k["G"], "kind": "conference", "source": "hand", "replace": True})
+out["missing"] = [res.get("replaced"), res.get("undo"), b"G found" in open(os.path.join(ROOT, P["G"]), "rb").read()[:30]]
+# 6. a book is never replaced from a paper drop
+B = "Papers/Books/Some Book.pdf"; put(B, pdf("book")); dl.save_index({"doi": "10.5555/book", "title": "Some Book", "journal": "Books", "abbr": "Book"}, B, "ok")
+tok = importer._stage(pdf("not the book"))
+res = importer.confirm(tok, {"title": "Some Book", "authors": "", "journal": "", "pub_date": "2026", "doi": "10.5555/book", "kind": "journal", "source": "hand", "replace": True})
+out["book"] = [res.get("existing"), not res.get("replaced"), b"book" in open(os.path.join(ROOT, B), "rb").read()[:20]]
+# 7. a damaged record (a time that is not one, a list) neither stops the listing nor the purge, and is kept
+for n_, body in (("deleted-20261101-000001-aaaaaa", '{"token": "x", "title": "Odd", "when": "soon", "files": []}'), ("deleted-20261101-000002-bbbbbb", "[1, 2]")):
+    os.makedirs(os.path.join(dl.PAPERS, "_removed", n_)); open(os.path.join(dl.PAPERS, "_removed", n_, "_undo.json"), "w").write(body)
+L_ = listed(); n_purged = deletion.purge_old()
+out["damaged"] = ["deleted-20261101-000001-aaaaaa" in L_, "deleted-20261101-000002-bbbbbb" in L_, n_purged, os.path.isdir(os.path.join(dl.PAPERS, "_removed", "deleted-20261101-000001-aaaaaa"))]
+# 8. a paper that went with a folder leaves the disk with that folder, not before it
+Z = fo.create("Old")["id"]; fo.add(Z, [k["H"]]); rz = deletion.delete_folder(Z, papers=True)
+pz = json.load(open(os.path.join(dl.PAPERS, "_removed", rz["undo"], "_undo.json")))["papers"][0]
+mf = os.path.join(dl.PAPERS, "_removed", pz, "_undo.json"); m_ = json.load(open(mf)); m_["when"] -= 8 * 86400; json.dump(m_, open(mf, "w"))
+n1 = deletion.purge_old(); kept_ = os.path.isdir(os.path.join(dl.PAPERS, "_removed", pz))
+mf = os.path.join(dl.PAPERS, "_removed", rz["undo"], "_undo.json"); m_ = json.load(open(mf)); m_["when"] -= 8 * 86400; json.dump(m_, open(mf, "w"))
+n2 = deletion.purge_old()
+out["with_folder"] = [n1, kept_, n2, not os.path.isdir(os.path.join(dl.PAPERS, "_removed", pz))]
+# 9. the Undo of a drop deletes quietly only a folder still empty; one you have put something in goes to the Bin
+sys.path.insert(0, paths.DASHBOARD); os.environ["JW_NO_UPDATE_CHECK"] = "1"
+import server
+E1 = fo.create("Dropped")["id"]; E2 = fo.create("Inner", E1)["id"]
+e_ok = server._empty_family(E1)
+open(os.path.join(fo.DIR, E2 + ".draft.json"), "w").write("{}"); e_draft = server._empty_family(E1)
+os.remove(os.path.join(fo.DIR, E2 + ".draft.json")); fo.add(E2, [k["D"]]); e_paper = server._empty_family(E1)
+out["quiet"] = [e_ok, e_draft, e_paper]
+print("JSON" + json.dumps(out))
+""" % HERE
+            env = {k_: v for k_, v in os.environ.items() if k_ not in ("JW_HOME", "JW_LOCAL", "OPENAI_API_KEY")}
+            r = subprocess.run([sys.executable, "-c", child], env=dict(env, JW_HOME=home, JW_LOCAL=loc, JW_NO_KEYCHAIN="1"), capture_output=True, text=True, timeout=180)
+            assert r.returncode == 0, r.stderr[-2000:]
+            o = json.loads(r.stdout.split("JSON", 1)[1])
+            assert o["clash"] == [1, True, True, True, True, True, False], o["clash"]
+            assert o["clash_then"] == [[], True, True], o["clash_then"]
+            assert o["readded"] == [True, 1, True, 1, True], o["readded"]
+            assert o["order"] == [True], o["order"]
+            assert o["details_back"] == ["Title from the new PDF", "My corrected title", True], o["details_back"]
+            assert o["missing"] == [True, None, True], o["missing"]
+            assert o["book"] == [True, True, True], o["book"]
+            assert o["damaged"] == [True, False, 0, True], o["damaged"]
+            assert o["with_folder"] == [0, True, 1, True], o["with_folder"]
+            assert o["quiet"] == [True, False, False], o["quiet"]
+        finally:
+            shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
+    check("the bin when things change meanwhile: a folder made again keeps its papers back and the old one's files wait; a paper added again is listed on its own; a paper "
+          "put back before its folder is in it again; a replaced paper's details come back; Replace brings a missing PDF back; a book is never replaced; a damaged record "
+          "is kept; a folder's papers leave with it; a drop's Undo deletes quietly only an empty folder", t_bin_edges)
 
     def t_delete_items():
         """What you added can be deleted: a paper or a book is deleted for good (files, notes, summary, card, search index, folders, reading status) and stays out of

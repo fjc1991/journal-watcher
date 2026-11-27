@@ -1411,7 +1411,7 @@ class Handler(BaseHTTPRequestHandler):
                     fo.rename(fid, b.get("name"))
                 elif act == "delete":                # (children: "delete" = with the folders inside it; else they move up one level. papers: their papers go to the bin too,
                     #  except those also in a folder you keep. quiet: an empty folder a drop made, taken back by its Undo: not kept in the bin)
-                    if b.get("quiet"):
+                    if b.get("quiet") and _empty_family(fid):
                         fo.delete(fid, "delete" if b.get("children") == "delete" else "lift")
                     else:
                         extra.update(deletion.delete_folder(fid, bool(b.get("papers")), "delete" if b.get("children") == "delete" else "lift"))
@@ -2214,7 +2214,9 @@ class Handler(BaseHTTPRequestHandler):
             done, errors = [], []
             for t in (b.get("tokens") or [])[:500]:
                 try:
-                    done.append(deletion.restore(str(t)))
+                    r_ = deletion.restore(str(t))
+                    done.append(r_)
+                    errors += [{"token": str(t)[:60], "error": str(m)[:400]} for m in r_.get("errors") or []]      # (a folder back, but not all of it: say what)
                 except (ValueError, OSError) as e:
                     errors.append({"token": str(t)[:60], "error": str(e)[:200]})
             if done and indexer:
@@ -2388,19 +2390,29 @@ def take_lock(port):
     return None
 
 
+def _empty_family(fid):
+    """quiet (a drop's Undo): only a folder that is still empty, with the folders inside it, leaves without going to the Bin; one you have put something in
+    since (a paper, an Ideas Lab board, a draft…) goes to the Bin like any other."""
+    fam = fo.family(fid) or [fid]
+    return all(not (fo.get(x) or {}).get("papers") and not any(os.path.exists(os.path.join(fo.DIR, x + s)) for s in deletion.FOLDER_SUFFIXES if s != ".json")
+               for x in fam)
+
+
+def _bin_watch():
+    while True:
+        time.sleep(3 * 3600)
+        try:
+            deletion.purge_old()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _daily_snapshot():
     try:
         deletion.purge_old()            # (what has been in the bin more than 7 days leaves the disk now; and every few hours while the app runs)
-        def _bin_watch():
-            while True:
-                time.sleep(3 * 3600)
-                try:
-                    deletion.purge_old()
-                except Exception:  # noqa: BLE001
-                    pass
-        threading.Thread(target=_bin_watch, daemon=True, name="bin").start()
     except Exception:  # noqa: BLE001
         pass
+    threading.Thread(target=_bin_watch, daemon=True, name="bin").start()
     try:
         aifiles.snapshot()
     except Exception as e:  # noqa: BLE001      (a full disk, a locked file: the app starts all the same)

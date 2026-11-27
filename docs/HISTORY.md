@@ -1245,6 +1245,19 @@ Skip is unchanged: the card says it is already in the Library, and nothing is wr
 - the month box (fills, keeps a typed date, refuses 2026-13, files under `Papers/2026-12/`, remembered for the folder);
 - Skip or Replace (the explanation, the file replaced in place with its folder kept, the old PDF in the Bin).
 
+**Review.** A review of the diff with four finders, each finding checked by two skeptics, found 13 defects in this change, all fixed with a test that fails without the fix (checked one fix at a time):
+- **A folder made again under the same name before Put back.** Folder ids come from the name, so Put back was refused, and the papers that went with the folder could not be reached any other way. Now the papers go back into the new folder; the old folder's own files (board, drafts) stay in the Bin until the new folder is deleted and Put back is pressed again.
+- **A paper that could not come back with its folder** (added again meanwhile, a file in the way, any error). It was hidden in the bin and deleted after 7 days. Now it is listed in the Bin on its own and the error is shown.
+- **A paper put back before its folder.** It is written into the folder's kept copy, so it is in the folder again when the folder comes back.
+- **Replace overwrote corrected details for good.** The details file beside the PDF now goes to the Bin with the old PDF and comes back with it.
+- **Replace on a paper whose PDF is missing.** It failed; now it puts the new PDF there, with nothing to keep.
+- **A book matched by a paper drop.** It is never replaced.
+- **The server's reply to a folder delete.** It sent the number of folders under the key the page reads as the folder list, which broke the page after deleting a folder inside another. It is now `count`, and the page keeps its list unless it gets a list.
+- **The folder-delete dialog counted papers from the page's copy of the Library**, which can be out of date. It now reloads the Library first.
+- **The drop's Undo deleted a folder quietly whatever was in it.** Now only a folder that is still empty is deleted quietly; anything else goes to the Bin.
+- **The month box.** Emptying it, or choosing a folder with no month, now gives each paper its own date back, and an emptied box forgets the folder's month.
+- **Purge.** It now takes the bin's lock, removes a folder's papers with the folder (not a few minutes before it), and skips a damaged record instead of stopping. The 3-hour purge thread starts even if the first purge fails.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

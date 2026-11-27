@@ -3173,7 +3173,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
                 if os.path.exists(marker): break
                 page.wait_for_timeout(250)
             rows_after = list(csv.DictReader(open(idxp, newline=""))); r1 = [r_ for r_ in rows_after if r_["doi"] == "10.9999/pc.wrong1"][0]
-            removed_dirs = [d_ for d_ in os.listdir(os.path.join(TMP, "Papers", "_removed")) if not d_.startswith("deleted-")] if os.path.isdir(os.path.join(TMP, "Papers", "_removed")) else []      # (not what was deleted earlier in this run: that is kept there too, for Undo)
+            removed_dirs = [d_ for d_ in os.listdir(os.path.join(TMP, "Papers", "_removed")) if not d_.startswith(("deleted-", "folder-", "replaced-"))] if os.path.isdir(os.path.join(TMP, "Papers", "_removed")) else []      # (not what was deleted earlier in this run: that is kept there too, for Undo)
             check("'Remove and download again' moves that PDF and its summary aside (Papers/_removed, nothing deleted), the library forgets it, and the paper is queued for download again",
                   not os.path.exists(os.path.join(folderp, "wrong1.pdf")) and not os.path.exists(os.path.join(folderp, "wrong1.md")) and len(removed_dirs) == 1
                   and os.path.exists(os.path.join(TMP, "Papers", "_removed", removed_dirs[0], "2025-03", "CheckTest", "wrong1.pdf")) and os.path.exists(os.path.join(TMP, "Papers", "_removed", removed_dirs[0], "2025-03", "CheckTest", "wrong1.md"))
@@ -4137,6 +4137,13 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.click('#lib-bin tr:has-text("ICIS26") [data-binput]'); page.wait_for_function("!document.querySelector('#lib-bin').textContent.includes('ICIS26')", timeout=15000)
             ic2_ = next((x for x in api("/api/folders") if x["name"] == "ICIS26"), None)
             check("Put back brings the folder back with the folders inside it and their papers", ic2_ is not None and sorted(x["name"] for x in api("/api/folders") if x["parent"] == ic2_["id"]) == ["Track A", "Track B"] and ic2_["count"] == 3, str(ic2_))
+            # a folder inside another, deleted from its own page: the page goes to the folder it was in, and the folder list stays a list
+            ta_ = next(x for x in api("/api/folders") if x["name"] == "Track A" and x["parent"] == ic2_["id"])
+            page.goto(base + "/#/folder/" + ta_["id"]); page.wait_for_selector("#fv-del"); page.click("#fv-del"); page.wait_for_selector("#delf-dlg[open]"); page.click("#delf-go")
+            page.wait_for_function("location.hash === '#/folder/%s'" % ic2_["id"], timeout=15000)
+            check("deleting a folder inside another from its own page goes to the folder it was in, which lists what is left", page.evaluate("Array.isArray(LibraryUI.folders())")
+                  and "Track A" not in page.inner_text("#main-content"), page.evaluate("location.hash"))
+            api("/api/library/restore", {"tokens": [b["token"] for b in api("/api/library/deleted")["kept"] if b["title"].endswith("Track A")]})
             # a folder with a paper only it holds, deleted with its papers: the paper goes to the Bin under the folder, and comes back with it
             solo_ = next(r_ for r_ in api("/api/library") if not r_.get("folders") and r_.get("journal") != "Books")
             tmpf_ = api("/api/folders", {"action": "create", "name": "Only here", "files": [solo_["file"]]})["id"]
@@ -4185,7 +4192,10 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
             page.evaluate(JS_TREE, [{"kind": "open", "id": mf_}, [[mo3_, "m3.pdf", []]]]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=40000)
             check("the next drop into the same folder starts with the month used last for it", page.input_value("#ir-month") == "2026-12" and val_("pub_date", 0) == "2026-12", page.input_value("#ir-month"))
-            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
+            page.fill("#ir-month", "")
+            check("emptying the month box gives each paper its own date back", val_("pub_date", 0) not in ("", "2026-12"), val_("pub_date", 0))
+            page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
+            check("…and the folder has no month from then on", page.evaluate("localStorage.getItem('jw-month:' + %s)" % json.dumps(mf_)) is None)
             api("/api/folders", {"action": "delete", "id": wid_, "children": "delete"}); page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
 

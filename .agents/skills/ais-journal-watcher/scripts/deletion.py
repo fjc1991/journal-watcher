@@ -61,11 +61,12 @@ def deleted_keys():
         return {dl.index_key(r) for r in csv.DictReader(f) if r.get("status") == DELETED and dl.index_key(r)}
 
 
-def _inside_papers(file):
-    """The real path of a library file named by `file` (relative to the data folder), or a ValueError: it must be a PDF under Papers/, not a link out of it."""
+def _inside_papers(file, missing_ok=False):
+    """The real path of a library file named by `file` (relative to the data folder), or a ValueError: it must be a PDF under Papers/, not a link out of it
+    (missing_ok: it may not be there)."""
     base = os.path.realpath(dl.PAPERS)
     full = os.path.realpath(os.path.join(dl.ROOT, file)) if isinstance(file, str) and file and "\0" not in file else ""
-    if not full.startswith(base + os.sep) or not full.lower().endswith(".pdf") or not os.path.isfile(full):
+    if not full.startswith(base + os.sep) or not full.lower().endswith(".pdf") or not (os.path.isfile(full) or (missing_ok and not os.path.exists(full))):
         raise ValueError("That file is not in your library.")
     if any(part.startswith("_") for part in os.path.relpath(full, base).split(os.sep)[:-1]):     # (Papers/_removed, _conflicts, _folders: not library papers)
         raise ValueError("That file is not in your library.")
@@ -177,9 +178,36 @@ def _undo_of(token):
     d = os.path.join(_removed_root(), token)
     try:
         with open(os.path.join(d, "_undo.json"), encoding="utf-8") as f:
-            return d, json.load(f)
+            u = json.load(f)
     except (OSError, ValueError):
         return None, None
+    return (d, u) if isinstance(u, dict) else (None, None)
+
+
+def _when(u):
+    """When it went to the bin; a record whose time cannot be read counts as just now (kept, rather than deleted or a crash)."""
+    try:
+        return float(u.get("when") or 0) or time.time()
+    except (TypeError, ValueError):
+        return time.time()
+
+
+def _write_undo(d, u):
+    tmp = dl.tmp_path(os.path.join(d, "_undo.json"))
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(u, fh, ensure_ascii=False)
+    os.replace(tmp, os.path.join(d, "_undo.json"))
+
+
+def _release(tokens):
+    """Papers that went to the bin with a folder but did not come back with it: listed in the Bin on their own from now on."""
+    for t in tokens:
+        d2, u2 = _undo_of(t)
+        if u2 and u2.pop("with", None):
+            try:
+                _write_undo(d2, u2)
+            except OSError:
+                pass
 
 
 def recently_deleted():
@@ -193,10 +221,10 @@ def recently_deleted():
         for n in os.listdir(root):
             d, u = _undo_of(n)
             if u and not u.get("with"):
-                left = _keep(u) - int((time.time() - float(u.get("when") or 0)) // 86400)
+                left = _keep(u) - int((time.time() - _when(u)) // 86400)
                 if left > 0:
                     out.append({"token": n, "title": u.get("title") or u.get("file") or "", "kind": u.get("kind") or "paper",
-                                "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(float(u.get("when") or 0))), "days_left": left,
+                                "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(_when(u))), "days_left": left,
                                 "papers": len(u.get("papers") or []), "folders": len(u.get("folder_files") or {})})
     return sorted(out, key=lambda x: x.get("when") or "", reverse=True)
 
@@ -205,12 +233,21 @@ def purge_old():
     """Delete from disk what has been in the bin longer than it is kept (KEEP_DAYS days; OLD_KEEP_DAYS for a record written before 1.5). Returns how many."""
     n = 0
     root = _removed_root()
-    if os.path.isdir(root):
-        for name in os.listdir(root):
-            d, u = _undo_of(name)
-            if u and time.time() - float(u.get("when") or 0) > _keep(u) * 86400:
-                shutil.rmtree(d, ignore_errors=True)
-                n += 1
+    with _lock:                                                   # (not while something is being put back)
+        if os.path.isdir(root):
+            for name in os.listdir(root):
+                d, u = _undo_of(name)
+                if not u:
+                    continue
+                if u.get("with") and _undo_of(u["with"])[1]:
+                    continue                                      # (a paper that went with a folder leaves with that folder, not a few minutes before it)
+                if time.time() - _when(u) > _keep(u) * 86400:
+                    for t in u.get("papers") or []:
+                        d2, u2 = _undo_of(t)
+                        if u2:
+                            shutil.rmtree(d2, ignore_errors=True)
+                    shutil.rmtree(d, ignore_errors=True)
+                    n += 1
     return n
 
 
@@ -279,8 +316,8 @@ def _restore_item(token):
         for fid in u.get("folders") or []:
             try:
                 fo.add(fid, [key])
-            except Exception:  # noqa: BLE001      (the folder was deleted meanwhile)
-                pass
+            except Exception:  # noqa: BLE001      (the folder was deleted meanwhile: if it is in the bin, the paper goes back into it with the folder)
+                _hold_member(fid, key)
         if u.get("state"):
             try:
                 st = rs.load()
@@ -292,12 +329,32 @@ def _restore_item(token):
         return {"title": u.get("title") or "", "file": u.get("file") or ""}
 
 
+def _hold_member(fid, key):
+    """A paper put back while a folder it was in is in the bin: write it into that folder's kept copy, so it is in the folder again when the folder is put back."""
+    root = _removed_root()
+    if not os.path.isdir(root) or not re.fullmatch(r"[a-z0-9-]{1,48}", str(fid)):
+        return
+    for n in os.listdir(root):
+        d, u = _undo_of(n)
+        if u and u.get("kind") == "folder" and fid in (u.get("folder_files") or {}):
+            p = os.path.join(d, "_folders", fid + ".json")
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    f = json.load(fh)
+                if key not in f.get("papers", []):
+                    f.setdefault("papers", []).append(key)
+                    with open(p, "w", encoding="utf-8") as fh:
+                        json.dump(f, fh, ensure_ascii=False, indent=1)
+            except (OSError, ValueError, AttributeError):
+                pass
+
+
 # ---------------------------------------------------------------- folders into the bin
 
 def delete_folder(fid, papers=False, children="delete"):
     """Delete a folder: it, and (children "delete") the folders inside it, go to the bin with what was made in them (Ideas Lab board, matrix, drafts…). With
     papers=True the papers they show go too, each as delete_item does, except a paper that is also in a folder outside them: that one stays (`kept` counts
-    them). Returns {"title", "folders", "papers", "kept", "undo"}. children "lift" (what the server does when not told): only this folder goes; the folders
+    them). Returns {"title", "count" (folders), "papers", "kept", "undo"}. children "lift" (what the server does when not told): only this folder goes; the folders
     inside it move up one level, as folders.delete does."""
     import folders as fo
     import pipeline as pl
@@ -342,10 +399,9 @@ def delete_folder(fid, papers=False, children="delete"):
             d2, u2 = _undo_of(t)
             if u2:
                 u2["with"] = token
-                with open(os.path.join(d2, "_undo.json"), "w", encoding="utf-8") as fh:
-                    json.dump(u2, fh, ensure_ascii=False)
+                _write_undo(d2, u2)
     fo.delete(fid, children)
-    return {"title": f["name"], "folders": len(fam), "papers": gone, "kept": kept, "undo": token}
+    return {"title": f["name"], "count": len(fam), "papers": gone, "kept": kept, "undo": token}
 
 
 FOLDER_SUFFIXES = (".json", ".ideas.json", ".digest.md", ".ask.json", ".matrix.json", ".draft.json", ".claims.json", ".synthesis.json", ".workspace.json", ".review.json")
@@ -358,24 +414,33 @@ def _restore_folder(token):
         if not u:
             raise ValueError("That folder is not kept any more.")
         src = os.path.join(d, "_folders")
-        clash = [x for x in (u.get("folder_files") or {}) if fo.get(x)]
-        if clash:
-            raise ValueError("A folder with the same place in your folders is back already (%s)." % ", ".join(clash)[:80])
+        every = u.get("folder_files") or {}
+        clash = {x: s for x, s in every.items() if fo.get(x)}     # (made again meanwhile under the same name and place: that one stays, and gets its papers back)
         os.makedirs(fo.DIR, exist_ok=True)
-        for x, suffixes in (u.get("folder_files") or {}).items():
-            if not re.fullmatch(r"[a-z0-9-]{1,48}", x):
+        for x, suffixes in every.items():
+            if x in clash or not re.fullmatch(r"[a-z0-9-]{1,48}", x):
                 continue
             for suffix in suffixes:
                 if suffix in FOLDER_SUFFIXES and os.path.exists(os.path.join(src, x + suffix)):
                     shutil.copy2(os.path.join(src, x + suffix), os.path.join(fo.DIR, x + suffix))
         tokens = list(u.get("papers") or [])
-    errors = []
+        if clash:                                                 # (its own files, the board, drafts…, wait in the bin: delete the new folder and put this back to have them)
+            u["folder_files"], u["papers"] = clash, []
+            _write_undo(d, u)
+    errors, failed = [], []
     for t in tokens:                                              # its papers, into the folders they were in (the folder is back now)
         try:
             _restore_item(t)
-        except ValueError as e:
-            errors.append(str(e))
-    shutil.rmtree(d, ignore_errors=True)
+        except Exception as e:  # noqa: BLE001      (it stays in the bin, listed on its own)
+            errors.append(str(e)[:200])
+            failed.append(t)
+    _release(failed)
+    if clash:
+        names = ", ".join((json.load(open(os.path.join(src, x + ".json"), encoding="utf-8")).get("name") if os.path.exists(os.path.join(src, x + ".json")) else x) for x in clash)[:120]
+        errors.insert(0, "A folder with the same name and place is there again (%s): its papers are back in it, and the deleted folder's own files (board, drafts, "
+                         "matrix…) stay in the Bin. To have those, delete the new folder and put this back again." % names)
+    else:
+        shutil.rmtree(d, ignore_errors=True)
     return {"title": u.get("title") or "", "file": "", "errors": errors}
 
 
@@ -388,17 +453,28 @@ def replace_pdf(file, data):
     import notes_store as ns
     if not dl.is_pdf(data):
         raise ValueError("That doesn’t look like a complete PDF.")
+    import kinds
     with _lock:
-        full = _inside_papers(file)
+        full = _inside_papers(file, missing_ok=True)
+        if not os.path.exists(full):                              # (the paper's PDF is missing: the new one takes its place, nothing to keep)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            tmp = dl.tmp_path(full)
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, full)
+            return {"file": file, "undo": None}
         try:
             sha = ns.sha1_of(full)
         except OSError:
             sha = None
         token = _token("replaced")
-        rel = os.path.relpath(full, os.path.realpath(dl.PAPERS))
-        dest = os.path.join(_removed_root(), token, rel)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copy2(full, dest)                                  # (the old one is in the bin before the new one is written)
+        base = os.path.realpath(dl.PAPERS)
+        rels = [os.path.relpath(p, base) for p in (full, kinds.sidecar_path(full)) if os.path.exists(p)]
+        for rel in rels:                                          # (the old PDF and the details beside it are in the bin before the new one is written)
+            dest = os.path.join(_removed_root(), token, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(os.path.join(base, rel), dest)
+        rel = rels[0]
         tmp = dl.tmp_path(full)
         with open(tmp, "wb") as fh:
             fh.write(data)
@@ -410,7 +486,7 @@ def replace_pdf(file, data):
         except Exception:  # noqa: BLE001
             pass
         with open(os.path.join(_removed_root(), token, "_undo.json"), "w", encoding="utf-8") as fh:
-            json.dump({"token": token, "kind": "replaced", "title": title, "file": file, "when": time.time(), "keep": KEEP_DAYS, "files": [rel]}, fh, ensure_ascii=False)
+            json.dump({"token": token, "kind": "replaced", "title": title, "file": file, "when": time.time(), "keep": KEEP_DAYS, "files": rels}, fh, ensure_ascii=False)
         _forget_index(sha)
         return {"file": file, "undo": token}
 
@@ -440,7 +516,11 @@ def _restore_replaced(token):
         raise ValueError("The paper it belonged to is not in your library any more.")
     with open(src, "rb") as fh:
         data = fh.read()
-    replace_pdf(u.get("file"), data)                              # (the copy there now goes to the bin in turn)
+    full = replace_pdf(u.get("file"), data) and _inside_papers(u.get("file"))      # (the copy there now goes to the bin in turn, with its details)
+    import kinds
+    side = os.path.join(d, os.path.splitext(rel)[0] + ".paper.json")
+    if os.path.exists(side):                                      # (the details it had come back with it)
+        shutil.copy2(side, kinds.sidecar_path(full))
     shutil.rmtree(d, ignore_errors=True)
     return {"title": u.get("title") or "", "file": u.get("file") or ""}
 

@@ -677,7 +677,7 @@ function setKind(files) {
 // ---------------------------------------------------------------- folders
 async function folderOp(body) {
   let r;
-  try { r = await api("/api/folders", body); FOLDERS = r.folders; }
+  try { r = await api("/api/folders", body); if (Array.isArray(r.folders)) FOLDERS = r.folders; }
   catch (e) { notifyError(e); throw e; }
   await ctx.reload(); const el = $("#lib-papers") && $("#libview"); if (el && $("#lf-folder")) fillControls($("#libview")); results();
   return r;
@@ -734,7 +734,7 @@ function folderView(box, id) {
   $("#fv-del").onclick = async () => {
     const how = await askDeleteFolders([id]); if (!how) return;
     const r = await folderOp({action: "delete", id, children: "delete", papers: how.papers});
-    toast(`Moved to the Bin: ${r.folders > 1 ? r.folders + " folders" : "the folder"}${r.papers ? ` and ${r.papers} paper${r.papers === 1 ? "" : "s"}` : ""}${r.kept ? ` (${r.kept} also in another folder stayed)` : ""}.`);
+    toast(`Moved to the Bin: ${r.count > 1 ? r.count + " folders" : "the folder"}${r.papers ? ` and ${r.papers} paper${r.papers === 1 ? "" : "s"}` : ""}${r.kept ? ` (${r.kept} also in another folder stayed)` : ""}.`);
     ctx.go(f.parent && FOLDERS.find(x => x.id === f.parent) ? {j: "@" + f.parent} : {j: null});
   };
   $("#fv-export").onclick = e => { e.stopPropagation(); exportMenu($("#fv-expmenu"), {folder: id}); };
@@ -866,7 +866,8 @@ async function binTab() {
 
 // ---------------------------------------------------------------- deleting folders: the folder only, or with its papers (those in no folder you keep)
 // ids: the folders you chose. Resolves to {papers: bool} or null (Cancel).
-function askDeleteFolders(ids) {
+async function askDeleteFolders(ids) {
+  try { await ctx.reload(); } catch (e) { /* counts from what the page has */ }      // the papers in a folder may have changed since the page loaded (another window, a drop): count from the library as it is now
   const fam = new Set(ids.flatMap(i => [...famOf(i)])), names = ids.map(i => (FOLDERS.find(f => f.id === i) || {}).name).filter(Boolean);
   const inside = fam.size - ids.length;
   const rows = lib().filter(r => (r.folders || []).some(x => fam.has(x)));

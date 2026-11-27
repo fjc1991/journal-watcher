@@ -539,7 +539,8 @@ def _replace(ex, data, title, authors, det, f):
         details.save(ex, fields)
     except ValueError as e:                               # (the PDF is replaced all the same; the details could not be kept)
         note = str(e)
-    return {"file": ex, "title": title, "existing": True, "replaced": True, "undo": r["undo"], "note": "the PDF was replaced" + (" (" + note + ")" if note else "")}
+    return {"file": ex, "title": title, "existing": True, "replaced": True, "undo": r["undo"],
+            "note": ("the PDF was replaced" if r["undo"] else "its missing PDF is back") + (" (" + note + ")" if note else "")}
 
 
 def _clean_text(v, limit):
@@ -595,6 +596,10 @@ def confirm(token, fields):
             data = fh.read()
         p = _paper(meta, kind)
         ex = _existing(p) if f.get("replace") else None
+        if ex:
+            import books
+            if books.is_book(ex):                        # (a book is never replaced from a paper drop: it is "already in your library")
+                ex = None
         if ex:                                           # you already have it and chose Replace: the new PDF takes the old one's place, which goes to the bin
             res = _replace(ex, data, title, authors, det, f)
         else:
