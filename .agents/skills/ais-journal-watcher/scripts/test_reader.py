@@ -2281,6 +2281,13 @@ e_ok = server._empty_family(E1)
 open(os.path.join(fo.DIR, E2 + ".draft.json"), "w").write("{}"); e_draft = server._empty_family(E1)
 os.remove(os.path.join(fo.DIR, E2 + ".draft.json")); fo.add(E2, [k["D"]]); e_paper = server._empty_family(E1)
 out["quiet"] = [e_ok, e_draft, e_paper]
+# 10. a replaced PDF is indexed again (its old passages left the index with the old PDF); a paper you already had, untouched, is not
+kicks = []
+server.indexer = type("I", (), {"kick": staticmethod(lambda *a, **k: kicks.append(a))})()
+fake = type("H", (), {"send_json": lambda self, o, *a: o})()
+server.Handler.finish_import(fake, {"file": P["F"], "existing": True, "replaced": True}, False); n_rep = len(kicks)
+server.Handler.finish_import(fake, {"file": P["F"], "existing": True}, False)
+out["reindex"] = [n_rep, len(kicks)]
 print("JSON" + json.dumps(out))
 """ % HERE
             env = {k_: v for k_, v in os.environ.items() if k_ not in ("JW_HOME", "JW_LOCAL", "OPENAI_API_KEY")}
@@ -2297,6 +2304,7 @@ print("JSON" + json.dumps(out))
             assert o["damaged"] == [True, False, 0, True], o["damaged"]
             assert o["with_folder"] == [0, True, 1, True], o["with_folder"]
             assert o["quiet"] == [True, False, False], o["quiet"]
+            assert o["reindex"] == [1, 1], o["reindex"]
         finally:
             shutil.rmtree(home, ignore_errors=True); shutil.rmtree(loc, ignore_errors=True)
     check("the bin when things change meanwhile: a folder made again keeps its papers back and the old one's files wait; a paper added again is listed on its own; a paper "

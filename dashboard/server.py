@@ -882,9 +882,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, **res})
 
     def finish_import(self, res, summarize):
-        """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does."""
+        """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does. A new paper, or a PDF you replaced
+        (its old passages left the search index with it), is indexed."""
         row = pl.library_row(res["file"]) or {}
-        if indexer and not res["existing"]:
+        if indexer and (not res["existing"] or res.get("replaced")):
             indexer.kick(2)
         if summarize and not res["existing"] and not row.get("summary"):
             def job():
