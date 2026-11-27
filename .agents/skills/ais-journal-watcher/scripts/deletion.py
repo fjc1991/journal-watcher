@@ -32,11 +32,11 @@ import download as dl  # noqa: E402
 
 DELETED = "deleted"
 KEEP_DAYS = 7                     # how long the bin keeps what you deleted
-OLD_KEEP_DAYS = 30                # what was deleted before 1.5 was promised 30 days; its record has no "keep" and keeps that promise
+OLD_KEEP_DAYS = 30                # what was deleted before 1.4.3 was promised 30 days; its record has no "keep" and keeps that promise
 
 
 def _keep(u):
-    """How many days this bin entry is kept: what its record says, else (a record written before 1.5) OLD_KEEP_DAYS."""
+    """How many days this bin entry is kept: what its record says, else (a record written before 1.4.3) OLD_KEEP_DAYS."""
     try:
         return int(u.get("keep", OLD_KEEP_DAYS))
     except (TypeError, ValueError):
@@ -213,7 +213,7 @@ def _release(tokens):
 def recently_deleted():
     """What is in the bin and can still be put back, newest first: [{token, title, kind ("paper" | "book" | "folder" | "replaced"), when, days_left, papers (a folder:
     how many of its papers went with it), folders (a folder: how many folders, itself included)}]. A paper deleted with its folder is listed under the folder, not on
-    its own. What is older than its keep (KEEP_DAYS days; 30 for what was deleted before 1.5) leaves the disk first."""
+    its own. What is older than its keep (KEEP_DAYS days; 30 for what was deleted before 1.4.3) leaves the disk first."""
     purge_old()
     out = []
     root = _removed_root()
@@ -233,7 +233,7 @@ def recently_deleted():
 
 
 def purge_old():
-    """Delete from disk what has been in the bin longer than it is kept (KEEP_DAYS days; OLD_KEEP_DAYS for a record written before 1.5). Returns how many."""
+    """Delete from disk what has been in the bin longer than it is kept (KEEP_DAYS days; OLD_KEEP_DAYS for a record written before 1.4.3). Returns how many."""
     n = 0
     root = _removed_root()
     with _lock:                                                   # (not while something is being put back)
