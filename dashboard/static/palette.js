@@ -25,7 +25,7 @@ function build() {
   add("go", "Watch", "watch", "watch", () => nav({view: "run", j: null}), {hint: "page", quick: true, hay: "check for new papers weekly archive search runs journals", sub: "check journals for new papers; your past runs"});
   add("go", "Library", "library", "library", () => nav({view: "lib", j: null, tab: "papers"}), {hint: "page", quick: true, hay: "papers search browse journals", sub: "every paper you have downloaded"});
   add("go", "Library › Books", "library", "library", () => nav({view: "lib", j: null, tab: "books"}), {hint: "page", hay: "library books chapters epub book"});
-  [["ask", "Ask the whole library", "ask"], ["discover", "Discover papers you don’t have", "discover"], ["hl", "Highlights hub", "hl"], ["review", "Review flashcards", "review"], ["tags", "Tags", "tags"]].forEach(([t, name, ic]) =>
+  [["ask", "Ask the whole library", "ask"], ["discover", "Discover papers you don’t have", "discover"], ["hl", "Highlights hub", "hl"], ["review", "Review flashcards", "review"], ["tags", "Tags", "tags"], ["bin", "Bin (deleted papers and folders)", "trash"]].forEach(([t, name, ic]) =>
     add("go", "Library › " + name, ic, t, () => nav({view: "lib", j: null, tab: t}), {hint: "tool", quick: t === "ask", hay: "library " + t}));
   add("go", "Folders", "folders", "folders", () => nav({view: "lib", j: null, tab: "folders"}), {hint: "page", quick: true, hay: "folder tiles projects", sub: "your folders of papers"});
   [["ai", "AI & privacy", "models keys budget cost provider local only"], ["usage", "Usage & cost", "budget spent spending cost month"], ["prompts", "Prompts", "prompt template"],

@@ -525,6 +525,23 @@ def analyse_pdf(data, filename="paper.pdf", use_ai=None):
             "confidence": "none" if not cands else "high" if pick == 0 and _strong(cands[0]) else "check", "existing": ex or ""}
 
 
+def _replace(ex, data, title, authors, det, f):
+    """Replace the PDF of the paper at `ex` (a library path) with `data`, keeping its notes, highlights, summary, folders and reading status; the dialog's
+    details (title, authors with what stands under them, abstract, keywords, session…) are kept as corrections beside it (details.py)."""
+    import deletion
+    import details
+    r = deletion.replace_pdf(ex, data)
+    fields = dict(det, title=title)
+    if det.get("authors") or authors:
+        fields["authors"] = det.get("authors") or [{"name": a} for a in authors]
+    note = ""
+    try:
+        details.save(ex, fields)
+    except ValueError as e:                               # (the PDF is replaced all the same; the details could not be kept)
+        note = str(e)
+    return {"file": ex, "title": title, "existing": True, "replaced": True, "undo": r["undo"], "note": "the PDF was replaced" + (" (" + note + ")" if note else "")}
+
+
 def _clean_text(v, limit):
     return re.sub(r"\s+", " ", str(v or "")).strip()[:limit]
 
@@ -577,7 +594,11 @@ def confirm(token, fields):
         with open(claimed, "rb") as fh:
             data = fh.read()
         p = _paper(meta, kind)
-        res = _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), f.get("type") or "", det))
+        ex = _existing(p) if f.get("replace") else None
+        if ex:                                           # you already have it and chose Replace: the new PDF takes the old one's place, which goes to the bin
+            res = _replace(ex, data, title, authors, det, f)
+        else:
+            res = _file(p, data, note, after=lambda dest: kinds.write_sidecar(dest, kind, p["journal"], label, dl.index_key(p), f.get("type") or "", det))
     except Exception:
         try:
             os.replace(claimed, path)                    # filing failed: the PDF waits again

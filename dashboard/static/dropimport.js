@@ -149,7 +149,10 @@ function cardHtml(c) {
       <span><b>${esc(k.title)}</b><small>${esc((k.authors || []).slice(0, 4).join(", ") + ((k.authors || []).length > 4 ? " et al." : ""))}${!book && TYPEWORD[k.kind] ? " · " + esc(TYPEWORD[k.kind]) : ""}${book ? (k.publisher ? " · " + esc(k.publisher) : "") : k.journal ? " · " + esc(k.journal) : ""}${k.year ? " · " + esc(k.year) : ""}${book && k.isbn ? " · ISBN " + esc(k.isbn) : ""}${k.doi ? " · " + esc(k.doi) : ""}</small>
       <small class="ir-why">${esc(why(k))}${k.doi_printed && k.verdict === "match" && k.authors_found ? " · DOI printed in the PDF" : k.source === "title" ? " · found by its title" : ""}</small></span></label>`).join("");
   const f = c.fields, fld = (k, label, ph, wide) => `<label class="ir-f${wide ? " wide" : ""}"><span>${label}</span><input type="text" data-k="${k}" data-i="${c.i}" value="${esc(f[k])}" placeholder="${esc(ph || "")}" autocomplete="off" spellcheck="false"></label>`;
-  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}${!book && readSay(a) ? `<div class="ir-st ir-hint ir-read">${readSay(a)}</div>` : ""}${!book && filledNote(c) ? `<div class="ir-st warn ir-filled">${filledNote(c)}</div>` : ""}<div class="ir-st warn${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}. It will not be added twice.</div>
+  return `${head}<div class="ir-st ${say[0]}">${say[1]}</div>${!book && a.kind_hint ? `<div class="ir-st ir-hint">${esc(a.kind_hint)}</div>` : ""}${!book && readSay(a) ? `<div class="ir-st ir-hint ir-read">${readSay(a)}</div>` : ""}${!book && filledNote(c) ? `<div class="ir-st warn ir-filled">${filledNote(c)}</div>` : ""}<div class="ir-st warn ir-dup${c.existing ? "" : " hide"}" id="ir-x${c.i}">You already have this ${book ? "book" : "paper"}.${book ? " It will not be added twice." : `
+      <span class="ir-dupopt" role="radiogroup" aria-label="What to do with ${esc(c.file.name)}"><label><input type="radio" name="ir-dup${c.i}" data-dup="${c.i}" value="skip"${c.dup !== "replace" ? " checked" : ""}> Skip: keep the one I have${""}</label>
+      <label><input type="radio" name="ir-dup${c.i}" data-dup="${c.i}" value="replace"${c.dup === "replace" ? " checked" : ""}> Replace its PDF with this one</label></span>
+      <small>${c.dup === "replace" ? "The new PDF takes its place; its notes, highlights, summary, folders and reading status stay (highlights may sit in the wrong place if the pages changed). The old PDF goes to the Bin for 7 days." : "Nothing is added twice; it is still put into the folder you add to."}</small>`}</div>
     ${cands.length ? `<div class="ir-cands" role="radiogroup" aria-label="Records found for ${esc(c.file.name)}">${opts}<label class="ir-cand"><input type="radio" name="ir-c${c.i}" data-sel="${c.i}" value="-1"${c.sel === -1 ? " checked" : ""}><span><b>None of these</b><small>I will type the details myself</small></span></label></div>` : ""}
     <div class="ir-fields">${fld("title", "Title", "", true)}${fld("authors", "Authors or editors (separate with ;)", "Jane Doe; John Smith", true)}${book ? fld("publisher", "Publisher", "") + fld("pub_date", "Year", "YYYY") + fld("isbn", "ISBN", "978…") + fld("doi", "DOI (if it has one)", "10.…") : ptypeSel(c, c.file.name) + fld("journal", VENUE[c.ptype || "journal"][0], VENUE[c.ptype || "journal"][1]) + fld("pub_date", "Date", "YYYY or YYYY-MM-DD") + fld("doi", "DOI", "10.…")}</div>
     ${book ? "" : moreHtml(c, c.many)}
@@ -171,6 +174,8 @@ async function review(files, w, o = {}) {
     d.innerHTML = `<h2 id="ir-h">Check the details of ${plural(pdfs.length, pdfs.every(isEpub) ? "EPUB" : pdfs.some(isEpub) ? "file" : "PDF")}</h2>
       <p class="pmeta">Nothing is filed until you press Add. Each file is read and looked up online (Crossref for papers; Open Library and Crossref for books); fix anything that is wrong. Say what each file is: a paper (a journal article, a preprint or working paper, a conference paper, or a report, thesis or other) or a book.</p>
       ${pdfs.length > 1 ? `<div class="row ir-all"><label>Set every paper's type to <select id="ir-all" aria-label="Set the type of every paper you have not set yourself"><option value="">(as each one says)</option>${PTYPES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label></div>` : ""}
+      ${pdfs.some(f => !isEpub(f)) && !o.book ? `<div class="row ir-month"><label for="ir-month">File under month</label><input type="text" id="ir-month" maxlength="7" placeholder="e.g. 2026-12" autocomplete="off" spellcheck="false" aria-describedby="ir-monthsay">
+        <small id="ir-monthsay">Sets the date of every paper here (YYYY-MM), so they are filed under that month: for a conference, the month it takes place. Remembered for the folder you add to.</small></div>` : ""}
       <div class="ir-batch hide" id="ir-batch" role="status" aria-live="polite"></div>
       <div class="ir-list">${cards.map(c => `<section class="ir-card" id="ir-c${c.i}"></section>`).join("")}${skipped.slice(0, 3).map(f => `<div class="ir-skip">${esc(f.name)} — not a PDF or EPUB, skipped</div>`).join("")}</div>
       <div class="ir-foot">
@@ -196,8 +201,19 @@ async function review(files, w, o = {}) {
     const to = $("#ir-to", d), nm = $("#ir-name", d);
     if (to && o.top && w.kind !== "library") { to.value = "new"; nm.value = o.top.slice(0, 60); nm.classList.remove("hide"); }      // (one folder around everything was dropped: a new folder of its name is the natural place)
     else if (to) { to.value = first; nm.classList.toggle("hide", to.value !== "new"); if (o.top) nm.value = o.top.slice(0, 60); }
+    // ---- the month every paper is filed under: from the box at the top; remembered per folder (jw-month:<folder id>, kept in the data folder with the other page settings)
+    const MON = $("#ir-month", d), monthOk = v => /^\d{4}-(0[1-9]|1[0-2])$/.test(v);
+    const destId = () => fixed || (to && to.value.startsWith("f:") ? to.value.slice(2) : "");
+    let monthTouched = false;
+    const month = () => MON && monthOk(norm(MON.value)) ? norm(MON.value) : "";
+    const putMonth = c => { const m = month(); if (!m || c.kind === "book" || c.state !== "ok" || c.dateTouched) return; c.fields.pub_date = m; const el = $(`[data-k="pub_date"][data-i="${c.i}"]`, d); if (el) el.value = m; };
+    const loadMonth = () => { if (!MON || monthTouched) return; MON.value = destId() ? ls.get("jw-month:" + destId()) : ""; cards.forEach(putMonth); };
+    if (MON) {
+      MON.oninput = () => { monthTouched = true; MON.classList.toggle("bad", !!norm(MON.value) && !monthOk(norm(MON.value))); cards.forEach(putMonth); };
+      loadMonth();
+    }
     const treeBox = () => { const t = $("#ir-tree", d); if (t && to) t.classList.toggle("hide", to.value === "lib"); };      // (without a folder to add to there are no folders to keep)
-    if (to) { to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); treeBox(); if (to.value === "new") { nm.focus(); nm.select(); } }; treeBox(); }
+    if (to) { to.onchange = () => { nm.classList.toggle("hide", to.value !== "new"); treeBox(); loadMonth(); if (to.value === "new") { nm.focus(); nm.select(); } }; treeBox(); }
     cards.forEach(draw); status();
     const take = c => {                                                      // fill the boxes from the chosen record, or (none of them) from the file's own title
       c.prevNames = null;
@@ -245,7 +261,7 @@ async function review(files, w, o = {}) {
         if (closed) { discard([c.a.token]); return false; }
         c.det = detOf(c.a); c.filled = {};
         if (c.from) c.det.session = c.from;      // (the folder it was in on your disk: "Session 1B - GenAI, Work & Labor Markets")
-        take(c);
+        take(c); putMonth(c);
       } catch (e) { c.state = "error"; c.error = e.message; c.include = false; }
       if (!closed) { draw(c); status(); }
       return !closed;
@@ -342,11 +358,12 @@ async function review(files, w, o = {}) {
       if (e.target.dataset.ptype !== undefined) {                  // a paper's type: only the words of its venue box change (nothing is read again)
         const c = cards[+e.target.dataset.ptype]; c.ptype = e.target.value; c.ptypeTouched = true; if (c.ptype !== "other") c.label = ""; relabel(c); return;
       }
+      if (e.target.dataset.dup !== undefined) { const c = cards[+e.target.dataset.dup]; c.dup = e.target.value; draw(c); return; }      // (skip or replace a paper you have)
       const t = e.target, i = +(t.dataset.inc ?? t.dataset.sel ?? t.dataset.kind ?? -1); if (i < 0) return; const c = cards[i];
       if (t.dataset.kind !== undefined) {                          // paper <-> book: the old look is thrown away and the file is looked at again
         if (c.a) discard([c.a.token]); c.kind = t.value; c.a = null; c.state = "reading"; c.sel = -1; c.existing = ""; c.fields = blank(c.kind); draw(c); status(); look(c);
       } else if (t.dataset.inc !== undefined) { c.include = t.checked; $("#ir-c" + i, d).classList.toggle("off", !c.include); }
-      else { c.sel = +t.value; take(c); sync(c); relabel(c); const pp = $("#ir-pp" + i, d); if (pp) pp.innerHTML = peopleHtml(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }      // (the authors changed with the record: so do their lines under More details)
+      else { c.sel = +t.value; take(c); putMonth(c); sync(c); relabel(c); const pp = $("#ir-pp" + i, d); if (pp) pp.innerHTML = peopleHtml(c); $("#ir-e" + i, d).textContent = ""; recheck(c); }      // (the authors changed with the record: so do their lines under More details)
       status();
     });
     d.addEventListener("toggle", e => { const m = e.target.dataset && e.target.dataset.more; if (m !== undefined) cards[+m].moreOpen = e.target.open; }, true);
@@ -368,6 +385,7 @@ async function review(files, w, o = {}) {
       if (t.dataset.d !== undefined) { cards[+t.dataset.i].det[t.dataset.d] = t.value; return; }
       if (t.dataset.p !== undefined) { const c = cards[+t.dataset.i], n = namesOf(c)[+t.dataset.pn]; if (n) (c.det.people[pkey(n)] = c.det.people[pkey(n)] || {...personOf(c, n)})[t.dataset.p] = t.value; return; }
       if (t.dataset.k === undefined) return; const c = cards[+t.dataset.i];
+      if (t.dataset.k === "pub_date") c.dateTouched = true;      // (a date you typed on a paper stays, whatever the month box says)
       if (t.dataset.k === "authors") {                           // a name whose spelling you correct keeps what stands under it
         const was = c.prevNames || namesOf(c), now = String(t.value || "").split(";").map(norm).filter(Boolean);      // (the names as they last stood: a box that is emptied and filled in one go passes through nothing)
         if (now.length) c.prevNames = now;
@@ -380,6 +398,7 @@ async function review(files, w, o = {}) {
     const finish = v => { if (closed) return; closed = true; resolve(v); d.close(); };
     const go = () => {
       const err = t => { $("#ir-err", d).textContent = t; }, use = ready();
+      if (MON && norm(MON.value) && !month()) { err("The month must be written YYYY-MM, e.g. 2026-12 (or left empty)."); return MON.focus(); }
       for (const c of use) {
         const f = c.fields, what = c.kind === "book" ? "book" : "paper";
         const badIsbn = c.kind === "book" && !isbnOk(f.isbn), bad = !norm(f.title) ? `Give this ${what} a title.` : norm(f.pub_date) && !dateOk(norm(f.pub_date)) ? "The date must be a year (2024), a month (2024-05) or a day (2024-05-17), or empty." : badIsbn ? "That ISBN is not valid (its check digit does not match). Correct it or leave it empty." : "";
@@ -397,10 +416,10 @@ async function review(files, w, o = {}) {
       const extra = c => {                                       // a paper's type; the record's Crossref type and ISSN (only while its venue is the record's)
         if (c.kind === "book") return {kind: "book"};
         const cand = c.sel >= 0 ? c.a.candidates[c.sel] : null, sameVenue = cand && norm(cand.journal || "") === norm(c.fields.journal || "");
-        return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : [], details: detailsOf(c)};
+        return {kind: c.ptype, label: c.ptype === "other" ? c.label : "", type: cand ? cand.type || "" : "", issn: sameVenue ? cand.issn || [] : [], details: detailsOf(c), replace: !!c.existing && c.dup === "replace"};
       };
       const tree = hasTree && dest.mode !== "lib" ? (($("#ir-tree input:checked", d) || {}).value || "keep") : "";      // (without a folder to add to there is nothing to make folders in)
-      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, path: tree === "keep" ? c.dir : [], session: c.kind === "book" ? "" : c.det.session || "", fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked, tree});
+      finish({items: use.map(c => ({name: c.file.name, kind: c.kind, token: c.a.token, path: tree === "keep" ? c.dir : [], session: c.kind === "book" ? "" : c.det.session || "", fields: {...c.fields, source: source(c), ...extra(c)}})), dest, summarize: $("#ir-sum", d).checked, tree, month: month()});
     };
     $("#ir-go", d).onclick = go;
     $("#ir-cancel", d).onclick = () => d.close();
@@ -420,7 +439,7 @@ function snack() {
 }
 function bye(s, ms) { clearTimeout(D.timer); if (ms) D.timer = setTimeout(() => { s.classList.add("gone"); setTimeout(() => s.remove(), 300); }, ms); }
 
-async function run({items, dest, summarize, tree}) {
+async function run({items, dest, summarize, tree, month}) {
   const s = snack(), res = [], total = items.length; let stop = false, folderId = dest.id || null, fname = "", created = false, filed = null, fileErr = "";
   const paint = (n, msg) => { s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div><div class="di-bar"><i style="width:${Math.round(100 * n / total)}%"></i></div><div class="row"><button class="btn small" data-di="stop">Stop</button></div>`; };
   s.onclick = e => { if (e.target.closest("[data-di=stop]")) stop = true; };
@@ -441,7 +460,7 @@ async function run({items, dest, summarize, tree}) {
       if (r.existing && f.session) {                         // a paper you already had is not filed again, so its details were not written: it still gets its session, unless it has one
         try { const d0 = await api("/api/paper/details?file=" + encodeURIComponent(r.file)); if (!(d0.details || {}).session) await api("/api/paper/details", {file: r.file, fields: {session: f.session}}); } catch (e) { /* a book, or gone: nothing to note */ }
       }
-      res.push({name: f.name, file: r.file, title: r.title, existing: !!r.existing, path: f.path || []});
+      res.push({name: f.name, file: r.file, title: r.title, existing: !!r.existing && !r.replaced, replaced: !!r.replaced, path: f.path || []});
     } catch (e) { res.push({name: f.name, error: e.message}); }
   }
   if (folderId && tree) {                      // the papers that came out of folders: into those folders (made inside the one you add to), or all into the one; one request
@@ -449,15 +468,16 @@ async function run({items, dest, summarize, tree}) {
     try { filed = await api("/api/folders", {action: "file", id: folderId, into: Object.values(groups)}); }
     catch (e) { fileErr = e.message; }                     // (the papers are in your library all the same: said so below)
   }
-  if (fileErr && created) { try { await api("/api/folders", {action: "delete", id: folderId}); } catch (e) { /* it stays, empty */ } }
+  if (fileErr && created) { try { await api("/api/folders", {action: "delete", id: folderId, children: "delete", quiet: true}); } catch (e) { /* it stays, empty */ } }
   if (folderId) ls.set("jw-drop-last", folderId);
+  if (folderId && month) ls.set("jw-month:" + folderId, month);      // (the next drop into this folder starts with this month)
   if (stop) discard(items.slice(res.length).map(x => x.token));          // the ones not reached are forgotten
-  const ok = res.filter(r => r.file && !r.error), isNew = ok.filter(r => !r.existing), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
+  const ok = res.filter(r => r.file && !r.error), isNew = ok.filter(r => !r.existing && !r.replaced), had = ok.filter(r => r.existing), bad = res.filter(r => r.error), left = total - res.length;
   const nsub = filed ? new Set(Object.entries(filed.where || {}).filter(([k]) => k).map(([, id]) => id)).size : 0;      // (two folders whose names are the same in their first 60 characters became one)
   const msg = (fileErr ? (ok.length ? `Added ${plural(ok.length, noun)} to your library, but not to “${fname}”: ${fileErr}` : "Nothing was added")
     : folderId ? (ok.length ? `Added ${plural(ok.length, noun)} to “${fname}”` + (nsub ? ` in ${plural(nsub, "folder")} inside it` : "") : "Nothing was added") : (isNew.length ? `Added ${plural(isNew.length, noun)} to your library` : "Nothing new to add")) +
-    (had.length ? ` · ${had.length} already in your library` : "") + (bad.length ? ` · ${bad.length} failed` : "") + (left ? ` · stopped, ${left} left` : "");
-  const detail = res.map(r => `<li class="${r.error ? "bad" : r.existing ? "had" : "new"}"><span>${esc(r.title || r.name)}</span><small>${r.error ? esc(r.error) : r.existing ? "already in your library" + (folderId ? " — added to the folder" : "") : "added"}</small></li>`).join("");
+    (had.length ? ` · ${had.length} already in your library` : "") + (ok.some(r => r.replaced) ? ` · ${ok.filter(r => r.replaced).length} replaced` : "") + (bad.length ? ` · ${bad.length} failed` : "") + (left ? ` · stopped, ${left} left` : "");
+  const detail = res.map(r => `<li class="${r.error ? "bad" : r.existing ? "had" : "new"}"><span>${esc(r.title || r.name)}</span><small>${r.error ? esc(r.error) : r.replaced ? "its PDF was replaced (the old one is in the Bin)" : r.existing ? "already in your library" + (folderId ? " — added to the folder" : "") : "added"}</small></li>`).join("");
   s.innerHTML = `<div class="di-msg"><b>${esc(msg)}</b></div>${bad.length ? `<ul class="di-det">${detail}</ul>` : `<ul class="di-det hide">${detail}</ul>`}
     <div class="row">${folderId && ok.length && !fileErr ? `<button class="btn small" data-di="open">Open folder</button><button class="btn small" data-di="undo">Undo</button>` : ""}<button class="btn small" data-di="det">Details</button><button class="btn small" data-di="x">Close</button></div>`;
   s.onclick = async e => {
@@ -469,7 +489,7 @@ async function run({items, dest, summarize, tree}) {
       try {
         if (filed) await api("/api/folders", {action: "unfile", groups: Object.entries(filed.where || {}).map(([k, id]) => ({id, files: ok.filter(r => r.path.join("/") === k).map(r => r.file)})), delete: filed.made || []});      // (each paper out of its own folder; the folders this drop made go if they are empty then)
         else await api("/api/folders", {action: "remove", id: folderId, files: ok.map(r => r.file)});
-        if (created) await api("/api/folders", {action: "delete", id: folderId});
+        if (created) await api("/api/folders", {action: "delete", id: folderId, children: "delete", quiet: true});
         s.innerHTML = `<div class="di-msg"><b>Undone.</b> ${isNew.length ? plural(isNew.length, noun) + " stay" + (isNew.length === 1 ? "s" : "") + " in your library." : ""}</div>`; bye(s, 4000);
         const cur = window.LibraryUI.currentFolder && window.LibraryUI.currentFolder(), inside = cur === folderId, gone = filed && (filed.made || []).includes(cur);
         if (created && (inside || gone)) { await ctx.reload(); ctx.go({j: null}); } else if (gone) { await window.LibraryUI.refreshFolders(); ctx.go({j: "@" + folderId}); } else await refreshView();

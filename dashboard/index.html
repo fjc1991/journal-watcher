@@ -524,7 +524,7 @@ function go(nav, push = true) {
   render();
 }
 // ---------- routes: #/watch · #/library[/<tab>] · #/folders · #/folder/<id>[/<tab>]  (so reload and Back land where you were)
-const LIBTABS = ["papers", "books", "ask", "discover", "hl", "review", "tags"];
+const LIBTABS = ["papers", "books", "ask", "discover", "hl", "review", "tags", "bin"];
 function routeOf(n) {
   if (n.view !== "lib") return "#/watch";
   if (typeof n.j === "string" && n.j[0] === "@") { const t = n.ftab || (window.LibraryUI && LibraryUI.folderTabName()); return "#/folder/" + encodeURIComponent(n.j.slice(1)) + (t && t !== "papers" ? "/" + t : ""); }

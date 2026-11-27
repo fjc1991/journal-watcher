@@ -115,7 +115,7 @@ async function setState(file, patch) {
 let TOP = null;
 function top(el, opts) {
   TOP = {el, opts}; QUEUE = null;
-  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers", "search and browse them"], ["books", "Books", "your books, by chapter"], ["ask", "Ask", "questions across your library"], ["discover", "Discover", "papers your library cites"], ["hl", "Highlights", "everything you marked"], ["review", "Review", "flashcards due today"], ["tags", "Tags", "your papers by tag"]].map(([k, t, h]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>
+  el.innerHTML = `<div class="libtabs tooltabs" role="tablist">${[["papers", "Papers", "search and browse them"], ["books", "Books", "your books, by chapter"], ["ask", "Ask", "questions across your library"], ["discover", "Discover", "papers your library cites"], ["hl", "Highlights", "everything you marked"], ["review", "Review", "flashcards due today"], ["tags", "Tags", "your papers by tag"], ["bin", "Bin", "deleted, kept 7 days"]].map(([k, t, h]) => `<button data-tab="${k}" data-tool="${k}" role="tab">${ico(k === "bin" ? "trash" : k)}<span class="tn">${t}</span><span class="th">${h}</span></button>`).join("")}</div>
     <div id="lib-papers">
       <div class="card libtools">
         <div class="row lt-top"><input type="search" id="lf-q" placeholder="Search titles, authors, summaries — and your own highlights and notes…" autocomplete="off">
@@ -140,7 +140,7 @@ function top(el, opts) {
       <div id="lib-results"></div>
       <div class="papersmore hide" id="lr-more"><button class="btn" id="lr-moremore" type="button">Show more</button></div>
     </div>
-    <div id="lib-folders" class="hide"></div><div id="lib-books" class="hide"></div><div id="lib-ask" class="hide"></div><div id="lib-discover" class="hide"></div><div id="lib-hl" class="hide"></div><div id="lib-review" class="hide"></div><div id="lib-tags" class="hide"></div><div class="actionbar card hide" id="lib-actionbar"></div>`;
+    <div id="lib-folders" class="hide"></div><div id="lib-bin" class="hide"></div><div id="lib-books" class="hide"></div><div id="lib-ask" class="hide"></div><div id="lib-discover" class="hide"></div><div id="lib-hl" class="hide"></div><div id="lib-review" class="hide"></div><div id="lib-tags" class="hide"></div><div class="actionbar card hide" id="lib-actionbar"></div>`;
   const bind = (id, ev, fn) => $("#" + id, el).addEventListener(ev, fn);
   const refresh = debounce(() => results(opts), 220);
   bind("lf-q", "input", e => { F.q = e.target.value; refresh(); });
@@ -248,14 +248,15 @@ function fillControls(el) {
   const gt = $('[data-gotab="folders"]', el); if (gt) gt.onclick = () => openTab("folders");
 }
 function tabs(el, opts) {
-  if (F.tab !== "folders" && !["papers", "books", "ask", "discover", "hl", "review", "tags"].includes(F.tab)) F.tab = "papers";
+  if (F.tab !== "folders" && !["papers", "books", "ask", "discover", "hl", "review", "tags", "bin"].includes(F.tab)) F.tab = "papers";
   $$(".libtabs button", el).forEach(b => b.classList.toggle("on", b.dataset.tab === F.tab));
   $(".libtabs", el).classList.toggle("hide", F.tab === "folders"); $("#lib-head")?.classList.toggle("hide", F.tab === "folders");
   ctx.tabChanged && ctx.tabChanged();
   $("#lib-papers", el).classList.toggle("hide", F.tab !== "papers"); $("#lib-hl", el).classList.toggle("hide", F.tab !== "hl"); $("#lib-tags", el).classList.toggle("hide", F.tab !== "tags"); $("#lib-review", el).classList.toggle("hide", F.tab !== "review"); $("#lib-ask", el).classList.toggle("hide", F.tab !== "ask"); $("#lib-discover", el).classList.toggle("hide", F.tab !== "discover"); $("#lib-folders", el).classList.toggle("hide", F.tab !== "folders");
   if (opts && opts.browse) opts.browse.classList.toggle("hide", F.tab !== "papers" || active());
-  $("#lib-books", el).classList.toggle("hide", F.tab !== "books");
-  if (F.tab === "papers") results(opts); else if (F.tab === "books") booksTab(); else if (F.tab === "hl") highlightsHub(); else if (F.tab === "tags") tagManager();
+  $("#lib-books", el).classList.toggle("hide", F.tab !== "books"); $("#lib-bin", el).classList.toggle("hide", F.tab !== "bin");
+  if (F.tab === "bin") binTab();
+  else if (F.tab === "papers") results(opts); else if (F.tab === "books") booksTab(); else if (F.tab === "hl") highlightsHub(); else if (F.tab === "tags") tagManager();
   else if (F.tab === "folders" && window.FoldersUI) window.FoldersUI.mount($("#lib-folders", el));
   else if (F.tab === "review" && window.ReviewUI) window.ReviewUI.mount($("#lib-review", el));
   else if (F.tab === "discover" && window.DiscoverUI) { const box = $("#lib-discover", el); if (!box.dataset.mounted) { window.DiscoverUI.mount(box, {folder: null}); box.dataset.mounted = "1"; } }
@@ -731,10 +732,10 @@ function folderView(box, id) {
   $$(".fv-crumbs [data-up]", box).forEach(b => b.onclick = () => ctx.go({j: "@" + b.dataset.up}));
   $("#fv-sub").onclick = async () => { try { const n = await newFolder([], id); if (n) { folderView(box, id); ctx.renderNav?.(); } } catch (e) { /* said in a toast */ } };
   $("#fv-del").onclick = async () => {
-    const inside = famOf(id).size - 1;
-    const ask = inside ? `Delete the folder “${f.name}” and the ${inside} folder${inside === 1 ? "" : "s"} inside it?\n\nThe papers are not deleted. The Ideas Lab boards, workspaces, drafts and checks of all ${inside + 1} folders are.`
-      : `Delete the folder “${f.name}”? The papers are not deleted, but its Ideas Lab board, workspace, drafts and checks are.`;
-    if (confirm(ask)) { await folderOp({action: "delete", id, children: "delete"}); ctx.go(f.parent && FOLDERS.find(x => x.id === f.parent) ? {j: "@" + f.parent} : {j: null}); }
+    const how = await askDeleteFolders([id]); if (!how) return;
+    const r = await folderOp({action: "delete", id, children: "delete", papers: how.papers});
+    toast(`Moved to the Bin: ${r.folders > 1 ? r.folders + " folders" : "the folder"}${r.papers ? ` and ${r.papers} paper${r.papers === 1 ? "" : "s"}` : ""}${r.kept ? ` (${r.kept} also in another folder stayed)` : ""}.`);
+    ctx.go(f.parent && FOLDERS.find(x => x.id === f.parent) ? {j: "@" + f.parent} : {j: null});
   };
   $("#fv-export").onclick = e => { e.stopPropagation(); exportMenu($("#fv-expmenu"), {folder: id}); };
   $$(".fvtabs button", box).forEach(b => b.onclick = () => folderTab(b.dataset.ft));
@@ -832,6 +833,61 @@ async function highlightsHub() {
 }
 
 // ---------------------------------------------------------------- tag manager (library-wide)
+// ---------------------------------------------------------------- the bin: what you deleted, kept for 7 days, then gone by itself
+const BINKIND = {paper: "Paper", book: "Book", folder: "Folder", replaced: "Older PDF of a paper"};
+async function binTab() {
+  const box = $("#lib-bin"); if (!box) return;
+  let R; try { R = await api("/api/library/deleted"); } catch (e) { box.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
+  const xs = R.kept || [], days = R.days || 7;
+  const what = x => x.kind === "folder" ? [x.folders > 1 ? `with ${x.folders - 1} folder${x.folders === 2 ? "" : "s"} inside` : "", x.papers ? `${x.papers} paper${x.papers === 1 ? "" : "s"}` : "only the folder; its papers stayed"].filter(Boolean).join(" · ")
+    : x.kind === "replaced" ? "the PDF a newer copy replaced; putting it back swaps the two" : "with its notes, highlights, summary and card";
+  box.innerHTML = `<div class="card libtools"><div class="pmeta">What you delete waits here for ${days} days: the files stay in the Papers folder (in <code>_removed</code>) until then, and you can put them back as they were, with their folders and notes. After ${days} days they are deleted from the disk by themselves.</div></div>
+    ${xs.length ? `<div class="card"><table class="st-table bin-table"><tr><th>What</th><th></th><th>Deleted</th><th>Left</th><th></th></tr>${xs.map(x => `<tr data-bin="${esc(x.token)}"><td><b>${esc(x.title)}</b><br><small class="pmeta">${esc(what(x))}</small></td><td>${esc(BINKIND[x.kind] || x.kind)}</td><td>${esc(x.when)}</td><td>${x.days_left} day${x.days_left === 1 ? "" : "s"}</td>
+      <td class="bin-act"><button class="btn small" data-binput="${esc(x.token)}">Put back</button><button class="btn small danger" data-binforget="${esc(x.token)}">Delete now</button></td></tr>`).join("")}</table></div>`
+      : `<div class="card empty"><h2>The bin is empty</h2>Papers, books and folders you delete wait here for ${days} days.</div>`}`;
+  box.onclick = async e => {
+    const put = e.target.closest("[data-binput]"), gone = e.target.closest("[data-binforget]"); if (!put && !gone) return;
+    try {
+      if (put) {
+        const r = await api("/api/library/restore", {tokens: [put.dataset.binput]});
+        if (r.errors && r.errors.length) return notifyError(new Error(r.errors[0].error));
+        toast("Put back."); await loadFolders(); await ctx.reload(); ctx.renderNav?.();
+      } else {
+        const row = xs.find(x => x.token === gone.dataset.binforget) || {};
+        if (!confirm(`Delete “${row.title || "this"}” from the disk now?\n\nIt cannot be put back afterwards.`)) return;
+        const r = await api("/api/library/forget", {tokens: [gone.dataset.binforget]});
+        if (r.errors && r.errors.length) return notifyError(new Error(r.errors[0].error));
+        toast("Deleted for good.");
+      }
+      binTab();
+    } catch (er) { notifyError(er); }
+  };
+}
+
+// ---------------------------------------------------------------- deleting folders: the folder only, or with its papers (those in no folder you keep)
+// ids: the folders you chose. Resolves to {papers: bool} or null (Cancel).
+function askDeleteFolders(ids) {
+  const fam = new Set(ids.flatMap(i => [...famOf(i)])), names = ids.map(i => (FOLDERS.find(f => f.id === i) || {}).name).filter(Boolean);
+  const inside = fam.size - ids.length;
+  const rows = lib().filter(r => (r.folders || []).some(x => fam.has(x)));
+  const only = rows.filter(r => (r.folders || []).every(x => fam.has(x))).length, kept = rows.length - only;
+  return new Promise(resolve => {
+    $("#delf-dlg") && $("#delf-dlg").remove();
+    const d = document.createElement("dialog"); d.id = "delf-dlg"; d.className = "card di-dlg"; d.setAttribute("aria-labelledby", "delf-h");
+    d.innerHTML = `<h2 id="delf-h">Delete ${ids.length === 1 ? "the folder “" + esc(names[0]) + "”" : ids.length + " folders"}${inside ? ` and the ${inside} folder${inside === 1 ? "" : "s"} inside` : ""}?</h2>
+      <p class="pmeta">The folder${fam.size === 1 ? "" : "s"} go${fam.size === 1 ? "es" : ""} to the Bin (Library › Bin) for 7 days with ${fam.size === 1 ? "its" : "their"} Ideas Lab board, workspace, drafts and checks, and can be put back from there.</p>
+      <div class="di-list" role="radiogroup" aria-label="What happens to the papers">
+        <label class="di-opt"><input type="radio" name="delf" value="0" checked> <span><b>Delete the folder only</b><small class="pmeta"> · the ${rows.length} paper${rows.length === 1 ? "" : "s"} in ${fam.size === 1 ? "it" : "them"} stay in your library</small></span></label>
+        <label class="di-opt"><input type="radio" name="delf" value="1"${only ? "" : " disabled"}> <span><b>Delete the folder and its papers</b><small class="pmeta"> · ${only} paper${only === 1 ? "" : "s"} go${only === 1 ? "es" : ""} to the Bin too${kept ? `; ${kept} also in another folder stay` : ""}</small></span></label></div>
+      <div class="row di-btns"><button class="btn" id="delf-no">Cancel</button><button class="btn danger" id="delf-go">Delete</button></div>`;
+    document.body.append(d); d.showModal();
+    let out = null;
+    $("#delf-no", d).onclick = () => d.close();
+    $("#delf-go", d).onclick = () => { out = {papers: ($('input[name="delf"]:checked', d) || {}).value === "1"}; d.close(); };
+    d.addEventListener("close", () => { d.remove(); resolve(out); }, {once: true});
+  });
+}
+
 async function tagManager() {
   const box = $("#lib-tags"); if (!box) return;
   await loadTags();
@@ -858,6 +914,7 @@ window.LibraryUI = {
   row, readyKey, top, shelf, folderView, folderName, folderTab, addDialog, openTab, bookSummaryHtml, showChapters, summarised,
   refreshFolders: loadFolders, state: F, redrawRow,
   folderCount: () => FOLDERS.filter(f => !f.parent).length, folders: () => FOLDERS,                 // (the folders at the top: what the sidebar and the Folders page list)
+  askDeleteFolders, binTab,
   inFolder, folderLabel, folderTree, folderRoots, folderIndent: indent, folderPath: id => { const f = FOLDERS.find(x => x.id === id); return f ? folderLabel(f) : folderName(id); },                          // folders inside folders: the other pages list and count with these
   updateFolderHead() {                                                                          // the counts under a folder's name, after cards were made or papers added
     if (!FV.id || !$("#libview:not(.hide) #fv-body")) return; const rows = lib().filter(r => inFolder(r, FV.id)), m = $("#libview .pagehead .meta");
