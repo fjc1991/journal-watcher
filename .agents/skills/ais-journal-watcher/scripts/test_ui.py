@@ -4128,7 +4128,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.click("#delf-go"); page.wait_for_selector(".fp-path", timeout=15000)
             bin_ = api("/api/library/deleted")["kept"]
             check("…the folder and the folders inside it go to the Bin; the papers stay",
-                  not any(x["name"] in ("ICIS26", "Track A", "Track B") for x in api("/api/folders")) and len(api("/api/library")) == n_lib_ and [(b["kind"], b["title"], b["folders"], b["papers"]) for b in bin_][:1] == [("folder", "ICIS26", 3, 0)],
+                  not any(x["name"] in ("ICIS26", "Track A", "Track B") for x in api("/api/folders")) and len(api("/api/library")) == n_lib_ and [(b["kind"], b["title"], b["folders"], b["papers"]) for b in bin_ if b["title"] == "ICIS26"] == [("folder", "ICIS26", 3, 0)] and bin_[0]["title"] == "ICIS26",
                   str(bin_[:2]))
             # the Bin tab: put the folder back, as it was
             page.goto(base + "/#/library/bin"); page.wait_for_selector("#lib-bin .bin-table", timeout=15000)
@@ -4166,9 +4166,10 @@ pl.FEED_HOST_PAUSE = 0                                                          
             mo1_ = ws_pdf("Monthly Paper One On Platforms", [("Ana Ruiz", "Harbor College", "Lisbon, Portugal", "aruiz@harbor.example")])
             mo2_ = ws_pdf("Monthly Paper Two On Markets", [("Ben Okafor", "University of Northfield", "Northfield, MN, USA", "bokafor@northfield.example")])
             mo3_ = ws_pdf("Monthly Paper Three On Labour", [("Cy Wu", "Lakeside Institute of Technology", "Austin, TX, USA", "cwu@lakeside.example")])
+            newer_t1_ = base64.b64encode(base64.b64decode(t1_) + b"\n% a newer copy of the same paper\n%%EOF\n").decode()      # (the same paper, other bytes: what Replace is for)
             mf_ = api("/api/folders", {"action": "create", "name": "Month test"})["id"]; had_ = next(r_ for r_ in api("/api/library") if r_["title"] == "Agents That Negotiate Prices")
             page.goto("about:blank"); page.goto(base + "/#/folder/" + mf_); page.wait_for_selector("#fv-body")
-            page.evaluate(JS_TREE, [{"kind": "open", "id": mf_}, [[mo1_, "m1.pdf", []], [mo2_, "m2.pdf", []], [t1_, "again.pdf", []]]]); page.wait_for_selector("#ir-dlg[open]")
+            page.evaluate(JS_TREE, [{"kind": "open", "id": mf_}, [[mo1_, "m1.pdf", []], [mo2_, "m2.pdf", []], [newer_t1_, "again.pdf", []]]]); page.wait_for_selector("#ir-dlg[open]")
             for i_ in range(3):
                 page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
             check("the dialog has a 'File under month' box (empty for a folder never filed into); the paper you already have offers Skip (chosen) or Replace",
@@ -4188,14 +4189,20 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("the new papers are filed under December 2026 (and the one with its own date under its own); the one you had keeps its place and folders, with the new PDF, and its old PDF is in the Bin",
                   L_["Monthly Paper One On Platforms"]["file"].startswith("Papers/2026-12/") and L_["Monthly Paper Two On Markets"]["file"].startswith("Papers/2025-03/") and len(api("/api/library")) == n_lib_ + 2
                   and L_["Agents That Negotiate Prices"]["file"] == had_["file"] and mf_ in L_["Agents That Negotiate Prices"]["folders"] and open(os.path.join(TMP, had_["file"]), "rb").read() != old_
-                  and [b["title"] for b in rep_] == ["Agents That Negotiate Prices"], str((L_["Monthly Paper One On Platforms"]["file"], [b["title"] for b in rep_])))
+                  and [b["title"] for b in rep_] == ["Agents That Negotiate Prices"],
+                  str([L_["Monthly Paper One On Platforms"]["file"], L_["Monthly Paper Two On Markets"]["file"], len(api("/api/library")) - n_lib_, L_["Agents That Negotiate Prices"]["file"] == had_["file"],
+                       mf_ in L_["Agents That Negotiate Prices"]["folders"], open(os.path.join(TMP, had_["file"]), "rb").read() != old_, [b["title"] for b in rep_]]))
             page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
             page.evaluate(JS_TREE, [{"kind": "open", "id": mf_}, [[mo3_, "m3.pdf", []]]]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=40000)
             check("the next drop into the same folder starts with the month used last for it", page.input_value("#ir-month") == "2026-12" and val_("pub_date", 0) == "2026-12", page.input_value("#ir-month"))
             page.fill("#ir-month", "")
             check("emptying the month box gives each paper its own date back", val_("pub_date", 0) not in ("", "2026-12"), val_("pub_date", 0))
             page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
-            check("…and the folder has no month from then on", page.evaluate("localStorage.getItem('jw-month:' + %s)" % json.dumps(mf_)) is None)
+            try:                                  # (the papers are filed after the dialog closes; the month is forgotten when that is done)
+                page.wait_for_function("localStorage.getItem('jw-month:' + %s) === null" % json.dumps(mf_), timeout=40000); gone_m_ = True
+            except Exception:  # noqa: BLE001
+                gone_m_ = False
+            check("…and the folder has no month from then on", gone_m_, page.evaluate("localStorage.getItem('jw-month:' + %s)" % json.dumps(mf_)))
             api("/api/folders", {"action": "delete", "id": wid_, "children": "delete"}); page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
 

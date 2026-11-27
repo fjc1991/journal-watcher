@@ -225,8 +225,11 @@ def recently_deleted():
                 if left > 0:
                     out.append({"token": n, "title": u.get("title") or u.get("file") or "", "kind": u.get("kind") or "paper",
                                 "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(_when(u))), "days_left": left,
-                                "papers": len(u.get("papers") or []), "folders": len(u.get("folder_files") or {})})
-    return sorted(out, key=lambda x: x.get("when") or "", reverse=True)
+                                "papers": len(u.get("papers") or []), "folders": len(u.get("folder_files") or {}), "_t": _when(u)})
+    out.sort(key=lambda x: x["_t"], reverse=True)              # (newest first, to the second: "when" shows the minute only)
+    for x in out:
+        del x["_t"]
+    return out
 
 
 def purge_old():
