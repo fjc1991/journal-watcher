@@ -2152,7 +2152,7 @@ for days in (6, 8):
     ages[days] = x["undo"]
 listed = [b["token"] for b in deletion.recently_deleted()]
 out["seven_days"] = [ages[6] in listed, ages[8] not in listed, not os.path.exists(os.path.join(dl.PAPERS, "_removed", ages[8])), os.path.exists(os.path.join(dl.PAPERS, "_removed", ages[6]))]
-# what was deleted before 1.5 (its record says nothing of how long) keeps the 30 days it was promised
+# what was deleted before 1.4.3 (its record says nothing of how long) keeps the 30 days it was promised
 olds = {}
 for days in (8, 31):
     t_ = "deleted-20261001-0000" + str(days).zfill(2) + "-abcdef"; os.makedirs(os.path.join(dl.PAPERS, "_removed", t_))
