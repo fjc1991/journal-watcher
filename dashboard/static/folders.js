@@ -94,12 +94,14 @@ async function rename(id, name) {
 }
 async function del() {
   const ids = [...P.sel]; if (!ids.length) return;
-  const names = ids.map(i => (P.folders.find(f => f.id === i) || {}).name).filter(Boolean);
   const under = id => { const out = new Set(); let grew = true; while (grew) { grew = false; for (const f of P.folders) if (f.parent && (f.parent === id || out.has(f.parent)) && !out.has(f.id)) { out.add(f.id); grew = true; } } return out; };
-  const inside = new Set(ids.flatMap(i => [...under(i)])), tops = ids.filter(i => !inside.has(i)), more = [...inside].filter(i => !ids.includes(i)).length;      // (a folder ticked together with the one it is in goes with that one)
-  if (!confirm(`Delete ${ids.length === 1 ? "the folder “" + names[0] + "”" : ids.length + " folders"}${more ? ` and the ${more} folder${more === 1 ? "" : "s"} inside` : ""}?\n\nThe papers are not deleted. The folder’s Ideas Lab board, matrix and saved conversation are.`)) return;
-  for (const id of tops) { try { await api("/api/folders", {action: "delete", id, children: "delete"}); } catch (e) { notifyError(e); } }
-  P.sel.clear(); toast(`Deleted ${ids.length + more} folder${ids.length + more === 1 ? "" : "s"}.`); await refresh();
+  const inside = new Set(ids.flatMap(i => [...under(i)])), tops = ids.filter(i => !inside.has(i));      // (a folder ticked together with the one it is in goes with that one)
+  const how = window.LibraryUI && LibraryUI.askDeleteFolders ? await LibraryUI.askDeleteFolders(tops) : (confirm("Delete these folders?") ? {papers: false} : null);
+  if (!how) return;
+  let nf = 0, np = 0;
+  for (const id of tops) { try { const r = await api("/api/folders", {action: "delete", id, children: "delete", papers: how.papers}); nf += r.count || 1; np += r.papers || 0; } catch (e) { notifyError(e); } }
+  P.sel.clear(); toast(`Moved to the Bin: ${nf} folder${nf === 1 ? "" : "s"}${np ? ` and ${np} paper${np === 1 ? "" : "s"}` : ""}.`); await refresh();
+  if (np && window.LibraryUI) await ctx.reload();
 }
 function wire(el) {
   el.addEventListener("click", e => {

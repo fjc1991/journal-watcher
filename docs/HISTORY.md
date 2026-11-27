@@ -1200,6 +1200,64 @@ A second, smaller review of those fixes (two reviewers, a skeptic each) kept 9 f
 
 **Tests.** Browser: the batch block of `test_ui.py` rewritten (fill, the card note, emptying, Undo with the type, nothing after Undo, two papers not enough) and four sidebar checks (counts, a change from elsewhere, the filtered Library, the mark). Before the commit the fill was run in jsdom on what `pdfmeta.read` gives for the four real WITS26 PDFs, and the sidebar on a fake event stream; the full browser suite was not run in that session.
 
+### Item 54. The Bin, filing a drop under a month, Skip or Replace for a paper you have (2026-11-27)
+
+**Asked.** Deleting a folder in the app did not delete anything in the Dropbox library. The user asked for three things:
+- deleted folders and PDFs go to a bin for 7 days, then are deleted;
+- a drop can be filed under a month (WITS takes place in December, so December 2026);
+- a PDF you already have prompts a question: skip or replace?
+
+**Why.** Before this change, `folders.delete` removed only the folder's `.json`. Papers were never deleted with a folder. The user answered four questions:
+- **Folder deletion:** ask each time, offering the folder only or the folder and its papers. A paper also in another folder is kept.
+- **Bin:** 7 days for everything, shown as a Bin tab in the Library.
+- **Month:** one month for the whole drop, remembered per folder.
+- **Replace:** a new PDF, keeping the notes.
+
+**The bin.** `deletion.py` keeps everything in `Papers/_removed/<token>/` with `_undo.json`, as the 30-day undo for papers did before. `KEEP_DAYS` is now 7, and there are three kinds of entry:
+- **`deleted-`:** a paper or a book, unchanged.
+- **`folder-`:** a folder and its family, with their side files under `_folders/`. If papers were deleted with the folder, each paper keeps its own `deleted-` entry. That entry is marked `with` the folder's token, so the Bin shows one row for the folder.
+- **`replaced-`:** the old PDF of a replaced paper.
+
+Put back on a folder restores the folders before the papers, so each paper goes back into its folders. It refuses a folder id that exists again. Put back on a replaced PDF swaps the files back, which puts the newer copy in the Bin. Delete now (`forget`) also removes the paper entries listed under a folder. `purge_old()` runs at server start, every 3 hours in a daemon thread, and before the Bin is listed.
+
+A folder deleted by the drop's own Undo, or when a drop fails, is deleted with `quiet`. That folder was made by the drop a moment earlier, so it does not go to the Bin.
+
+**Month.** The box in the import dialog fills `pub_date` on every paper card whose date you did not type. The month decides the `Papers/YYYY-MM/` folder of the file. It is checked as `YYYY-MM` before anything is filed. It is stored as `jw-month:<folder id>`, a synced page preference, so a second computer knows it too.
+
+**Replace.** For a card marked `existing`, `importer.confirm` with `replace` calls `deletion.replace_pdf`, which:
+- copies the old PDF to the Bin;
+- writes the new one atomically at the same path, so the reader's position, notes, highlights and the index row stay attached;
+- forgets the old file's search index;
+- saves the dialog's details.
+
+Skip is unchanged: the card says it is already in the Library, and nothing is written.
+
+**Tests.** Offline: `t_bin` covers:
+- a folder only, then Put back;
+- a folder with its papers (two deleted, one kept because it is in another folder), then Put back with notes and status;
+- Delete now;
+- 6 against 8 days;
+- Replace (notes kept, title corrected, one Library row, a `replaced` entry), swapping back, and Skip.
+
+`t_delete_items` now checks the purge before the list, because listing purges. Browser:
+- the folder-delete dialog (the choice is off when every paper is in another folder);
+- the Bin tab (list, Put back of a folder family and of a folder with its paper, Delete now);
+- the month box (fills, keeps a typed date, refuses 2026-13, files under `Papers/2026-12/`, remembered for the folder);
+- Skip or Replace (the explanation, the file replaced in place with its folder kept, the old PDF in the Bin).
+
+**Review.** A review of the diff with four finders, each finding checked by two skeptics, found 13 defects in this change, all fixed with a test that fails without the fix (checked one fix at a time):
+- **A folder made again under the same name before Put back.** Folder ids come from the name, so Put back was refused, and the papers that went with the folder could not be reached any other way. Now the papers go back into the new folder; the old folder's own files (board, drafts) stay in the Bin until the new folder is deleted and Put back is pressed again.
+- **A paper that could not come back with its folder** (added again meanwhile, a file in the way, any error). It was hidden in the bin and deleted after 7 days. Now it is listed in the Bin on its own and the error is shown.
+- **A paper put back before its folder.** It is written into the folder's kept copy, so it is in the folder again when the folder comes back.
+- **Replace overwrote corrected details for good.** The details file beside the PDF now goes to the Bin with the old PDF and comes back with it.
+- **Replace on a paper whose PDF is missing.** It failed; now it puts the new PDF there, with nothing to keep.
+- **A book matched by a paper drop.** It is never replaced.
+- **The server's reply to a folder delete.** It sent the number of folders under the key the page reads as the folder list, which broke the page after deleting a folder inside another. It is now `count`, and the page keeps its list unless it gets a list.
+- **The folder-delete dialog counted papers from the page's copy of the Library**, which can be out of date. It now reloads the Library first.
+- **The drop's Undo deleted a folder quietly whatever was in it.** Now only a folder that is still empty is deleted quietly; anything else goes to the Bin.
+- **The month box.** Emptying it, or choosing a folder with no month, now gives each paper its own date back, and an emptied box forgets the folder's month.
+- **Purge.** It now takes the bin's lock, removes a folder's papers with the folder (not a few minutes before it), and skips a damaged record instead of stopping. The 3-hour purge thread starts even if the first purge fails.
+
 ## 2. How it runs now (CLI agent)
 
 **Claude Sonnet 5.5 (`claude-sonnet-5-5`) via the Claude API is the main model** — `scripts/agent.py`

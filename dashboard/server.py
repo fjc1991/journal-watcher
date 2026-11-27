@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.parse
@@ -881,9 +882,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, **res})
 
     def finish_import(self, res, summarize):
-        """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does."""
+        """Answer an import; if asked (and the paper is new), write its summary in the background like the pipeline does. A new paper, or a PDF you replaced
+        (its old passages left the search index with it), is indexed."""
         row = pl.library_row(res["file"]) or {}
-        if indexer and not res["existing"]:
+        if indexer and (not res["existing"] or res.get("replaced")):
             indexer.kick(2)
         if summarize and not res["existing"] and not row.get("summary"):
             def job():
@@ -1189,7 +1191,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/aifiles":      # Settings → AI files: what the AI wrote or cached, how big it is, what was cleared lately, how big a backup is
             return self.send_json({"kinds": aifiles.scan(), "trash": aifiles.trash_list(), "backup": aifiles.backup_size(), "export_dir": prefs.get_settings().get("export_dir") or "",
                                    "mcp": {"python": paths.cmd("mcp_server.py")[0], "args": paths.cmd("mcp_server.py")[1:], "env": {"JW_HOME": ROOT} if paths.FROZEN else {}}})
-        if path == "/api/library/deleted":   # what you deleted in the last 30 days and can put back
+        if path == "/api/library/deleted":   # the bin: what you deleted in the last KEEP_DAYS (7) days and can put back
             return self.send_json({"kept": deletion.recently_deleted(), "days": deletion.KEEP_DAYS})
         if path == "/api/journals":     # Settings → Journals & interests: your journals with their two switches, and the shipped ones your list does not have
             try:
@@ -1408,8 +1410,12 @@ class Handler(BaseHTTPRequestHandler):
                         fo.add(f["id"], keys)
                 elif act == "rename":
                     fo.rename(fid, b.get("name"))
-                elif act == "delete":                # (children: "delete" = with the folders inside it; else they move up one level)
-                    fo.delete(fid, "delete" if b.get("children") == "delete" else "lift")
+                elif act == "delete":                # (children: "delete" = with the folders inside it; else they move up one level. papers: their papers go to the bin too,
+                    #  except those also in a folder you keep. quiet: an empty folder a drop made, taken back by its Undo: not kept in the bin)
+                    if b.get("quiet") and _empty_family(fid):
+                        fo.delete(fid, "delete" if b.get("children") == "delete" else "lift")
+                    else:
+                        extra.update(deletion.delete_folder(fid, bool(b.get("papers")), "delete" if b.get("children") == "delete" else "lift"))
                 elif act in ("add", "remove"):
                     (fo.add if act == "add" else fo.remove)(fid, keys)
                 elif act == "move":                  # {id, parent}: put a folder inside another ("" = at the top)
@@ -2197,11 +2203,21 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as e:
                     errors.append({"file": str(f)[:300], "error": str(e)[:200]})
             return self.send_json({"ok": not errors, "deleted": done, "errors": errors})
-        if path == "/api/library/restore":       # {tokens: [...]}: put back what you deleted (kept for 30 days: deletion.restore)
+        if path == "/api/library/forget":        # {tokens: [...]}: delete from the bin now (a folder with the papers that went with it)
             done, errors = [], []
             for t in (b.get("tokens") or [])[:500]:
                 try:
-                    done.append(deletion.restore(str(t)))
+                    done.append(deletion.forget(str(t)))
+                except (ValueError, OSError) as e:
+                    errors.append({"token": str(t)[:60], "error": str(e)[:200]})
+            return self.send_json({"ok": not errors, "forgotten": done, "errors": errors, "kept": deletion.recently_deleted()})
+        if path == "/api/library/restore":       # {tokens: [...]}: put back what is in the bin (kept for 7 days: deletion.restore)
+            done, errors = [], []
+            for t in (b.get("tokens") or [])[:500]:
+                try:
+                    r_ = deletion.restore(str(t))
+                    done.append(r_)
+                    errors += [{"token": str(t)[:60], "error": str(m)[:400]} for m in r_.get("errors") or []]      # (a folder back, but not all of it: say what)
                 except (ValueError, OSError) as e:
                     errors.append({"token": str(t)[:60], "error": str(e)[:200]})
             if done and indexer:
@@ -2375,11 +2391,29 @@ def take_lock(port):
     return None
 
 
+def _empty_family(fid):
+    """quiet (a drop's Undo): only a folder that is still empty, with the folders inside it, leaves without going to the Bin; one you have put something in
+    since (a paper, an Ideas Lab board, a draft…) goes to the Bin like any other."""
+    fam = fo.family(fid) or [fid]
+    return all(not (fo.get(x) or {}).get("papers") and not any(os.path.exists(os.path.join(fo.DIR, x + s)) for s in deletion.FOLDER_SUFFIXES if s != ".json")
+               for x in fam)
+
+
+def _bin_watch():
+    while True:
+        time.sleep(3 * 3600)
+        try:
+            deletion.purge_old()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _daily_snapshot():
     try:
-        deletion.purge_old()            # (what you deleted more than 30 days ago leaves the disk now)
+        deletion.purge_old()            # (what has been in the bin more than 7 days leaves the disk now; and every few hours while the app runs)
     except Exception:  # noqa: BLE001
         pass
+    threading.Thread(target=_bin_watch, daemon=True, name="bin").start()
     try:
         aifiles.snapshot()
     except Exception as e:  # noqa: BLE001      (a full disk, a locked file: the app starts all the same)

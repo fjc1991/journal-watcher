@@ -20,7 +20,7 @@ import download as dl  # noqa: E402
 
 FILE = os.path.join(dl.BASE, "ui_prefs.json")
 EXACT = ("jw-theme", "jw-reflow", "jw-rd-mode", "jw-rd-dark", "jw-rd-tab", "jw-ask-mode", "jw-askmany-mode", "jw-drop-last", "jw-skim-d", "jw-skim-off", "jw-fp-view", "jw-fp-sort", "jw-welcome")
-PREFIX = ("jw-skim-on:", "jw-pos:", "jw-lsn-")
+PREFIX = ("jw-skim-on:", "jw-pos:", "jw-lsn-", "jw-month:")      # (jw-month:<folder id>: the month the papers of a drop into that folder are filed under)
 POS = "jw-pos:"
 MAX_POS = 1500
 MAX_KEYS = 4000
