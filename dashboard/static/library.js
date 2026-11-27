@@ -620,7 +620,7 @@ async function deleteItems(files) {      // delete papers or books for good, aft
   const one = rows.length === 1, books = rows.filter(r => r.book).length;
   const what = one ? `the ${rows[0].book ? "book" : "paper"} “${rows[0].title || rows[0].file}”` : `${rows.length} ${books === rows.length ? "books" : books ? "papers and books" : "papers"}`;
   const files_ = one && rows[0].book ? "its PDF and EPUB" : one ? "its PDF" : "their files (PDF, EPUB)";
-  if (!confirm(`Delete ${what} for good?\n\n${files_[0].toUpperCase() + files_.slice(1)} and ${one ? "its" : "their"} notes, highlights, summary and card are deleted from this computer and from your data folder. You can put ${one ? "it" : "them"} back for 30 days (Undo, or Settings → AI files & backup → Recently deleted); after that ${one ? "it is" : "they are"} gone for good.\n\nA weekly check or archive search will not download ${one ? "it" : "them"} again; you can still add ${one ? "it" : "them"} yourself.`)) return;
+  if (!confirm(`Delete ${what}?\n\n${files_[0].toUpperCase() + files_.slice(1)} and ${one ? "its" : "their"} notes, highlights, summary and card go to the Bin (Library › Bin) and can be put back from there for 7 days (or with Undo); after that they are deleted from this computer and from your data folder.\n\nA weekly check or archive search will not download ${one ? "it" : "them"} again; you can still add ${one ? "it" : "them"} yourself.`)) return;
   try {
     const r = await api("/api/library/delete", {files: rows.map(x => x.file)});
     rows.forEach(x => SEL.delete(x.file));

@@ -614,7 +614,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("the journal tiles come first on the Library's home; Continue reading and Up next are below them", order_ == [True, True], str(order_))
             tabs_ = page.evaluate("[...document.querySelectorAll('.libtabs button')].map(b => [b.querySelector('.tn') && b.querySelector('.tn').textContent, (b.querySelector('.th') || {}).textContent || '', Math.round(b.getBoundingClientRect().height), !!b.querySelector('.ico')])")
             check("the Library's tabs are large tiles: each with its icon, its name and a one-line hint, at least 44 px tall",
-                  len(tabs_) == 7 and all(t_[0] and len(t_[1]) > 5 and t_[2] >= 44 and t_[3] for t_ in tabs_), str(tabs_))
+                  len(tabs_) == 8 and tabs_[-1][0] == "Bin" and all(t_[0] and len(t_[1]) > 5 and t_[2] >= 44 and t_[3] for t_ in tabs_), str(tabs_))
             prog_ = page.evaluate("""(async () => { const st = await import('/static/state.js'); const el = document.createElement('div'); document.body.append(el);
                 st.progress(el, {msg: 'Reading the reference lists', done: 3, total: 4}); const a = [el.querySelector('.jw-bar i').style.width, el.textContent, el.querySelector('.jw-prog').classList.contains('ind'), el.querySelector('[role=progressbar]').getAttribute('aria-valuenow')];
                 st.progress(el, {msg: 'Comparing', step: 4, steps: 4}); const b = [el.querySelector('.jw-bar i').style.width, el.textContent];
@@ -3744,7 +3744,7 @@ pl.FEED_HOST_PAUSE = 0                                                          
             row_.locator("[data-delitem]").click()
             page.wait_for_function("(t) => ![...document.querySelectorAll('.librow')].some(e => e.innerText.includes(t))", arg=victim["title"][:25], timeout=10000)
             dlg_ = dialogs[n_dlg:]
-            check("deleting asks first, saying what goes and that it is not downloaded again", dlg_ and "for good" in dlg_[0] and "notes, highlights, summary and card" in dlg_[0] and "will not download it again" in dlg_[0], dlg_[:1])
+            check("deleting asks first, saying what goes, that it waits 7 days in the Bin, and that it is not downloaded again", dlg_ and "Bin" in dlg_[0] and "7 days" in dlg_[0] and "notes, highlights, summary and card" in dlg_[0] and "will not download it again" in dlg_[0], dlg_[:1])
             check("…and the paper, its notes and its summary are gone, and the index says you deleted it", victim["file"] not in [r_["file"] for r_ in api("/api/library")] and not any(os.path.exists(os.path.join(delp, n_)) for n_ in ("gone.pdf", "gone.notes.json", "gone.md"))
                   and any(r_["doi"] == "10.9999/del.gone" and r_["status"] == "deleted" and not r_["file"] for r_ in csv.DictReader(open(os.path.join(TMP, "Papers", "_index.csv"), newline=""))), str(os.listdir(delp)))
             page.fill("#lf-q", "")
@@ -4117,11 +4117,73 @@ pl.FEED_HOST_PAUSE = 0                                                          
             page.wait_for_function("document.querySelector('.di-snack') && /ICIS26/.test(document.querySelector('.di-snack').textContent)", timeout=60000)
             ic_ = next(x for x in api("/api/folders") if x["name"] == "ICIS26"); tracks_ = sorted(x["name"] for x in api("/api/folders") if x["parent"] == ic_["id"])
             check("…with the papers you already had put into them (nothing is added twice)", tracks_ == ["Track A", "Track B"] and (ic_["count"], ic_["own"]) == (3, 0) and len(api("/api/library")) == n_lib_, str((tracks_, ic_)))
-            page.goto(base + "/#/folder/" + ic_["id"]); page.wait_for_selector("#fv-del"); n_dlg = len(dialogs)
-            page.click("#fv-del"); page.wait_for_selector(".fp-path", timeout=15000)
-            check("deleting a folder with folders inside says so first, and takes them with it; the papers stay",
-                  len(dialogs) == n_dlg + 1 and "and the 2 folders inside it" in dialogs[-1] and "papers are not deleted" in dialogs[-1] and not any(x["name"] in ("ICIS26", "Track A", "Track B") for x in api("/api/folders"))
-                  and len(api("/api/library")) == n_lib_, dialogs[-1])
+            page.goto(base + "/#/folder/" + ic_["id"]); page.wait_for_selector("#fv-del")
+            page.click("#fv-del"); page.wait_for_selector("#delf-dlg[open]")
+            dq_ = page.inner_text("#delf-dlg")
+            check("deleting a folder asks what to do with its papers: the folder only (the default), or with its papers, except those also in another folder (here all three are, so that choice is off)",
+                  "and the 2 folders inside" in dq_ and "Bin" in dq_ and "7 days" in dq_ and page.is_checked('#delf-dlg input[value="0"]') and page.is_disabled('#delf-dlg input[value="1"]')
+                  and "3 also in another folder stay" in dq_, dq_)
+            page.click("#delf-go"); page.wait_for_selector(".fp-path", timeout=15000)
+            bin_ = api("/api/library/deleted")["kept"]
+            check("…the folder and the folders inside it go to the Bin; the papers stay",
+                  not any(x["name"] in ("ICIS26", "Track A", "Track B") for x in api("/api/folders")) and len(api("/api/library")) == n_lib_ and [(b["kind"], b["title"], b["folders"], b["papers"]) for b in bin_][:1] == [("folder", "ICIS26", 3, 0)],
+                  str(bin_[:2]))
+            # the Bin tab: put the folder back, as it was
+            page.goto(base + "/#/library/bin"); page.wait_for_selector("#lib-bin .bin-table", timeout=15000)
+            check("Library › Bin lists what was deleted, how many days it is kept, and what came with it", "ICIS26" in page.inner_text("#lib-bin") and "with 2 folders inside" in page.inner_text("#lib-bin") and "7 days" in page.inner_text("#lib-bin"),
+                  page.inner_text("#lib-bin")[:300])
+            page.click('#lib-bin tr:has-text("ICIS26") [data-binput]'); page.wait_for_function("!document.querySelector('#lib-bin').textContent.includes('ICIS26')", timeout=15000)
+            ic2_ = next((x for x in api("/api/folders") if x["name"] == "ICIS26"), None)
+            check("Put back brings the folder back with the folders inside it and their papers", ic2_ is not None and sorted(x["name"] for x in api("/api/folders") if x["parent"] == ic2_["id"]) == ["Track A", "Track B"] and ic2_["count"] == 3, str(ic2_))
+            # a folder with a paper only it holds, deleted with its papers: the paper goes to the Bin under the folder, and comes back with it
+            solo_ = next(r_ for r_ in api("/api/library") if not r_.get("folders") and r_.get("journal") != "Books")
+            tmpf_ = api("/api/folders", {"action": "create", "name": "Only here", "files": [solo_["file"]]})["id"]
+            page.goto(base + "/#/folder/" + tmpf_); page.wait_for_selector("#fv-del"); page.click("#fv-del"); page.wait_for_selector("#delf-dlg[open]")
+            page.check('#delf-dlg input[value="1"]'); wq_ = page.inner_text("#delf-dlg"); page.click("#delf-go"); page.wait_for_selector(".fp-path", timeout=15000)
+            gone_ = solo_["file"] not in [r_["file"] for r_ in api("/api/library")]
+            page.goto(base + "/#/library/bin"); page.wait_for_selector("#lib-bin .bin-table", timeout=15000)
+            row_bin_ = page.inner_text('#lib-bin tr:has-text("Only here")')
+            check("'Delete the folder and its papers' takes the paper only it holds to the Bin too, listed under the folder", "1 paper goes to the Bin too" in wq_ and gone_ and "1 paper" in row_bin_
+                  and solo_["title"][:20] not in page.inner_text("#lib-bin"), str((wq_[-160:], gone_, row_bin_)))
+            page.click('#lib-bin tr:has-text("Only here") [data-binput]'); page.wait_for_function("!document.querySelector('#lib-bin').textContent.includes('Only here')", timeout=15000)
+            back_ = next((r_ for r_ in api("/api/library") if r_["file"] == solo_["file"]), None)
+            check("…and Put back brings both: the paper is in the folder again", back_ is not None and tmpf_ in (back_.get("folders") or []), str(back_ and back_.get("folders")))
+            api("/api/folders", {"action": "delete", "id": tmpf_}); page.goto(base + "/#/library/bin"); page.wait_for_selector('#lib-bin tr:has-text("Only here")', timeout=15000)
+            page.click('#lib-bin tr:has-text("Only here") [data-binforget]'); page.wait_for_function("!document.querySelector('#lib-bin').textContent.includes('Only here')", timeout=15000)
+            check("Delete now empties that place in the Bin at once (after asking), and it cannot be put back", not any(b["title"] == "Only here" for b in api("/api/library/deleted")["kept"])
+                  and "cannot be put back" in dialogs[-1], dialogs[-1][:120])
+
+            # the month a drop is filed under, remembered for the folder; a paper you already have: Skip or Replace
+            mo1_ = ws_pdf("Monthly Paper One On Platforms", [("Ana Ruiz", "Harbor College", "Lisbon, Portugal", "aruiz@harbor.example")])
+            mo2_ = ws_pdf("Monthly Paper Two On Markets", [("Ben Okafor", "University of Northfield", "Northfield, MN, USA", "bokafor@northfield.example")])
+            mo3_ = ws_pdf("Monthly Paper Three On Labour", [("Cy Wu", "Lakeside Institute of Technology", "Austin, TX, USA", "cwu@lakeside.example")])
+            mf_ = api("/api/folders", {"action": "create", "name": "Month test"})["id"]; had_ = next(r_ for r_ in api("/api/library") if r_["title"] == "Agents That Negotiate Prices")
+            page.goto("about:blank"); page.goto(base + "/#/folder/" + mf_); page.wait_for_selector("#fv-body")
+            page.evaluate(JS_TREE, [{"kind": "open", "id": mf_}, [[mo1_, "m1.pdf", []], [mo2_, "m2.pdf", []], [t1_, "again.pdf", []]]]); page.wait_for_selector("#ir-dlg[open]")
+            for i_ in range(3):
+                page.wait_for_selector("#ir-c%d .ir-f" % i_, timeout=40000)
+            check("the dialog has a 'File under month' box (empty for a folder never filed into); the paper you already have offers Skip (chosen) or Replace",
+                  page.input_value("#ir-month") == "" and page.is_visible("#ir-x2") and page.is_checked('#ir-x2 input[value="skip"]') and page.locator('#ir-x2 input[value="replace"]').count() == 1)
+            page.fill("#ir-month", "2026-11"); page.fill('#ir-dlg [data-k="pub_date"][data-i="1"]', "2025-03"); page.fill("#ir-month", "2026-12")
+            check("the month box sets every paper's date; a date you typed on a paper stays", val_("pub_date", 0) == "2026-12" and val_("pub_date", 1) == "2025-03" and val_("pub_date", 2) == "2026-12",
+                  str([val_("pub_date", i_) for i_ in range(3)]))
+            page.check('#ir-x2 input[value="replace"]')
+            check("choosing Replace says what happens", "old PDF goes to the Bin" in page.inner_text("#ir-x2") and "notes, highlights, summary, folders" in page.inner_text("#ir-x2"), page.inner_text("#ir-x2"))
+            page.fill("#ir-month", "2026-13"); page.click("#ir-go"); page.wait_for_timeout(300)
+            check("a month that is not one is refused before anything is filed", "YYYY-MM" in page.inner_text("#ir-err") and page.locator("#ir-dlg[open]").count() == 1, page.inner_text("#ir-err"))
+            page.fill("#ir-month", "2026-12"); n_lib_ = len(api("/api/library")); old_ = open(os.path.join(TMP, had_["file"]), "rb").read()
+            page.click("#ir-go"); page.wait_for_selector("#ir-dlg", state="detached", timeout=40000)
+            page.wait_for_function("document.querySelector('.di-snack') && /replaced/.test(document.querySelector('.di-snack').textContent)", timeout=60000)
+            L_ = {r_["title"]: r_ for r_ in api("/api/library")}
+            rep_ = [b for b in api("/api/library/deleted")["kept"] if b["kind"] == "replaced"]
+            check("the new papers are filed under December 2026 (and the one with its own date under its own); the one you had keeps its place and folders, with the new PDF, and its old PDF is in the Bin",
+                  L_["Monthly Paper One On Platforms"]["file"].startswith("Papers/2026-12/") and L_["Monthly Paper Two On Markets"]["file"].startswith("Papers/2025-03/") and len(api("/api/library")) == n_lib_ + 2
+                  and L_["Agents That Negotiate Prices"]["file"] == had_["file"] and mf_ in L_["Agents That Negotiate Prices"]["folders"] and open(os.path.join(TMP, had_["file"]), "rb").read() != old_
+                  and [b["title"] for b in rep_] == ["Agents That Negotiate Prices"], str((L_["Monthly Paper One On Platforms"]["file"], [b["title"] for b in rep_])))
+            page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
+            page.evaluate(JS_TREE, [{"kind": "open", "id": mf_}, [[mo3_, "m3.pdf", []]]]); page.wait_for_selector("#ir-dlg[open]"); page.wait_for_selector("#ir-c0 .ir-f", timeout=40000)
+            check("the next drop into the same folder starts with the month used last for it", page.input_value("#ir-month") == "2026-12" and val_("pub_date", 0) == "2026-12", page.input_value("#ir-month"))
+            page.click("#ir-cancel"); page.wait_for_selector("#ir-dlg", state="detached")
             api("/api/folders", {"action": "delete", "id": wid_, "children": "delete"}); page.evaluate("document.querySelector('.di-snack') && document.querySelector('.di-snack').remove()")
             page.goto(base + "/"); page.click("#libitem"); page.wait_for_selector("#lf-q")
 

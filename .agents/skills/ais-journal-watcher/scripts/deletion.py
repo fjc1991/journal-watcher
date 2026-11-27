@@ -32,6 +32,15 @@ import download as dl  # noqa: E402
 
 DELETED = "deleted"
 KEEP_DAYS = 7                     # how long the bin keeps what you deleted
+OLD_KEEP_DAYS = 30                # what was deleted before 1.5 was promised 30 days; its record has no "keep" and keeps that promise
+
+
+def _keep(u):
+    """How many days this bin entry is kept: what its record says, else (a record written before 1.5) OLD_KEEP_DAYS."""
+    try:
+        return int(u.get("keep", OLD_KEEP_DAYS))
+    except (TypeError, ValueError):
+        return KEEP_DAYS
 _lock = threading.Lock()
 
 
@@ -129,7 +138,7 @@ def delete_item(file):
         if moved:
             try:
                 with open(os.path.join(keep_dir, "_undo.json"), "w", encoding="utf-8") as f:
-                    json.dump({"token": token, "file": file, "title": row.get("title") or "", "kind": kind, "when": time.time(), "row": was, "folders": was_folders, "state": was_state, "files": moved}, f, ensure_ascii=False)
+                    json.dump({"token": token, "file": file, "title": row.get("title") or "", "kind": kind, "when": time.time(), "keep": KEEP_DAYS, "row": was, "folders": was_folders, "state": was_state, "files": moved}, f, ensure_ascii=False)
             except OSError:
                 token = ""
         else:
@@ -176,7 +185,7 @@ def _undo_of(token):
 def recently_deleted():
     """What is in the bin and can still be put back, newest first: [{token, title, kind ("paper" | "book" | "folder" | "replaced"), when, days_left, papers (a folder:
     how many of its papers went with it), folders (a folder: how many folders, itself included)}]. A paper deleted with its folder is listed under the folder, not on
-    its own. What is older than KEEP_DAYS days leaves the disk first."""
+    its own. What is older than its keep (KEEP_DAYS days; 30 for what was deleted before 1.5) leaves the disk first."""
     purge_old()
     out = []
     root = _removed_root()
@@ -184,7 +193,7 @@ def recently_deleted():
         for n in os.listdir(root):
             d, u = _undo_of(n)
             if u and not u.get("with"):
-                left = KEEP_DAYS - int((time.time() - float(u.get("when") or 0)) // 86400)
+                left = _keep(u) - int((time.time() - float(u.get("when") or 0)) // 86400)
                 if left > 0:
                     out.append({"token": n, "title": u.get("title") or u.get("file") or "", "kind": u.get("kind") or "paper",
                                 "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(float(u.get("when") or 0))), "days_left": left,
@@ -193,13 +202,13 @@ def recently_deleted():
 
 
 def purge_old():
-    """Delete from disk what has been in the bin for more than KEEP_DAYS days. Returns how many."""
+    """Delete from disk what has been in the bin longer than it is kept (KEEP_DAYS days; OLD_KEEP_DAYS for a record written before 1.5). Returns how many."""
     n = 0
     root = _removed_root()
     if os.path.isdir(root):
         for name in os.listdir(root):
             d, u = _undo_of(name)
-            if u and time.time() - float(u.get("when") or 0) > KEEP_DAYS * 86400:
+            if u and time.time() - float(u.get("when") or 0) > _keep(u) * 86400:
                 shutil.rmtree(d, ignore_errors=True)
                 n += 1
     return n
@@ -327,7 +336,7 @@ def delete_folder(fid, papers=False, children="delete"):
                     shutil.copy2(p, os.path.join(keep_dir, x + suffix))
                     files.setdefault(x, []).append(suffix)
         with open(os.path.join(_removed_root(), token, "_undo.json"), "w", encoding="utf-8") as fh:
-            json.dump({"token": token, "kind": "folder", "title": " › ".join(fo.path(fid)) or f["name"], "when": time.time(), "folder": fid, "folder_files": files,
+            json.dump({"token": token, "kind": "folder", "title": " › ".join(fo.path(fid)) or f["name"], "when": time.time(), "keep": KEEP_DAYS, "folder": fid, "folder_files": files,
                        "papers": tokens, "children": children}, fh, ensure_ascii=False)
         for t in tokens:                                          # (the papers that went with it are listed under it, and come back with it)
             d2, u2 = _undo_of(t)
@@ -401,7 +410,7 @@ def replace_pdf(file, data):
         except Exception:  # noqa: BLE001
             pass
         with open(os.path.join(_removed_root(), token, "_undo.json"), "w", encoding="utf-8") as fh:
-            json.dump({"token": token, "kind": "replaced", "title": title, "file": file, "when": time.time(), "files": [rel]}, fh, ensure_ascii=False)
+            json.dump({"token": token, "kind": "replaced", "title": title, "file": file, "when": time.time(), "keep": KEEP_DAYS, "files": [rel]}, fh, ensure_ascii=False)
         _forget_index(sha)
         return {"file": file, "undo": token}
 

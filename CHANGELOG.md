@@ -2,6 +2,13 @@
 
 Release notes: `.github/workflows/release.yml` reads the bullets under the heading of the version being released (`## 1.2.0`) and shows them in the app's "Update available" dialog.
 
+## 1.5.0
+
+- **Deleting a folder now asks what to do with its papers.** Delete the folder only (its papers stay in the Library), or the folder and its papers. A paper that is also in another folder is always kept. Before this, deleting a folder removed it from the app only, and its papers stayed in your data folder.
+- **The Bin.** Everything you delete (papers, books, folders with the folders inside them, and a PDF you replaced) goes to a new Bin tab in the Library. It stays there for 7 days. Put back returns it as it was: notes, highlights, summary, folders and reading status. Delete now removes it at once. After 7 days it is deleted from this computer and from your data folder. The app checks for this when it starts and every 3 hours while it runs. Things deleted before 1.5 are now also kept for 7 days instead of 30.
+- **File a drop under a month.** When you add PDFs, a "File under month" box at the top of the dialog (for example 2026-12 for WITS, which is held in December) sets the date of every paper in the drop. A date you type on one paper stays. The month is remembered for the folder, so the next drop into it starts with it.
+- **A paper you already have: Skip or Replace.** When a PDF you add is already in the Library, its card asks which you want. Skip is chosen by default. Replace puts the new PDF in place and keeps your notes, highlights, summary, folders and reading status; the details in the dialog are applied, and the old PDF goes to the Bin.
+
 ## 1.4.2
 
 - **What most papers of a drop say is now filled in for the others, without asking.** Some PDFs carry no running footer and say nothing about where they were presented. When you add several PDFs at once and at least three agree on a venue, a date or a conference (more than half of those that say something), the papers that say nothing get it as soon as every PDF is read; the venue brings its type ("WITS 2026", conference paper). Each card filled this way says so, a line at the top of the dialog lists what was filled, and one Undo takes it all back. A box you empty after it was filled stays empty. This replaces the question asked in 1.4.1.
