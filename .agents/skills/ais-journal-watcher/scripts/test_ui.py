@@ -2074,7 +2074,9 @@ pl.FEED_HOST_PAUSE = 0                                                          
             check("Edit mode selects folders and offers Rename and Delete", "1 selected" in page.inner_text(".fp-editbar") and page.locator(".fp-tile.sel").count() == 1 and page.locator("[data-fp='rename']:not([disabled])").count() == 1)
             page.click('[data-fp="rename"]'); page.wait_for_selector(".fp-rename"); page.fill(".fp-rename", "Journal club"); page.keyboard.press("Enter"); page.wait_for_selector(".fp-tile[data-id='reading-group'] .fp-name:has-text('Journal club')")
             check("a folder is renamed in place", json.load(open(os.path.join(TMP, "Papers", "_folders", "reading-group.json")))["name"] == "Journal club")
-            page.click(".fp-tile[data-id='reading-group']"); page.click('[data-fp="delete"]'); page.wait_for_function("!document.querySelector(\".fp-tile[data-id='reading-group']\")")
+            page.click(".fp-tile[data-id='reading-group']"); page.click('[data-fp="delete"]'); page.wait_for_selector("#delf-dlg[open]")
+            check("Delete in Edit mode asks what to do with the papers too (the folder only is chosen)", page.is_checked('#delf-dlg input[value="0"]') and "Journal club" in page.inner_text("#delf-dlg"), page.inner_text("#delf-dlg")[:200])
+            page.click("#delf-go"); page.wait_for_function("!document.querySelector(\".fp-tile[data-id='reading-group']\")")
             check("and deleted (the papers stay)", not os.path.exists(os.path.join(TMP, "Papers", "_folders", "reading-group.json")) and len(api("/api/library")) >= 3)
             page.click('[data-fp="edit"]')
             page.evaluate("""([b64, id]) => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
